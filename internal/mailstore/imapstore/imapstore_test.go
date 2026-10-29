@@ -228,8 +228,8 @@ func TestCloseIsBoundedWhenLogoutGoesUnanswered(t *testing.T) {
 	go func() { done <- s.Close() }()
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Errorf("Close = %v, want nil once the connection is closed", err)
+		if err == nil || !strings.Contains(err.Error(), "LOGOUT unanswered") {
+			t.Errorf("Close = %v, want an error saying LOGOUT went unanswered", err)
 		}
 		if elapsed := time.Since(start); elapsed > 3*time.Second {
 			t.Errorf("Close took %v, want it bounded by the 100ms close timeout", elapsed)

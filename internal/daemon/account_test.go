@@ -272,6 +272,9 @@ func TestTestAccountOAuthRejected(t *testing.T) {
 	if strings.Contains(resp.GetImap().GetError(), oauthtest.AccessToken) {
 		t.Errorf("imap error %q contains the access token", resp.GetImap().GetError())
 	}
+	if c := resp.GetSmtp(); c.GetOk() || c.GetReason() != api.ReasonAuthRejected || !strings.Contains(c.GetError(), "not attempted") {
+		t.Errorf("smtp = %+v, want AUTH_REJECTED, not attempted", c)
+	}
 	a := listAccounts(t, h)["gm"]
 	if a.GetAuthState() != chainmailv1.AuthState_AUTH_STATE_REQUIRED || !strings.Contains(a.GetAuthDetail(), "chainmail auth login gm") {
 		t.Errorf("account after rejection = %+v, want the auth login hint", a)

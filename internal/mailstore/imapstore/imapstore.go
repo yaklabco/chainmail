@@ -180,7 +180,7 @@ func (s *Session) Close() error {
 	logoutErr := s.client.Logout().Wait()
 	closeErr := s.client.Close()
 	if !timer.Stop() {
-		return nil
+		return fmt.Errorf("closing IMAP session: LOGOUT unanswered after %v; connection closed", s.closeTimeout)
 	}
 	if errors.Is(closeErr, net.ErrClosed) {
 		closeErr = nil // the server hung up after BYE, as it should
