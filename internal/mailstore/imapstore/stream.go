@@ -153,8 +153,10 @@ func (p *partReader) fill() error {
 	return nil
 }
 
-// Read implements io.Reader. A failure after the stream started is final
-// and reported as unavailable.
+// Read implements io.Reader. A failure to fetch the next chunk is final and
+// reported as unavailable. Any other failure comes from decoding the part's
+// base64 or quoted-printable, which no retry fixes, so it matches no
+// mailstore sentinel and reads as a broken message.
 func (p *partReader) Read(b []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -164,7 +166,7 @@ func (p *partReader) Read(b []byte) (int, error) {
 	n, err := p.decoded.Read(b)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, mailstore.ErrUnavailable) &&
 		!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		err = fmt.Errorf("%w: the stream broke after it started: %w", mailstore.ErrUnavailable, err)
+		err = fmt.Errorf("decoding the part: %w", err)
 	}
 	return n, err
 }
@@ -182,6 +184,7 @@ func (p *partReader) Close() error {
 }
 
 // rawReader reads the still-encoded part bytes, fetching chunks as needed.
+// A failed fetch is unavailable, so Read can tell it from a decoding error.
 type rawReader struct{ p *partReader }
 
 func (r rawReader) Read(b []byte) (int, error) {
@@ -191,7 +194,10 @@ func (r rawReader) Read(b []byte) (int, error) {
 			return 0, io.EOF
 		}
 		if err := p.fill(); err != nil {
-			return 0, err
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, mailstore.ErrUnavailable) {
+				return 0, err
+			}
+			return 0, fmt.Errorf("%w: the stream broke after it started: %w", mailstore.ErrUnavailable, err)
 		}
 	}
 	n := copy(b, p.buf)

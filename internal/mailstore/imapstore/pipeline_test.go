@@ -54,6 +54,9 @@ type scriptServer struct {
 	dropAfter int
 	// refuse names a command, SEARCH or FETCH, that is answered with refusal.
 	refuse, refusal string
+	// encoding is every message's Content-Transfer-Encoding, 7bit if unset,
+	// and text, when set, is every message's body instead of scriptBody.
+	encoding, text string
 
 	conns, searches, fetches atomic.Int32
 
@@ -114,6 +117,14 @@ func scriptHeader(uid int) string {
 }
 
 func scriptBody(uid int) string { return fmt.Sprintf("body %d\r\n", uid) }
+
+// bodyOf is the body of message uid: text when set, else scriptBody.
+func (srv *scriptServer) bodyOf(uid int) string {
+	if srv.text != "" {
+		return srv.text
+	}
+	return scriptBody(uid)
+}
 
 var (
 	uidFetch    = regexp.MustCompile(`^UID FETCH (\S+) `)
@@ -221,14 +232,18 @@ func (srv *scriptServer) summaries(rest string) string {
 	if m := peekSection.FindStringSubmatch(rest); m != nil {
 		sec = m[1]
 	}
+	encoding := srv.encoding
+	if encoding == "" {
+		encoding = "7bit"
+	}
 	var b strings.Builder
 	for uid := 1; uid <= srv.n; uid++ {
 		h := scriptHeader(uid)
 		fmt.Fprintf(&b, "* %d FETCH (UID %d INTERNALDATE \"20-Oct-2026 09:00:00 +0000\" RFC822.SIZE %d FLAGS () "+
-			"BODYSTRUCTURE (\"text\" \"plain\" (\"charset\" \"utf-8\") NIL NIL \"7bit\" %d 1 NIL NIL NIL NIL) "+
+			"BODYSTRUCTURE (\"text\" \"plain\" (\"charset\" \"utf-8\") NIL NIL \"%s\" %d 1 NIL NIL NIL NIL) "+
 			"ENVELOPE (\"Mon, 26 Oct 2026 09:00:00 +0000\" \"m%d\" ((NIL NIL \"a\" \"example.com\")) ((NIL NIL \"a\" \"example.com\")) "+
 			"((NIL NIL \"a\" \"example.com\")) ((NIL NIL \"me\" \"example.test\")) NIL NIL NIL \"<m%d@x>\") BODY[%s] {%d}\r\n%s)\r\n",
-			uid, uid, len(h)+len(scriptBody(uid)), len(scriptBody(uid)), uid, uid, sec, len(h), h)
+			uid, uid, len(h)+len(srv.bodyOf(uid)), encoding, len(srv.bodyOf(uid)), uid, uid, sec, len(h), h)
 	}
 	return b.String()
 }
@@ -246,7 +261,7 @@ func (srv *scriptServer) answer(cmd string) (data, done string) {
 	if err != nil {
 		return "", tag + " BAD unexpected FETCH\r\n"
 	}
-	body := scriptBody(uid)
+	body := srv.bodyOf(uid)
 	if sec[1] == "" {
 		body = scriptHeader(uid) + body // the whole message
 	}

@@ -128,3 +128,44 @@ func TestPartReaderCloseDuringRead(t *testing.T) {
 		t.Fatal("the reader kept going after Close")
 	}
 }
+
+// TestStreamPartBadEncodingIsPermanent checks that a part whose base64 does
+// not decode fails as a broken message, not an unavailable server, whether
+// or not decoded bytes came first, while a dropped connection mid-stream
+// stays unavailable.
+func TestStreamPartBadEncodingIsPermanent(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		text      string
+		dropAfter int
+		want      string
+		permanent bool
+	}{
+		"before any bytes": {text: "!!!!!!!!\r\n", permanent: true},
+		"after bytes":      {text: "aGVsbG8gd29ybGQh\r\n!!!!\r\n", want: "hello world!", permanent: true},
+		"connection drops": {text: "aGVsbG8gd29ybGQh\r\naGVsbG8gd29ybGQh\r\n", dropAfter: 1, want: "hello "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := startScriptServer(t, &scriptServer{n: 1, encoding: "base64", text: tc.text, dropAfter: tc.dropAfter})
+			s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second})
+			s.chunk = 8
+			_, rc, err := s.StreamPart(t.Context(), scriptRefs(1)[0], "1")
+			if err != nil {
+				t.Fatalf("StreamPart: %v", err)
+			}
+			t.Cleanup(func() { _ = rc.Close() })
+			data, err := readAllWithin(t, rc, 5*time.Second)
+			if err == nil || string(data) != tc.want {
+				t.Fatalf("read %q, %v; want %q and an error", data, err, tc.want)
+			}
+			unavailable := errors.Is(err, mailstore.ErrUnavailable) || errors.Is(err, errConnLost)
+			if tc.permanent && (unavailable || errors.Is(err, mailstore.ErrNotFound) || errors.Is(err, mailstore.ErrStaleRef)) {
+				t.Errorf("read = %v, want a permanent error, not a server failure", err)
+			}
+			if !tc.permanent && !errors.Is(err, mailstore.ErrUnavailable) {
+				t.Errorf("read = %v, want ErrUnavailable", err)
+			}
+		})
+	}
+}
