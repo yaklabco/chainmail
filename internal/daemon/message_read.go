@@ -51,29 +51,65 @@ func mediaType(s string) string {
 	return mt
 }
 
+// itemError is the API form of a failure of one item. Its message is
+// messageErr's fixed text.
 func itemError(err error) *chainmailv1.ItemError {
-	cerr := toConnectError(err)
+	cerr := toConnectError(messageErr(err))
 	d := api.Detail(cerr)
 	return &chainmailv1.ItemError{Reason: d.GetReason(), Message: cerr.Message(), Hint: d.GetHint()}
 }
 
-// errUnparsable stands in for a per-message failure with reason INTERNAL.
-// Such a failure comes from parsing the message, and parse errors quote the
-// bytes they choke on, so none of its text leaves the daemon: header bytes
-// from the sender are an injection channel.
+// errUnparsable is a render failure, reason INTERNAL. Parse errors quote the
+// bytes they choke on, so the render error itself is dropped.
 var errUnparsable = errors.New("the message could not be parsed")
 
 // apiReason returns the API reason err maps to.
 func apiReason(err error) string { return api.Detail(toConnectError(err)).GetReason() }
 
-// messageErr returns the error to report for a failure of one message, from
-// a store result or from rendering: err itself, or errUnparsable when err
-// maps to INTERNAL. Every per-message error passes through it.
+// clientText is the whole message a client sees for a failure of one
+// message, of one search source, or of a stream, by reason. A store's error
+// can carry the mail server's text or a decoder's, and either can quote
+// sender bytes, which are an injection channel, so none of it leaves the
+// daemon. INVALID_ARGUMENT has no entry: the daemon writes those messages
+// itself, from the request and never from message bytes. The hint, which
+// the daemon also writes, is kept.
+var clientText = map[string]string{
+	api.ReasonStaleRef:          "the message is gone; search again",
+	api.ReasonNotFound:          "not found",
+	api.ReasonServerUnavailable: "the mail server failed while reading",
+	api.ReasonTimeout:           "timed out",
+	api.ReasonAuthRequired:      "the account needs authentication",
+	api.ReasonAuthRejected:      "the server rejected the credentials",
+	api.ReasonInternal:          "the message could not be read",
+}
+
+// fixedTextError reads as msg and unwraps to err, so err's reason still maps.
+type fixedTextError struct {
+	msg string
+	err error
+}
+
+func (e *fixedTextError) Error() string { return e.msg }
+
+func (e *fixedTextError) Unwrap() error { return e.err }
+
+// messageErr returns the error to report for a failure of one message, of
+// one search source or of a stream: err with its text replaced by
+// clientText for its reason, or err itself for INVALID_ARGUMENT. Every such
+// error passes through it before it reaches a client.
 func messageErr(err error) error {
-	if apiReason(err) == api.ReasonInternal {
-		return errUnparsable
+	if err == nil {
+		return nil
 	}
-	return err
+	reason := apiReason(err)
+	if reason == api.ReasonInvalidArgument {
+		return err
+	}
+	msg, ok := clientText[reason]
+	if !ok {
+		msg = clientText[api.ReasonInternal]
+	}
+	return &fixedTextError{msg: msg, err: err}
 }
 
 // callLevel reports whether a failure of one message means the whole call
@@ -213,7 +249,7 @@ func (m *messageService) get(ctx context.Context, req *chainmailv1.GetRequest) (
 
 func (m *messageService) fill(item *chainmailv1.GetItem, res mailstore.MessageResult, full bool) {
 	if res.Err != nil {
-		item.Result = &chainmailv1.GetItem_Error{Error: itemError(messageErr(res.Err))}
+		item.Result = &chainmailv1.GetItem_Error{Error: itemError(res.Err)}
 		return
 	}
 	msg, err := m.renderMessage(res.Message, full)
@@ -377,7 +413,7 @@ func (m *messageService) GetRaw(ctx context.Context, req *connect.Request[chainm
 	entry := audit.Entry{Action: "get.raw"}
 	sent, rawErr := m.raw(ctx, req.Msg.GetRef(), &entry, stream)
 	entry.Targets = append(entry.Targets, tally("bytes", sent))
-	return m.s.record(ctx, c, entry, rawErr)
+	return m.s.record(ctx, c, entry, messageErr(rawErr))
 }
 
 func (m *messageService) raw(ctx context.Context, s string, entry *audit.Entry, stream *connect.ServerStream[chainmailv1.GetRawResponse]) (int, error) {
@@ -404,7 +440,7 @@ func (m *messageService) DownloadAttachment(ctx context.Context, req *connect.Re
 	entry := audit.Entry{Action: "attachment"}
 	sent, dlErr := m.download(ctx, req.Msg, &entry, stream)
 	entry.Targets = append(entry.Targets, tally("bytes", sent))
-	return m.s.record(ctx, c, entry, dlErr)
+	return m.s.record(ctx, c, entry, messageErr(dlErr))
 }
 
 func (m *messageService) download(ctx context.Context, req *chainmailv1.DownloadAttachmentRequest, entry *audit.Entry, stream *connect.ServerStream[chainmailv1.DownloadAttachmentResponse]) (int, error) {
@@ -434,9 +470,10 @@ func (m *messageService) download(ctx context.Context, req *chainmailv1.Download
 
 // pump copies r to send in chunks of up to chunkBytes and returns the bytes
 // sent. Bytes read before an error are still sent. A read error after bytes
-// went out is ErrUnavailable whatever its cause, except that a deadline or a
-// cancellation stays TIMEOUT: the client holds part of the data, and the
-// stream is never resumed, since the store never fetches bytes again.
+// went out is never NOT_FOUND or STALE_REF: the client holds part of the
+// data, and the stream is never resumed, since the store never fetches
+// bytes again. A deadline or a cancellation stays TIMEOUT, and anything else
+// is SERVER_UNAVAILABLE.
 func pump(r io.Reader, send func([]byte) error) (int, error) {
 	buf := make([]byte, chunkBytes)
 	total, fill := 0, 0
@@ -451,14 +488,17 @@ func pump(r io.Reader, send func([]byte) error) (int, error) {
 			fill = 0
 		}
 		switch {
+		case err == nil:
 		case errors.Is(err, io.EOF):
 			return total, nil
-		case err != nil && total > 0 && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)):
-			return total, fmt.Errorf("the stream stopped after %d bytes: %w", total, err)
-		case err != nil && total > 0 && !errors.Is(err, mailstore.ErrUnavailable):
-			return total, fmt.Errorf("%w: the stream broke after %d bytes: %s", mailstore.ErrUnavailable, total, err.Error())
-		case err != nil:
+		case total == 0:
 			return total, err
+		case errors.Is(err, context.DeadlineExceeded):
+			return total, fmt.Errorf("the stream stopped after %d bytes: %w", total, context.DeadlineExceeded)
+		case errors.Is(err, context.Canceled):
+			return total, fmt.Errorf("the stream stopped after %d bytes: %w", total, context.Canceled)
+		default:
+			return total, fmt.Errorf("%w: the stream broke after %d bytes", mailstore.ErrUnavailable, total)
 		}
 	}
 }

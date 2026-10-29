@@ -85,9 +85,10 @@ func singleAccount(accts []config.ResolvedAccount) string {
 // tally is an audit target that counts something, such as "rows=3".
 func tally(name string, n int) string { return fmt.Sprintf("%s=%d", name, n) }
 
-// partialSource describes a source that failed, for a response's partial list.
+// partialSource describes a source that failed, for a response's partial
+// list. Its message is messageErr's fixed text.
 func partialSource(account, folder string, err error) *chainmailv1.PartialSource {
-	cerr := toConnectError(err)
+	cerr := toConnectError(messageErr(err))
 	d := api.Detail(cerr)
 	return &chainmailv1.PartialSource{Account: account, Folder: folder, Reason: d.GetReason(), Message: cerr.Message(), Hint: d.GetHint()}
 }
