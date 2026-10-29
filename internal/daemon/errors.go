@@ -35,6 +35,8 @@ func toConnectError(err error) *connect.Error {
 	case errors.Is(err, context.Canceled):
 		// The client gave up. TIMEOUT keeps the exit code contract without a new reason.
 		return api.New(connect.CodeCanceled, api.ReasonTimeout, "", err)
+	case errors.Is(err, auth.ErrTokenEndpoint):
+		return api.New(connect.CodeUnavailable, api.ReasonServerUnavailable, "", err)
 	default:
 		return api.New(connect.CodeInternal, api.ReasonInternal, "", err)
 	}

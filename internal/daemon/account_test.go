@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
@@ -14,6 +16,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/emersion/go-smtp"
+	"golang.org/x/oauth2"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/api"
@@ -297,6 +300,53 @@ func TestTestAccountOAuth(t *testing.T) {
 	}
 	if !resp.GetImap().GetOk() || !resp.GetSmtp().GetOk() {
 		t.Errorf("checks = imap %+v smtp %+v", resp.GetImap(), resp.GetSmtp())
+	}
+}
+
+// A token endpoint outage is a server problem, not a verdict on the secrets.
+func TestTestAccountTokenEndpointOutage(t *testing.T) {
+	t.Parallel()
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(tokens.Close)
+	m := startMail(t, "me@gmail.com", "unused", oauthtest.AccessToken)
+	cfg := fmt.Sprintf(`
+[oauth_clients.g]
+client_id = "client-id"
+
+[accounts.gm]
+provider = "gmail"
+address = "me@gmail.com"
+auth = "oauth2"
+oauth_client = "g"
+imap = { host = "127.0.0.1", port = %d, security = "tls" }
+smtp = { host = "127.0.0.1", port = %d, security = "starttls" }
+`, m.imap.Port, m.smtp.Port)
+	h := daemontest.Start(t, cfg, daemontest.Options{
+		RootCAs:     m.ca.Pool,
+		AuthOptions: []auth.Option{auth.WithOAuthEndpoint(oauth2.Endpoint{TokenURL: tokens.URL, AuthStyle: oauth2.AuthStyleInParams})},
+	})
+	for name, value := range map[string]string{"oauth_clients/g": oauthtest.ClientSecret, "tokens/gm": oauthtest.RefreshToken} {
+		if err := h.Vault.Set(name, []byte(value)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := testAccount(t, h, "gm")
+	if got := api.Detail(err).GetReason(); got != api.ReasonServerUnavailable || connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Errorf("err = %v (reason %s), want unavailable SERVER_UNAVAILABLE", err, got)
+	}
+	if a := listAccounts(t, h)["gm"]; a.GetAuthState() != chainmailv1.AuthState_AUTH_STATE_OK {
+		t.Errorf("account after outage = %+v, want AUTH_STATE_OK", a)
+	}
+	var test daemontest.AuditRow
+	for _, r := range h.AuditRows(t) {
+		if r.Action == "account.test" {
+			test = r
+		}
+	}
+	if test.Result != "error" || test.Reason != api.ReasonServerUnavailable {
+		t.Errorf("audit = %+v", test)
 	}
 }
 

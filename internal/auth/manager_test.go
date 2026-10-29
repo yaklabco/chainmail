@@ -518,6 +518,69 @@ func TestTokenEndpointErrorsHideBodies(t *testing.T) {
 	requireNoSecrets(t, "exchange error", err.Error(), append(secrets, oauthtest.Code)...)
 }
 
+// A token endpoint that is down, or answers with an error chainmail does not
+// know, says nothing about the secrets: the account stays usable and the
+// error matches ErrTokenEndpoint, which the daemon reports as unavailable.
+func TestTokenEndpointOutageIsUnavailable(t *testing.T) {
+	t.Parallel()
+	const leak = "body-only-value"
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "503", status: http.StatusServiceUnavailable, body: `{"oops":"` + leak + `"}`},
+		{name: "unknown error code", status: http.StatusBadRequest, body: `{"error":"temporarily_unavailable","error_description":"` + leak + `"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ep, _ := cannedTokenServer(t, tt.status, tt.body)
+			f := newFixtureAt(t, ep)
+			f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
+			f.set(t, auth.RefreshTokenSecret("gm"), oauthtest.RefreshToken)
+			_, err := f.m.Credentials(t.Context(), "gm")
+			if !errors.Is(err, auth.ErrTokenEndpoint) || errors.Is(err, auth.ErrAuthRequired) {
+				t.Errorf("Credentials err = %v, want ErrTokenEndpoint and not ErrAuthRequired", err)
+			}
+			if err != nil {
+				requireNoSecrets(t, "refresh error", err.Error(), leak, oauthtest.RefreshToken, oauthtest.ClientSecret)
+			}
+			if st, _ := f.m.State("gm"); st.Required {
+				t.Errorf("State = %+v, want ok after an outage", st)
+			}
+		})
+	}
+}
+
+func TestTokenExchangeOutageIsUnavailable(t *testing.T) {
+	t.Parallel()
+	ep, _ := cannedTokenServer(t, http.StatusServiceUnavailable, `{}`)
+	f := newFixtureAt(t, ep)
+	f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
+	ch, err := f.m.BeginLogin("gm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = f.m.FinishLogin(t.Context(), "gm", oauthtest.RedirectFor(t, ch.URL, oauthtest.Code))
+	if !errors.Is(err, auth.ErrTokenEndpoint) || errors.Is(err, auth.ErrRejected) {
+		t.Errorf("FinishLogin err = %v, want ErrTokenEndpoint and not ErrRejected", err)
+	}
+}
+
+func TestUnreachableTokenEndpointIsUnavailable(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.NotFoundHandler())
+	ep := oauth2.Endpoint{AuthURL: srv.URL + "/auth", TokenURL: srv.URL + "/token", AuthStyle: oauth2.AuthStyleInParams}
+	srv.Close()
+	f := newFixtureAt(t, ep)
+	f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
+	f.set(t, auth.RefreshTokenSecret("gm"), oauthtest.RefreshToken)
+	if _, err := f.m.Credentials(t.Context(), "gm"); !errors.Is(err, auth.ErrTokenEndpoint) {
+		t.Errorf("Credentials err = %v, want ErrTokenEndpoint", err)
+	}
+}
+
 func TestManagerPrintsNoSecrets(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)

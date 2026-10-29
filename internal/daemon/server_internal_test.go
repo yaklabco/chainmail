@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -198,6 +199,8 @@ func TestToConnectError(t *testing.T) {
 		{err: vault.ErrEmptyValue, code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
 		{err: context.DeadlineExceeded, code: connect.CodeDeadlineExceeded, reason: api.ReasonTimeout},
 		{err: context.Canceled, code: connect.CodeCanceled, reason: api.ReasonTimeout},
+		{err: fmt.Errorf("refreshing: %w", auth.ErrTokenEndpoint), code: connect.CodeUnavailable, reason: api.ReasonServerUnavailable},
+		{err: fmt.Errorf("%w: %w", auth.ErrTokenEndpoint, context.DeadlineExceeded), code: connect.CodeDeadlineExceeded, reason: api.ReasonTimeout},
 		{err: errors.New("boom"), code: connect.CodeInternal, reason: api.ReasonInternal},
 	}
 	for _, tt := range tests {

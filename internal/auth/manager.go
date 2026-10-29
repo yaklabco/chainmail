@@ -38,6 +38,10 @@ var (
 	ErrStateMismatch  = errors.New("redirect URL does not match the login in progress")
 	ErrConsentDenied  = errors.New("consent was not granted")
 	ErrNoRefreshToken = errors.New("provider returned no refresh token")
+	// ErrTokenEndpoint means the OAuth2 token endpoint could not be reached
+	// or failed in a way that says nothing about the secrets, such as a 5xx
+	// or an error code chainmail does not act on.
+	ErrTokenEndpoint = errors.New("oauth2 token endpoint unavailable")
 )
 
 // PasswordSecret names the vault entry holding an account's password.
@@ -229,7 +233,10 @@ func (m *Manager) oauthCredentials(ctx context.Context, acct config.ResolvedAcco
 		}
 		hint, ok := refreshHint(acct, err)
 		if !ok {
-			return Credentials{}, fmt.Errorf("refreshing access token for %s: %w", acct.Name, tokenError(err))
+			// Only the codes refreshHint knows say anything about the
+			// secrets. Anything else, a 5xx, an unknown code or no
+			// response at all, is the endpoint's trouble.
+			return Credentials{}, fmt.Errorf("%w: refreshing access token for %s: %w", ErrTokenEndpoint, acct.Name, tokenError(err))
 		}
 		if m.markRequiredAt(acct.Name, hint, gen) || attempt > 0 {
 			return Credentials{}, &RequiredError{Account: acct.Name, Hint: hint}
@@ -256,6 +263,17 @@ func refreshHint(acct config.ResolvedAccount, err error) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// exchangeRefused reports whether the token endpoint refused an
+// authorization code exchange, as opposed to failing to answer it: a 4xx
+// with an OAuth2 error code, such as invalid_grant for a used code.
+func exchangeRefused(err error) bool {
+	var re *oauth2.RetrieveError
+	if !errors.As(err, &re) || re.ErrorCode == "" {
+		return false
+	}
+	return re.Response == nil || re.Response.StatusCode < http.StatusInternalServerError
 }
 
 // Rejected records that a server refused creds, which Credentials issued
@@ -362,11 +380,10 @@ func (m *Manager) FinishLogin(ctx context.Context, account, redirectURL string) 
 	}
 	tok, err := conf.Exchange(m.withHTTPClient(ctx), q.Get("code"), oauth2.VerifierOption(p.verifier))
 	if err != nil {
-		var re *oauth2.RetrieveError
-		if errors.As(err, &re) {
+		if exchangeRefused(err) {
 			return fmt.Errorf("%w: token exchange failed: %w", ErrRejected, tokenError(err))
 		}
-		return fmt.Errorf("token exchange for %s: %w", account, err)
+		return fmt.Errorf("%w: token exchange for %s: %w", ErrTokenEndpoint, account, tokenError(err))
 	}
 	if tok.RefreshToken == "" {
 		return fmt.Errorf("%w: remove chainmail's access at https://myaccount.google.com/permissions and log in again", ErrNoRefreshToken)

@@ -118,7 +118,7 @@ chainmail never retries rejected credentials, because providers lock out account
 - SMTP: a `534` or `535` reply to AUTH.
 - OAuth2: the token endpoint answering `invalid_grant`, `invalid_client` or `unauthorized_client`.
 
-Temporary server errors, such as other IMAP response codes, Gmail's `ALERT` for too many connections, SMTP `454` or `421`, timeouts and network failures, leave the account alone. After the IMAP server rejects a login, `accounts test` does not try SMTP with the same credentials. Setting a new secret, or a new `auth login`, clears the state.
+Temporary server errors, such as other IMAP response codes, Gmail's `ALERT` for too many connections, SMTP `454` or `421`, timeouts and network failures, leave the account alone. So does an OAuth2 token endpoint that cannot be reached, answers `5xx`, or answers a refresh with an error code other than those three: the call fails with `SERVER_UNAVAILABLE` (exit 7). `auth login` reports a `4xx` with an error code as `AUTH_REJECTED`, and an unreachable endpoint or a `5xx` as `SERVER_UNAVAILABLE`. After the IMAP server rejects a login, `accounts test` does not try SMTP with the same credentials. Setting a new secret, or a new `auth login`, clears the state.
 
 ## Configuration reference
 
