@@ -7,6 +7,7 @@ require (
 	filippo.io/age v1.3.2
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
+	github.com/emersion/go-smtp v0.25.0
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/spf13/cobra v1.10.2
 	github.com/yaklabco/stave v0.17.6
