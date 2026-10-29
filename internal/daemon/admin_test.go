@@ -269,6 +269,24 @@ func TestOAuthLogin(t *testing.T) {
 	}
 }
 
+// A refused exchange reaches the client as AUTH_REJECTED with a hint.
+func TestFinishAuthLoginRefusalHasHint(t *testing.T) {
+	t.Parallel()
+	o := oauthtest.Start(t)
+	h := daemontest.Start(t, gmailConfig, daemontest.Options{AuthOptions: []auth.Option{auth.WithOAuthEndpoint(o.Endpoint())}})
+	setSecret(t, h, "oauth_clients/g", oauthtest.ClientSecret)
+	begin, err := h.Client.Admin.BeginAuthLogin(t.Context(), connect.NewRequest(&chainmailv1.BeginAuthLoginRequest{Account: "gm"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirect := oauthtest.RedirectFor(t, begin.Msg.GetConsentUrl(), "used-code")
+	_, err = h.Client.Admin.FinishAuthLogin(t.Context(), connect.NewRequest(&chainmailv1.FinishAuthLoginRequest{Account: "gm", RedirectUrl: redirect}))
+	d := api.Detail(err)
+	if d.GetReason() != api.ReasonAuthRejected || !strings.Contains(d.GetHint(), "chainmail auth login gm again") {
+		t.Errorf("err = %v, detail = %+v, want AUTH_REJECTED with the login hint", err, d)
+	}
+}
+
 func TestBeginAuthLoginErrors(t *testing.T) {
 	t.Parallel()
 	h := daemontest.Start(t, gmailConfig, daemontest.Options{})

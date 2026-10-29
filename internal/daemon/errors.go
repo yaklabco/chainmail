@@ -23,11 +23,14 @@ var invalidArgument = []error{
 func toConnectError(err error) *connect.Error {
 	var (
 		required *auth.RequiredError
+		rejected *auth.RejectedError
 		badName  *secretNameError
 	)
 	switch {
 	case errors.As(err, &required):
 		return api.New(connect.CodeUnauthenticated, api.ReasonAuthRequired, required.Hint, err)
+	case errors.As(err, &rejected):
+		return api.New(connect.CodeUnauthenticated, api.ReasonAuthRejected, rejected.Hint, err)
 	case errors.Is(err, auth.ErrRejected):
 		return api.New(connect.CodeUnauthenticated, api.ReasonAuthRejected, "", err)
 	case errors.Is(err, config.ErrUnknownAccount):

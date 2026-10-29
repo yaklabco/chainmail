@@ -498,6 +498,57 @@ func TestFinishLoginErrors(t *testing.T) {
 	}
 }
 
+func requireRejectedHint(t *testing.T, err error, hint string) {
+	t.Helper()
+	var re *auth.RejectedError
+	if !errors.Is(err, auth.ErrRejected) || !errors.As(err, &re) {
+		t.Fatalf("err = %v, want *auth.RejectedError matching ErrRejected", err)
+	}
+	if !strings.Contains(re.Hint, hint) {
+		t.Errorf("hint = %q, want it to contain %q", re.Hint, hint)
+	}
+}
+
+// A refused code cannot be used again, so the login ends and the hint says
+// to start a new one. Pasting the same URL again then says no login is in
+// progress instead of failing the exchange again.
+func TestFinishLoginUsedCodeEndsLogin(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
+	ch, err := f.m.BeginLogin("gm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirect := oauthtest.RedirectFor(t, ch.URL, "used-code")
+	err = f.m.FinishLogin(t.Context(), "gm", redirect)
+	requireRejectedHint(t, err, "run: chainmail auth login gm again")
+	requireNoSecrets(t, "exchange error", err.Error(), "used-code", oauthtest.ClientSecret)
+	if err := f.m.FinishLogin(t.Context(), "gm", redirect); !errors.Is(err, auth.ErrNoPendingLogin) {
+		t.Errorf("second paste: err = %v, want ErrNoPendingLogin", err)
+	}
+}
+
+// A refused client secret leaves the code unused, so the login stays in
+// progress: once the secret is fixed, the same URL completes it.
+func TestFinishLoginBadClientKeepsLogin(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.set(t, auth.ClientSecret("g"), "wrong-client-secret")
+	ch, err := f.m.BeginLogin("gm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirect := oauthtest.RedirectFor(t, ch.URL, oauthtest.Code)
+	err = f.m.FinishLogin(t.Context(), "gm", redirect)
+	requireRejectedHint(t, err, "run: chainmail secret set oauth_clients/g")
+	f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
+	f.m.SecretChanged(auth.ClientSecret("g"))
+	if err := f.m.FinishLogin(t.Context(), "gm", redirect); err != nil {
+		t.Errorf("FinishLogin after fixing the client secret: %v", err)
+	}
+}
+
 func TestFinishLoginUnparsableURLHidesCode(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)

@@ -291,6 +291,19 @@ func exchangeRefused(err error) bool {
 	return re.Response == nil || re.Response.StatusCode < http.StatusInternalServerError
 }
 
+// exchangeHint says what a human must do about a refused code exchange, and
+// whether the login in progress is over. invalid_client leaves the code
+// unused, so after the client secret is fixed the same URL still works.
+// Every other refusal, such as invalid_grant for a used or expired code,
+// needs a new login.
+func exchangeHint(acct config.ResolvedAccount, err error) (hint string, definitive bool) {
+	var re *oauth2.RetrieveError
+	if errors.As(err, &re) && re.ErrorCode == "invalid_client" {
+		return "the OAuth client was rejected; run: chainmail secret set " + ClientSecret(acct.OAuthClient), false
+	}
+	return "run: chainmail auth login " + acct.Name + " again", true
+}
+
 // Rejected records that a server refused creds, which Credentials issued
 // for account. chainmail stops using them until a human changes a secret or
 // logs in again. If account's secrets or auth state changed since creds were
@@ -395,7 +408,13 @@ func (m *Manager) FinishLogin(ctx context.Context, account, redirectURL string) 
 	tok, err := conf.Exchange(m.withHTTPClient(ctx), q.Get("code"), oauth2.VerifierOption(p.verifier))
 	if err != nil {
 		if exchangeRefused(err) {
-			return fmt.Errorf("%w: token exchange failed: %w", ErrRejected, tokenError(err))
+			hint, definitive := exchangeHint(acct, err)
+			if definitive {
+				// The code is spent or the login cannot complete, so a
+				// second paste of the same URL could only fail again.
+				m.dropPending(account, p)
+			}
+			return &RejectedError{Hint: hint, Err: fmt.Errorf("token exchange failed: %w", tokenError(err))}
 		}
 		return fmt.Errorf("%w: token exchange for %s: %w", ErrTokenEndpoint, account, tokenError(err))
 	}

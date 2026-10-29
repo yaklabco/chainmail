@@ -38,6 +38,19 @@ func (e *RequiredError) Error() string {
 // Unwrap lets errors.Is(err, ErrAuthRequired) match.
 func (e *RequiredError) Unwrap() error { return ErrAuthRequired }
 
+// RejectedError is a refusal of credentials that comes with a hint saying
+// what to run. It matches ErrRejected and its cause, which carries no
+// secrets or response bodies.
+type RejectedError struct {
+	Hint string
+	Err  error
+}
+
+func (e *RejectedError) Error() string { return fmt.Sprintf("%v: %v", ErrRejected, e.Err) }
+
+// Unwrap lets errors.Is match ErrRejected and the cause.
+func (e *RejectedError) Unwrap() []error { return []error{ErrRejected, e.Err} }
+
 // Credentials are what a dialer needs to log in. Every way of printing,
 // logging or marshalling them leaves Secret out.
 type Credentials struct {
