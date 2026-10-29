@@ -405,3 +405,15 @@ func TestStoreRetriesADialTimeoutOnce(t *testing.T) {
 		t.Errorf("%d connection attempts, want 2: a dial that timed out is retried once, like a command", n)
 	}
 }
+
+func TestJitteredBackoffNeverPanics(t *testing.T) {
+	t.Parallel()
+	for _, attempt := range []int{0, 1, 8, 9, 36, 63, 64, 100} {
+		if d := jitteredBackoff(attempt); d <= 0 {
+			t.Errorf("jitteredBackoff(%d) = %v, want a positive wait", attempt, d)
+		}
+	}
+	if o := (Options{Retries: 1000}).withDefaults(); o.Retries != maxRetries {
+		t.Errorf("Retries 1000 became %d, want the cap %d", o.Retries, maxRetries)
+	}
+}

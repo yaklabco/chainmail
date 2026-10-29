@@ -41,8 +41,8 @@ type Options struct {
 	// IdleLogout logs out a connection idle this long. Zero means 10 minutes.
 	IdleLogout time.Duration
 	// Retries is how often an operation is retried after a dropped
-	// connection. Zero means 3; negative means none. A command that timed
-	// out is retried at most once, within this limit.
+	// connection. Zero means 3; negative means none; more than 10 means 10.
+	// A command that timed out is retried at most once, within this limit.
 	Retries int
 	// Backoff is the wait before retry n, counting from 0. Nil means
 	// jittered exponential backoff from 200ms.
@@ -59,7 +59,10 @@ const (
 	defaultNoopAfter      = 60 * time.Second
 	defaultIdleLogout     = 10 * time.Minute
 	defaultRetries        = 3
-	dialTimeout           = 30 * time.Second
+	// maxRetries caps Retries, so a misconfigured count cannot keep an
+	// operation retrying for hours.
+	maxRetries  = 10
+	dialTimeout = 30 * time.Second
 )
 
 func (o Options) withDefaults() Options {
@@ -80,6 +83,8 @@ func (o Options) withDefaults() Options {
 		o.Retries = defaultRetries
 	case o.Retries < 0:
 		o.Retries = 0
+	case o.Retries > maxRetries:
+		o.Retries = maxRetries
 	}
 	if o.Backoff == nil {
 		o.Backoff = jitteredBackoff
@@ -93,9 +98,11 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-// jitteredBackoff waits about 200ms, 400ms, 800ms, give or take half.
+// jitteredBackoff waits about 200ms, 400ms, 800ms, give or take half. The
+// wait stops growing at the ninth attempt, about 51s, so the shift never
+// overflows.
 func jitteredBackoff(attempt int) time.Duration {
-	base := 200 * time.Millisecond << attempt
+	base := 200 * time.Millisecond << min(max(attempt, 0), 8)
 	return base/2 + rand.N(base)
 }
 
