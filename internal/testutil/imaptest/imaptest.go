@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync/atomic"
 	"testing"
 
 	"github.com/emersion/go-imap/v2"
@@ -28,6 +29,8 @@ type User struct {
 	// credentials. Tests use it to make the server report trouble, such as
 	// NO [UNAVAILABLE].
 	LoginError error
+	// Logins, when set, counts this user's login attempts, whatever their outcome.
+	Logins *atomic.Int32
 }
 
 // Start runs a server until the test ends and returns its endpoint.
@@ -76,9 +79,13 @@ type session struct {
 	users map[string]User
 }
 
-// Login answers with the user's LoginError when one is set.
+// Login counts the attempt and answers with the user's LoginError when one is set.
 func (s *session) Login(username, password string) error {
-	if u, ok := s.users[username]; ok && u.LoginError != nil {
+	u, ok := s.users[username]
+	if ok && u.Logins != nil {
+		u.Logins.Add(1)
+	}
+	if ok && u.LoginError != nil {
 		return u.LoginError
 	}
 	return s.Session.Login(username, password)

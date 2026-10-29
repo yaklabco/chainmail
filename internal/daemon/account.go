@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"connectrpc.com/connect"
 
@@ -89,6 +90,14 @@ func (a *accountService) test(ctx context.Context, name string) (*chainmailv1.Te
 	if err != nil {
 		return nil, err
 	}
+	// One test per account at a time: a caller that waited sees the
+	// account parked by a rejection instead of logging in with the same
+	// bad password again.
+	unlock, err := a.s.accountLocks.lock(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	creds, err := a.s.auth.Credentials(ctx, name)
 	if err != nil {
 		return nil, err
@@ -145,4 +154,32 @@ func (a *accountService) check(ctx context.Context, account string, creds auth.C
 		c.Reason = api.ReasonServerUnavailable
 	}
 	return c
+}
+
+// keyedLock is a set of mutexes, one per key, that waiters can give up on.
+// Keys are configured account names, so the set stays small.
+type keyedLock struct {
+	mu    sync.Mutex
+	locks map[string]chan struct{}
+}
+
+// lock waits until key is free or ctx ends. The caller must call unlock
+// exactly once.
+func (l *keyedLock) lock(ctx context.Context, key string) (unlock func(), err error) {
+	l.mu.Lock()
+	if l.locks == nil {
+		l.locks = map[string]chan struct{}{}
+	}
+	ch, ok := l.locks[key]
+	if !ok {
+		ch = make(chan struct{}, 1)
+		l.locks[key] = ch
+	}
+	l.mu.Unlock()
+	select {
+	case ch <- struct{}{}:
+		return func() { <-ch }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }

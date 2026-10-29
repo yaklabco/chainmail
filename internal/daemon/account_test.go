@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -150,6 +151,46 @@ func TestTestAccountWrongPassword(t *testing.T) {
 	}
 	if _, err := testAccount(t, h, "local"); api.Detail(err).GetReason() != api.ReasonAuthRequired {
 		t.Errorf("second test err = %v, want AUTH_REQUIRED until the secret changes", err)
+	}
+}
+
+// Concurrent tests of an account with a bad password must not each log in:
+// providers lock accounts out after a few failures.
+func TestConcurrentTestsLogInOnce(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	var logins atomic.Int32
+	m := mailServers{
+		ca: ca,
+		imap: imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{
+			Username: "me@example.test", Password: "pw", Logins: &logins,
+		}),
+		smtp: smtptest.Start(t, ca, provider.SecurityStartTLS, smtptest.User{Username: "me@example.test", Password: "pw"}),
+	}
+	h := daemontest.Start(t, localConfig(m), daemontest.Options{RootCAs: m.ca.Pool})
+	setSecret(t, h, "accounts/local", "wrong")
+	const callers = 4
+	reasons := make([]string, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Go(func() {
+			resp, err := testAccount(t, h, "local")
+			switch {
+			case err != nil:
+				reasons[i] = api.Detail(err).GetReason()
+			default:
+				reasons[i] = resp.GetImap().GetReason()
+			}
+		})
+	}
+	wg.Wait()
+	if n := logins.Load(); n != 1 {
+		t.Errorf("IMAP login attempts = %d, want 1", n)
+	}
+	slices.Sort(reasons)
+	want := []string{api.ReasonAuthRejected, api.ReasonAuthRequired, api.ReasonAuthRequired, api.ReasonAuthRequired}
+	if !slices.Equal(reasons, want) {
+		t.Errorf("reasons = %v, want %v", reasons, want)
 	}
 }
 

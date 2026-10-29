@@ -53,6 +53,8 @@ type Server struct {
 	audit   *audit.Writer
 	started time.Time
 	httpSrv *http.Server
+	// accountLocks serializes account tests, one account at a time.
+	accountLocks keyedLock
 }
 
 // New wires up a Server. Call Serve to run it.
