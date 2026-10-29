@@ -11,6 +11,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/audit"
 	"github.com/jamesainslie/chainmail/internal/auth"
+	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/mailstore/imapstore"
 	"github.com/jamesainslie/chainmail/internal/sender"
 )
@@ -64,9 +65,12 @@ func (a *accountService) TestAccount(ctx context.Context, req *connect.Request[c
 	if err != nil {
 		return nil, err
 	}
-	name := req.Msg.GetAccount()
-	resp, testErr := a.test(ctx, name)
-	entry := audit.Entry{Account: name, Action: "account.test"}
+	target, testErr := accountTarget(req.Msg.GetAccount())
+	var resp *chainmailv1.TestAccountResponse
+	if testErr == nil {
+		resp, testErr = a.test(ctx, target)
+	}
+	entry := audit.Entry{Account: target, Action: "account.test"}
 	if testErr == nil {
 		for _, check := range []*chainmailv1.Check{resp.GetImap(), resp.GetSmtp()} {
 			if check.GetOk() {
@@ -154,6 +158,24 @@ func (a *accountService) check(ctx context.Context, account string, creds auth.C
 		c.Reason = api.ReasonServerUnavailable
 	}
 	return c
+}
+
+// invalidTarget stands in for a client-supplied name that failed
+// validation. Such a name can be any bytes of any size, and the audit log
+// is append-only, so it never records one. Parentheses fit neither name
+// pattern, so it cannot be mistaken for a real name, and encoding/json
+// leaves them unescaped.
+const invalidTarget = "(invalid)"
+
+var errInvalidAccountName = errors.New("invalid account name")
+
+// accountTarget returns account for the audit log, or invalidTarget and an
+// error when it cannot be an account name. The error leaves the name out.
+func accountTarget(account string) (string, error) {
+	if config.ValidName(account) {
+		return account, nil
+	}
+	return invalidTarget, errInvalidAccountName
 }
 
 // keyedLock is a set of mutexes, one per key, that waiters can give up on.

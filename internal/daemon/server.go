@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"regexp"
 	"sync"
 	"time"
 
@@ -187,11 +188,19 @@ func callerOf(ctx context.Context, h http.Header) (caller, error) {
 		return caller{}, api.New(connect.CodePermissionDenied, api.ReasonForbidden, "", errors.New("the socket peer is unknown"))
 	}
 	c := caller{uid: p.UID, client: h.Get(api.HeaderClient)}
-	if c.client == "" {
+	switch {
+	case c.client == "":
 		c.client = "unknown"
+	case !clientKindRE.MatchString(c.client):
+		c.client = invalidTarget
 	}
 	return c, nil
 }
+
+// clientKindRE matches the client kinds the audit log records, such as
+// "cli" or "mcp". The kind is self-reported, so anything else is recorded
+// as invalidTarget. The peer's uid is the authoritative identity.
+var clientKindRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
 
 // record writes an audit entry for an action that has run, then returns the
 // action's own error as a Connect error. If e.Result is empty it is derived

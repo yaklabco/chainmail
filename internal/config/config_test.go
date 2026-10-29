@@ -124,6 +124,18 @@ func TestAccountUnknown(t *testing.T) {
 	}
 }
 
+func TestValidName(t *testing.T) {
+	t.Parallel()
+	for name, want := range map[string]bool{
+		"work": true, "gmail-2": true, "a": true, strings.Repeat("a", 63): true,
+		"": false, "-x": false, "Work": false, "a/b": false, "../x": false, "a\x00": false, strings.Repeat("a", 64): false,
+	} {
+		if got := ValidName(name); got != want {
+			t.Errorf("ValidName(%.20q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
 func TestParseInvalid(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

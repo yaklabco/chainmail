@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -167,6 +168,19 @@ func TestCallerOf(t *testing.T) {
 	}
 	c, err = callerOf(peerContext(context.Background()), http.Header{})
 	if err != nil || c.client != "unknown" {
+		t.Errorf("caller = %+v, %v", c, err)
+	}
+	// The kind is self-reported and lands in the audit log, so anything
+	// that is not a short plain name is recorded as a placeholder.
+	for _, kind := range []string{strings.Repeat("x", 100<<10), "two words", "UPPER"} {
+		h.Set(api.HeaderClient, kind)
+		c, err = callerOf(peerContext(context.Background()), h)
+		if err != nil || c.client != invalidTarget {
+			t.Errorf("kind %.20q: caller = %.60v, %v; want %s", kind, c, err, invalidTarget)
+		}
+	}
+	h.Set(api.HeaderClient, "live-test")
+	if c, err = callerOf(peerContext(context.Background()), h); err != nil || c.client != "live-test" {
 		t.Errorf("caller = %+v, %v", c, err)
 	}
 }

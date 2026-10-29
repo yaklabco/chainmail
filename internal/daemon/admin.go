@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/audit"
+	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/provider"
 	"github.com/jamesainslie/chainmail/internal/vault"
 	"github.com/jamesainslie/chainmail/internal/version"
@@ -26,7 +28,11 @@ func (a *adminService) SetSecret(ctx context.Context, req *connect.Request[chain
 		return nil, err
 	}
 	name, value := req.Msg.GetName(), req.Msg.GetValue()
-	setErr := a.s.checkSecretName(name)
+	target := name
+	if !vault.ValidName(name) {
+		target = invalidTarget
+	}
+	setErr := a.s.checkSecret(name, value)
 	if setErr == nil {
 		setErr = a.s.opts.Vault.Set(name, value)
 		// A failed final directory sync still leaves the new value live, so an
@@ -35,7 +41,7 @@ func (a *adminService) SetSecret(ctx context.Context, req *connect.Request[chain
 			a.s.auth.SecretChanged(name)
 		}
 	}
-	if err := a.s.record(ctx, c, audit.Entry{Action: "secret.set", Targets: []string{name}}, setErr); err != nil {
+	if err := a.s.record(ctx, c, audit.Entry{Action: "secret.set", Targets: []string{target}}, setErr); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&chainmailv1.SetSecretResponse{}), nil
@@ -59,15 +65,22 @@ func (e *secretNameError) Error() string {
 
 func (e *secretNameError) Unwrap() error { return vault.ErrInvalidName }
 
-// checkSecretName allows the password of a configured password account and
-// the secret of a configured OAuth2 client. Refresh tokens are refused:
-// only a login writes one, after the provider issued it.
-func (s *Server) checkSecretName(name string) error {
+// errNULPassword never includes the value.
+var errNULPassword = errors.New("the password contains a NUL byte, which no login can send")
+
+// checkSecret allows the password of a configured password account and the
+// secret of a configured OAuth2 client. Refresh tokens are refused: only a
+// login writes one, after the provider issued it. A password may not hold a
+// NUL byte, which SASL PLAIN uses as its separator.
+func (s *Server) checkSecret(name string, value []byte) error {
 	kind, rest, _ := strings.Cut(name, "/")
 	cfg := s.opts.Config
 	switch kind {
 	case "accounts":
 		if acct, err := cfg.Account(rest); err == nil && acct.Auth == provider.AuthPassword {
+			if bytes.IndexByte(value, 0) >= 0 {
+				return errNULPassword
+			}
 			return nil
 		}
 	case "oauth_clients":
@@ -94,8 +107,11 @@ func (a *adminService) BeginAuthLogin(ctx context.Context, req *connect.Request[
 	if err != nil {
 		return nil, err
 	}
-	account := req.Msg.GetAccount()
-	ch, loginErr := a.s.auth.BeginLogin(account)
+	account, loginErr := accountTarget(req.Msg.GetAccount())
+	var ch auth.Challenge
+	if loginErr == nil {
+		ch, loginErr = a.s.auth.BeginLogin(account)
+	}
 	if err := a.s.record(ctx, c, audit.Entry{Account: account, Action: "auth.login.begin"}, loginErr); err != nil {
 		return nil, err
 	}
@@ -110,8 +126,10 @@ func (a *adminService) FinishAuthLogin(ctx context.Context, req *connect.Request
 	if err != nil {
 		return nil, err
 	}
-	account := req.Msg.GetAccount()
-	loginErr := a.s.auth.FinishLogin(ctx, account, req.Msg.GetRedirectUrl())
+	account, loginErr := accountTarget(req.Msg.GetAccount())
+	if loginErr == nil {
+		loginErr = a.s.auth.FinishLogin(ctx, account, req.Msg.GetRedirectUrl())
+	}
 	if err := a.s.record(ctx, c, audit.Entry{Account: account, Action: "auth.login.finish"}, loginErr); err != nil {
 		return nil, err
 	}

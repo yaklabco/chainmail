@@ -167,6 +167,78 @@ func TestSecretFieldsAreDebugRedact(t *testing.T) {
 	}
 }
 
+// Names that fail validation are client-supplied bytes of any size, so the
+// append-only audit log records a placeholder instead.
+func TestInvalidNamesAreAuditedAsPlaceholder(t *testing.T) {
+	t.Parallel()
+	h := daemontest.Start(t, gmailConfig, daemontest.Options{})
+	huge := strings.Repeat("a", 100<<10)
+	calls := []struct {
+		action string
+		call   func(name string) error
+	}{
+		{action: "account.test", call: func(name string) error {
+			_, err := h.Client.Account.TestAccount(t.Context(), connect.NewRequest(&chainmailv1.TestAccountRequest{Account: name}))
+			return err
+		}},
+		{action: "secret.set", call: func(name string) error {
+			_, err := h.Client.Admin.SetSecret(t.Context(), connect.NewRequest(&chainmailv1.SetSecretRequest{Name: name, Value: []byte("v")}))
+			return err
+		}},
+		{action: "auth.login.begin", call: func(name string) error {
+			_, err := h.Client.Admin.BeginAuthLogin(t.Context(), connect.NewRequest(&chainmailv1.BeginAuthLoginRequest{Account: name}))
+			return err
+		}},
+		{action: "auth.login.finish", call: func(name string) error {
+			_, err := h.Client.Admin.FinishAuthLogin(t.Context(), connect.NewRequest(&chainmailv1.FinishAuthLoginRequest{Account: name, RedirectUrl: "http://127.0.0.1:53682/"}))
+			return err
+		}},
+	}
+	for _, c := range calls {
+		for _, name := range []string{huge, "../x"} {
+			err := c.call(name)
+			if got := api.Detail(err).GetReason(); got != api.ReasonInvalidArgument {
+				t.Errorf("%s %.20q: reason = %s, want INVALID_ARGUMENT (err %.200v)", c.action, name, got, err)
+			}
+			if err != nil && strings.Contains(err.Error(), huge[:1024]) {
+				t.Errorf("%s: the error echoes the huge name", c.action)
+			}
+		}
+	}
+	rows := h.AuditRows(t)
+	if len(rows) != 2*len(calls) {
+		t.Fatalf("audit rows = %d, want %d", len(rows), 2*len(calls))
+	}
+	for i, r := range rows {
+		want := daemontest.AuditRow{Client: "test", Account: "(invalid)", Action: calls[i/2].action, Targets: "[]", Result: "error", Reason: api.ReasonInvalidArgument}
+		if want.Action == "secret.set" {
+			want.Account, want.Targets = "", `["(invalid)"]`
+		}
+		if r != want {
+			t.Errorf("audit row %d = %.300v, want %+v", i, r, want)
+		}
+	}
+}
+
+// Every client gets the NUL refusal, not only the CLI.
+func TestSetSecretRefusesNULPassword(t *testing.T) {
+	t.Parallel()
+	h := daemontest.Start(t, gmailConfig, daemontest.Options{})
+	_, err := h.Client.Admin.SetSecret(t.Context(), connect.NewRequest(&chainmailv1.SetSecretRequest{Name: "accounts/host", Value: []byte("hunter\x00two")}))
+	if got := api.Detail(err).GetReason(); got != api.ReasonInvalidArgument {
+		t.Errorf("reason = %s, want INVALID_ARGUMENT (err %v)", got, err)
+	}
+	if err != nil && strings.Contains(err.Error(), "hunter") {
+		t.Errorf("error %v contains the value", err)
+	}
+	if _, err := h.Vault.Get("accounts/host"); err == nil {
+		t.Error("a password with a NUL byte was stored")
+	}
+	if rows := h.AuditRows(t); len(rows) != 1 || rows[0].Result != "error" || rows[0].Reason != api.ReasonInvalidArgument {
+		t.Errorf("audit rows = %+v", rows)
+	}
+}
+
 func TestOAuthLogin(t *testing.T) {
 	t.Parallel()
 	o := oauthtest.Start(t)

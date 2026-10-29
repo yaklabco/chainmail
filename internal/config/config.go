@@ -90,6 +90,9 @@ func (e *ValidationError) Error() string {
 // names (accounts/<name>, oauth_clients/<name>), so no path characters.
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
+// ValidName reports whether name can name an account or OAuth client.
+func ValidName(name string) bool { return nameRE.MatchString(name) }
+
 // Load reads and parses the config file at path.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)

@@ -16,6 +16,7 @@ var invalidArgument = []error{
 	vault.ErrInvalidName, vault.ErrEmptyValue,
 	auth.ErrNotOAuth, auth.ErrNoPendingLogin, auth.ErrLoginExpired,
 	auth.ErrStateMismatch, auth.ErrConsentDenied, auth.ErrNoRefreshToken,
+	errNULPassword,
 }
 
 // toConnectError maps a Go error to a Connect error with a stable reason.
@@ -31,6 +32,9 @@ func toConnectError(err error) *connect.Error {
 		return api.New(connect.CodeUnauthenticated, api.ReasonAuthRejected, "", err)
 	case errors.Is(err, config.ErrUnknownAccount):
 		return api.New(connect.CodeNotFound, api.ReasonNotFound, "run: chainmail accounts list", err)
+	case errors.Is(err, errInvalidAccountName):
+		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument,
+			"account names are 1 to 63 lowercase letters, digits and hyphens; run: chainmail accounts list", err)
 	case errors.As(err, &badName):
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, badName.hint, err)
 	case isAny(err, invalidArgument):
