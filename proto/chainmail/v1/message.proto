@@ -151,6 +151,7 @@ message Attachment {
   // The IMAP part number, such as "2" or "1.2". Pass it to DownloadAttachment.
   string part = 1;
   Untrusted filename = 2;
+  // A lowercase type/subtype such as application/pdf, without parameters.
   string content_type = 3;
   // Size as the server stores it, before transfer decoding. A base64 part
   // decodes to about three quarters of this.
@@ -224,6 +225,11 @@ message GetThreadResponse {
   repeated Message messages = 2;
   string source = 3;
   google.protobuf.Timestamp fetched_at = 4;
+  // The whole thread would not fit in a 16 MiB response, so messages holds
+  // the oldest messages that fit and omitted_refs the rest.
+  bool truncated = 5;
+  // Refs of the newer messages left out, oldest first. Pass them to Get.
+  repeated string omitted_refs = 6;
 }
 
 message DownloadAttachmentRequest {
@@ -234,7 +240,10 @@ message DownloadAttachmentRequest {
 
 message AttachmentHeader {
   Untrusted filename = 1;
+  // A lowercase type/subtype such as application/pdf, without parameters.
   string content_type = 2;
+  // The encoded size the server reports, before transfer decoding. The
+  // decoded bytes that follow are fewer: about three quarters for base64.
   int64 size = 3;
 }
 

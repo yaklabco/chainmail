@@ -36,10 +36,10 @@ const (
 
 // messageService implements chainmailv1connect.MessageServiceHandler.
 type messageService struct {
-	// Task 13 replaces the embedded handler once all six methods exist.
-	chainmailv1connect.UnimplementedMessageServiceHandler
 	s *Server
 }
+
+var _ chainmailv1connect.MessageServiceHandler = (*messageService)(nil)
 
 // withDeadline gives ctx a deadline of d unless the client already set one.
 func withDeadline(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {

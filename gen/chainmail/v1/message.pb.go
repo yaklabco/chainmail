@@ -1127,9 +1127,10 @@ func (x *Body) GetTrimmedBytes() int64 {
 type Attachment struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The IMAP part number, such as "2" or "1.2". Pass it to DownloadAttachment.
-	Part        string     `protobuf:"bytes,1,opt,name=part,proto3" json:"part,omitempty"`
-	Filename    *Untrusted `protobuf:"bytes,2,opt,name=filename,proto3" json:"filename,omitempty"`
-	ContentType string     `protobuf:"bytes,3,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
+	Part     string     `protobuf:"bytes,1,opt,name=part,proto3" json:"part,omitempty"`
+	Filename *Untrusted `protobuf:"bytes,2,opt,name=filename,proto3" json:"filename,omitempty"`
+	// A lowercase type/subtype such as application/pdf, without parameters.
+	ContentType string `protobuf:"bytes,3,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
 	// Size as the server stores it, before transfer decoding. A base64 part
 	// decodes to about three quarters of this.
 	Size          int64 `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
@@ -1769,9 +1770,14 @@ type GetThreadResponse struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	ThreadId string                 `protobuf:"bytes,1,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
 	// Oldest first.
-	Messages      []*Message             `protobuf:"bytes,2,rep,name=messages,proto3" json:"messages,omitempty"`
-	Source        string                 `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`
-	FetchedAt     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=fetched_at,json=fetchedAt,proto3" json:"fetched_at,omitempty"`
+	Messages  []*Message             `protobuf:"bytes,2,rep,name=messages,proto3" json:"messages,omitempty"`
+	Source    string                 `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`
+	FetchedAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=fetched_at,json=fetchedAt,proto3" json:"fetched_at,omitempty"`
+	// The whole thread would not fit in a 16 MiB response, so messages holds
+	// the oldest messages that fit and omitted_refs the rest.
+	Truncated bool `protobuf:"varint,5,opt,name=truncated,proto3" json:"truncated,omitempty"`
+	// Refs of the newer messages left out, oldest first. Pass them to Get.
+	OmittedRefs   []string `protobuf:"bytes,6,rep,name=omitted_refs,json=omittedRefs,proto3" json:"omitted_refs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1834,6 +1840,20 @@ func (x *GetThreadResponse) GetFetchedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *GetThreadResponse) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
+func (x *GetThreadResponse) GetOmittedRefs() []string {
+	if x != nil {
+		return x.OmittedRefs
+	}
+	return nil
+}
+
 type DownloadAttachmentRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Ref   string                 `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
@@ -1888,10 +1908,13 @@ func (x *DownloadAttachmentRequest) GetPart() string {
 }
 
 type AttachmentHeader struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Filename      *Untrusted             `protobuf:"bytes,1,opt,name=filename,proto3" json:"filename,omitempty"`
-	ContentType   string                 `protobuf:"bytes,2,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
-	Size          int64                  `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Filename *Untrusted             `protobuf:"bytes,1,opt,name=filename,proto3" json:"filename,omitempty"`
+	// A lowercase type/subtype such as application/pdf, without parameters.
+	ContentType string `protobuf:"bytes,2,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
+	// The encoded size the server reports, before transfer decoding. The
+	// decoded bytes that follow are fewer: about three quarters for base64.
+	Size          int64 `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2167,13 +2190,15 @@ const file_chainmail_v1_message_proto_rawDesc = "" +
 	"\x04data\x18\x01 \x01(\fR\x04data\"8\n" +
 	"\x10GetThreadRequest\x12\x10\n" +
 	"\x03ref\x18\x01 \x01(\tR\x03ref\x12\x12\n" +
-	"\x04full\x18\x02 \x01(\bR\x04full\"\xb6\x01\n" +
+	"\x04full\x18\x02 \x01(\bR\x04full\"\xf7\x01\n" +
 	"\x11GetThreadResponse\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x121\n" +
 	"\bmessages\x18\x02 \x03(\v2\x15.chainmail.v1.MessageR\bmessages\x12\x16\n" +
 	"\x06source\x18\x03 \x01(\tR\x06source\x129\n" +
 	"\n" +
-	"fetched_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tfetchedAt\"A\n" +
+	"fetched_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tfetchedAt\x12\x1c\n" +
+	"\ttruncated\x18\x05 \x01(\bR\ttruncated\x12!\n" +
+	"\fomitted_refs\x18\x06 \x03(\tR\vomittedRefs\"A\n" +
 	"\x19DownloadAttachmentRequest\x12\x10\n" +
 	"\x03ref\x18\x01 \x01(\tR\x03ref\x12\x12\n" +
 	"\x04part\x18\x02 \x01(\tR\x04part\"~\n" +

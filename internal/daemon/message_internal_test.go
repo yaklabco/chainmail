@@ -197,3 +197,49 @@ func TestMessageProtoWrapsTextAndLeavesTheMessageAlone(t *testing.T) {
 		t.Errorf("body = %v", b)
 	}
 }
+
+func TestFitPrefix(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		base          int
+		kept, dropped []int
+		limit, want   int
+	}{
+		{"all fit", 10, []int{20, 20}, []int{1, 1}, 50, 2},
+		{"exactly at the limit", 10, []int{20, 20}, []int{1, 1}, 50, 2},
+		{"the second crosses", 10, []int{20, 30}, []int{1, 1}, 50, 1},
+		{"a later small one is cut too", 10, []int{20, 30, 1}, []int{1, 1, 1}, 50, 1},
+		{"the first crosses", 10, []int{60, 1}, []int{1, 1}, 50, 0},
+		{"stand-ins count", 10, []int{38}, []int{5}, 50, 1},
+		{"nothing", 10, nil, nil, 50, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := fitPrefix(tt.base, tt.kept, tt.dropped, tt.limit); got != tt.want {
+				t.Errorf("fitPrefix = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMediaType(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		"application/pdf":             "application/pdf",
+		`Text/HTML; charset="utf-8"`:  "text/html",
+		"image/png; name=a b":         "image/png",
+		"text":                        "application/octet-stream",
+		"":                            "application/octet-stream",
+		"text/":                       "application/octet-stream",
+		"te xt/plain":                 "application/octet-stream",
+		"text/plain\x1b[31m":          "application/octet-stream",
+		"application/vnd.ms-excel":    "application/vnd.ms-excel",
+		"multipart/mixed; boundary=x": "multipart/mixed",
+	} {
+		if got := mediaType(in); got != want {
+			t.Errorf("mediaType(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

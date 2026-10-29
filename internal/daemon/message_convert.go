@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"slices"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -65,6 +66,8 @@ func snippetOf(sum mailstore.Summary) string {
 	}
 }
 
+// messageProto builds the API form of msg. A message can be shared by
+// several results, so slices are copied rather than aliased.
 func messageProto(msg *mailstore.Message, body render.Body) *chainmailv1.Message {
 	sum := msg.Summary
 	out := &chainmailv1.Message{
@@ -72,14 +75,14 @@ func messageProto(msg *mailstore.Message, body render.Body) *chainmailv1.Message
 		From: addressesProto(sum.From), To: addressesProto(sum.To), Cc: addressesProto(msg.Cc),
 		Subject: untrusted(sum.Subject), MessageId: untrusted(msg.MessageID),
 		InReplyTo: untrustedList(msg.InReplyTo), References: untrustedList(msg.References),
-		Flags: sum.Flags, Labels: sum.Labels, ThreadId: sum.ThreadID,
+		Flags: slices.Clone(sum.Flags), Labels: slices.Clone(sum.Labels), ThreadId: sum.ThreadID,
 		Body: &chainmailv1.Body{
 			Untrusted: render.CleanText(body.Text), Truncated: body.Truncated || msg.TextClipped,
 			QuotedTrimmed: body.QuotedTrimmed, TrimmedBytes: int64(body.TrimmedBytes),
 		},
 	}
 	for _, a := range msg.Attachments {
-		out.Attachments = append(out.Attachments, &chainmailv1.Attachment{Part: a.Part, Filename: untrusted(a.Filename), ContentType: a.ContentType, Size: a.Size})
+		out.Attachments = append(out.Attachments, &chainmailv1.Attachment{Part: a.Part, Filename: untrusted(a.Filename), ContentType: mediaType(a.ContentType), Size: a.Size})
 	}
 	return out
 }
