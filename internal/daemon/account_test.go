@@ -1,11 +1,15 @@
 package daemon_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/emersion/go-smtp"
@@ -209,9 +213,11 @@ func TestTestAccountErrors(t *testing.T) {
 	}
 }
 
-func TestTestAccountOAuth(t *testing.T) {
-	t.Parallel()
-	m := startMail(t, "me@gmail.com", "unused", oauthtest.AccessToken)
+// startOAuth runs mail servers that accept token for me@gmail.com, and a
+// daemon whose gm account has finished an OAuth2 login against oauthtest.
+func startOAuth(t *testing.T, token string) *daemontest.Harness {
+	t.Helper()
+	m := startMail(t, "me@gmail.com", "unused", token)
 	o := oauthtest.Start(t)
 	cfg := fmt.Sprintf(`
 [oauth_clients.g]
@@ -238,6 +244,12 @@ smtp = { host = "127.0.0.1", port = %d, security = "starttls" }
 	if _, err := h.Client.Admin.FinishAuthLogin(t.Context(), connect.NewRequest(&chainmailv1.FinishAuthLoginRequest{Account: "gm", RedirectUrl: redirect})); err != nil {
 		t.Fatal(err)
 	}
+	return h
+}
+
+func TestTestAccountOAuth(t *testing.T) {
+	t.Parallel()
+	h := startOAuth(t, oauthtest.AccessToken)
 	resp, err := testAccount(t, h, "gm")
 	if err != nil {
 		t.Fatalf("TestAccount: %v", err)
@@ -245,6 +257,126 @@ smtp = { host = "127.0.0.1", port = %d, security = "starttls" }
 	if !resp.GetImap().GetOk() || !resp.GetSmtp().GetOk() {
 		t.Errorf("checks = imap %+v smtp %+v", resp.GetImap(), resp.GetSmtp())
 	}
+}
+
+func TestTestAccountOAuthRejected(t *testing.T) {
+	t.Parallel()
+	h := startOAuth(t, "some-other-token")
+	resp, err := testAccount(t, h, "gm")
+	if err != nil {
+		t.Fatalf("TestAccount: %v", err)
+	}
+	if c := resp.GetImap(); c.GetOk() || c.GetReason() != api.ReasonAuthRejected {
+		t.Errorf("imap = %+v, want AUTH_REJECTED", c)
+	}
+	if strings.Contains(resp.GetImap().GetError(), oauthtest.AccessToken) {
+		t.Errorf("imap error %q contains the access token", resp.GetImap().GetError())
+	}
+	a := listAccounts(t, h)["gm"]
+	if a.GetAuthState() != chainmailv1.AuthState_AUTH_STATE_REQUIRED || !strings.Contains(a.GetAuthDetail(), "chainmail auth login gm") {
+		t.Errorf("account after rejection = %+v, want the auth login hint", a)
+	}
+}
+
+// A rejected login is not retried, because providers such as Hostinger count
+// IMAP and SMTP failures together toward a lockout. The SMTP endpoint here
+// has nothing listening, so a real probe would report SERVER_UNAVAILABLE.
+func TestTestAccountSkipsSMTPAfterIMAPRejection(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	m := mailServers{
+		ca:   ca,
+		imap: imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{Username: "me@example.test", Password: "pw"}),
+		smtp: provider.Endpoint{Host: "127.0.0.1", Port: closedPort(t), Security: provider.SecurityStartTLS},
+	}
+	h := daemontest.Start(t, localConfig(m), daemontest.Options{RootCAs: m.ca.Pool})
+	setSecret(t, h, "accounts/local", "wrong")
+	resp, err := testAccount(t, h, "local")
+	if err != nil {
+		t.Fatalf("TestAccount: %v", err)
+	}
+	if c := resp.GetImap(); c.GetReason() != api.ReasonAuthRejected {
+		t.Errorf("imap = %+v, want AUTH_REJECTED", c)
+	}
+	if c := resp.GetSmtp(); c.GetOk() || c.GetReason() != api.ReasonAuthRejected || !strings.Contains(c.GetError(), "not attempted") {
+		t.Errorf("smtp = %+v, want AUTH_REJECTED without an attempt", c)
+	}
+}
+
+// The client giving up while IMAP is stuck is reported as TIMEOUT, and the
+// audit row is still written.
+func TestTestAccountTimeout(t *testing.T) {
+	t.Parallel()
+	silent := silentEndpoint(t)
+	m := mailServers{ca: tlstest.New(t), imap: silent, smtp: silent}
+	h := daemontest.Start(t, localConfig(m), daemontest.Options{RootCAs: m.ca.Pool})
+	setSecret(t, h, "accounts/local", "pw")
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	if _, err := h.Client.Account.TestAccount(ctx, connect.NewRequest(&chainmailv1.TestAccountRequest{Account: "local"})); err == nil {
+		t.Fatal("TestAccount succeeded against a silent server")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if last := lastAudit(t, h); last.Action == "account.test" {
+			if last.Result != "error" || last.Reason != api.ReasonTimeout {
+				t.Errorf("audit = %+v, want TIMEOUT", last)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no account.test audit row after the client gave up")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// closedPort returns a local port that nothing listens on.
+func closedPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener address is %T", ln.Addr())
+	}
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return addr.Port
+}
+
+// silentEndpoint accepts connections and never sends a byte, until the test ends.
+func silentEndpoint(t *testing.T) provider.Endpoint {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		_ = ln.Close() // ends Accept; nothing to do about a close error at test end
+		wg.Wait()
+	})
+	wg.Go(func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			wg.Go(func() {
+				<-t.Context().Done()
+				_ = conn.Close() // the test is over; the client may already have hung up
+			})
+		}
+	})
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener address is %T", ln.Addr())
+	}
+	return provider.Endpoint{Host: "127.0.0.1", Port: addr.Port, Security: provider.SecurityTLS}
 }
 
 // When the checks fail differently, the audit row keeps the rejection, since

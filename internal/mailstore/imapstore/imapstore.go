@@ -21,6 +21,9 @@ import (
 
 const defaultTimeout = 30 * time.Second
 
+// defaultCloseTimeout bounds the LOGOUT exchange in Close.
+const defaultCloseTimeout = 5 * time.Second
+
 // DialOptions tune how Dial connects.
 type DialOptions struct {
 	// RootCAs replaces the system roots when set. Tests use it.
@@ -35,6 +38,10 @@ type Session struct {
 	client *imapclient.Client
 	// caps is fetched in Dial, under its deadline, and sorted.
 	caps []string
+	// conn is the TCP connection under client. Close shuts it if LOGOUT stalls.
+	conn net.Conn
+	// closeTimeout bounds LOGOUT in Close. Tests shorten it.
+	closeTimeout time.Duration
 }
 
 // Dial connects to ep, secures the connection and logs in with creds.
@@ -69,7 +76,7 @@ func Dial(ctx context.Context, ep provider.Endpoint, creds auth.Credentials, opt
 		_ = conn.Close() // the handshake, login or capability error is the one to report
 		return nil, err
 	}
-	return &Session{client: client, caps: caps}, nil
+	return &Session{client: client, caps: caps, conn: conn, closeTimeout: defaultCloseTimeout}, nil
 }
 
 func handshake(ctx context.Context, conn net.Conn, ep provider.Endpoint, roots *x509.CertPool) (*imapclient.Client, error) {
@@ -162,10 +169,19 @@ func (s *Session) Capabilities() []string {
 	return slices.Clone(s.caps)
 }
 
-// Close logs out and closes the connection.
+// Close logs out and closes the connection. A server that does not answer
+// LOGOUT within the close timeout has its connection shut instead, and that
+// counts as closed: the session is gone either way.
 func (s *Session) Close() error {
+	// A deadline set on the connection would not hold, because imapclient
+	// resets the read deadline after every response, so a timer shuts the
+	// connection instead.
+	timer := time.AfterFunc(s.closeTimeout, func() { _ = s.conn.Close() }) // Logout and Close below report the outcome
 	logoutErr := s.client.Logout().Wait()
 	closeErr := s.client.Close()
+	if !timer.Stop() {
+		return nil
+	}
 	if errors.Is(closeErr, net.ErrClosed) {
 		closeErr = nil // the server hung up after BYE, as it should
 	}

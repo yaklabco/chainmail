@@ -199,7 +199,7 @@ func TestDialServerTroubleIsNotRejection(t *testing.T) {
 func TestDialFetchesCapabilitiesUnderTheDeadline(t *testing.T) {
 	t.Parallel()
 	ca := tlstest.New(t)
-	ep := startStalledCapabilityServer(t, ca)
+	ep := startStallingServer(t, ca, "CAPABILITY")
 	start := time.Now()
 	s, err := Dial(t.Context(), ep, password("pw"), DialOptions{RootCAs: ca.Pool, Timeout: 300 * time.Millisecond})
 	if err == nil {
@@ -214,10 +214,36 @@ func TestDialFetchesCapabilitiesUnderTheDeadline(t *testing.T) {
 	}
 }
 
-// startStalledCapabilityServer runs a one-connection IMAP server over
-// implicit TLS that accepts any LOGIN without sending capabilities, then
-// never answers CAPABILITY. It answers LOGOUT so a Close still works.
-func startStalledCapabilityServer(t *testing.T, ca *tlstest.CA) provider.Endpoint {
+func TestCloseIsBoundedWhenLogoutGoesUnanswered(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	ep := startStallingServer(t, ca, "LOGOUT")
+	s, err := Dial(t.Context(), ep, password("pw"), DialOptions{RootCAs: ca.Pool})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	s.closeTimeout = 100 * time.Millisecond
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- s.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Close = %v, want nil once the connection is closed", err)
+		}
+		if elapsed := time.Since(start); elapsed > 3*time.Second {
+			t.Errorf("Close took %v, want it bounded by the 100ms close timeout", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close blocked although the close timeout is 100ms")
+	}
+}
+
+// startStallingServer runs a one-connection IMAP server over implicit TLS
+// that accepts any LOGIN without sending capabilities and never answers the
+// command called stall. It answers everything else, so with stall set to
+// CAPABILITY a Close still works.
+func startStallingServer(t *testing.T, ca *tlstest.CA, stall string) provider.Endpoint {
 	t.Helper()
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", ca.Server)
 	if err != nil {
@@ -237,7 +263,7 @@ func startStalledCapabilityServer(t *testing.T, ca *tlstest.CA) provider.Endpoin
 		defer func() { _ = conn.Close() }() // the client may already have hung up
 		stop := context.AfterFunc(t.Context(), func() { _ = conn.Close() })
 		defer stop()
-		serveStalledCapability(conn)
+		serveStalling(conn, stall)
 	}()
 	addr, ok := ln.Addr().(*net.TCPAddr)
 	if !ok {
@@ -246,7 +272,7 @@ func startStalledCapabilityServer(t *testing.T, ca *tlstest.CA) provider.Endpoin
 	return provider.Endpoint{Host: "127.0.0.1", Port: addr.Port, Security: provider.SecurityTLS}
 }
 
-func serveStalledCapability(conn net.Conn) {
+func serveStalling(conn net.Conn, stall string) {
 	w := bufio.NewWriter(conn)
 	reply := func(lines ...string) bool {
 		for _, l := range lines {
@@ -267,16 +293,26 @@ func serveStalledCapability(conn net.Conn) {
 		}
 		tag, rest, _ := strings.Cut(strings.TrimRight(line, "\r\n"), " ")
 		cmd, _, _ := strings.Cut(rest, " ")
-		switch strings.ToUpper(cmd) {
+		cmd = strings.ToUpper(cmd)
+		if cmd == stall {
+			continue // left unanswered: the client has to give up on its own
+		}
+		switch cmd {
 		case "LOGIN":
 			if !reply(tag + " OK logged in") {
+				return
+			}
+		case "CAPABILITY":
+			if !reply("* CAPABILITY IMAP4rev1", tag+" OK done") {
 				return
 			}
 		case "LOGOUT":
 			reply("* BYE", tag+" OK bye")
 			return
 		default:
-			// CAPABILITY and anything else go unanswered.
+			if !reply(tag + " BAD unknown command") {
+				return
+			}
 		}
 	}
 }

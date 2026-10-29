@@ -73,7 +73,7 @@ func (a *accountService) TestAccount(ctx context.Context, req *connect.Request[c
 			}
 			entry.Result = audit.ResultError
 			// A rejection parked the account, so it is the reason worth keeping.
-			if entry.Reason != api.ReasonAuthRejected {
+			if entry.Reason == "" || check.GetReason() == api.ReasonAuthRejected {
 				entry.Reason = check.GetReason()
 			}
 		}
@@ -105,6 +105,12 @@ func (a *accountService) test(ctx context.Context, name string) (*chainmailv1.Te
 		}
 		return caps, nil
 	})
+	if resp.Imap.GetReason() == api.ReasonAuthRejected {
+		// Providers such as Hostinger count IMAP and SMTP failures together
+		// toward a lockout, so a rejected login is not tried again.
+		resp.Smtp = &chainmailv1.Check{Reason: api.ReasonAuthRejected, Error: "not attempted: the IMAP server rejected the same credentials"}
+		return resp, nil
+	}
 	resp.Smtp = a.check(ctx, name, func(ctx context.Context) ([]string, error) {
 		return nil, sender.Probe(ctx, acct.SMTP, creds, sender.DialOptions{RootCAs: a.s.opts.RootCAs})
 	})
