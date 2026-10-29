@@ -3,8 +3,10 @@ module github.com/jamesainslie/chainmail
 go 1.26.10
 
 require (
+	connectrpc.com/connect v1.21.1
 	github.com/spf13/cobra v1.10.2
 	github.com/yaklabco/stave v0.17.6
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
@@ -62,4 +64,8 @@ require (
 	golang.org/x/tools v0.52.0 // indirect
 )
 
-tool github.com/yaklabco/stave
+tool (
+	connectrpc.com/connect/cmd/protoc-gen-connect-go
+	github.com/yaklabco/stave
+	google.golang.org/protobuf/cmd/protoc-gen-go
+)

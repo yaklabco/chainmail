@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package chainmail.v1;
+
+import "google/protobuf/timestamp.proto";
+
+message SetSecretRequest {
+  // Vault name, such as accounts/work or oauth_clients/workspace.
+  string name = 1;
+  bytes value = 2;
+}
+
+message SetSecretResponse {}
+
+message BeginAuthLoginRequest {
+  string account = 1;
+}
+
+message BeginAuthLoginResponse {
+  // Open this in a browser to grant consent.
+  string consent_url = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+message FinishAuthLoginRequest {
+  string account = 1;
+  // The full URL the browser was sent to after consent.
+  string redirect_url = 2;
+}
+
+message FinishAuthLoginResponse {}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  string version = 1;
+  google.protobuf.Timestamp started_at = 2;
+  bool dev_mode = 3;
+  // Names of stored secrets. Values are never returned.
+  repeated string secret_names = 4;
+}
+
+// AdminService holds operations for a human. It is never exposed over MCP.
+service AdminService {
+  // SetSecret stores a secret in the vault. Secrets can be written but never read back.
+  rpc SetSecret(SetSecretRequest) returns (SetSecretResponse);
+  // BeginAuthLogin starts the OAuth2 consent flow for an account.
+  rpc BeginAuthLogin(BeginAuthLoginRequest) returns (BeginAuthLoginResponse);
+  // FinishAuthLogin completes the flow with the URL the browser landed on.
+  rpc FinishAuthLogin(FinishAuthLoginRequest) returns (FinishAuthLoginResponse);
+  // GetStatus reports daemon version, uptime and stored secret names.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+}

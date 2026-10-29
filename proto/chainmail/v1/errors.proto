@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package chainmail.v1;
+
+// ErrorDetail is attached to every error the daemon returns.
+message ErrorDetail {
+  // Stable machine-readable reason, such as AUTH_REQUIRED or NOT_FOUND.
+  string reason = 1;
+  // What a human or agent should do next, such as the command to run.
+  string hint = 2;
+  // Set when reason is HELD.
+  string approval_id = 3;
+}

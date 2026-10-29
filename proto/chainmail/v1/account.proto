@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package chainmail.v1;
+
+// AuthState says whether chainmail can log in to an account without a human.
+enum AuthState {
+  AUTH_STATE_UNSPECIFIED = 0;
+  // Credentials are present and have not been rejected.
+  AUTH_STATE_OK = 1;
+  // Credentials are missing or were rejected. auth_detail says what to run.
+  AUTH_STATE_REQUIRED = 2;
+}
+
+// Account is one configured mail account.
+message Account {
+  string name = 1;
+  string provider = 2;
+  string address = 3;
+  // "password" or "oauth2".
+  string auth_method = 4;
+  AuthState auth_state = 5;
+  // Why auth is required, and what to run, when auth_state is AUTH_STATE_REQUIRED.
+  string auth_detail = 6;
+}
+
+message ListAccountsRequest {}
+
+message ListAccountsResponse {
+  repeated Account accounts = 1;
+}
+
+message TestAccountRequest {
+  string account = 1;
+}
+
+// Check is the result of one connection test.
+message Check {
+  bool ok = 1;
+  // Stable reason when ok is false: AUTH_REJECTED, SERVER_UNAVAILABLE or TIMEOUT.
+  string reason = 2;
+  string error = 3;
+  // IMAP capabilities, when the IMAP login worked.
+  repeated string capabilities = 4;
+  int64 latency_ms = 5;
+}
+
+message TestAccountResponse {
+  string account = 1;
+  Check imap = 2;
+  Check smtp = 3;
+}
+
+// AccountService describes configured accounts and tests their connections.
+service AccountService {
+  // ListAccounts returns every configured account and its auth state.
+  rpc ListAccounts(ListAccountsRequest) returns (ListAccountsResponse);
+  // TestAccount logs in to the account's IMAP and SMTP servers and reports what happened.
+  rpc TestAccount(TestAccountRequest) returns (TestAccountResponse);
+}
