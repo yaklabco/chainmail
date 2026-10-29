@@ -80,14 +80,17 @@ func (c *conn) listFolders(ctx context.Context) ([]mailstore.Folder, error) {
 		}
 	}
 	if len(need) > 0 {
-		// STATUS commands are pipelined: all are sent before any answer is read.
-		err := c.do(ctx, func() error {
+		// STATUS commands are pipelined: all are sent before any answer is
+		// read. Their replies carry no literals, so imapclient's reader never
+		// waits on this loop, and reading them in order is safe.
+		err := c.pipeline(ctx, func(progress func()) error {
 			cmds := make([]*imapclient.StatusCommand, len(need))
 			for j, i := range need {
 				cmds[j] = c.client().Status(folders[i].Name, statusOpts)
 			}
 			for j, cmd := range cmds {
 				data, err := cmd.Wait()
+				progress()
 				var refusal *imap.Error
 				switch {
 				case errors.As(err, &refusal):

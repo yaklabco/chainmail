@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -50,30 +51,48 @@ func (c *conn) Noop(ctx context.Context) error {
 	return c.do(ctx, func() error { return c.client().Noop().Wait() })
 }
 
+// errCommandTimeout marks a command the server did not answer within the
+// command timeout. It always comes wrapped with errConnLost, since the
+// connection is shut, but a timeout is retried at most once: a server too
+// slow for the bound stays too slow, and every retry costs another timeout.
+var errCommandTimeout = errors.New("the mail server stopped answering")
+
 // do runs one IMAP exchange, bounded by the command timeout and by ctx.
 // When either ends first, the connection is shut, which unblocks f, and c
 // is dead. A reply from the server, such as NO, leaves c usable; any other
 // failure means the connection broke.
 func (c *conn) do(ctx context.Context, f func() error) error {
+	return c.pipeline(ctx, func(func()) error { return f() })
+}
+
+// pipeline is do for several commands in flight at once. f calls progress
+// each time one of them completes, which gives the rest a fresh command
+// timeout, so the timeout bounds each command and not the whole batch.
+//
+// Shutting the connection releases f only while every command f has sent
+// is being read. imapclient's reader waits at each literal until the command
+// it belongs to takes it, and that wait does not end when the socket closes.
+// So f must read pipelined FETCHes concurrently, as collectAll does, never
+// one after another.
+func (c *conn) pipeline(ctx context.Context, f func(progress func()) error) error {
 	if c.Dead() {
 		return errConnLost
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	timer := time.AfterFunc(c.timeout, c.kill)
+	w := startWatchdog(c.timeout, c.kill)
 	stop := context.AfterFunc(ctx, c.kill)
-	err := f()
-	// A false Stop means the kill has started, or is about to, even when f
-	// already finished, so c is dead from here on either way.
-	timerFired := !timer.Stop()
+	err := f(w.reset)
+	timedOut := w.stop()
 	if !stop() {
+		// The kill has started, or is about to, even if f already finished.
 		c.dead.Store(true)
 		return ctx.Err()
 	}
-	if timerFired {
+	if timedOut {
 		c.dead.Store(true)
-		return fmt.Errorf("%w: no answer within %v", errConnLost, c.timeout)
+		return fmt.Errorf("%w: %w within %v", errConnLost, errCommandTimeout, c.timeout)
 	}
 	var imapErr *imap.Error
 	if err != nil && (!errors.As(err, &imapErr) || imapErr.Type == imap.StatusResponseTypeBye) {
@@ -81,6 +100,51 @@ func (c *conn) do(ctx context.Context, f func() error) error {
 		return fmt.Errorf("%w: %w", errConnLost, err)
 	}
 	return err
+}
+
+// watchdog calls fire once d passes without a reset.
+type watchdog struct {
+	d     time.Duration
+	mu    sync.Mutex
+	timer *time.Timer
+	// fired is set before fire runs, and stopped by stop. Once either is
+	// set, reset does nothing.
+	fired, stopped bool
+}
+
+func startWatchdog(d time.Duration, fire func()) *watchdog {
+	w := &watchdog{d: d}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.timer = time.AfterFunc(d, func() {
+		w.mu.Lock()
+		if w.stopped || w.fired {
+			w.mu.Unlock()
+			return
+		}
+		w.fired = true
+		w.mu.Unlock()
+		fire()
+	})
+	return w
+}
+
+// reset starts the wait again.
+func (w *watchdog) reset() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.fired && !w.stopped {
+		w.timer.Reset(w.d)
+	}
+}
+
+// stop disarms w and reports whether it fired.
+func (w *watchdog) stop() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.stopped = true
+	w.timer.Stop()
+	return w.fired
 }
 
 func (c *conn) kill() {

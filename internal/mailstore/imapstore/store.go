@@ -33,7 +33,8 @@ type Options struct {
 	RootCAs *x509.CertPool
 	// PoolSize caps connections per account. Zero means 3.
 	PoolSize int
-	// CommandTimeout bounds each IMAP command. Zero means 20s.
+	// CommandTimeout bounds each IMAP command. In a pipeline, each command
+	// that completes gives the rest a fresh timeout. Zero means 20s.
 	CommandTimeout time.Duration
 	// NoopAfter is how long a connection may sit idle before a NOOP checks
 	// it on reuse. Zero means 60s.
@@ -41,7 +42,8 @@ type Options struct {
 	// IdleLogout logs out a connection idle this long. Zero means 10 minutes.
 	IdleLogout time.Duration
 	// Retries is how often an operation is retried after a dropped
-	// connection. Zero means 3; negative means none.
+	// connection. Zero means 3; negative means none. A command that timed
+	// out is retried at most once, within this limit.
 	Retries int
 	// Backoff is the wait before retry n, counting from 0. Nil means
 	// jittered exponential backoff from 200ms.
@@ -265,9 +267,18 @@ func (s *Store) withConn(ctx context.Context, folder string, f func(*conn) error
 	return s.retry(ctx, func() error { return s.tryConn(ctx, folder, f) })
 }
 
+// timeoutRetries is how often an operation is retried after a command timed
+// out. A dropped connection gets Retries; a timeout gets one fresh
+// connection, in case the old one was wedged, and no more: a server or link
+// too slow for the bound stays too slow, and each retry costs another
+// timeout plus a refetch of the whole batch.
+const timeoutRetries = 1
+
 // retry runs try again after a dropped connection, up to Retries times with
-// backoff, then reports the account unavailable. Every other outcome is final.
+// backoff, then reports the account unavailable. A timed-out command is
+// retried at most timeoutRetries times. Every other outcome is final.
 func (s *Store) retry(ctx context.Context, try func() error) error {
+	timeouts := 0
 	for attempt := 0; ; attempt++ {
 		err := try()
 		if err == nil || !errors.Is(err, errConnLost) {
@@ -276,7 +287,10 @@ func (s *Store) retry(ctx context.Context, try func() error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if attempt >= s.opts.Retries {
+		if errors.Is(err, errCommandTimeout) {
+			timeouts++
+		}
+		if attempt >= s.opts.Retries || timeouts > timeoutRetries {
 			return fmt.Errorf("%w: %s after %d attempts: %w", mailstore.ErrUnavailable, s.acct.Name, attempt+1, err)
 		}
 		s.opts.Logger.Debug("retrying after a dropped connection", "account", s.acct.Name, "attempt", attempt+1, "err", err)

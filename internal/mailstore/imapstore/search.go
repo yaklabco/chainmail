@@ -221,40 +221,40 @@ func (s *Store) FetchSummaries(ctx context.Context, src mailstore.Source, uids [
 }
 
 // samples fills Sample with the first bytes of each message's text part.
-// The FETCH commands are pipelined.
+// The FETCH commands are pipelined and read concurrently.
 func (c *conn) samples(ctx context.Context, sums []mailstore.Summary, structures []imap.BodyStructure) error {
 	type pending struct {
 		i       int
 		part    *imap.BodyStructureSinglePart
 		section *imap.FetchItemBodySection
-		cmd     *imapclient.FetchCommand
 	}
-	return c.do(ctx, func() error {
+	return c.pipeline(ctx, func(progress func()) error {
 		var ps []pending
+		var cmds []*imapclient.FetchCommand
 		for i := range sums {
 			path, part := textLeaf(structures[i])
 			if part == nil {
 				continue
 			}
 			sec := &imap.FetchItemBodySection{Part: path, Peek: true, Partial: &imap.SectionPartial{Size: mailstore.SampleBytes}}
-			cmd := c.client().Fetch(imap.UIDSetNum(imap.UID(sums[i].Ref.UID)), &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{sec}})
-			ps = append(ps, pending{i: i, part: part, section: sec, cmd: cmd})
+			cmds = append(cmds, c.client().Fetch(imap.UIDSetNum(imap.UID(sums[i].Ref.UID)), &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{sec}}))
+			ps = append(ps, pending{i: i, part: part, section: sec})
 		}
-		for _, p := range ps {
-			bufs, err := p.cmd.Collect()
+		replies, errs := collectAll(cmds, progress)
+		for k, p := range ps {
 			var refusal *imap.Error
-			switch {
+			switch err := errs[k]; {
 			case errors.As(err, &refusal):
 				continue // no snippet for this one
 			case err != nil:
 				return err
 			}
-			if len(bufs) == 0 {
+			if len(replies[k]) == 0 {
 				continue
 			}
 			sums[p.i].Sample = &mailstore.TextSample{
 				MediaType: p.part.MediaType(), Charset: param(p.part.Params, "charset"),
-				Encoding: p.part.Encoding, Data: bufs[0].FindBodySection(p.section),
+				Encoding: p.part.Encoding, Data: replies[k][0].FindBodySection(p.section),
 			}
 		}
 		return nil

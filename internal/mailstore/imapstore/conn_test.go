@@ -117,3 +117,26 @@ func TestDoTimeoutKillsConnection(t *testing.T) {
 		t.Errorf("timeout: err %v, dead %t; want errConnLost and dead", err, c.Dead())
 	}
 }
+
+func TestPipelineTimeoutBoundsEachCommand(t *testing.T) {
+	t.Parallel()
+	const timeout = 150 * time.Millisecond
+	steps := func(progress func()) error {
+		for range 4 {
+			time.Sleep(timeout / 2)
+			progress()
+		}
+		return nil
+	}
+	c := newTestConn(t, imaptest.User{Username: "steps@example.test", Password: "pw"})
+	c.timeout = timeout
+	if err := c.pipeline(t.Context(), steps); err != nil || c.Dead() {
+		t.Errorf("four commands each within the timeout: err %v, dead %t; want no error", err, c.Dead())
+	}
+	quiet := newTestConn(t, imaptest.User{Username: "quiet@example.test", Password: "pw"})
+	quiet.timeout = timeout
+	err := quiet.pipeline(t.Context(), func(func()) error { return steps(func() {}) })
+	if !errors.Is(err, errCommandTimeout) || !errors.Is(err, errConnLost) || !quiet.Dead() {
+		t.Errorf("no progress for longer than the timeout: err %v, dead %t; want a timeout", err, quiet.Dead())
+	}
+}

@@ -107,12 +107,12 @@ func (s *Store) fetchGroup(ctx context.Context, c *conn, folder string, refs []r
 			}
 		}
 	}
-	// One FETCH per message for its text parts, all sent before any is read.
-	return c.do(ctx, func() error {
+	// One FETCH per message for its text parts, all sent at once and read
+	// concurrently.
+	return c.pipeline(ctx, func(progress func()) error {
 		type pending struct {
-			js  []int
-			b   *imapclient.FetchMessageBuffer
-			cmd *imapclient.FetchCommand
+			js []int
+			b  *imapclient.FetchMessageBuffer
 		}
 		// set fills the result of every ref naming the message.
 		set := func(p pending, msg *mailstore.Message, err error) {
@@ -121,31 +121,33 @@ func (s *Store) fetchGroup(ctx context.Context, c *conn, folder string, refs []r
 			}
 		}
 		var ps []pending
+		var cmds []*imapclient.FetchCommand
 		for _, uid := range uids {
 			b := got[uid]
 			if b == nil {
 				continue
 			}
-			p := pending{js: want[uid], b: b}
+			var cmd *imapclient.FetchCommand
 			if secs := textSections(b.BodyStructure); len(secs) > 0 {
-				p.cmd = c.client().Fetch(imap.UIDSetNum(b.UID), &imap.FetchOptions{UID: true, BodySection: secs})
+				cmd = c.client().Fetch(imap.UIDSetNum(b.UID), &imap.FetchOptions{UID: true, BodySection: secs})
 			}
-			ps = append(ps, p)
+			ps = append(ps, pending{js: want[uid], b: b})
+			cmds = append(cmds, cmd)
 		}
-		for _, p := range ps {
+		replies, errs := collectAll(cmds, progress)
+		for i, p := range ps {
 			var parts *imapclient.FetchMessageBuffer
-			if p.cmd != nil {
-				bufs, err := p.cmd.Collect()
+			if cmds[i] != nil {
 				var refusal *imap.Error
-				switch {
+				switch err := errs[i]; {
 				case errors.As(err, &refusal):
 					set(p, nil, fmt.Errorf("%w: reading the text: %w", mailstore.ErrUnavailable, err))
 					continue
 				case err != nil:
 					return err
 				}
-				if len(bufs) > 0 {
-					parts = bufs[0]
+				if len(replies[i]) > 0 {
+					parts = replies[i][0]
 				}
 			}
 			msg, err := s.message(folder, c.uidValidity, p.b, parts)
@@ -153,6 +155,31 @@ func (s *Store) fetchGroup(ctx context.Context, c *conn, folder string, refs []r
 		}
 		return nil
 	})
+}
+
+// collectAll reads pipelined FETCH commands, each on its own goroutine, and
+// calls progress as each one completes. A nil command is skipped.
+//
+// Reading them one after another deadlocks. A server may send a later
+// command's data before it completes an earlier one, as Dovecot does when it
+// runs pipelined commands in parallel. imapclient's reader then waits for
+// the later command to take its literal, while the caller waits for the
+// earlier command to complete, which the reader never gets to.
+func collectAll(cmds []*imapclient.FetchCommand, progress func()) ([][]*imapclient.FetchMessageBuffer, []error) {
+	replies := make([][]*imapclient.FetchMessageBuffer, len(cmds))
+	errs := make([]error, len(cmds))
+	var wg sync.WaitGroup
+	for i, cmd := range cmds {
+		if cmd == nil {
+			continue
+		}
+		wg.Go(func() {
+			replies[i], errs[i] = cmd.Collect()
+			progress()
+		})
+	}
+	wg.Wait()
+	return replies, errs
 }
 
 func (s *Store) message(folder string, uidValidity uint32, b, parts *imapclient.FetchMessageBuffer) (*mailstore.Message, error) {
