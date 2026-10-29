@@ -225,7 +225,7 @@ The daemon logs JSON lines to stderr and stops cleanly on Ctrl-C. `--dev` refuse
 
 A dev daemon picks its socket from `--socket`, then `CHAINMAIL_SOCKET`, then `$XDG_RUNTIME_DIR/chainmail-dev.sock`. Clients pick theirs from `--socket`, then `CHAINMAIL_SOCKET`, then `/run/chainmail/chainmail.sock`. Clients never look at `XDG_RUNTIME_DIR`, so export `CHAINMAIL_SOCKET` (or pass `--socket`) wherever you run the CLI. Where `XDG_RUNTIME_DIR` is not set, as on macOS, the daemon needs `--socket` or `CHAINMAIL_SOCKET` as well.
 
-Store the secrets. `secret set` takes the value from `--from-pass`, from a no-echo prompt when stdin is a terminal, or from stdin. A secret is one line: a trailing newline is dropped, and a value with more than one line is refused. Setting a secret clears the auth-required state of every account that uses it.
+Store the secrets. `secret set` takes the value from `--from-pass`, from a no-echo prompt when stdin is a terminal, or from stdin. A secret is one line: a trailing newline is dropped, and a value with more than one line is refused, as is a password (`accounts/<account>`) containing a NUL byte. Setting a secret clears the auth-required state of every account that uses it.
 
 ```fish
 chainmail secret set oauth_clients/workspace --from-pass chainmail/oauth-workspace

@@ -118,6 +118,9 @@ func (a *adminService) FinishAuthLogin(ctx context.Context, req *connect.Request
 	return connect.NewResponse(&chainmailv1.FinishAuthLoginResponse{}), nil
 }
 
+// GetStatus reports the daemon's version, start time, mode and secret names.
+// It is read-only and returns no secret values, so it is deliberately not
+// audited: status polling would otherwise flood the audit log.
 func (a *adminService) GetStatus(_ context.Context, _ *connect.Request[chainmailv1.GetStatusRequest]) (*connect.Response[chainmailv1.GetStatusResponse], error) {
 	return connect.NewResponse(&chainmailv1.GetStatusResponse{
 		Version:     version.Version,

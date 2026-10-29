@@ -209,6 +209,15 @@ func TestSecretSetErrors(t *testing.T) {
 	if badName.code != 2 || errorReason(t, badName.stderr) != "INVALID_ARGUMENT" {
 		t.Errorf("bad name: %+v", badName)
 	}
+	// PLAIN separates its fields with NUL, so a password cannot hold one.
+	nul := runCLI(t, Env{Stdin: strings.NewReader("hunter\x00two\n")}, "--socket", h.Socket, "secret", "set", "accounts/host")
+	if nul.code != 2 || errorReason(t, nul.stderr) != "INVALID_ARGUMENT" {
+		t.Errorf("NUL in password: %+v", nul)
+	}
+	assertNoSecret(t, "hunter", nul.stdout, nul.stderr)
+	if _, err := h.Vault.Get("accounts/host"); err == nil {
+		t.Error("a password with a NUL byte was stored")
+	}
 	passFails := runCLI(t, Env{Getenv: passStore(t, "", "x"), PassShow: func(context.Context, string) ([]byte, error) { return nil, errors.New("gpg locked") }},
 		"--socket", h.Socket, "secret", "set", "accounts/host", "--from-pass", "x")
 	if passFails.code != 1 || !strings.Contains(passFails.stderr, "gpg locked") {

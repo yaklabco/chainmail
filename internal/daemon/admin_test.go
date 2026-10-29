@@ -7,6 +7,9 @@ import (
 	"testing"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/api"
@@ -135,6 +138,31 @@ func TestSetSecretOnlyConfiguredNames(t *testing.T) {
 	for i, r := range rows[2:] {
 		if r.Action != "secret.set" || r.Result != "error" || r.Reason != api.ReasonInvalidArgument || r.Targets != `["`+tests[i].name+`"]` {
 			t.Errorf("audit row for %s = %+v", tests[i].name, r)
+		}
+	}
+}
+
+// Request fields that carry a secret or an authorization code are marked
+// debug_redact, for tools that honour it. protobuf-go v1.36 still prints
+// them, so the daemon must not log request messages either way.
+func TestSecretFieldsAreDebugRedact(t *testing.T) {
+	t.Parallel()
+	fields := []struct {
+		msg   proto.Message
+		field protoreflect.Name
+	}{
+		{msg: &chainmailv1.SetSecretRequest{}, field: "value"},
+		{msg: &chainmailv1.FinishAuthLoginRequest{}, field: "redirect_url"},
+	}
+	for _, f := range fields {
+		md := f.msg.ProtoReflect().Descriptor()
+		fd := md.Fields().ByName(f.field)
+		if fd == nil {
+			t.Fatalf("%s has no field %s", md.FullName(), f.field)
+		}
+		opts, ok := fd.Options().(*descriptorpb.FieldOptions)
+		if !ok || !opts.GetDebugRedact() {
+			t.Errorf("%s.%s is not debug_redact", md.FullName(), f.field)
 		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 
 	"github.com/emersion/go-sasl"
 
@@ -59,6 +60,7 @@ func (c Credentials) SASL() sasl.Client {
 	return &plainClient{
 		inner:    sasl.NewPlainClient("", c.Username, c.Secret),
 		username: c.Username,
+		nul:      strings.ContainsRune(c.Username, 0) || strings.ContainsRune(c.Secret, 0),
 	}
 }
 
@@ -84,15 +86,28 @@ func (c Credentials) LogValue() slog.Value {
 	)
 }
 
+// errPlainNUL never includes the offending value, which may be a password.
+var errPlainNUL = errors.New("PLAIN username or password contains a NUL byte")
+
 // plainClient wraps go-sasl's PLAIN client, whose exported Password field
 // would otherwise show up in fmt, encoding/json and slog output. The
 // wrapped client sits in an unexported field so encoding/json skips it.
 type plainClient struct {
 	inner    sasl.Client
 	username string
+	// nul records whether the username or password holds a NUL byte, so
+	// the password itself need not be kept outside inner.
+	nul bool
 }
 
-func (c *plainClient) Start() (string, []byte, error) { return c.inner.Start() }
+// Start builds the initial response. PLAIN separates its fields with NUL, so
+// a NUL in either value would shift them, and Start refuses one.
+func (c *plainClient) Start() (string, []byte, error) {
+	if c.nul {
+		return "", nil, errPlainNUL
+	}
+	return c.inner.Start()
+}
 
 func (c *plainClient) Next(challenge []byte) ([]byte, error) { return c.inner.Next(challenge) }
 

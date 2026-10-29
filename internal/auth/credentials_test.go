@@ -112,6 +112,26 @@ func TestXOAuth2RejectsSeparatorInValues(t *testing.T) {
 	}
 }
 
+// PLAIN separates its fields with NUL, so a NUL in either value would shift
+// them. Start refuses one, and the error leaves the value out.
+func TestPlainRejectsNULInValues(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, user, password string }{
+		{"username", "evil\x00admin", "pw-secret"},
+		{"password", "me@example.com", "hunter\x00secret"},
+	} {
+		c := Credentials{Method: provider.AuthPassword, Username: tc.user, Secret: tc.password}
+		_, ir, err := c.SASL().Start()
+		if err == nil {
+			t.Errorf("%s with NUL: Start() returned %q and no error", tc.name, ir)
+			continue
+		}
+		if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "evil") || strings.Contains(err.Error(), "hunter") {
+			t.Errorf("%s: error leaks the value: %v", tc.name, err)
+		}
+	}
+}
+
 func TestRequiredErrorMatchesSentinel(t *testing.T) {
 	t.Parallel()
 	err := fmt.Errorf("wrapped: %w", &RequiredError{Account: "work", Hint: "run: chainmail auth login work"})

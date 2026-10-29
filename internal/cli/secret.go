@@ -49,6 +49,11 @@ func newSecretCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// SASL PLAIN separates its fields with NUL, so a password
+			// holding one could never log in.
+			if strings.HasPrefix(name, "accounts/") && bytes.IndexByte(value, 0) >= 0 {
+				return &exitError{reason: api.ReasonInvalidArgument, msg: "the password contains a NUL byte, which no login can send"}
+			}
 			c := g.client(env)
 			defer c.Close()
 			req := connect.NewRequest(&chainmailv1.SetSecretRequest{Name: name, Value: value})

@@ -211,7 +211,8 @@ func (x *BeginAuthLoginResponse) GetExpiresAt() *timestamppb.Timestamp {
 type FinishAuthLoginRequest struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Account string                 `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
-	// The full URL the browser was sent to after consent.
+	// The full URL the browser was sent to after consent. It carries the
+	// authorization code.
 	RedirectUrl   string `protobuf:"bytes,2,opt,name=redirect_url,json=redirectUrl,proto3" json:"redirect_url,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -417,10 +418,10 @@ const file_chainmail_v1_admin_proto_rawDesc = "" +
 	"\vconsent_url\x18\x01 \x01(\tR\n" +
 	"consentUrl\x129\n" +
 	"\n" +
-	"expires_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"U\n" +
+	"expires_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"Z\n" +
 	"\x16FinishAuthLoginRequest\x12\x18\n" +
-	"\aaccount\x18\x01 \x01(\tR\aaccount\x12!\n" +
-	"\fredirect_url\x18\x02 \x01(\tR\vredirectUrl\"\x19\n" +
+	"\aaccount\x18\x01 \x01(\tR\aaccount\x12&\n" +
+	"\fredirect_url\x18\x02 \x01(\tB\x03\x80\x01\x01R\vredirectUrl\"\x19\n" +
 	"\x17FinishAuthLoginResponse\"\x12\n" +
 	"\x10GetStatusRequest\"\xa6\x01\n" +
 	"\x11GetStatusResponse\x12\x18\n" +

@@ -24,8 +24,9 @@ message BeginAuthLoginResponse {
 
 message FinishAuthLoginRequest {
   string account = 1;
-  // The full URL the browser was sent to after consent.
-  string redirect_url = 2;
+  // The full URL the browser was sent to after consent. It carries the
+  // authorization code.
+  string redirect_url = 2 [debug_redact = true];
 }
 
 message FinishAuthLoginResponse {}
