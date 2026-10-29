@@ -1,6 +1,7 @@
 package sender
 
 import (
+	"bufio"
 	"context"
 	"crypto/x509"
 	"encoding/base64"
@@ -172,7 +173,10 @@ func TestProbeFailuresAreNotRejections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	closed, _ := ln.Addr().(*net.TCPAddr)
+	closed, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener address is %T", ln.Addr())
+	}
 	if err := ln.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -257,4 +261,128 @@ func startSilentServer(t *testing.T) provider.Endpoint {
 		t.Fatalf("listener address is %T", ln.Addr())
 	}
 	return provider.Endpoint{Host: "127.0.0.1", Port: addr.Port, Security: provider.SecurityStartTLS}
+}
+
+// An untrusted certificate offered after STARTTLS is a TLS failure, reported
+// as such, not as an AUTH problem.
+func TestProbeUntrustedSTARTTLSIsATLSError(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	ep := smtptest.Start(t, ca, provider.SecurityStartTLS, user)
+	err := Probe(t.Context(), ep, creds(provider.AuthPassword, "pw"), DialOptions{RootCAs: x509.NewCertPool()})
+	if err == nil {
+		t.Fatal("Probe succeeded")
+	}
+	if errors.Is(err, auth.ErrRejected) {
+		t.Errorf("err = %v, should not be a credential rejection", err)
+	}
+	if msg := err.Error(); strings.Contains(msg, "AUTH") || !strings.Contains(msg, "STARTTLS") {
+		t.Errorf("err = %q, want a STARTTLS failure that does not mention AUTH", msg)
+	}
+	var unknownCA x509.UnknownAuthorityError
+	if !errors.As(err, &unknownCA) {
+		t.Errorf("err = %v, want x509.UnknownAuthorityError in the chain", err)
+	}
+}
+
+// A server that offers AUTH but not STARTTLS on a STARTTLS endpoint must not
+// get the credentials over plaintext.
+func TestProbeFailsClosedWithoutSTARTTLS(t *testing.T) {
+	t.Parallel()
+	ep, commands := startNoSTARTTLSServer(t)
+	err := Probe(t.Context(), ep, creds(provider.AuthPassword, "pw-plaintext-4d2b"), DialOptions{})
+	if err == nil {
+		t.Fatal("Probe succeeded")
+	}
+	if errors.Is(err, auth.ErrRejected) {
+		t.Errorf("err = %v, should not be a credential rejection", err)
+	}
+	var got []string
+	select {
+	case got = <-commands:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fake server never saw the connection end")
+	}
+	if len(got) == 0 {
+		t.Fatal("the fake server received no commands; the test is not exercising the probe")
+	}
+	for _, cmd := range got {
+		if strings.HasPrefix(strings.ToUpper(cmd), "AUTH") {
+			t.Errorf("server received %q over plaintext", cmd)
+		}
+	}
+}
+
+// startNoSTARTTLSServer runs a one-connection plaintext SMTP fake whose EHLO
+// advertises AUTH but not STARTTLS. Once the client hangs up it sends every
+// command line it received on the returned channel.
+func startNoSTARTTLSServer(t *testing.T) (provider.Endpoint, <-chan []string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening: %v", err)
+	}
+	commands := make(chan []string, 1)
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		_ = ln.Close() // ends Accept; nothing to do about a close error at test end
+		<-done
+	})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }() // the client may already have hung up
+		stop := context.AfterFunc(t.Context(), func() { _ = conn.Close() })
+		defer stop()
+		commands <- serveNoSTARTTLS(conn)
+	}()
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener address is %T", ln.Addr())
+	}
+	return provider.Endpoint{Host: "127.0.0.1", Port: addr.Port, Security: provider.SecurityStartTLS}, commands
+}
+
+func serveNoSTARTTLS(conn net.Conn) []string {
+	var received []string
+	w := bufio.NewWriter(conn)
+	reply := func(lines ...string) bool {
+		for _, l := range lines {
+			if _, err := w.WriteString(l + "\r\n"); err != nil {
+				return false
+			}
+		}
+		return w.Flush() == nil
+	}
+	if !reply("220 localhost ESMTP ready") {
+		return received
+	}
+	r := bufio.NewReader(conn)
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return received
+		}
+		line = strings.TrimRight(line, "\r\n")
+		received = append(received, line)
+		verb, _, _ := strings.Cut(line, " ")
+		var ok bool
+		switch strings.ToUpper(verb) {
+		case "EHLO":
+			ok = reply("250-localhost", "250 AUTH PLAIN XOAUTH2")
+		case "AUTH":
+			ok = reply("235 2.7.0 accepted")
+		case "QUIT":
+			reply("221 2.0.0 bye")
+			return received
+		default:
+			ok = reply("502 5.5.1 not implemented")
+		}
+		if !ok {
+			return received
+		}
+	}
 }

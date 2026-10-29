@@ -76,6 +76,12 @@ func handshake(ctx context.Context, conn net.Conn, ep provider.Endpoint, roots *
 		if err != nil {
 			return nil, fmt.Errorf("STARTTLS with %s: %w", ep.Addr(), err)
 		}
+		// go-smtp only wraps the connection; the TLS handshake runs on the
+		// next write. Greeting again now makes a certificate failure a
+		// STARTTLS error rather than an AUTH one.
+		if err := c.Hello("localhost"); err != nil {
+			return nil, fmt.Errorf("STARTTLS with %s: %w", ep.Addr(), err)
+		}
 		return c, nil
 	default:
 		return nil, fmt.Errorf("unsupported security %v for %s", ep.Security, ep.Addr())
