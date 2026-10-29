@@ -25,7 +25,8 @@ const defaultTimeout = 30 * time.Second
 type DialOptions struct {
 	// RootCAs replaces the system roots when set. Tests use it.
 	RootCAs *x509.CertPool
-	// Timeout bounds connecting and logging in. Zero means 30 seconds.
+	// Timeout bounds connecting, logging in and fetching capabilities. Zero
+	// means 30 seconds.
 	Timeout time.Duration
 }
 

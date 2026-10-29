@@ -44,7 +44,7 @@ func TestDial(t *testing.T) {
 				}
 				caps := s.Capabilities()
 				if !slices.Contains(caps, "IMAP4rev1") {
-					t.Errorf("Capabilities() = %v, want IMAP4rev1", caps)
+					t.Fatalf("Capabilities() = %v, want IMAP4rev1", caps)
 				}
 				caps[0] = "MUTATED"
 				if slices.Contains(s.Capabilities(), "MUTATED") {
