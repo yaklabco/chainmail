@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"maps"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -35,8 +37,11 @@ func (m *messageService) Search(ctx context.Context, req *connect.Request[chainm
 
 // searchPlan is a validated search: what to look for, where, and from where on.
 type searchPlan struct {
-	tree     *query.Node
-	in       string
+	tree *query.Node
+	in   string
+	// named is every account the call covers. accounts is the ones this
+	// page searches, which leaves out those a cursor has finished.
+	named    []config.ResolvedAccount
 	accounts []config.ResolvedAccount
 	limit    int
 	// resume, when continuing from a cursor, maps account, then folder, to
@@ -96,7 +101,7 @@ func (m *messageService) plan(req *chainmailv1.SearchRequest) (*searchPlan, erro
 		names[i] = a.Name
 	}
 	p := &searchPlan{
-		tree: rest, in: scope.In, accounts: accts, limit: limit,
+		tree: rest, in: scope.In, named: accts, accounts: slices.Clone(accts), limit: limit,
 		fingerprint: ref.Fingerprint(rest.String(), scope.In, strings.Join(names, ",")),
 	}
 	if req.GetCursor() == "" {
@@ -132,11 +137,16 @@ func (m *messageService) plan(req *chainmailv1.SearchRequest) (*searchPlan, erro
 }
 
 // checkSources refuses a cursor naming a folder of account that a fresh
-// search, with the same query, does not pick.
+// search, with the same query, does not pick. A genuine cursor meets this
+// when a folder was deleted or renamed since its page, so the error says
+// to search again rather than to resend the cursor.
 func (p *searchPlan) checkSources(account string, results []mailstore.SourceResult) error {
 	for folder := range p.resume[account] {
 		if !slices.ContainsFunc(results, func(r mailstore.SourceResult) bool { return r.Source.Folder == folder }) {
-			return errForgedCursor("it names a folder this search does not cover")
+			return &argError{
+				msg:  fmt.Sprintf("%s: it names a folder of %s that this search no longer covers", ref.ErrInvalidCursor, account),
+				hint: "the folders changed since the first page, or the cursor was altered; search again without the cursor",
+			}
 		}
 	}
 	return nil
@@ -144,14 +154,29 @@ func (p *searchPlan) checkSources(account string, results []mailstore.SourceResu
 
 // resumeAt returns where a folder continues. ok is false when the plan
 // resumes from a cursor that has nothing left there, or never had the
-// folder, as when it failed on an earlier page. Without a cursor every
-// folder starts from the top.
+// folder, as when the folder's SEARCH failed on the first page. Without a
+// cursor every folder starts from the top.
 func (p *searchPlan) resumeAt(account, folder string) (resumePoint, bool) {
 	if !p.continuing() {
 		return resumePoint{}, true
 	}
 	rp, ok := p.resume[account][folder]
 	return rp, ok && !rp.done
+}
+
+// cursorSources returns account's cursor sources as the cursor gave them,
+// ordered by folder.
+func (p *searchPlan) cursorSources(account string) []ref.CursorSource {
+	var out []ref.CursorSource
+	for _, folder := range slices.Sorted(maps.Keys(p.resume[account])) {
+		out = append(out, p.resume[account][folder].cursorSource(account, folder))
+	}
+	return out
+}
+
+// cursorSource is the cursor source rp was read from.
+func (rp resumePoint) cursorSource(account, folder string) ref.CursorSource {
+	return ref.CursorSource{Account: account, Folder: folder, UIDValidity: rp.bound.UIDValidity, Below: rp.bound.Below, Done: rp.done}
 }
 
 // narrow keeps the matches of a fresh source result below where the cursor
@@ -203,7 +228,7 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 	if err != nil {
 		return nil, entry, err
 	}
-	entry.Account = singleAccount(p.accounts)
+	entry.Account = singleAccount(p.named)
 	resp := &chainmailv1.SearchResponse{Source: sourceServer, FetchedAt: timestamppb.New(m.s.opts.Now())}
 
 	type outcome struct {
@@ -234,12 +259,17 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 
 	var failures []error
 	var states []*sourceState
+	// carried are cursor sources a failure kept this page from reaching.
+	// They go into the next cursor as they were, so a later page retries
+	// them, and that page's plan and checkSources check them again.
+	var carried []ref.CursorSource
 	counts := map[string]uint64{}
 	for i, a := range p.accounts {
 		o := outcomes[i]
 		if o.err != nil {
 			resp.Partial = append(resp.Partial, partialSource(a.Name, "", o.err))
 			failures = append(failures, o.err)
+			carried = append(carried, p.cursorSources(a.Name)...)
 			continue
 		}
 		for _, r := range o.results {
@@ -255,6 +285,9 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 			if r.Err != nil {
 				resp.Partial = append(resp.Partial, partialSource(a.Name, r.Source.Folder, r.Err))
 				failures = append(failures, r.Err)
+				if p.continuing() {
+					carried = append(carried, rp.cursorSource(a.Name, r.Source.Folder))
+				}
 				continue
 			}
 			counts[a.Name] += uint64(r.Count)
@@ -271,7 +304,7 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 		}
 	}
 	if req.GetCountOnly() {
-		entry.Targets = []string{tally("accounts", len(p.accounts)), tally("matches", int(resp.GetCount()))}
+		entry.Targets = []string{tally("accounts", len(p.named)), tally("matches", int(resp.GetCount()))}
 		return resp, entry, nil
 	}
 
@@ -295,8 +328,8 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 		}
 		resp.Rows = append(resp.Rows, rowFromSummary(r.sum, req.GetSnippets(), count))
 	}
-	resp.NextCursor = nextCursor(p, states)
-	entry.Targets = []string{tally("accounts", len(p.accounts)), tally("rows", len(resp.GetRows()))}
+	resp.NextCursor = nextCursor(p, states, carried)
+	entry.Targets = []string{tally("accounts", len(p.named)), tally("rows", len(resp.GetRows()))}
 	return resp, entry, nil
 }
 
@@ -351,10 +384,22 @@ func merge(states []*sourceState, limit int, threads bool) []mergedRow {
 	}
 }
 
+// newest returns the source whose next row is the newest, or nil when the
+// merge must stop. It stops when a source has used every row it fetched
+// but has matches it did not fetch: those may be newer than any other
+// source's next row, so the page ends short and the cursor resumes there.
+// That happens when threads collapse a source's rows, or when messages
+// were expunged between SEARCH and FETCH.
 func newest(states []*sourceState) *sourceState {
 	var best *sourceState
 	for _, st := range states {
-		if st.err != nil || st.next >= len(st.rows) {
+		if st.err != nil {
+			continue
+		}
+		if st.next >= len(st.rows) {
+			if len(st.uids) > st.requested {
+				return nil
+			}
 			continue
 		}
 		if best == nil || later(st.rows[st.next], best.rows[best.next]) {
@@ -379,23 +424,38 @@ func later(a, b mailstore.Summary) bool {
 	return a.Ref.UID > b.Ref.UID
 }
 
-// nextCursor records, per source, where the next page starts. It returns ""
-// once every source is exhausted. Sources that failed are left out.
-func nextCursor(p *searchPlan, states []*sourceState) string {
+// nextCursor records, per source, where the next page starts, followed by
+// the carried sources a failure kept this page from reaching. It returns ""
+// once every source is exhausted. A source whose fetch failed continues
+// where its page started, so a later page retries it.
+func nextCursor(p *searchPlan, states []*sourceState, carried []ref.CursorSource) string {
 	c := ref.Cursor{Query: p.fingerprint}
 	more := false
 	for _, st := range states {
-		if st.err != nil {
-			continue
-		}
 		cs := ref.CursorSource{Account: st.account, Folder: st.src.Folder, UIDValidity: st.src.UIDValidity, Below: st.prevBelow}
-		if st.next > 0 {
+		switch {
+		case st.err != nil:
+			// Retry from where this page started. This case comes first: a
+			// failed fetch also has next == len(rows), with no rows at all.
+		case st.requested > 0 && st.next == len(st.rows):
+			// Every UID fetched was used or has gone since SEARCH.
+			cs.Below = st.uids[st.requested-1]
+		case st.next > 0:
 			cs.Below = st.lowest
 		}
-		cs.Done = st.next == len(st.rows) && len(st.uids) <= st.requested
+		if cs.Below == 0 && len(st.uids) > 0 && st.uids[0] < math.MaxUint32 {
+			// No page has reached this source yet. Bound it at what matched
+			// now, so mail arriving later stays out of later pages.
+			cs.Below = st.uids[0] + 1
+		}
+		cs.Done = st.err == nil && st.next == len(st.rows) && len(st.uids) <= st.requested
 		if !cs.Done {
 			more = true
 		}
+		c.Sources = append(c.Sources, cs)
+	}
+	for _, cs := range carried {
+		more = more || !cs.Done
 		c.Sources = append(c.Sources, cs)
 	}
 	if !more {

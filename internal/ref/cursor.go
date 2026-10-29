@@ -29,8 +29,8 @@ type Cursor struct {
 }
 
 // CursorSource is one searched folder: the UIDVALIDITY it had on the first
-// page, and the UID the next page continues below. Below 0 means no row from
-// this source has been returned yet. Done means nothing is left in it.
+// page, and the UID the next page continues below, exclusive. Below 0 means
+// no bound. Done means nothing is left in it.
 type CursorSource struct {
 	Account     string `json:"a"`
 	Folder      string `json:"f"`

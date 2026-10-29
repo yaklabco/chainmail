@@ -47,7 +47,7 @@ func TestMergeTakesTopUIDRunsPerSource(t *testing.T) {
 		t.Errorf("consumed a %d (lowest %d), b %d (lowest %d)", a.next, a.lowest, b.next, b.lowest)
 	}
 	p := &searchPlan{fingerprint: ref.Fingerprint("q")}
-	c, err := ref.DecodeCursor(nextCursor(p, []*sourceState{a, b}))
+	c, err := ref.DecodeCursor(nextCursor(p, []*sourceState{a, b}, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestNextCursorEndsWhenEverySourceIsDone(t *testing.T) {
 		rows: []mailstore.Summary{summaryAt("a", "INBOX", 2, time.Now(), "")},
 	}
 	merge([]*sourceState{s}, 10, false)
-	if got := nextCursor(&searchPlan{fingerprint: ref.Fingerprint("q")}, []*sourceState{s}); got != "" {
+	if got := nextCursor(&searchPlan{fingerprint: ref.Fingerprint("q")}, []*sourceState{s}, nil); got != "" {
 		t.Errorf("cursor = %q, want none", got)
 	}
 }
