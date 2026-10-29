@@ -28,28 +28,54 @@ func OpenState(ctx context.Context, path string) (*sql.DB, error) {
 }
 
 // Open opens the SQLite database at filePath and applies the migrations in
-// migrations. Files are named NNNN_description.sql, numbered from 0001 with no gaps.
+// migrations. Files are named NNNN_description.sql, numbered from 0001 with no
+// gaps. The whole set is validated before any migration is applied.
+//
+// The returned pool holds a single connection. A caller must not run another
+// query while it still holds Rows open from an earlier one: the second query
+// waits for the only connection, which the open Rows never release, and deadlocks.
 func Open(ctx context.Context, filePath string, migrations fs.FS) (*sql.DB, error) {
+	// filePath goes into a file: URI, where these characters change its meaning.
+	if strings.ContainsAny(filePath, "?#%") {
+		return nil, fmt.Errorf("database path %q must not contain '?', '#' or '%%'", filePath)
+	}
+	names, err := migrationNames(migrations)
+	if err != nil {
+		return nil, err
+	}
 	params := url.Values{"_pragma": {"busy_timeout(5000)", "journal_mode(WAL)", "foreign_keys(1)"}}
 	conn, err := sql.Open("sqlite", "file:"+filePath+"?"+params.Encode())
 	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", filePath, err)
 	}
-	// One connection serializes writers, so SQLite never returns SQLITE_BUSY to us.
+	// One connection serializes writers within this process. busy_timeout covers
+	// contention with other processes that open the same file.
 	conn.SetMaxOpenConns(1)
-	if err := migrate(ctx, conn, migrations); err != nil {
+	if err := migrate(ctx, conn, migrations, names); err != nil {
 		_ = conn.Close() // the migration error is the one to report
 		return nil, fmt.Errorf("migrating %s: %w", filePath, err)
 	}
 	return conn, nil
 }
 
-func migrate(ctx context.Context, conn *sql.DB, migrations fs.FS) error {
+// migrationNames lists the migrations in order and checks that they are
+// numbered 0001, 0002, ... with no gaps.
+func migrationNames(migrations fs.FS) ([]string, error) {
 	names, err := fs.Glob(migrations, "*.sql")
 	if err != nil {
-		return fmt.Errorf("listing migrations: %w", err)
+		return nil, fmt.Errorf("listing migrations: %w", err)
 	}
 	slices.Sort(names)
+	for i, name := range names {
+		want := fmt.Sprintf("%04d", i+1)
+		if prefix, _, _ := strings.Cut(name, "_"); prefix != want {
+			return nil, fmt.Errorf("migration %s: want number %s", name, want)
+		}
+	}
+	return names, nil
+}
+
+func migrate(ctx context.Context, conn *sql.DB, migrations fs.FS, names []string) error {
 	var current int
 	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&current); err != nil {
 		return fmt.Errorf("reading user_version: %w", err)
@@ -57,20 +83,13 @@ func migrate(ctx context.Context, conn *sql.DB, migrations fs.FS) error {
 	if current > len(names) {
 		return fmt.Errorf("schema version %d is newer than this binary (%d)", current, len(names))
 	}
-	for i, name := range names {
-		want := i + 1
-		prefix, _, _ := strings.Cut(name, "_")
-		if n, convErr := strconv.Atoi(prefix); convErr != nil || n != want {
-			return fmt.Errorf("migration %s: want number %04d", name, want)
-		}
-		if want <= current {
-			continue
-		}
+	for i, name := range names[current:] {
+		version := current + i + 1
 		body, err := fs.ReadFile(migrations, name)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", name, err)
 		}
-		if err := apply(ctx, conn, want, string(body)); err != nil {
+		if err := apply(ctx, conn, version, string(body)); err != nil {
 			return fmt.Errorf("migration %s: %w", name, err)
 		}
 	}

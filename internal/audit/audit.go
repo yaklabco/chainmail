@@ -19,6 +19,11 @@ const (
 	ResultError Result = "error"
 )
 
+// timeLayout stores At as fixed-width UTC with nine fractional digits, so the
+// at column sorts and range-compares correctly as text. RFC3339Nano trims
+// trailing zeros and would not.
+const timeLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
 // Entry is one audited action. It must never hold a secret value or message content.
 type Entry struct {
 	// At defaults to the writer's clock.
@@ -72,7 +77,7 @@ func (w *Writer) Record(ctx context.Context, e Entry) error {
 	_, err = w.db.ExecContext(ctx,
 		`INSERT INTO audit (at, caller_uid, client, account, action, targets, decision, approval_id, result, reason)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		at.UTC().Format(time.RFC3339Nano), e.CallerUID, e.Client, e.Account, e.Action,
+		at.UTC().Format(timeLayout), e.CallerUID, e.Client, e.Account, e.Action,
 		string(targetsJSON), e.Decision, e.ApprovalID, string(e.Result), e.Reason)
 	if err != nil {
 		return fmt.Errorf("audit: writing %s: %w", e.Action, err)

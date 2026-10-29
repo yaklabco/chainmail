@@ -72,3 +72,42 @@ func TestNewerSchemaIsRejected(t *testing.T) {
 		t.Errorf("err = %v, want a newer-schema error", err)
 	}
 }
+
+func TestMigrationGapAppliesNothing(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "x.db")
+	gap := fstest.MapFS{
+		"0001_a.sql": {Data: []byte("CREATE TABLE a (x INTEGER);")},
+		"0003_c.sql": {Data: []byte("CREATE TABLE c (x INTEGER);")},
+	}
+	if _, err := Open(t.Context(), path, gap); err == nil {
+		t.Fatal("Open accepted a numbering gap")
+	}
+	conn, err := Open(t.Context(), path, fstest.MapFS{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() }) // a close error at test end changes nothing
+	var version, tables int
+	if err := conn.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.QueryRowContext(t.Context(), "SELECT count(*) FROM sqlite_master WHERE type = 'table'").Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if version != 0 || tables != 0 {
+		t.Errorf("user_version = %d, tables = %d, want both 0", version, tables)
+	}
+}
+
+func TestOpenRejectsURIMetacharacters(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, name := range []string{"a?b.db", "a#b.db", "a%b.db"} {
+		path := filepath.Join(dir, name)
+		_, err := Open(t.Context(), path, fstest.MapFS{})
+		if err == nil || !strings.Contains(err.Error(), "must not contain") {
+			t.Errorf("Open(%q): err = %v, want a path error", path, err)
+		}
+	}
+}
