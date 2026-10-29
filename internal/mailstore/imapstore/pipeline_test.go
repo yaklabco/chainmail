@@ -41,12 +41,21 @@ const (
 
 // scriptServer is an IMAP server over implicit TLS with one folder, INBOX,
 // holding n single-part text messages with UIDs 1 to n. It answers just
-// enough of IMAP for FetchMessages and FetchSummaries.
+// enough of IMAP for the Store's reads.
 type scriptServer struct {
 	n     int
 	mode  pipelineMode
 	delay time.Duration
-	conns atomic.Int32
+	// endless answers every partial body FETCH with as many bytes as were
+	// asked for, as a broken server might, so a stream never runs short.
+	endless bool
+	// dropAfter, when set, hangs up instead of answering body FETCH number
+	// dropAfter+1 on a connection.
+	dropAfter int
+	// refuse names a command, SEARCH or FETCH, that is answered with refusal.
+	refuse, refusal string
+
+	conns, searches, fetches atomic.Int32
 
 	ca *tlstest.CA
 	ep provider.Endpoint
@@ -108,7 +117,7 @@ func scriptBody(uid int) string { return fmt.Sprintf("body %d\r\n", uid) }
 
 var (
 	uidFetch    = regexp.MustCompile(`^UID FETCH (\S+) `)
-	peekSection = regexp.MustCompile(`BODY\.PEEK\[([^\]]*)\](?:<(\d+)\.\d+>)?`)
+	peekSection = regexp.MustCompile(`BODY\.PEEK\[([^\]]*)\](?:<(\d+)\.(\d+)>)?`)
 )
 
 func (srv *scriptServer) serve(conn net.Conn) {
@@ -124,6 +133,7 @@ func (srv *scriptServer) serve(conn net.Conn) {
 	}
 	r := bufio.NewReader(conn)
 	var held []string // body FETCH commands not yet answered
+	bodies := 0       // body FETCHes seen on this connection
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
@@ -143,33 +153,29 @@ func (srv *scriptServer) serve(conn net.Conn) {
 			send("* BYE bye\r\n" + tag + " OK bye\r\n")
 			return
 		case "UID":
-			if strings.Contains(rest, "BODYSTRUCTURE") {
+			kind := "FETCH"
+			if strings.HasPrefix(strings.ToUpper(rest), "UID SEARCH") {
+				kind = "SEARCH"
+				srv.searches.Add(1)
+			} else {
+				srv.fetches.Add(1)
+			}
+			switch {
+			case kind == srv.refuse:
+				reply = tag + " " + srv.refusal + "\r\n"
+			case kind == "SEARCH":
+				reply = "* SEARCH 1\r\n" + tag + " OK done\r\n"
+			case strings.Contains(rest, "BODYSTRUCTURE"):
 				reply = srv.summaries(rest) + tag + " OK done\r\n"
-				break
-			}
-			held = append(held, tag+" "+rest)
-			if srv.mode == inOrder || srv.mode == slowly {
-				if srv.mode == slowly {
-					time.Sleep(srv.delay)
+			default:
+				bodies++
+				if srv.dropAfter > 0 && bodies > srv.dropAfter {
+					return
 				}
-				data, done := srv.answer(held[0])
-				held = nil
-				reply = data + done
-				break
-			}
-			if len(held) < srv.n {
-				continue
-			}
-			var data, done strings.Builder
-			for _, h := range held {
-				d, ok := srv.answer(h)
-				data.WriteString(d)
-				done.WriteString(ok)
-			}
-			held = nil
-			reply = data.String()
-			if srv.mode == dataFirst {
-				reply += done.String()
+				var ok bool
+				if reply, ok = srv.body(tag+" "+rest, &held); !ok {
+					continue
+				}
 			}
 		default:
 			reply = tag + " BAD unknown command\r\n"
@@ -178,6 +184,34 @@ func (srv *scriptServer) serve(conn net.Conn) {
 			return
 		}
 	}
+}
+
+// body queues one body FETCH and returns what to send for the queue so far,
+// or false to wait for more.
+func (srv *scriptServer) body(cmd string, held *[]string) (string, bool) {
+	*held = append(*held, cmd)
+	if srv.mode == inOrder || srv.mode == slowly {
+		if srv.mode == slowly {
+			time.Sleep(srv.delay)
+		}
+		data, done := srv.answer((*held)[0])
+		*held = nil
+		return data + done, true
+	}
+	if len(*held) < srv.n {
+		return "", false
+	}
+	var data, done strings.Builder
+	for _, h := range *held {
+		d, ok := srv.answer(h)
+		data.WriteString(d)
+		done.WriteString(ok)
+	}
+	*held = nil
+	if srv.mode == dataFirst {
+		data.WriteString(done.String())
+	}
+	return data.String(), true
 }
 
 // summaries answers the summary FETCH for every message, echoing the body
@@ -213,8 +247,21 @@ func (srv *scriptServer) answer(cmd string) (data, done string) {
 		return "", tag + " BAD unexpected FETCH\r\n"
 	}
 	body := scriptBody(uid)
+	if sec[1] == "" {
+		body = scriptHeader(uid) + body // the whole message
+	}
 	origin := ""
 	if sec[2] != "" {
+		off, _ := strconv.Atoi(sec[2])  // the pattern only matches digits
+		size, _ := strconv.Atoi(sec[3]) // likewise
+		switch {
+		case srv.endless:
+			body = strings.Repeat("x", size)
+		case off >= len(body):
+			body = ""
+		default:
+			body = body[off:min(off+size, len(body))]
+		}
 		origin = "<" + sec[2] + ">"
 	}
 	return fmt.Sprintf("* %d FETCH (UID %d BODY[%s]%s {%d}\r\n%s)\r\n", uid, uid, sec[1], origin, len(body), body), done
@@ -318,5 +365,39 @@ func TestFetchSummariesReadsPipelinedSamplesInAnyOrder(t *testing.T) {
 		if sum.Sample == nil || string(sum.Sample.Data) != scriptBody(int(sum.Ref.UID)) {
 			t.Errorf("UID %d sample = %+v, want its body", sum.Ref.UID, sum.Sample)
 		}
+	}
+}
+
+func TestServerRefusalsAreNotRetried(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct{ refuse, refusal string }{
+		"search NO":  {"SEARCH", "NO [SERVERBUG] search failed"},
+		"search BAD": {"SEARCH", "BAD unsupported criterion"},
+		"fetch NO":   {"FETCH", "NO [SERVERBUG] fetch failed"},
+		"fetch BAD":  {"FETCH", "BAD unsupported item"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := startScriptServer(t, &scriptServer{n: 1, refuse: tc.refuse, refusal: tc.refusal})
+			s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second})
+			var err error
+			sent := &srv.fetches
+			if tc.refuse == "SEARCH" {
+				sent = &srv.searches
+				var res []mailstore.SourceResult
+				res, err = s.Search(t.Context(), mailstore.SearchRequest{Bounds: map[string]mailstore.Bound{"INBOX": {UIDValidity: scriptUIDValidity}}})
+				if err == nil && len(res) == 1 {
+					err = res[0].Err
+				}
+			} else {
+				err = fetchWithin(t, s, scriptRefs(1), 5*time.Second)[0].Err
+			}
+			if !errors.Is(err, mailstore.ErrUnavailable) || errors.Is(err, errConnLost) {
+				t.Errorf("err = %v, want ErrUnavailable from the refusal", err)
+			}
+			if n, c := sent.Load(), srv.conns.Load(); n != 1 || c != 1 {
+				t.Errorf("%s sent %d times on %d connections, want once on one: a refusal is final", tc.refuse, n, c)
+			}
+		})
 	}
 }

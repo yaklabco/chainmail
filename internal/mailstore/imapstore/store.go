@@ -117,6 +117,10 @@ type Store struct {
 	// when its context ends.
 	loginGate chan struct{}
 
+	// chunk is how much of a part each FETCH asks for while streaming:
+	// chunkSize, unless a test shrinks it.
+	chunk int64
+
 	mu      sync.Mutex
 	folders []mailstore.Folder // cached; nil until listed
 	// borrowed counts connections out of the pool, a stream reader's
@@ -133,7 +137,7 @@ const closeWait = 5 * time.Second
 // New returns a Store for acct. It connects on first use.
 func New(acct config.ResolvedAccount, creds Credentialer, opts Options) *Store {
 	opts = opts.withDefaults()
-	s := &Store{acct: acct, creds: creds, opts: opts, loginGate: make(chan struct{}, 1)}
+	s := &Store{acct: acct, creds: creds, opts: opts, loginGate: make(chan struct{}, 1), chunk: chunkSize}
 	s.pool = newPool(s.dial, poolOptions{size: opts.PoolSize, noopAfter: opts.NoopAfter, idleLogout: opts.IdleLogout, now: opts.Now})
 	return s
 }

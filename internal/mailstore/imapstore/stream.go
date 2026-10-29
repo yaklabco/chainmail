@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime/quotedprintable"
 	"strings"
+	"sync"
 
 	"github.com/emersion/go-imap/v2"
 
@@ -90,7 +92,7 @@ func (s *Store) openPart(ctx context.Context, c *conn, r ref.Ref, path []int) (m
 		info = mailstore.PartInfo{Filename: decodeWord(sp.Filename()), ContentType: sp.MediaType(), Size: int64(sp.Size)}
 		encoding = sp.Encoding
 	}
-	pr := &partReader{s: s, c: c, ctx: ctx, uid: uid, path: path}
+	pr := &partReader{s: s, c: c, ctx: ctx, uid: uid, path: path, size: info.Size}
 	if err := pr.fill(); err != nil {
 		return mailstore.PartInfo{}, nil, err
 	}
@@ -107,21 +109,33 @@ func (s *Store) openPart(ctx context.Context, c *conn, r ref.Ref, path []int) (m
 }
 
 // partReader streams one part, fetching it in chunks with BODY.PEEK.
+//
+// Read and Close may be called from different goroutines. Close waits for a
+// Read in progress, which the command timeout and the request's context
+// bound, and every Read after Close fails with fs.ErrClosed, since the
+// connection is back in the pool by then.
 type partReader struct {
-	s       *Store
-	c       *conn
-	ctx     context.Context // the request's context; it bounds every chunk fetch
-	uid     uint32
-	path    []int
+	s    *Store
+	c    *conn
+	ctx  context.Context // the request's context; it bounds every chunk fetch
+	uid  uint32
+	path []int
+	// size is the part's size from BODYSTRUCTURE, or the message's
+	// RFC822.SIZE. The stream ends after at most size plus one chunk, in
+	// case the server's count is a little off, so a server that keeps
+	// sending full chunks cannot keep it going for ever.
+	size    int64
 	offset  int64
 	buf     []byte
 	eof     bool
 	decoded io.Reader
-	closed  bool
+
+	mu     sync.Mutex // serialises Read and Close
+	closed bool
 }
 
 func (p *partReader) fill() error {
-	sec := &imap.FetchItemBodySection{Part: p.path, Peek: true, Partial: &imap.SectionPartial{Offset: p.offset, Size: chunkSize}}
+	sec := &imap.FetchItemBodySection{Part: p.path, Peek: true, Partial: &imap.SectionPartial{Offset: p.offset, Size: p.s.chunk}}
 	bufs, err := p.c.fetch(p.ctx, imap.UIDSetNum(imap.UID(p.uid)), &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{sec}})
 	if err != nil {
 		return err
@@ -131,14 +145,22 @@ func (p *partReader) fill() error {
 		data = bufs[0].FindBodySection(sec)
 	}
 	p.offset += int64(len(data))
+	if p.offset > p.size+p.s.chunk {
+		return fmt.Errorf("%w: the server sent more than the %d bytes the part has", mailstore.ErrUnavailable, p.size)
+	}
 	p.buf = data
-	p.eof = len(data) < chunkSize
+	p.eof = int64(len(data)) < p.s.chunk
 	return nil
 }
 
 // Read implements io.Reader. A failure after the stream started is final
 // and reported as unavailable.
 func (p *partReader) Read(b []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return 0, fs.ErrClosed
+	}
 	n, err := p.decoded.Read(b)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, mailstore.ErrUnavailable) &&
 		!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -149,6 +171,8 @@ func (p *partReader) Read(b []byte) (int, error) {
 
 // Close returns the connection to the pool, or drops it if it broke.
 func (p *partReader) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.closed {
 		return nil
 	}
