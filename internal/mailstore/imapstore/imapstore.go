@@ -23,6 +23,12 @@ import (
 
 const defaultTimeout = 30 * time.Second
 
+// errLogin marks a failure once LOGIN or AUTHENTICATE went out, other than
+// a rejection of the credentials: the server hung up, said BYE, or the time
+// ran out. Dialing again would send the credentials again, so the Store
+// never does.
+var errLogin = errors.New("logging in")
+
 // defaultCloseTimeout bounds the LOGOUT exchange in Close.
 const defaultCloseTimeout = 5 * time.Second
 
@@ -64,14 +70,19 @@ func Dial(ctx context.Context, ep provider.Endpoint, creds auth.Credentials, opt
 	// If ctx ends mid-handshake, closing the connection unblocks the read or write in progress.
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() }) // the caller sees ctx.Err() instead
 	client, err := handshake(ctx, conn, ep, opts.RootCAs)
+	loginFailed := false
 	if err == nil {
 		err = login(client, creds)
+		loginFailed = err != nil
 	}
 	var caps []string
 	if err == nil {
 		caps, err = capabilities(client)
 	}
 	if !stop() {
+		if loginFailed && !errors.Is(err, auth.ErrRejected) {
+			return nil, fmt.Errorf("%w at %s: %w", errLogin, ep.Addr(), ctx.Err())
+		}
 		return nil, fmt.Errorf("connecting to %s: %w", ep.Addr(), ctx.Err())
 	}
 	if err != nil {
@@ -136,7 +147,7 @@ func loginError(err error) error {
 	if errors.As(err, &imapErr) && rejectsCredentials(imapErr) {
 		return fmt.Errorf("%w: %w", auth.ErrRejected, imapErr)
 	}
-	return fmt.Errorf("logging in: %w", err)
+	return fmt.Errorf("%w: %w", errLogin, err)
 }
 
 // rejectsCredentials reports whether a reply to LOGIN or AUTHENTICATE refuses

@@ -33,6 +33,9 @@ type User struct {
 	LoginError error
 	// Logins, when set, counts this user's login attempts, whatever their outcome.
 	Logins *atomic.Int32
+	// ByeOnLogin hangs up with an untagged BYE in reply to every login
+	// attempt, after counting it, as a server going away mid-login would.
+	ByeOnLogin bool
 	// Folders are created at start, besides INBOX.
 	Folders []string
 	// Mail holds raw messages to append at start, by folder.
@@ -65,8 +68,8 @@ func Start(t testing.TB, ca *tlstest.CA, security provider.Security, users ...Us
 		byName[u.Username] = u
 	}
 	opts := &imapserver.Options{
-		NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-			return &session{Session: mem.NewSession(), users: byName}, nil, nil
+		NewSession: func(conn *imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+			return &session{Session: mem.NewSession(), users: byName, conn: conn}, nil, nil
 		},
 		Caps:   imap.CapSet{imap.CapIMAP4rev1: {}},
 		Logger: log.New(io.Discard, "", 0),
@@ -94,6 +97,8 @@ func Start(t testing.TB, ca *tlstest.CA, security provider.Security, users ...Us
 type session struct {
 	imapserver.Session
 	users map[string]User
+	// conn is the connection the session serves, for ByeOnLogin.
+	conn *imapserver.Conn
 	// current is the logged-in user, for OnSelect.
 	current *User
 }
@@ -103,6 +108,10 @@ func (s *session) Login(username, password string) error {
 	u, ok := s.users[username]
 	if ok && u.Logins != nil {
 		u.Logins.Add(1)
+	}
+	if ok && u.ByeOnLogin {
+		_ = s.conn.Bye("going away") // the client sees the hang-up either way
+		return &imap.Error{Type: imap.StatusResponseTypeNo, Text: "going away"}
 	}
 	if ok && u.LoginError != nil {
 		return u.LoginError

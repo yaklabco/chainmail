@@ -406,6 +406,69 @@ func TestStoreRetriesADialTimeoutOnce(t *testing.T) {
 	}
 }
 
+// TestStoreDoesNotResendALoginAfterAHangUp checks that a server hanging up
+// after the credentials went out ends the dial: logging in again would only
+// send them again.
+func TestStoreDoesNotResendALoginAfterAHangUp(t *testing.T) {
+	t.Parallel()
+	var logins atomic.Int32
+	ca := tlstest.New(t)
+	ep := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{Username: "host@example.test", Password: "pw", ByeOnLogin: true, Logins: &logins})
+	creds := passwordCreds("host@example.test", "pw")
+	s := New(testAccount("host", ep, false), creds, Options{RootCAs: ca.Pool, Backoff: noBackoff})
+	t.Cleanup(func() { _ = s.Close() })
+	_, err := s.ListFolders(t.Context())
+	if !errors.Is(err, mailstore.ErrUnavailable) || errors.Is(err, errConnLost) {
+		t.Errorf("ListFolders = %v, want ErrUnavailable and not a lost connection", err)
+	}
+	if n := logins.Load(); n != 1 || creds.rejections() != 0 {
+		t.Errorf("logins = %d, rejections = %d; want 1 and 0", n, creds.rejections())
+	}
+}
+
+// TestStoreCodelessTooManyIsARejection checks that a NO without a code is a
+// rejection of the credentials even when its text says "too many", as a
+// server that counts failed logins says.
+func TestStoreCodelessTooManyIsARejection(t *testing.T) {
+	t.Parallel()
+	var logins atomic.Int32
+	ca := tlstest.New(t)
+	refusal := &imap.Error{Type: imap.StatusResponseTypeNo, Text: "Too many invalid login attempts"}
+	ep := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{Username: "host@example.test", Password: "pw", LoginError: refusal, Logins: &logins})
+	creds := passwordCreds("host@example.test", "pw")
+	s := New(testAccount("host", ep, false), creds, Options{RootCAs: ca.Pool, Backoff: noBackoff})
+	t.Cleanup(func() { _ = s.Close() })
+	if _, err := s.ListFolders(t.Context()); !errors.Is(err, auth.ErrRejected) || errors.Is(err, mailstore.ErrUnavailable) {
+		t.Errorf("ListFolders = %v, want auth.ErrRejected and not unavailable", err)
+	}
+	s.pool.mu.Lock()
+	poolCap := s.pool.max
+	s.pool.mu.Unlock()
+	if n := logins.Load(); n != 1 || creds.rejections() != 1 || poolCap != defaultPoolSize {
+		t.Errorf("logins = %d, rejections = %d, pool cap = %d; want 1, 1 and %d", n, creds.rejections(), poolCap, defaultPoolSize)
+	}
+}
+
+func TestIsConnLimit(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		err  error
+		want bool
+	}{
+		{&imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeLimit, Text: "slow down"}, true},
+		{&imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeAlert, Text: "Too many simultaneous connections. (Failure)"}, true},
+		{&imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeAlert, Text: "Maximum number of connections from user+IP exceeded"}, true},
+		{&imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeAlert, Text: "Application-specific password required"}, false},
+		{&imap.Error{Type: imap.StatusResponseTypeNo, Text: "Too many invalid login attempts"}, false},
+		{&imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeUnavailable, Text: "too many users"}, false},
+		{errors.New("too many"), false},
+	} {
+		if got := isConnLimit(tt.err); got != tt.want {
+			t.Errorf("isConnLimit(%v) = %t, want %t", tt.err, got, tt.want)
+		}
+	}
+}
+
 func TestJitteredBackoffNeverPanics(t *testing.T) {
 	t.Parallel()
 	for _, attempt := range []int{0, 1, 8, 9, 36, 63, 64, 100} {
@@ -415,5 +478,21 @@ func TestJitteredBackoffNeverPanics(t *testing.T) {
 	}
 	if o := (Options{Retries: 1000}).withDefaults(); o.Retries != maxRetries {
 		t.Errorf("Retries 1000 became %d, want the cap %d", o.Retries, maxRetries)
+	}
+}
+
+// TestStoreDoesNotResendALoginThatTimedOut checks that a LOGIN the server
+// never answers is not sent again on a fresh connection, unlike a dial that
+// timed out before logging in.
+func TestStoreDoesNotResendALoginThatTimedOut(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	ep := startStallingServer(t, ca, "LOGIN")
+	s := New(testAccount("host", ep, false), passwordCreds("host@example.test", "pw"), Options{RootCAs: ca.Pool, Backoff: noBackoff})
+	s.dialTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { _ = s.Close() })
+	_, err := s.ListFolders(t.Context())
+	if !errors.Is(err, mailstore.ErrUnavailable) || !errors.Is(err, errLogin) || strings.Contains(err.Error(), "attempts") {
+		t.Errorf("ListFolders = %v, want ErrUnavailable from the login, without a retry", err)
 	}
 }

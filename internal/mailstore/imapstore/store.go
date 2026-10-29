@@ -236,19 +236,15 @@ func (s *Store) dial(ctx context.Context) (*conn, error) {
 	switch {
 	case err == nil:
 		return newConn(sess, s.opts.CommandTimeout, s.opts.Now), nil
+	case errors.Is(err, auth.ErrRejected):
+		s.creds.Rejected(s.acct.Name, creds)
+		return nil, &auth.RejectedError{Hint: rejectedHint(s.acct), Err: err}
 	case isConnLimit(err):
 		s.pool.shrink()
 		s.opts.Logger.Warn("server refused another connection; pool shrunk", "account", s.acct.Name)
 		return nil, fmt.Errorf("%w: %s refused another connection: %w", mailstore.ErrUnavailable, s.acct.Name, err)
-	case errors.Is(err, auth.ErrRejected):
-		s.creds.Rejected(s.acct.Name, creds)
-		return nil, &auth.RejectedError{Hint: rejectedHint(s.acct), Err: err}
 	case ctx.Err() != nil:
 		return nil, ctx.Err()
-	case errors.Is(err, context.DeadlineExceeded):
-		// The dial's own timeout, since ctx is still live: as slow as a
-		// command that timed out, and retried as sparingly.
-		return nil, fmt.Errorf("%w: %w: %w", errConnLost, errCommandTimeout, err)
 	case isRefusal(err):
 		// The server answered, so trying again would only resend the
 		// credentials: NO [ALERT] for an app password, BAD for
@@ -256,8 +252,19 @@ func (s *Store) dial(ctx context.Context) (*conn, error) {
 		// temporary (RFC 5530), but the account is reported unavailable
 		// for the caller to try later rather than retried here at once.
 		return nil, fmt.Errorf("%w: %s refused the login: %w", mailstore.ErrUnavailable, s.acct.Name, err)
+	case errors.Is(err, errLogin):
+		// The credentials went out, so a fresh connection would only send
+		// them again: to a server that hung up on them, maybe one counting
+		// failures towards a lockout. That holds for a BYE, a dropped
+		// connection and a timeout alike.
+		return nil, fmt.Errorf("%w: %s failed while logging in: %w", mailstore.ErrUnavailable, s.acct.Name, err)
+	case errors.Is(err, context.DeadlineExceeded):
+		// The dial's own timeout, since ctx is still live: as slow as a
+		// command that timed out, and retried as sparingly.
+		return nil, fmt.Errorf("%w: %w: %w", errConnLost, errCommandTimeout, err)
 	default:
-		// A transport or TLS failure, or a BYE: worth a fresh connection.
+		// A transport or TLS failure, or a BYE, before the credentials went
+		// out: worth a fresh connection.
 		return nil, fmt.Errorf("%w: %w", errConnLost, err)
 	}
 }
@@ -275,7 +282,10 @@ func rejectedHint(acct config.ResolvedAccount) string {
 	return "the server rejected the password; run: chainmail secret set " + auth.PasswordSecret(acct.Name)
 }
 
-// isConnLimit reports a server refusing a connection for being over its limit.
+// isConnLimit reports a server refusing a connection for being over its
+// limit: code LIMIT, or code ALERT with text saying so, as Gmail sends. A
+// code-less NO is never one, whatever its text: that rejects the
+// credentials.
 func isConnLimit(err error) bool {
 	var e *imap.Error
 	if !errors.As(err, &e) {
@@ -283,6 +293,9 @@ func isConnLimit(err error) bool {
 	}
 	if e.Code == imap.ResponseCodeLimit {
 		return true
+	}
+	if e.Code != imap.ResponseCodeAlert {
+		return false
 	}
 	text := strings.ToLower(e.Text)
 	return strings.Contains(text, "too many") || strings.Contains(text, "maximum number of connections")
