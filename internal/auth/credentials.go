@@ -44,6 +44,10 @@ type Credentials struct {
 	Username string
 	// Secret is the password, or the OAuth2 access token.
 	Secret string `json:"-"`
+	// gen is the account's generation when Manager issued these
+	// credentials. Rejected compares it to tell a refusal of the current
+	// secret from a refusal of one a human has since replaced.
+	gen uint64
 }
 
 // SASL returns a SASL client for c: PLAIN for passwords, XOAUTH2 for OAuth2.

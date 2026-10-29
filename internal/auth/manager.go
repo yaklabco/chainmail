@@ -104,6 +104,10 @@ type Manager struct {
 	// gen counts changes to secrets and auth state. Work that read a
 	// secret before gen moved is stale and must not be recorded.
 	gen uint64
+	// accountGen counts the same changes per account, so a change to one
+	// account does not hide a rejection on another. Credentials carry the
+	// value they were issued at.
+	accountGen map[string]uint64
 }
 
 // Option configures a Manager.
@@ -136,6 +140,7 @@ func NewManager(cfg *config.Config, store SecretStore, opts ...Option) *Manager 
 		required:   map[string]string{},
 		pending:    map[string]pendingLogin{},
 		sources:    map[string]oauth2.TokenSource{},
+		accountGen: map[string]uint64{},
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -193,11 +198,15 @@ func (m *Manager) Credentials(ctx context.Context, account string) (Credentials,
 		return Credentials{}, &RequiredError{Account: account, Hint: hint}
 	}
 	if acct.Auth == provider.AuthPassword {
+		// The generation is read before the secret, so a change that lands
+		// in between makes Rejected ignore these credentials rather than
+		// park a password that was never tried.
+		gen := m.generation(account)
 		pw, err := m.secret(acct, PasswordSecret(account))
 		if err != nil {
 			return Credentials{}, err
 		}
-		return Credentials{Method: provider.AuthPassword, Username: acct.Username, Secret: string(pw)}, nil
+		return Credentials{Method: provider.AuthPassword, Username: acct.Username, Secret: string(pw), gen: gen}, nil
 	}
 	return m.oauthCredentials(ctx, acct)
 }
@@ -208,13 +217,15 @@ func (m *Manager) Credentials(ctx context.Context, account string) (Credentials,
 // human who just fixed them to fix them again.
 func (m *Manager) oauthCredentials(ctx context.Context, acct config.ResolvedAccount) (Credentials, error) {
 	for attempt := 0; ; attempt++ {
+		// As for passwords, the generation is read before the secrets.
+		acctGen := m.generation(acct.Name)
 		src, gen, err := m.tokenSource(ctx, acct)
 		if err != nil {
 			return Credentials{}, err
 		}
 		tok, err := src.Token()
 		if err == nil {
-			return Credentials{Method: provider.AuthOAuth2, Username: acct.Username, Secret: tok.AccessToken}, nil
+			return Credentials{Method: provider.AuthOAuth2, Username: acct.Username, Secret: tok.AccessToken, gen: acctGen}, nil
 		}
 		hint, ok := refreshHint(acct, err)
 		if !ok {
@@ -247,9 +258,12 @@ func refreshHint(acct config.ResolvedAccount, err error) (string, bool) {
 	}
 }
 
-// Rejected records that a server refused account's credentials. chainmail
-// stops using them until a human changes a secret or logs in again.
-func (m *Manager) Rejected(account string) {
+// Rejected records that a server refused creds, which Credentials issued
+// for account. chainmail stops using them until a human changes a secret or
+// logs in again. If account's secrets or auth state changed since creds were
+// issued, the refusal is of credentials already replaced, and Rejected does
+// nothing, so the new ones get their chance.
+func (m *Manager) Rejected(account string, creds Credentials) {
 	acct, err := m.cfg.Account(account)
 	if err != nil {
 		return
@@ -258,7 +272,12 @@ func (m *Manager) Rejected(account string) {
 	if acct.Auth == provider.AuthOAuth2 {
 		hint = "the server rejected the access token; run: chainmail auth login " + account
 	}
-	m.markRequired(account, hint)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.accountGen[account] != creds.gen {
+		return
+	}
+	m.markRequiredLocked(account, hint)
 }
 
 // SecretChanged clears the auth state of every account that uses the secret called name.
@@ -273,6 +292,7 @@ func (m *Manager) SecretChanged(name string) {
 		if slices.Contains(neededSecrets(acct), name) {
 			delete(m.required, account)
 			delete(m.sources, account)
+			m.accountGen[account]++
 		}
 	}
 	m.gen++
@@ -360,6 +380,7 @@ func (m *Manager) FinishLogin(ctx context.Context, account, redirectURL string) 
 	delete(m.required, account)
 	m.sources[account] = src
 	m.gen++
+	m.accountGen[account]++
 	m.mu.Unlock()
 	return nil
 }
@@ -369,12 +390,6 @@ func (m *Manager) requiredHint(account string) (string, bool) {
 	defer m.mu.Unlock()
 	hint, ok := m.required[account]
 	return hint, ok
-}
-
-func (m *Manager) markRequired(account, hint string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.markRequiredLocked(account, hint)
 }
 
 // markRequiredAt marks account only if nothing changed since gen, so a
@@ -393,6 +408,14 @@ func (m *Manager) markRequiredLocked(account, hint string) {
 	m.required[account] = hint
 	delete(m.sources, account)
 	m.gen++
+	m.accountGen[account]++
+}
+
+// generation returns account's generation, which Credentials carry.
+func (m *Manager) generation(account string) uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.accountGen[account]
 }
 
 // dropPending ends the login p if it is still the one in progress, so a

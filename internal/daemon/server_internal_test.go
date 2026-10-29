@@ -104,10 +104,14 @@ func TestSetSecretFailureKeepsRejectedCredentialsParked(t *testing.T) {
 	if err := setSecretDirect(ctx, s, auth.PasswordSecret("host"), []byte("old")); err != nil {
 		t.Fatal(err)
 	}
-	s.auth.Rejected("host")
+	creds, err := s.auth.Credentials(ctx, "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.auth.Rejected("host", creds)
 	requireAuthState(t, s, true)
 
-	err := setSecretDirect(ctx, s, auth.PasswordSecret("host"), nil)
+	err = setSecretDirect(ctx, s, auth.PasswordSecret("host"), nil)
 	if got := api.Detail(err).GetReason(); got != api.ReasonInvalidArgument {
 		t.Fatalf("empty value: reason = %s (err %v)", got, err)
 	}

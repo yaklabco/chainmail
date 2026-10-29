@@ -106,6 +106,16 @@ func newFixtureAt(t *testing.T, ep oauth2.Endpoint) *fixture {
 	return f
 }
 
+// credentials returns account's credentials, failing the test on error.
+func (f *fixture) credentials(t *testing.T, account string) auth.Credentials {
+	t.Helper()
+	c, err := f.m.Credentials(t.Context(), account)
+	if err != nil {
+		t.Fatalf("Credentials(%s): %v", account, err)
+	}
+	return c
+}
+
 func (f *fixture) set(t *testing.T, name, value string) {
 	t.Helper()
 	if err := f.store.Set(name, []byte(value)); err != nil {
@@ -179,7 +189,7 @@ func TestRejectedUntilSecretChanges(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	f.set(t, auth.PasswordSecret("host"), "pw")
-	f.m.Rejected("host")
+	f.m.Rejected("host", f.credentials(t, "host"))
 	_, err := f.m.Credentials(t.Context(), "host")
 	requireHint(t, err, "rejected")
 	if st, _ := f.m.State("host"); !st.Required {
@@ -188,6 +198,66 @@ func TestRejectedUntilSecretChanges(t *testing.T) {
 	f.m.SecretChanged(auth.PasswordSecret("host"))
 	if _, err := f.m.Credentials(t.Context(), "host"); err != nil {
 		t.Errorf("Credentials after SecretChanged: %v", err)
+	}
+}
+
+func TestRejectionOfReplacedSecretIsIgnored(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.set(t, auth.PasswordSecret("host"), "old-pw")
+	old := f.credentials(t, "host")
+	// A human fixes the password while a login with the old one is in flight.
+	f.set(t, auth.PasswordSecret("host"), "new-pw")
+	f.m.SecretChanged(auth.PasswordSecret("host"))
+	f.m.Rejected("host", old)
+	if st, _ := f.m.State("host"); st.Required {
+		t.Errorf("State = %+v, want ok: the rejected password was already replaced", st)
+	}
+	c := f.credentials(t, "host")
+	if c.Secret != "new-pw" {
+		t.Errorf("Secret = %q, want the new password", c.Secret)
+	}
+}
+
+func TestRejectionOfCurrentCredentialsParks(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.set(t, auth.PasswordSecret("host"), "pw")
+	f.m.Rejected("host", f.credentials(t, "host"))
+	if st, _ := f.m.State("host"); !st.Required {
+		t.Errorf("State = %+v, want required", st)
+	}
+}
+
+func TestOtherAccountsChangesDoNotHideRejection(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.set(t, auth.PasswordSecret("host"), "pw")
+	creds := f.credentials(t, "host")
+	f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
+	f.m.SecretChanged(auth.ClientSecret("g"))
+	f.m.Rejected("host", creds)
+	if st, _ := f.m.State("host"); !st.Required {
+		t.Errorf("State = %+v, want required: gm's secret changing says nothing about host", st)
+	}
+}
+
+func TestRejectionBeforeFinishLoginIsIgnored(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
+	f.set(t, auth.RefreshTokenSecret("gm"), oauthtest.RefreshToken)
+	old := f.credentials(t, "gm")
+	ch, err := f.m.BeginLogin("gm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.m.FinishLogin(t.Context(), "gm", oauthtest.RedirectFor(t, ch.URL, oauthtest.Code)); err != nil {
+		t.Fatal(err)
+	}
+	f.m.Rejected("gm", old)
+	if st, _ := f.m.State("gm"); st.Required {
+		t.Errorf("State = %+v, want ok: the login replaced the rejected token", st)
 	}
 }
 

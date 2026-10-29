@@ -94,7 +94,7 @@ func (a *accountService) test(ctx context.Context, name string) (*chainmailv1.Te
 		return nil, err
 	}
 	resp := &chainmailv1.TestAccountResponse{Account: name}
-	resp.Imap = a.check(ctx, name, func(ctx context.Context) ([]string, error) {
+	resp.Imap = a.check(ctx, name, creds, func(ctx context.Context) ([]string, error) {
 		sess, err := imapstore.Dial(ctx, acct.IMAP, creds, imapstore.DialOptions{RootCAs: a.s.opts.RootCAs})
 		if err != nil {
 			return nil, err
@@ -111,17 +111,18 @@ func (a *accountService) test(ctx context.Context, name string) (*chainmailv1.Te
 		resp.Smtp = &chainmailv1.Check{Reason: api.ReasonAuthRejected, Error: "not attempted: the IMAP server rejected the same credentials"}
 		return resp, nil
 	}
-	resp.Smtp = a.check(ctx, name, func(ctx context.Context) ([]string, error) {
+	resp.Smtp = a.check(ctx, name, creds, func(ctx context.Context) ([]string, error) {
 		return nil, sender.Probe(ctx, acct.SMTP, creds, sender.DialOptions{RootCAs: a.s.opts.RootCAs})
 	})
 	return resp, nil
 }
 
-// check runs one connection test. A rejection marks the account as needing a
-// human, so chainmail stops retrying credentials that could lock it out.
+// check runs one connection test with creds. A rejection marks the account
+// as needing a human, so chainmail stops retrying credentials that could
+// lock it out, unless a human replaced them while the test ran.
 // Server trouble and timeouts say nothing about the credentials and leave the
 // auth state alone.
-func (a *accountService) check(ctx context.Context, account string, run func(context.Context) ([]string, error)) *chainmailv1.Check {
+func (a *accountService) check(ctx context.Context, account string, creds auth.Credentials, run func(context.Context) ([]string, error)) *chainmailv1.Check {
 	start := a.s.opts.Now()
 	caps, err := run(ctx)
 	c := &chainmailv1.Check{
@@ -136,7 +137,7 @@ func (a *accountService) check(ctx context.Context, account string, run func(con
 	switch {
 	case errors.Is(err, auth.ErrRejected):
 		c.Reason = api.ReasonAuthRejected
-		a.s.auth.Rejected(account)
+		a.s.auth.Rejected(account, creds)
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		// A canceled request is reported as TIMEOUT, as toConnectError does.
 		c.Reason = api.ReasonTimeout
