@@ -112,6 +112,10 @@ func messageErr(err error) error {
 	return &fixedTextError{msg: msg, err: err}
 }
 
+// clientGone is the error for a failed send on a stream: the client went
+// away, which maps to TIMEOUT like any other cancellation.
+func clientGone() error { return fmt.Errorf("%w: client went away", context.Canceled) }
+
 // callLevel reports whether a failure of one message means the whole call
 // failed: the server or the login is down, or time ran out, so the other
 // messages are no more readable than this one.
@@ -461,7 +465,7 @@ func (m *messageService) download(ctx context.Context, req *chainmailv1.Download
 	defer func() { _ = rc.Close() }() // as in raw
 	header := &chainmailv1.AttachmentHeader{Filename: untrusted(info.Filename), ContentType: mediaType(info.ContentType), Size: info.Size}
 	if err := stream.Send(&chainmailv1.DownloadAttachmentResponse{Chunk: &chainmailv1.DownloadAttachmentResponse_Header{Header: header}}); err != nil {
-		return 0, err
+		return 0, clientGone()
 	}
 	return pump(rc, func(b []byte) error {
 		return stream.Send(&chainmailv1.DownloadAttachmentResponse{Chunk: &chainmailv1.DownloadAttachmentResponse_Data{Data: b}})
@@ -469,11 +473,12 @@ func (m *messageService) download(ctx context.Context, req *chainmailv1.Download
 }
 
 // pump copies r to send in chunks of up to chunkBytes and returns the bytes
-// sent. Bytes read before an error are still sent. A read error after bytes
-// went out is never NOT_FOUND or STALE_REF: the client holds part of the
-// data, and the stream is never resumed, since the store never fetches
-// bytes again. A deadline or a cancellation stays TIMEOUT, a part that does
-// not decode stays INTERNAL, since no retry reads it, and anything else is
+// sent. Bytes read before an error are still sent, and a failed send means
+// the client went away. A read error after bytes went out is never
+// NOT_FOUND or STALE_REF: the client holds part of the data, and the stream
+// is never resumed, since the store never fetches bytes again. A deadline
+// or a cancellation stays TIMEOUT, a part that does not decode stays
+// INTERNAL, since no retry reads it, and anything else is
 // SERVER_UNAVAILABLE.
 func pump(r io.Reader, send func([]byte) error) (int, error) {
 	buf := make([]byte, chunkBytes)
@@ -482,8 +487,8 @@ func pump(r io.Reader, send func([]byte) error) (int, error) {
 		n, err := r.Read(buf[fill:])
 		fill += n
 		if fill == len(buf) || (err != nil && fill > 0) {
-			if serr := send(slices.Clone(buf[:fill])); serr != nil {
-				return total, serr
+			if send(slices.Clone(buf[:fill])) != nil {
+				return total, clientGone()
 			}
 			total += fill
 			fill = 0

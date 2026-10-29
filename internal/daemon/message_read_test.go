@@ -867,3 +867,35 @@ func TestStreamDecodeErrorIsInternal(t *testing.T) {
 		})
 	}
 }
+
+// TestStreamClientGoneIsAuditedAsTimeout checks that a client hanging up
+// mid-stream is audited as TIMEOUT, not INTERNAL.
+func TestStreamClientGoneIsAuditedAsTimeout(t *testing.T) {
+	t.Parallel()
+	m := startFakeMail(t)
+	r := m.host.Add(fake.Message{Folder: "INBOX", Subject: "big", Body: bigBody})
+	ctx, cancel := context.WithCancel(t.Context())
+	stream, err := m.Client.Message.GetRaw(ctx, connect.NewRequest(&chainmailv1.GetRawRequest{Ref: r.String()}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatalf("no data: %v", stream.Err())
+	}
+	cancel()
+	_ = stream.Close() // the client hangs up; its error is not the point
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rows := m.AuditRows(t)
+		if len(rows) > 0 && rows[len(rows)-1].Action == "get.raw" {
+			if row := rows[len(rows)-1]; row.Result != "error" || row.Reason != api.ReasonTimeout {
+				t.Errorf("audit = %+v, want an error row with TIMEOUT", row)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no get.raw audit row after 10s")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

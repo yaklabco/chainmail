@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/query"
@@ -241,5 +243,15 @@ func TestMediaType(t *testing.T) {
 		if got := mediaType(in); got != want {
 			t.Errorf("mediaType(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestPumpClientGoneIsTimeout checks that a failed send, which means the
+// client went away, maps to TIMEOUT rather than INTERNAL.
+func TestPumpClientGoneIsTimeout(t *testing.T) {
+	t.Parallel()
+	_, err := pump(strings.NewReader("hello"), func([]byte) error { return errors.New("write: broken pipe") })
+	if r := apiReason(err); r != api.ReasonTimeout || !errors.Is(err, context.Canceled) {
+		t.Errorf("pump = %v (reason %s), want TIMEOUT through context.Canceled", err, r)
 	}
 }
