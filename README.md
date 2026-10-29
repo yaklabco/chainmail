@@ -1,6 +1,6 @@
 # chainmail
 
-Email for AI agents. chainmail is one Go binary that lets agents read, write and organize mail over IMAP and SMTP without ever holding a password or token. A long-running daemon owns every credential and every connection to the mail servers. Agents talk to it through the `chainmail` CLI, which is a thin client on a Unix socket. Every call that changes or tests something is written to an audit log.
+Email for AI agents. chainmail is one Go binary that lets agents read, write and organize mail over IMAP and SMTP without ever holding a password or token. A long-running daemon owns every credential and every connection to the mail servers. Agents talk to it through the `chainmail` CLI, which is a thin client on a Unix socket. Every call except `admin status` is written to an audit log.
 
 Sub-project 1, the foundation, is what exists today: the daemon and its socket, the vault, password and OAuth2 login, `secret set`, `auth login` and `accounts test`. Reading, sending, policy, approvals and the MCP server arrive in later sub-projects.
 
@@ -17,7 +17,7 @@ flowchart LR
     D --> S[(state.db audit log)]
   end
   D -- "IMAP and SMTP over TLS" --> M[mail servers]
-  D -- "OAuth2 token refresh" --> G[Google]
+  D -- "OAuth2 token exchange and refresh" --> G[Google]
 ```
 
 ## Security model
@@ -45,7 +45,7 @@ nix develop -c go tool stave build
 ./bin/chainmail version
 ```
 
-Other stave targets: `check` (the default, and what CI runs: generated code check, lint, unit tests and build), `generate`, `lint`, `test:unit` and `test:live`.
+Other stave targets: `check` (the default, and what CI runs: generated code check, lint, unit tests and build), `generate`, `generateCheck`, `lint`, `test:unit` and `test:live`.
 
 ## Provider setup
 
@@ -79,7 +79,7 @@ jq -r .installed.client_secret client_secret_*.json | pass insert -m chainmail/o
 3. Under Google Auth Platform, fill in Branding (app name and support email) and set Audience to **Internal**. Internal apps need no verification, and their refresh tokens do not expire after 7 days.
 4. Under Data access, add the scope `https://mail.google.com/`.
 5. Under Clients, create an OAuth client of type **Desktop app** and download its JSON.
-6. Put the client ID in `[oauth_clients.<name>]` in the config, and store the secret with `chainmail secret set oauth_clients/<name>`.
+6. Put the client ID in `[oauth_clients.<name>]` in the config, set the account's `oauth_client` to `<name>`, and store the secret with `chainmail secret set oauth_clients/<name>`.
 7. Run `chainmail auth login <account>`.
 
 ### Personal Gmail with OAuth2
@@ -122,7 +122,7 @@ Temporary server errors, such as other IMAP response codes, Gmail's `ALERT` for 
 
 ## Configuration reference
 
-The daemon reads one TOML file, `/etc/chainmail/config.toml` by default or the file given with `--config`. It holds no secrets. Unknown keys are an error, and so are invalid values, with every problem listed at once.
+The daemon reads one TOML file, `/etc/chainmail/config.toml` by default or the file given with `--config`. It holds no secrets. Unknown keys are an error. Once every key is known, all invalid values are reported together. The daemon reads the file only at startup, so restart it after an edit.
 
 ```toml
 [daemon]
@@ -240,7 +240,7 @@ chainmail accounts list --output table
 chainmail accounts test work --output table
 ```
 
-Finally, run the live smoke test. It logs in to every configured account through the daemon at `$CHAINMAIL_SOCKET` and fails if any IMAP or SMTP check fails. It talks to real servers, so it never runs in CI or in `go test ./...`; it only builds with the `live` tag.
+Finally, run the live smoke test. It logs in to every configured account through the daemon at `$CHAINMAIL_SOCKET` and fails if any IMAP or SMTP check fails. It talks to real servers, so it never runs in CI or in `go test ./...`. It only builds with the `live` tag.
 
 ```fish
 nix develop -c go tool stave test:live
@@ -248,7 +248,7 @@ nix develop -c go tool stave test:live
 
 ## Commands
 
-Every command accepts `--socket <path>` and `--output json|table`. Only the `accounts` commands honour `--output table`; the rest always print JSON.
+Every command accepts `--socket <path>` and `--output json|table`. Only the `accounts` commands honour `--output table`. The rest always print JSON.
 
 | Command | Does | Prints on success |
 |---|---|---|
@@ -261,9 +261,9 @@ Every command accepts `--socket <path>` and `--output json|table`. Only the `acc
 | `chainmail admin status` | Shows the daemon's version, start time, dev mode and stored secret names. | `{"version":...,"started_at":...,"dev_mode":...,"secret_names":[...]}` |
 | `chainmail help [command]` | Prints help. `--help` on any command does the same. | help text |
 
-Each check in `accounts test` has `ok`, `reason` (`AUTH_REJECTED`, `SERVER_UNAVAILABLE` or `TIMEOUT` when it failed), `error`, `capabilities` (IMAP only) and `latency_ms`. When a check fails, the command still prints the full result on stdout, then reports the failure on stderr and exits with its code: 5 if any server rejected the credentials, otherwise the code of the first failed check.
+Each check in `accounts test` has `ok`, `reason` (`AUTH_REJECTED`, `SERVER_UNAVAILABLE` or `TIMEOUT` when it failed), `error`, `capabilities` (IMAP only) and `latency_ms`. When a check fails, the command still prints the full result on stdout, then reports the failure on stderr and exits with its code: 5 if any server rejected the credentials, otherwise the code of the first failed check. If the account is missing a secret or already needs a human, no check runs. The command prints nothing on stdout and fails with `AUTH_REQUIRED` (exit 5).
 
-`auth login` writes its instructions to stderr before the outcome. An agent driving it should parse only the last line of stderr as the error.
+`auth login` writes its instructions to stderr before the outcome, and `secret set` writes its prompt there when stdin is a terminal. An agent driving either should parse only the last line of stderr as the error.
 
 ## Exit codes and error output
 
