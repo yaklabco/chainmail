@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -836,6 +837,32 @@ func TestClientNeverSeesServerText(t *testing.T) {
 			leaks("Search partial", p.GetMessage()+p.GetHint())
 			if p.GetReason() != tc.reason || p.GetMessage() != tc.message {
 				t.Errorf("partial = %v, want %s %q", p, tc.reason, tc.message)
+			}
+		})
+	}
+}
+
+// TestStreamDecodeErrorIsInternal checks that a part that does not decode
+// ends the stream with INTERNAL, before any bytes and after, so an agent
+// does not retry it.
+func TestStreamDecodeErrorIsInternal(t *testing.T) {
+	t.Parallel()
+	for _, after := range []int{0, 5} {
+		t.Run(fmt.Sprint("after ", after), func(t *testing.T) {
+			t.Parallel()
+			m := startFakeMail(t)
+			r := m.host.Add(fake.Message{Folder: "INBOX", Subject: "raw", Body: "hello world"})
+			m.host.FailStreamAfter(after, errors.New("decoding the part: illegal base64 data at input byte 0"))
+			stream, err := m.Client.Message.GetRaw(t.Context(), connect.NewRequest(&chainmailv1.GetRawRequest{Ref: r.String()}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := readStream(stream, rawData)
+			if len(got) != after || reasonOf(err) != api.ReasonInternal {
+				t.Errorf("got %d bytes then %v; want %d bytes then INTERNAL", len(got), err, after)
+			}
+			if row := lastMailAudit(t, m); row.Reason != api.ReasonInternal {
+				t.Errorf("audit = %+v", row)
 			}
 		})
 	}

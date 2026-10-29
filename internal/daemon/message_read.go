@@ -472,8 +472,9 @@ func (m *messageService) download(ctx context.Context, req *chainmailv1.Download
 // sent. Bytes read before an error are still sent. A read error after bytes
 // went out is never NOT_FOUND or STALE_REF: the client holds part of the
 // data, and the stream is never resumed, since the store never fetches
-// bytes again. A deadline or a cancellation stays TIMEOUT, and anything else
-// is SERVER_UNAVAILABLE.
+// bytes again. A deadline or a cancellation stays TIMEOUT, a part that does
+// not decode stays INTERNAL, since no retry reads it, and anything else is
+// SERVER_UNAVAILABLE.
 func pump(r io.Reader, send func([]byte) error) (int, error) {
 	buf := make([]byte, chunkBytes)
 	total, fill := 0, 0
@@ -497,6 +498,8 @@ func pump(r io.Reader, send func([]byte) error) (int, error) {
 			return total, fmt.Errorf("the stream stopped after %d bytes: %w", total, context.DeadlineExceeded)
 		case errors.Is(err, context.Canceled):
 			return total, fmt.Errorf("the stream stopped after %d bytes: %w", total, context.Canceled)
+		case apiReason(err) == api.ReasonInternal:
+			return total, err
 		default:
 			return total, fmt.Errorf("%w: the stream broke after %d bytes", mailstore.ErrUnavailable, total)
 		}
