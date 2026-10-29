@@ -7,7 +7,7 @@ import "google/protobuf/timestamp.proto";
 message SetSecretRequest {
   // Vault name, such as accounts/work or oauth_clients/workspace.
   string name = 1;
-  bytes value = 2;
+  bytes value = 2 [debug_redact = true];
 }
 
 message SetSecretResponse {}

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"runtime"
 	"strconv"
 	"strings"
@@ -27,7 +28,17 @@ func Generate() error {
 // GenerateCheck fails if gen/ is out of date with proto/.
 func GenerateCheck() error {
 	st.Deps(Generate)
-	return sh.RunV("git", "diff", "--exit-code", "--", "gen")
+	if err := sh.RunV("git", "diff", "--exit-code", "--", "gen"); err != nil {
+		return err
+	}
+	untracked, err := sh.Output("git", "status", "--porcelain", "--", "gen")
+	if err != nil {
+		return err
+	}
+	if untracked != "" {
+		return errors.New("generated files not committed:\n" + untracked)
+	}
+	return nil
 }
 
 // Lint runs buf lint and golangci-lint.

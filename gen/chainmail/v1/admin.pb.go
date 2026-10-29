@@ -406,10 +406,10 @@ var File_chainmail_v1_admin_proto protoreflect.FileDescriptor
 
 const file_chainmail_v1_admin_proto_rawDesc = "" +
 	"\n" +
-	"\x18chainmail/v1/admin.proto\x12\fchainmail.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"<\n" +
+	"\x18chainmail/v1/admin.proto\x12\fchainmail.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"A\n" +
 	"\x10SetSecretRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value\"\x13\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x19\n" +
+	"\x05value\x18\x02 \x01(\fB\x03\x80\x01\x01R\x05value\"\x13\n" +
 	"\x11SetSecretResponse\"1\n" +
 	"\x15BeginAuthLoginRequest\x12\x18\n" +
 	"\aaccount\x18\x01 \x01(\tR\aaccount\"t\n" +
