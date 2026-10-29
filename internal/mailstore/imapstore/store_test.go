@@ -248,3 +248,61 @@ func TestStoreDoesNotRetryLoginRefusals(t *testing.T) {
 		})
 	}
 }
+
+func TestStoreLogsInOnceWhenThePasswordGoesBadLater(t *testing.T) {
+	t.Parallel()
+	var logins atomic.Int32
+	ca := tlstest.New(t)
+	ep := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{Username: "host@example.test", Password: "right", Logins: &logins})
+	creds := passwordCreds("host@example.test", "right")
+	s := New(testAccount("host", ep, false), creds, Options{RootCAs: ca.Pool, Backoff: noBackoff})
+	t.Cleanup(func() { _ = s.Close() })
+	if _, err := s.ListFolders(t.Context()); err != nil {
+		t.Fatalf("ListFolders with the right password: %v", err)
+	}
+	// Drop the connection that worked, so every borrow below has to dial.
+	c, err := s.borrow(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.kill()
+	s.release(c)
+	// The password is rotated while the daemon runs: the one it holds is now wrong.
+	creds.mu.Lock()
+	creds.creds.Secret = "stale"
+	creds.mu.Unlock()
+	logins.Store(0)
+	var wg sync.WaitGroup
+	for range 3 {
+		wg.Go(func() {
+			c, err := s.borrow(t.Context(), "")
+			if err == nil {
+				s.release(c)
+				t.Error("borrow dialed with a stale password and succeeded")
+			}
+		})
+	}
+	wg.Wait()
+	if n := logins.Load(); n != 1 || creds.rejections() != 1 {
+		t.Errorf("logins = %d, rejections = %d; want 1 and 1: a rejected password is tried once, not once per connection", n, creds.rejections())
+	}
+}
+
+func TestStoreDialWaitingForTheLoginGateGivesUpOnCancel(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	ep := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{Username: "host@example.test", Password: "pw"})
+	s := New(testAccount("host", ep, false), passwordCreds("host@example.test", "pw"), Options{RootCAs: ca.Pool, Backoff: noBackoff})
+	t.Cleanup(func() { _ = s.Close() })
+	s.loginGate <- struct{}{} // another login is in progress
+	t.Cleanup(func() { <-s.loginGate })
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := s.dial(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("dial behind a held gate = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("dial took %v to give up after a 50ms deadline", elapsed)
+	}
+}

@@ -9,7 +9,6 @@ import (
 	"math/rand/v2"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -108,14 +107,15 @@ type Store struct {
 	opts  Options
 	pool  *pool[*conn]
 
-	// loginGate holds one token. Until a login has worked, every dial takes
-	// it, so logins wait in line and a bad password is tried once, not once
-	// per pooled connection. The account parks on that refusal, and the
-	// borrowers behind it get AUTH_REQUIRED from the Credentialer without
-	// dialing. It is a channel rather than a mutex so a waiter can give up
+	// loginGate holds one token, and every dial takes it, so logins wait in
+	// line and a bad password is tried once, not once per pooled connection.
+	// That holds after a password is rotated or revoked while the daemon
+	// runs, too. The account parks on the refusal, and the dials behind it
+	// get AUTH_REQUIRED from the Credentialer without dialing. The cost is
+	// that concurrent dials, which happen when the pool fills, run one after
+	// another. It is a channel rather than a mutex so a waiter can give up
 	// when its context ends.
 	loginGate chan struct{}
-	loggedIn  atomic.Bool
 
 	mu      sync.Mutex
 	folders []mailstore.Folder // cached; nil until listed
@@ -208,13 +208,11 @@ func (s *Store) release(c *conn) {
 }
 
 func (s *Store) dial(ctx context.Context) (*conn, error) {
-	if !s.loggedIn.Load() {
-		select {
-		case s.loginGate <- struct{}{}:
-			defer func() { <-s.loginGate }()
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	select {
+	case s.loginGate <- struct{}{}:
+		defer func() { <-s.loginGate }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 	creds, err := s.creds.Credentials(ctx, s.acct.Name)
 	if err != nil {
@@ -223,14 +221,12 @@ func (s *Store) dial(ctx context.Context) (*conn, error) {
 	sess, err := Dial(ctx, s.acct.IMAP, creds, DialOptions{RootCAs: s.opts.RootCAs, Timeout: dialTimeout})
 	switch {
 	case err == nil:
-		s.loggedIn.Store(true)
 		return newConn(sess, s.opts.CommandTimeout, s.opts.Now), nil
 	case isConnLimit(err):
 		s.pool.shrink()
 		s.opts.Logger.Warn("server refused another connection; pool shrunk", "account", s.acct.Name)
 		return nil, fmt.Errorf("%w: %s refused another connection: %w", mailstore.ErrUnavailable, s.acct.Name, err)
 	case errors.Is(err, auth.ErrRejected):
-		s.loggedIn.Store(false)
 		s.creds.Rejected(s.acct.Name, creds)
 		return nil, &auth.RejectedError{Hint: rejectedHint(s.acct), Err: err}
 	case ctx.Err() != nil:
