@@ -49,8 +49,9 @@ type Vault struct {
 	secrets  map[string][]byte
 }
 
-// LoadIdentity reads the age X25519 identity in path. The file must not be
-// readable by group or others.
+// LoadIdentity reads the age X25519 identity in path. The file must be owned
+// by the daemon user with no group or other access, or be a systemd
+// credential owned by root:root that others cannot read.
 func LoadIdentity(path string) (*age.X25519Identity, error) {
 	// Check the mode and read the key through one descriptor, so the file
 	// that passed the check is the file that gets read.
@@ -63,8 +64,14 @@ func LoadIdentity(path string) (*age.X25519Identity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("vault key: %w", err)
 	}
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return nil, fmt.Errorf("vault key %s: mode %v is too open, want 0600 or 0400", path, perm)
+	if uid, gid, euid, ok := fileOwner(info); ok {
+		err = checkKeyFile(info.Mode(), uid, gid, euid)
+	} else if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		// No ownership data on this platform: fall back to the strict rule.
+		err = fmt.Errorf("mode %v is too open, want 0600 or 0400", perm)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("vault key %s: %w", path, err)
 	}
 	data, err := io.ReadAll(f)
 	if err != nil {
@@ -109,10 +116,47 @@ func Open(path string, id *age.X25519Identity) (*Vault, error) {
 	if f.Version != formatVersion {
 		return nil, fmt.Errorf("vault %s has format version %d, want %d", path, f.Version, formatVersion)
 	}
+	for _, name := range slices.Sorted(maps.Keys(f.Secrets)) {
+		if !ValidName(name) {
+			return nil, fmt.Errorf("vault %s: %w: %q", path, ErrInvalidName, name)
+		}
+		if len(f.Secrets[name]) == 0 {
+			return nil, fmt.Errorf("vault %s: secret %q: %w", path, name, ErrEmptyValue)
+		}
+	}
 	if f.Secrets != nil {
 		v.secrets = f.Secrets
 	}
 	return v, nil
+}
+
+// checkKeyFile decides whether a key file with this mode and ownership is
+// private enough. Others may never have access. A file owned by the
+// effective user (the --dev case) must also deny the group. A file owned by
+// root must have group root, and the group may read it: systemd's
+// LoadCredential= for a User= service makes the credential root:root 0400
+// and grants the service user an ACL entry, so the group bits show the ACL
+// mask and the file stats as 0440.
+func checkKeyFile(mode fs.FileMode, uid, gid, euid uint32) error {
+	perm := mode.Perm()
+	switch {
+	case perm&0o007 != 0:
+		return fmt.Errorf("mode %v is too open: others have access", perm)
+	case uid == euid && perm&0o070 == 0:
+		return nil
+	case uid == 0:
+		if gid != 0 {
+			return fmt.Errorf("owned by root with group %d: a root-owned key file must have group root", gid)
+		}
+		if perm&0o030 != 0 {
+			return fmt.Errorf("mode %v is too open: group may only read", perm)
+		}
+		return nil
+	case uid == euid:
+		return fmt.Errorf("mode %v is too open, want 0600 or 0400", perm)
+	default:
+		return fmt.Errorf("owned by uid %d: key file must be owned by root or the daemon user", uid)
+	}
 }
 
 // Get returns a copy of the secret called name.
@@ -141,8 +185,11 @@ func (v *Vault) Set(name string, value []byte) error {
 	if err := v.write(next); err != nil {
 		return err
 	}
+	// The new file has replaced the old one, so memory must match it even if
+	// the directory sync below fails. The sync error is still returned
+	// because the rename may not survive a crash.
 	v.secrets = next
-	return nil
+	return syncDir(filepath.Dir(v.path))
 }
 
 // Names returns the stored secret names in sorted order.
@@ -172,7 +219,8 @@ func (v *Vault) write(secrets map[string][]byte) error {
 }
 
 // writeFileAtomic writes data to a 0600 temp file beside path, syncs it, and
-// renames it over path, so a crash leaves either the old vault or the new one.
+// renames it over path. The caller syncs the directory afterwards, so a crash
+// leaves either the old vault or the new one.
 func writeFileAtomic(path string, data []byte) (err error) {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".vault-*.tmp")
@@ -198,7 +246,7 @@ func writeFileAtomic(path string, data []byte) (err error) {
 	if err = os.Rename(tmp.Name(), path); err != nil {
 		return fmt.Errorf("replacing vault: %w", err)
 	}
-	return syncDir(dir)
+	return nil
 }
 
 func syncDir(dir string) error {
