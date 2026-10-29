@@ -153,3 +153,27 @@ func TestForbiddenPeer(t *testing.T) {
 		t.Errorf("reason = %s", got)
 	}
 }
+
+func TestSetSecretRejectsOversizedRequest(t *testing.T) {
+	t.Parallel()
+	h := daemontest.Start(t, hostingerConfig, daemontest.Options{})
+	big := strings.Repeat("x", 1<<20+1)
+	_, err := h.Client.Admin.SetSecret(t.Context(), connect.NewRequest(&chainmailv1.SetSecretRequest{Name: "accounts/host", Value: []byte(big)}))
+	if connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Errorf("code = %v, want ResourceExhausted (err %v)", connect.CodeOf(err), err)
+	}
+	if names := h.Vault.Names(); len(names) != 0 {
+		t.Errorf("vault names = %v, want none", names)
+	}
+}
+
+func TestAccountServiceIsUnimplemented(t *testing.T) {
+	t.Parallel()
+	h := daemontest.Start(t, hostingerConfig, daemontest.Options{})
+	if _, err := h.Client.Account.ListAccounts(t.Context(), connect.NewRequest(&chainmailv1.ListAccountsRequest{})); connect.CodeOf(err) != connect.CodeUnimplemented {
+		t.Errorf("ListAccounts: %v", err)
+	}
+	if _, err := h.Client.Account.TestAccount(t.Context(), connect.NewRequest(&chainmailv1.TestAccountRequest{Account: "host"})); connect.CodeOf(err) != connect.CodeUnimplemented {
+		t.Errorf("TestAccount: %v", err)
+	}
+}

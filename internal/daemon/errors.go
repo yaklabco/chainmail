@@ -32,6 +32,9 @@ func toConnectError(err error) *connect.Error {
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, "", err)
 	case errors.Is(err, context.DeadlineExceeded):
 		return api.New(connect.CodeDeadlineExceeded, api.ReasonTimeout, "", err)
+	case errors.Is(err, context.Canceled):
+		// The client gave up. TIMEOUT keeps the exit code contract without a new reason.
+		return api.New(connect.CodeCanceled, api.ReasonTimeout, "", err)
 	default:
 		return api.New(connect.CodeInternal, api.ReasonInternal, "", err)
 	}

@@ -16,6 +16,8 @@ import (
 type Client struct {
 	Account chainmailv1connect.AccountServiceClient
 	Admin   chainmailv1connect.AdminServiceClient
+
+	transport *http.Transport
 }
 
 // New returns a client for the daemon listening on socketPath. kind names the
@@ -35,9 +37,16 @@ func New(socketPath, kind string) *Client {
 	// The host is ignored: every request goes to the socket.
 	const baseURL = "http://chainmail.local"
 	return &Client{
-		Account: chainmailv1connect.NewAccountServiceClient(hc, baseURL, opts),
-		Admin:   chainmailv1connect.NewAdminServiceClient(hc, baseURL, opts),
+		transport: transport,
+		Account:   chainmailv1connect.NewAccountServiceClient(hc, baseURL, opts),
+		Admin:     chainmailv1connect.NewAdminServiceClient(hc, baseURL, opts),
 	}
+}
+
+// Close drops the client's idle connections to the daemon, so a daemon shutting
+// down need not wait for them. The client stays usable and redials on the next call.
+func (c *Client) Close() {
+	c.transport.CloseIdleConnections()
 }
 
 func clientHeader(kind string) connect.UnaryInterceptorFunc {

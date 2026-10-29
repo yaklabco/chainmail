@@ -39,6 +39,13 @@ type Options struct {
 	Now func() time.Time
 }
 
+const (
+	// maxRequestBytes caps a request message. Secrets and redirect URLs are far smaller.
+	maxRequestBytes = 1 << 20
+	// auditTimeout bounds an audit write that outlives its request.
+	auditTimeout = 5 * time.Second
+)
+
 // Server is the chainmail daemon.
 type Server struct {
 	opts    Options
@@ -67,8 +74,9 @@ func New(opts Options) (*Server, error) {
 		started: opts.Now(),
 	}
 	mux := http.NewServeMux()
-	mux.Handle(chainmailv1connect.NewAccountServiceHandler(&accountService{s: s}))
-	mux.Handle(chainmailv1connect.NewAdminServiceHandler(&adminService{s: s}))
+	handlerOpts := connect.WithReadMaxBytes(maxRequestBytes)
+	mux.Handle(chainmailv1connect.NewAccountServiceHandler(&accountService{s: s}, handlerOpts))
+	mux.Handle(chainmailv1connect.NewAdminServiceHandler(&adminService{s: s}, handlerOpts))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
@@ -104,15 +112,19 @@ type caller struct {
 	client string
 }
 
-func callerOf(ctx context.Context, h http.Header) caller {
-	c := caller{client: h.Get(api.HeaderClient)}
+// callerOf identifies who sent a request. The middleware refuses requests
+// without a peer, so a missing one here is a wiring bug, and the request
+// fails rather than being audited as uid 0.
+func callerOf(ctx context.Context, h http.Header) (caller, error) {
+	p, ok := PeerFromContext(ctx)
+	if !ok {
+		return caller{}, api.New(connect.CodePermissionDenied, api.ReasonForbidden, "", errors.New("the socket peer is unknown"))
+	}
+	c := caller{uid: p.UID, client: h.Get(api.HeaderClient)}
 	if c.client == "" {
 		c.client = "unknown"
 	}
-	if p, ok := PeerFromContext(ctx); ok {
-		c.uid = p.UID
-	}
-	return c
+	return c, nil
 }
 
 // record writes an audit entry for an action that has run, then returns the
@@ -133,7 +145,11 @@ func (s *Server) record(ctx context.Context, c caller, e audit.Entry, actionErr 
 			e.Result = audit.ResultError
 		}
 	}
-	if err := s.audit.Record(ctx, e); err != nil {
+	// The action has already run, so its row is written even if the client
+	// has gone away.
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+	defer cancel()
+	if err := s.audit.Record(auditCtx, e); err != nil {
 		s.opts.Logger.Error("audit write failed", "action", e.Action, "err", err)
 		return api.New(connect.CodeInternal, api.ReasonInternal, "", fmt.Errorf("%s finished but the audit write failed: %w", e.Action, err))
 	}

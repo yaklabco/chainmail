@@ -98,13 +98,16 @@ func Start(t testing.TB, configTOML string, opts Options) *Harness {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(ctx) }()
+	c := client.New(socket, "test")
 	t.Cleanup(func() {
+		// Idle client connections would hold up the graceful shutdown.
+		c.Close()
 		cancel()
 		if err := <-done; err != nil {
 			t.Errorf("daemon: %v", err)
 		}
 	})
-	return &Harness{Client: client.New(socket, "test"), Vault: v, DB: stateDB, Socket: socket}
+	return &Harness{Client: c, Vault: v, DB: stateDB, Socket: socket}
 }
 
 // AuditRows returns every audit row in insertion order.

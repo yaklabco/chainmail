@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 
 	"connectrpc.com/connect"
@@ -16,22 +17,38 @@ type adminService struct {
 }
 
 func (a *adminService) SetSecret(ctx context.Context, req *connect.Request[chainmailv1.SetSecretRequest]) (*connect.Response[chainmailv1.SetSecretResponse], error) {
-	name := req.Msg.GetName()
-	setErr := a.s.opts.Vault.Set(name, req.Msg.GetValue())
-	// Set can fail after the new value is already in use, when only the
-	// directory sync fails, so the auth state is reset either way. Resetting
-	// it for a value that was not stored costs nothing.
-	a.s.auth.SecretChanged(name)
-	if err := a.s.record(ctx, callerOf(ctx, req.Header()), audit.Entry{Action: "secret.set", Targets: []string{name}}, setErr); err != nil {
+	c, err := callerOf(ctx, req.Header())
+	if err != nil {
+		return nil, err
+	}
+	name, value := req.Msg.GetName(), req.Msg.GetValue()
+	setErr := a.s.opts.Vault.Set(name, value)
+	if setErr == nil || a.s.secretIs(name, value) {
+		a.s.auth.SecretChanged(name)
+	}
+	if err := a.s.record(ctx, c, audit.Entry{Action: "secret.set", Targets: []string{name}}, setErr); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&chainmailv1.SetSecretResponse{}), nil
 }
 
+// secretIs reports whether the vault now serves value under name. Set can
+// fail after the new value is already in use, when only the directory sync
+// fails, and the auth state must then be reset as if it had succeeded. Any
+// other failure leaves the old value, and rejected credentials stay parked.
+func (s *Server) secretIs(name string, value []byte) bool {
+	cur, err := s.opts.Vault.Get(name)
+	return err == nil && len(value) > 0 && bytes.Equal(cur, value)
+}
+
 func (a *adminService) BeginAuthLogin(ctx context.Context, req *connect.Request[chainmailv1.BeginAuthLoginRequest]) (*connect.Response[chainmailv1.BeginAuthLoginResponse], error) {
+	c, err := callerOf(ctx, req.Header())
+	if err != nil {
+		return nil, err
+	}
 	account := req.Msg.GetAccount()
 	ch, loginErr := a.s.auth.BeginLogin(account)
-	if err := a.s.record(ctx, callerOf(ctx, req.Header()), audit.Entry{Account: account, Action: "auth.login.begin"}, loginErr); err != nil {
+	if err := a.s.record(ctx, c, audit.Entry{Account: account, Action: "auth.login.begin"}, loginErr); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&chainmailv1.BeginAuthLoginResponse{
@@ -41,9 +58,13 @@ func (a *adminService) BeginAuthLogin(ctx context.Context, req *connect.Request[
 }
 
 func (a *adminService) FinishAuthLogin(ctx context.Context, req *connect.Request[chainmailv1.FinishAuthLoginRequest]) (*connect.Response[chainmailv1.FinishAuthLoginResponse], error) {
+	c, err := callerOf(ctx, req.Header())
+	if err != nil {
+		return nil, err
+	}
 	account := req.Msg.GetAccount()
 	loginErr := a.s.auth.FinishLogin(ctx, account, req.Msg.GetRedirectUrl())
-	if err := a.s.record(ctx, callerOf(ctx, req.Header()), audit.Entry{Account: account, Action: "auth.login.finish"}, loginErr); err != nil {
+	if err := a.s.record(ctx, c, audit.Entry{Account: account, Action: "auth.login.finish"}, loginErr); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&chainmailv1.FinishAuthLoginResponse{}), nil
