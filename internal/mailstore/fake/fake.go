@@ -1,10 +1,13 @@
 // Package fake is an in-memory mailstore.Store for daemon component tests.
 // Its query evaluation is simple substring matching: it exists to test the
-// daemon's fan-out, merging, cursors and errors, not search semantics.
+// daemon's fan-out, merging, cursors and errors, not search semantics. Its
+// folder model, sources, thread IDs, sizes and stale-ref handling follow
+// internal/mailstore/imapstore, so daemon tests see what a server would give.
 package fake
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -13,6 +16,7 @@ import (
 	"mime"
 	"net/mail"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +34,8 @@ type Attachment struct {
 	Data        []byte
 }
 
-// Message is a fake message. Add assigns its UID.
+// Message is a fake message. Add assigns its UID and, on Gmail accounts, any
+// GmailMsgID or GmailThreadID left zero.
 type Message struct {
 	Folder      string
 	Date        time.Time
@@ -45,21 +50,33 @@ type Message struct {
 	InReplyTo   []string
 	References  []string
 	Attachments []Attachment
-	GmailMsgID  uint64
+	// GmailMsgID is the X-GM-MSGID. When it is zero, Add gives the message
+	// the next unused one from 1000.
+	GmailMsgID uint64
+	// GmailThreadID is Gmail's thread ID, from X-GM-EXT-1. When it is
+	// zero, Add puts the message in the thread of an earlier message with the
+	// same root Message-ID, or else in a new thread.
+	GmailThreadID uint64
+	// InternalDate is when the server received the message. Zero means Date.
+	InternalDate time.Time
 
 	uid uint32
 }
 
 // Store is an in-memory account.
 type Store struct {
-	mu          sync.Mutex
-	account     string
-	gmail       bool
-	now         func() time.Time
+	mu      sync.Mutex
+	account string
+	gmail   bool
+	now     func() time.Time
+	// folders are kept INBOX first, then by name.
 	folders     []mailstore.Folder
 	uidValidity map[string]uint32
 	nextUID     map[string]uint32
 	msgs        []*Message
+	msgIDs      map[uint64]bool
+	threadIDs   map[uint64]bool
+	nextMsgID   uint64
 	fail        map[string]error
 	folderFail  map[string]error
 	streamErr   error
@@ -70,12 +87,15 @@ type Store struct {
 
 var _ mailstore.Store = (*Store)(nil)
 
-// New returns an empty account. Gmail accounts get Gmail's folder names and
-// accept has:, filename: and label:.
+// New returns an empty account. Gmail accounts get Gmail's folders and
+// accept has:, filename: and label:. On Gmail, messages live in All Mail,
+// Trash or Spam, and INBOX, Sent Mail and any label folder are views of All
+// Mail by label, as on the server.
 func New(account string, gmail bool) *Store {
 	s := &Store{
 		account: account, gmail: gmail, now: time.Now,
 		uidValidity: map[string]uint32{}, nextUID: map[string]uint32{},
+		msgIDs: map[uint64]bool{}, threadIDs: map[uint64]bool{}, nextMsgID: 1000,
 		fail: map[string]error{}, folderFail: map[string]error{}, calls: map[string]int{},
 	}
 	if gmail {
@@ -102,29 +122,96 @@ func New(account string, gmail bool) *Store {
 	return s
 }
 
-// AddFolder adds a selectable folder with UIDVALIDITY 1.
+// AddFolder adds a selectable folder with UIDVALIDITY 1. On Gmail a folder
+// other than All Mail, Trash and Spam is a label: it lists the All Mail
+// messages with that label, or \Inbox, \Sent or \Draft for those roles. It
+// panics when the folder already exists.
 func (s *Store) AddFolder(name string, role mailstore.Role) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, ok := s.uidValidity[name]; ok {
+		panic(fmt.Sprintf("fake: folder %q already exists", name))
+	}
 	s.folders = append(s.folders, mailstore.Folder{Name: name, Role: role, Selectable: true})
+	slices.SortStableFunc(s.folders, func(a, b mailstore.Folder) int { return compareFolders(a.Name, b.Name) })
 	s.uidValidity[name] = 1
 	s.nextUID[name] = 1
 }
 
-// Add stores m and returns its ref. A Gmail message without a GmailMsgID gets one.
+// compareFolders orders INBOX first, then by name.
+func compareFolders(a, b string) int {
+	if ai, bi := strings.EqualFold(a, "INBOX"), strings.EqualFold(b, "INBOX"); ai != bi {
+		if ai {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(a, b)
+}
+
+// Add stores a copy of m and returns its ref. InternalDate defaults to Date.
+// Add panics, as a test helper should, when m.Folder does not exist, when a
+// Gmail message is not in All Mail, Trash or Spam, or when an explicit
+// GmailMsgID is already in use.
 func (s *Store) Add(m Message) ref.Ref {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, ok := s.uidValidity[m.Folder]; !ok {
+		panic(fmt.Sprintf("fake: no folder %q; call AddFolder first", m.Folder))
+	}
+	m = cloneMessage(m)
+	if s.gmail {
+		switch s.roleLocked(m.Folder) {
+		case mailstore.RoleAll, mailstore.RoleTrash, mailstore.RoleSpam:
+		default:
+			panic(fmt.Sprintf("fake: Gmail messages live in All Mail, Trash or Spam, not %q; use Labels", m.Folder))
+		}
+		s.assignGmailIDsLocked(&m)
+	} else {
+		m.GmailMsgID, m.GmailThreadID = 0, 0
+	}
+	if m.InternalDate.IsZero() {
+		m.InternalDate = m.Date
+	}
 	m.uid = s.nextUID[m.Folder]
 	s.nextUID[m.Folder]++
-	if s.gmail && m.GmailMsgID == 0 {
-		m.GmailMsgID = uint64(1000 + len(s.msgs))
-	}
-	if !s.gmail {
-		m.GmailMsgID = 0
-	}
 	s.msgs = append(s.msgs, &m)
 	return s.refLocked(&m)
+}
+
+// assignGmailIDsLocked fills in a zero X-GM-MSGID and thread ID. Gmail
+// names a new thread after its first message, so a fresh thread ID is the
+// message's own X-GM-MSGID unless another thread already has it.
+func (s *Store) assignGmailIDsLocked(m *Message) {
+	switch {
+	case m.GmailMsgID == 0:
+		for s.msgIDs[s.nextMsgID] {
+			s.nextMsgID++
+		}
+		m.GmailMsgID = s.nextMsgID
+		s.nextMsgID++
+	case s.msgIDs[m.GmailMsgID]:
+		panic(fmt.Sprintf("fake: X-GM-MSGID %d is already in use", m.GmailMsgID))
+	}
+	s.msgIDs[m.GmailMsgID] = true
+	if m.GmailThreadID == 0 {
+		if root := rootOf(m); root != "" {
+			for _, o := range s.msgs {
+				if rootOf(o) == root {
+					m.GmailThreadID = o.GmailThreadID
+					break
+				}
+			}
+		}
+	}
+	if m.GmailThreadID == 0 {
+		id := m.GmailMsgID
+		for s.threadIDs[id] {
+			id++
+		}
+		m.GmailThreadID = id
+	}
+	s.threadIDs[m.GmailThreadID] = true
 }
 
 // SetNow replaces the clock used for newer_than: and older_than:.
@@ -148,7 +235,7 @@ func (s *Store) Fail(method string, err error) {
 	s.fail[method] = err
 }
 
-// FailFolder makes Search fail in one folder.
+// FailFolder makes Search fail in one folder. A nil err clears it.
 func (s *Store) FailFolder(folder string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -211,7 +298,7 @@ func (s *Store) ListFolders(context.Context) ([]mailstore.Folder, error) {
 	out := slices.Clone(s.folders)
 	for i := range out {
 		for _, m := range s.msgs {
-			if m.Folder != out[i].Name {
+			if !s.inFolderLocked(out[i], m) {
 				continue
 			}
 			out[i].Messages++
@@ -221,6 +308,31 @@ func (s *Store) ListFolders(context.Context) ([]mailstore.Folder, error) {
 		}
 	}
 	return out, nil
+}
+
+// inFolderLocked reports whether m shows in f. On Gmail only All Mail, Trash
+// and Spam hold messages, and every other folder is an All Mail label.
+func (s *Store) inFolderLocked(f mailstore.Folder, m *Message) bool {
+	if !s.gmail {
+		return m.Folder == f.Name
+	}
+	switch f.Role {
+	case mailstore.RoleAll, mailstore.RoleTrash, mailstore.RoleSpam:
+		return m.Folder == f.Name
+	}
+	if s.roleLocked(m.Folder) != mailstore.RoleAll {
+		return false
+	}
+	label := f.Name
+	switch f.Role {
+	case mailstore.RoleInbox:
+		label = `\Inbox`
+	case mailstore.RoleSent:
+		label = `\Sent`
+	case mailstore.RoleDrafts:
+		label = `\Draft`
+	}
+	return hasLabel(m, label)
 }
 
 // Search implements mailstore.Store.
@@ -233,39 +345,48 @@ func (s *Store) Search(_ context.Context, req mailstore.SearchRequest) ([]mailst
 	if err := s.checkSupported(req.Query); err != nil {
 		return nil, err
 	}
-	names, err := s.sourcesLocked(req.In)
-	if err != nil {
-		return nil, err
-	}
+	var names []string
 	if req.Bounds != nil {
 		names = slices.Sorted(maps.Keys(req.Bounds))
-	}
-	var out []mailstore.SourceResult
-	for _, name := range names {
-		res := mailstore.SourceResult{Source: mailstore.Source{Folder: name, UIDValidity: s.uidValidity[name]}}
-		bound, continuing := req.Bounds[name]
-		switch {
-		case s.folderFail[name] != nil:
-			res.Err = s.folderFail[name]
-		case continuing && bound.UIDValidity != res.Source.UIDValidity:
-			res.Err = fmt.Errorf("%w: %s changed since the first page", mailstore.ErrStaleRef, name)
-		default:
-			for i := len(s.msgs) - 1; i >= 0; i-- {
-				m := s.msgs[i]
-				if m.Folder != name || (continuing && bound.Below > 0 && m.uid >= bound.Below) || !s.match(req.Query, m) {
-					continue
-				}
-				res.UIDs = append(res.UIDs, m.uid)
-			}
-			slices.SortFunc(res.UIDs, func(a, b uint32) int { return int(b) - int(a) })
-			res.Count = uint32(len(res.UIDs))
-			if req.CountOnly {
-				res.UIDs = nil
-			}
+	} else {
+		var err error
+		if names, err = s.sourcesLocked(req.In); err != nil {
+			return nil, err
 		}
-		out = append(out, res)
+	}
+	keep := s.inFilter(req.In)
+	out := make([]mailstore.SourceResult, 0, len(names))
+	for _, name := range names {
+		out = append(out, s.searchSourceLocked(name, req, keep))
 	}
 	return out, nil
+}
+
+func (s *Store) searchSourceLocked(name string, req mailstore.SearchRequest, keep func(*Message) bool) mailstore.SourceResult {
+	v, exists := s.uidValidity[name]
+	res := mailstore.SourceResult{Source: mailstore.Source{Folder: name, UIDValidity: v}}
+	bound, continuing := req.Bounds[name]
+	switch {
+	case !exists:
+		res.Err = fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, name)
+	case s.folderFail[name] != nil:
+		res.Err = s.folderFail[name]
+	case continuing && bound.UIDValidity != v:
+		res.Err = fmt.Errorf("%w: %s changed since the first page; search again", mailstore.ErrStaleRef, name)
+	default:
+		for _, m := range s.msgs {
+			if m.Folder != name || (continuing && bound.Below > 0 && m.uid >= bound.Below) || !keep(m) || !s.match(req.Query, m) {
+				continue
+			}
+			res.UIDs = append(res.UIDs, m.uid)
+		}
+		slices.SortFunc(res.UIDs, func(a, b uint32) int { return cmp.Compare(b, a) })
+		res.Count = uint32(len(res.UIDs))
+		if req.CountOnly {
+			res.UIDs = nil
+		}
+	}
+	return res
 }
 
 // FetchSummaries implements mailstore.Store.
@@ -275,7 +396,9 @@ func (s *Store) FetchSummaries(_ context.Context, src mailstore.Source, uids []u
 	if err := s.begin("FetchSummaries"); err != nil {
 		return nil, err
 	}
-	if s.uidValidity[src.Folder] != src.UIDValidity {
+	if v, ok := s.uidValidity[src.Folder]; !ok {
+		return nil, fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, src.Folder)
+	} else if v != src.UIDValidity {
 		return nil, fmt.Errorf("%w: %s changed", mailstore.ErrStaleRef, src.Folder)
 	}
 	var out []mailstore.Summary
@@ -304,8 +427,9 @@ func (s *Store) FetchMessages(_ context.Context, refs []ref.Ref) []mailstore.Mes
 			continue
 		}
 		out[i].Message = &mailstore.Message{
-			Summary: s.summaryLocked(m, mailstore.SummaryOptions{}), Cc: m.Cc, MessageID: m.MessageID,
-			InReplyTo: m.InReplyTo, References: m.References, Raw: rawMessage(m, false), Attachments: attachments(m),
+			Summary: s.summaryLocked(m, mailstore.SummaryOptions{}), Cc: slices.Clone(m.Cc), MessageID: m.MessageID,
+			InReplyTo: slices.Clone(m.InReplyTo), References: slices.Clone(m.References),
+			Raw: rawMessage(m, false), Attachments: attachments(m),
 		}
 	}
 	return out
@@ -334,7 +458,7 @@ func (s *Store) StreamPart(_ context.Context, r ref.Ref, part string) (mailstore
 		}
 		a := m.Attachments[i]
 		data = slices.Clone(a.Data)
-		info = mailstore.PartInfo{Filename: a.Filename, ContentType: a.ContentType, Size: int64(len(a.Data))}
+		info = mailstore.PartInfo{Filename: a.Filename, ContentType: a.ContentType, Size: encodedSize(a.Data)}
 	}
 	var rd io.Reader = bytes.NewReader(data)
 	if s.streamErr != nil {
@@ -343,7 +467,10 @@ func (s *Store) StreamPart(_ context.Context, r ref.Ref, part string) (mailstore
 	return info, io.NopCloser(rd), nil
 }
 
-// Thread implements mailstore.Store.
+// Thread implements mailstore.Store. On Gmail it groups All Mail by
+// GmailThreadID. Elsewhere it takes the messages outside Trash and Junk
+// whose Message-ID is the root or whose References contain it. Either way r
+// is included, and the result is oldest first by date.
 func (s *Store) Thread(_ context.Context, r ref.Ref) ([]ref.Ref, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -354,17 +481,30 @@ func (s *Store) Thread(_ context.Context, r ref.Ref) ([]ref.Ref, error) {
 	if err != nil {
 		return nil, err
 	}
-	root := mailstore.RootMessageID(seed.References, seed.InReplyTo, seed.MessageID)
-	out := []ref.Ref{s.refLocked(seed)}
+	root := rootOf(seed)
+	members := []*Message{seed}
 	for _, m := range s.msgs {
-		if m == seed || root == "" || s.roleLocked(m.Folder) == mailstore.RoleTrash || s.roleLocked(m.Folder) == mailstore.RoleSpam {
-			continue
-		}
-		if mailstore.RootMessageID(m.References, m.InReplyTo, m.MessageID) == root {
-			out = append(out, s.refLocked(m))
+		if m != seed && s.inThreadLocked(seed, root, m) {
+			members = append(members, m)
 		}
 	}
+	slices.SortStableFunc(members, func(a, b *Message) int { return dateOf(a).Compare(dateOf(b)) })
+	out := make([]ref.Ref, len(members))
+	for i, m := range members {
+		out[i] = s.refLocked(m)
+	}
 	return out, nil
+}
+
+func (s *Store) inThreadLocked(seed *Message, root string, m *Message) bool {
+	role := s.roleLocked(m.Folder)
+	if s.gmail {
+		return role == mailstore.RoleAll && m.GmailThreadID == seed.GmailThreadID
+	}
+	if root == "" || role == mailstore.RoleTrash || role == mailstore.RoleSpam {
+		return false
+	}
+	return trimID(m.MessageID) == root || slices.Contains(mailstore.MessageIDs(m.References), root)
 }
 
 // Close implements mailstore.Store.
@@ -428,31 +568,115 @@ func (s *Store) roleLocked(folder string) mailstore.Role {
 	return mailstore.RoleNone
 }
 
-func (s *Store) sourcesLocked(in string) ([]string, error) {
-	var out []string
-	lower := strings.ToLower(in)
+func (s *Store) byRoleLocked(role mailstore.Role) string {
 	for _, f := range s.folders {
-		switch {
-		case lower == "" && s.gmail:
-			if f.Role == mailstore.RoleAll {
-				out = append(out, f.Name)
-			}
-		case lower == "":
-			if f.Role != mailstore.RoleTrash && f.Role != mailstore.RoleSpam {
-				out = append(out, f.Name)
-			}
-		case lower == "anywhere":
-			if !s.gmail || f.Role == mailstore.RoleAll || f.Role == mailstore.RoleTrash || f.Role == mailstore.RoleSpam {
-				out = append(out, f.Name)
-			}
-		case string(f.Role) == lower || (lower == "junk" && f.Role == mailstore.RoleSpam) || f.Name == in:
-			out = append(out, f.Name)
+		if f.Selectable && f.Role == role {
+			return f.Name
 		}
+	}
+	return ""
+}
+
+// sourcesLocked picks the folders a search runs in, as imapstore's
+// gmailSources and standardSources do.
+func (s *Store) sourcesLocked(in string) ([]string, error) {
+	if s.gmail {
+		return s.gmailSourcesLocked(in)
+	}
+	return s.standardSourcesLocked(in)
+}
+
+// gmailSourcesLocked searches All Mail, and adds Trash and Spam only for
+// in:trash, in:spam and in:anywhere, since they are not part of All Mail.
+func (s *Store) gmailSourcesLocked(in string) ([]string, error) {
+	want := []mailstore.Role{mailstore.RoleAll}
+	switch strings.ToLower(in) {
+	case "trash":
+		want = []mailstore.Role{mailstore.RoleTrash}
+	case "spam", "junk":
+		want = []mailstore.Role{mailstore.RoleSpam}
+	case "anywhere":
+		want = []mailstore.Role{mailstore.RoleAll, mailstore.RoleTrash, mailstore.RoleSpam}
+	}
+	var out []string
+	for _, r := range want {
+		if name := s.byRoleLocked(r); name != "" {
+			out = append(out, name)
+		}
+	}
+	if slices.Contains(want, mailstore.RoleAll) && s.byRoleLocked(mailstore.RoleAll) == "" {
+		return nil, fmt.Errorf("%w: no All Mail folder", mailstore.ErrNotFound)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("%w: no folder for in:%s", mailstore.ErrNotFound, in)
 	}
 	return out, nil
+}
+
+// standardSourcesLocked searches every folder but Trash and Junk, or the
+// folders in: names by role or by exact name.
+func (s *Store) standardSourcesLocked(in string) ([]string, error) {
+	lower := strings.ToLower(in)
+	var out []string
+	switch lower {
+	case "", "anywhere":
+		for _, f := range s.folders {
+			if f.Selectable && (lower == "anywhere" || (f.Role != mailstore.RoleTrash && f.Role != mailstore.RoleSpam)) {
+				out = append(out, f.Name)
+			}
+		}
+		return out, nil
+	case "inbox", "sent", "drafts", "archive", "trash", "spam", "junk":
+		role := mailstore.Role(lower)
+		if lower == "junk" {
+			role = mailstore.RoleSpam
+		}
+		for _, f := range s.folders {
+			if f.Selectable && f.Role == role {
+				out = append(out, f.Name)
+			}
+		}
+		if len(out) == 0 {
+			return nil, fmt.Errorf("%w: no folder has the %s role", mailstore.ErrNotFound, role)
+		}
+		return out, nil
+	default:
+		for _, f := range s.folders {
+			if f.Selectable && f.Name == in {
+				return []string{f.Name}, nil
+			}
+		}
+		return nil, fmt.Errorf("%w: no folder named %q", mailstore.ErrNotFound, in)
+	}
+}
+
+// gmailLabels are the system labels Gmail's in: names. X-GM-LABELS reports
+// them with a backslash.
+var gmailLabels = map[string]string{
+	"inbox": `\Inbox`, "sent": `\Sent`, "drafts": `\Draft`, "starred": `\Starred`, "important": `\Important`,
+}
+
+// inFilter is what Gmail's own in: does within a source, where imapstore
+// passes it through in X-GM-RAW. in:archive is All Mail without \Inbox, and
+// any other name is a label. Standard accounts choose folders instead, so
+// every message passes.
+func (s *Store) inFilter(in string) func(*Message) bool {
+	lower := strings.ToLower(in)
+	switch {
+	case !s.gmail, lower == "", lower == "trash", lower == "spam", lower == "junk", lower == "anywhere":
+		return func(*Message) bool { return true }
+	case lower == "archive":
+		return func(m *Message) bool { return !hasLabel(m, `\Inbox`) }
+	}
+	label := in
+	if l, ok := gmailLabels[lower]; ok {
+		label = l
+	}
+	return func(m *Message) bool { return hasLabel(m, label) }
+}
+
+func hasLabel(m *Message, label string) bool {
+	return slices.ContainsFunc(m.Labels, func(l string) bool { return strings.EqualFold(l, label) })
 }
 
 func (s *Store) checkSupported(n *query.Node) error {
@@ -525,25 +749,28 @@ func (s *Store) matchTerm(n *query.Node, m *Message) bool {
 	case query.FieldFilename:
 		return slices.ContainsFunc(m.Attachments, func(a Attachment) bool { return contains(a.Filename) })
 	case query.FieldLabel:
-		return slices.ContainsFunc(m.Labels, func(l string) bool { return strings.EqualFold(l, n.Value) })
+		return hasLabel(m, n.Value)
 	case query.FieldAfter, query.FieldBefore:
+		// IMAP SINCE and BEFORE compare the internal date.
 		d, _ := query.ParseDate(n.Value) // the tree was validated
 		if n.Field == query.FieldAfter {
-			return !m.Date.Before(d)
+			return !m.InternalDate.Before(d)
 		}
-		return m.Date.Before(d)
+		return m.InternalDate.Before(d)
 	case query.FieldNewerThan, query.FieldOlderThan:
 		cut := ageCutoff(s.now(), n.Value)
 		if n.Field == query.FieldNewerThan {
-			return !m.Date.Before(cut)
+			return !m.InternalDate.Before(cut)
 		}
-		return m.Date.Before(cut)
+		return m.InternalDate.Before(cut)
 	case query.FieldLarger, query.FieldSmaller:
+		// RFC822.SIZE, the same value as Summary.Size.
 		size, _ := query.ParseSize(n.Value)
+		raw := int64(len(rawMessage(m, true)))
 		if n.Field == query.FieldLarger {
-			return int64(len(m.Body)) > size
+			return raw > size
 		}
-		return int64(len(m.Body)) < size
+		return raw < size
 	default:
 		return false
 	}
@@ -565,11 +792,13 @@ func ageCutoff(now time.Time, v string) time.Time {
 
 func (s *Store) summaryLocked(m *Message, opts mailstore.SummaryOptions) mailstore.Summary {
 	sum := mailstore.Summary{
-		Ref: s.refLocked(m), Date: m.Date, InternalDate: m.Date, From: m.From, To: m.To, Subject: m.Subject,
+		Ref: s.refLocked(m), Date: dateOf(m), InternalDate: m.InternalDate,
+		From: slices.Clone(m.From), To: slices.Clone(m.To), Subject: m.Subject,
 		Flags: slices.Clone(m.Flags), Size: int64(len(rawMessage(m, true))), HasAttachment: len(m.Attachments) > 0,
-		ThreadID: mailstore.ThreadKey(mailstore.RootMessageID(m.References, m.InReplyTo, m.MessageID)),
+		ThreadID: mailstore.ThreadKey(rootOf(m)),
 	}
 	if s.gmail {
+		sum.ThreadID = strconv.FormatUint(m.GmailThreadID, 16)
 		sum.Labels = slices.Clone(m.Labels)
 	}
 	if opts.Snippets {
@@ -582,12 +811,46 @@ func (s *Store) summaryLocked(m *Message, opts mailstore.SummaryOptions) mailsto
 	return sum
 }
 
+// dateOf is the Date header, or the internal date when there is none.
+func dateOf(m *Message) time.Time {
+	if m.Date.IsZero() {
+		return m.InternalDate
+	}
+	return m.Date
+}
+
+func rootOf(m *Message) string {
+	return mailstore.RootMessageID(m.References, m.InReplyTo, m.MessageID)
+}
+
+// trimID drops white space and angle brackets around a Message-ID.
+func trimID(id string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(id), "<"), ">")
+}
+
+// encodedSize is the base64 size of data, which is what a server reports
+// for an attachment part.
+func encodedSize(data []byte) int64 {
+	return int64(base64.StdEncoding.EncodedLen(len(data)))
+}
+
 func attachments(m *Message) []mailstore.Attachment {
 	var out []mailstore.Attachment
 	for _, a := range m.Attachments {
-		out = append(out, mailstore.Attachment{Part: a.Part, Filename: a.Filename, ContentType: a.ContentType, Size: int64(len(a.Data))})
+		out = append(out, mailstore.Attachment{Part: a.Part, Filename: a.Filename, ContentType: a.ContentType, Size: encodedSize(a.Data)})
 	}
 	return out
+}
+
+func cloneMessage(m Message) Message {
+	m.From, m.To, m.Cc = slices.Clone(m.From), slices.Clone(m.To), slices.Clone(m.Cc)
+	m.Flags, m.Labels = slices.Clone(m.Flags), slices.Clone(m.Labels)
+	m.InReplyTo, m.References = slices.Clone(m.InReplyTo), slices.Clone(m.References)
+	m.Attachments = slices.Clone(m.Attachments)
+	for i := range m.Attachments {
+		m.Attachments[i].Data = slices.Clone(m.Attachments[i].Data)
+	}
+	return m
 }
 
 // rawMessage builds m as MIME. withAttachments adds the attachment parts,
@@ -603,6 +866,13 @@ func rawMessage(m *Message, withAttachments bool) []byte {
 		}
 		return strings.Join(parts, ", ")
 	}
+	ids := func(entries []string) string {
+		list := mailstore.MessageIDs(entries)
+		for i, id := range list {
+			list[i] = "<" + id + ">"
+		}
+		return strings.Join(list, " ")
+	}
 	if len(m.From) > 0 {
 		header("From", addrs(m.From))
 	}
@@ -616,8 +886,14 @@ func rawMessage(m *Message, withAttachments bool) []byte {
 	if !m.Date.IsZero() {
 		header("Date", m.Date.Format(time.RFC1123Z))
 	}
-	if m.MessageID != "" {
-		header("Message-ID", "<"+m.MessageID+">")
+	if id := trimID(m.MessageID); id != "" {
+		header("Message-ID", "<"+id+">")
+	}
+	if v := ids(m.InReplyTo); v != "" {
+		header("In-Reply-To", v)
+	}
+	if v := ids(m.References); v != "" {
+		header("References", v)
 	}
 	header("MIME-Version", "1.0")
 	if !withAttachments || len(m.Attachments) == 0 {

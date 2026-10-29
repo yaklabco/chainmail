@@ -78,16 +78,24 @@ type TextSample struct {
 type Summary struct {
 	Ref ref.Ref
 	// Date is the Date header, or InternalDate when the header is missing.
-	Date         time.Time
+	Date time.Time
+	// InternalDate is when the server received the message. Searches by age
+	// and date, and the merge across sources, use it.
 	InternalDate time.Time
 	From         []Address
 	To           []Address
 	Subject      string
 	Flags        []string
-	Size         int64
+	// Size is the whole raw message in bytes, as RFC822.SIZE reports it.
+	// larger: and smaller: compare against it.
+	Size int64
 	// HasAttachment is true when any part is an attachment.
 	HasAttachment bool
-	ThreadID      string
+	// ThreadID groups the messages of one thread. On Google accounts it is
+	// Gmail's own thread ID, from X-GM-EXT-1, in lowercase hexadecimal.
+	// Elsewhere it is ThreadKey of the root Message-ID, or "" when the
+	// message has none.
+	ThreadID string
 	// Labels are Gmail labels, on Google accounts.
 	Labels []string
 	// Preview is the server's PREVIEW text, when snippets were asked for and
@@ -136,7 +144,9 @@ type Source struct {
 }
 
 // Bound continues a search in one folder: only UIDs below Below, and only if
-// the folder still has UIDValidity. Below 0 means no bound.
+// the folder still has UIDValidity. Below 0 means no bound. A folder whose
+// UIDVALIDITY changed fails on its own, as an ErrStaleRef in its
+// SourceResult.Err, and the other bounded folders are still searched.
 type Bound struct {
 	UIDValidity uint32
 	Below       uint32
@@ -146,11 +156,15 @@ type Bound struct {
 type SearchRequest struct {
 	// Query has had its in: and account: terms split off. Nil matches everything.
 	Query *query.Node
-	// In is the in: value, or empty.
+	// In is the in: value, or empty. On Google accounts in:trash, in:spam and
+	// in:anywhere add those folders as sources, and every other value is a
+	// filter within All Mail, as Gmail's own in: is.
 	In        string
 	CountOnly bool
 	// Bounds, when not nil, continues a search: exactly these folders are
-	// searched, each within its bound.
+	// searched, each within its bound, and In does not choose sources again.
+	// On Google accounts In still filters within All Mail. A stale bound is a
+	// per-source ErrStaleRef, not an error for the whole search.
 	Bounds map[string]Bound
 }
 
@@ -173,7 +187,10 @@ type SummaryOptions struct {
 type PartInfo struct {
 	Filename    string
 	ContentType string
-	Size        int64
+	// Size is the encoded size the server reports for the part, as in
+	// Attachment.Size, so it can differ from the decoded bytes streamed. For
+	// the whole message it is the raw size, as in Summary.Size.
+	Size int64
 }
 
 // Store reads one account. Every method is safe for concurrent use, and none
@@ -196,6 +213,10 @@ type Store interface {
 	// never fetched again, so a failure mid-stream is final.
 	StreamPart(ctx context.Context, r ref.Ref, part string) (PartInfo, io.ReadCloser, error)
 	// Thread returns the refs of every message in r's thread, r included.
+	// On Google accounts the thread is every message in All Mail with r's
+	// Gmail thread ID. Elsewhere it is every message outside Trash and Junk
+	// whose Message-ID is r's root Message-ID or whose References contain
+	// it. The order is unspecified: callers sort.
 	Thread(ctx context.Context, r ref.Ref) ([]ref.Ref, error)
 	// Close logs out of every connection, within 5 seconds.
 	Close() error

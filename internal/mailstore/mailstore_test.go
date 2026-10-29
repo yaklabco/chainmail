@@ -1,6 +1,9 @@
 package mailstore
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestRootMessageID(t *testing.T) {
 	t.Parallel()
@@ -16,6 +19,13 @@ func TestRootMessageID(t *testing.T) {
 		{"own id", nil, nil, "<me@x>", "me@x"},
 		{"blank entries skipped", []string{" ", "<r@x>"}, nil, "me@x", "r@x"},
 		{"none", nil, nil, "", ""},
+		{"raw References header", []string{"<root@x> <mid@x>"}, nil, "me@x", "root@x"},
+		{"folded References header", []string{"\r\n\t<root@x>\r\n <mid@x>"}, nil, "me@x", "root@x"},
+		{"raw In-Reply-To header", nil, []string{" <parent@x> <other@x>"}, "me@x", "parent@x"},
+		{"bare brackets skipped", []string{"<>", "<r@x>"}, nil, "me@x", "r@x"},
+		{"adjacent ids", []string{"<root@x><mid@x>"}, nil, "me@x", "root@x"},
+		{"comment before the id", []string{"(old) <root@x>"}, nil, "me@x", "root@x"},
+		{"phrase In-Reply-To", nil, []string{"Your message of Monday <parent@x>"}, "me@x", "parent@x"},
 	}
 	for _, tt := range tests {
 		if got := RootMessageID(tt.references, tt.inReplyTo, tt.messageID); got != tt.want {
@@ -32,5 +42,13 @@ func TestThreadKey(t *testing.T) {
 	}
 	if ThreadKey("") != "" {
 		t.Error("ThreadKey of no root should be empty")
+	}
+}
+
+func TestMessageIDs(t *testing.T) {
+	t.Parallel()
+	got := MessageIDs([]string{"<a@x> <b@x>", "c@x", "(note) <d@x><e@x>", " ", "<>"})
+	if want := []string{"a@x", "b@x", "c@x", "d@x", "e@x"}; !slices.Equal(got, want) {
+		t.Errorf("MessageIDs = %q, want %q", got, want)
 	}
 }
