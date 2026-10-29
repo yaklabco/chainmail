@@ -868,6 +868,24 @@ func TestStreamDecodeErrorIsInternal(t *testing.T) {
 	}
 }
 
+// TestGetThreadLeavesOutAMemberTheServerRefused checks that a member whose
+// text the server refused, which the IMAP store reports as an error with no
+// sentinel, is listed in omitted_refs rather than failing the thread.
+func TestGetThreadLeavesOutAMemberTheServerRefused(t *testing.T) {
+	t.Parallel()
+	m := startFaultyMail(t)
+	root := m.host.Add(fake.Message{Folder: "INBOX", Date: daysAgo(2), Subject: "root", MessageID: "r@x"}).String()
+	refused := m.host.Add(fake.Message{Folder: "INBOX", Date: daysAgo(1), Subject: "refused", References: []string{"r@x"}}).String()
+	m.hostFaults.setFix(failRefs(map[string]error{refused: fmt.Errorf("the server refused to read the text: NO %s", serverText)}))
+	resp, err := m.thread(t, root)
+	if err != nil {
+		t.Fatalf("GetThread = %v, want the thread without the refused member", err)
+	}
+	if len(resp.GetMessages()) != 1 || !resp.GetTruncated() || !slices.Equal(resp.GetOmittedRefs(), []string{refused}) {
+		t.Errorf("messages %d, truncated %t, omitted %v", len(resp.GetMessages()), resp.GetTruncated(), resp.GetOmittedRefs())
+	}
+}
+
 // TestStreamClientGoneIsAuditedAsTimeout checks that a client hanging up
 // mid-stream is audited as TIMEOUT, not INTERNAL.
 func TestStreamClientGoneIsAuditedAsTimeout(t *testing.T) {
