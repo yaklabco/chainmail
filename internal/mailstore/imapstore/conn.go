@@ -72,7 +72,7 @@ func (c *conn) do(ctx context.Context, f func() error) error {
 // Shutting the connection releases f only while every command f has sent
 // is being read. imapclient's reader waits at each literal until the command
 // it belongs to takes it, and that wait does not end when the socket closes.
-// So f must read pipelined FETCHes concurrently, as collectAll does, never
+// So f must read pipelined FETCHes concurrently, as collector does, never
 // one after another.
 func (c *conn) pipeline(ctx context.Context, f func(progress func()) error) error {
 	if c.Dead() {
@@ -107,6 +107,10 @@ type watchdog struct {
 	d     time.Duration
 	mu    sync.Mutex
 	timer *time.Timer
+	// deadline is when fire is due. A run of the timer that a reset
+	// overtook finds it in the future and leaves the firing to the run the
+	// reset scheduled.
+	deadline time.Time
 	// fired is set before fire runs, and stopped by stop. Once either is
 	// set, reset does nothing.
 	fired, stopped bool
@@ -116,9 +120,10 @@ func startWatchdog(d time.Duration, fire func()) *watchdog {
 	w := &watchdog{d: d}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.deadline = time.Now().Add(d)
 	w.timer = time.AfterFunc(d, func() {
 		w.mu.Lock()
-		if w.stopped || w.fired {
+		if w.stopped || w.fired || time.Now().Before(w.deadline) {
 			w.mu.Unlock()
 			return
 		}
@@ -134,6 +139,7 @@ func (w *watchdog) reset() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if !w.fired && !w.stopped {
+		w.deadline = time.Now().Add(w.d)
 		w.timer.Reset(w.d)
 	}
 }

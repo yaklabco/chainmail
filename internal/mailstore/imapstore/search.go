@@ -241,17 +241,17 @@ func (c *conn) samples(ctx context.Context, sums []mailstore.Summary, structures
 	}
 	return c.pipeline(ctx, func(progress func()) error {
 		var ps []pending
-		var cmds []*imapclient.FetchCommand
+		col := newCollector(len(sums), progress)
 		for i := range sums {
 			path, part := textLeaf(structures[i])
 			if part == nil {
 				continue
 			}
 			sec := &imap.FetchItemBodySection{Part: path, Peek: true, Partial: &imap.SectionPartial{Size: mailstore.SampleBytes}}
-			cmds = append(cmds, c.client().Fetch(imap.UIDSetNum(imap.UID(sums[i].Ref.UID)), &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{sec}}))
+			col.add(len(ps), c.client().Fetch(imap.UIDSetNum(imap.UID(sums[i].Ref.UID)), &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{sec}}))
 			ps = append(ps, pending{i: i, part: part, section: sec})
 		}
-		replies, errs := collectAll(cmds, progress)
+		replies, errs := col.wait()
 		for k, p := range ps {
 			var refusal *imap.Error
 			switch err := errs[k]; {
