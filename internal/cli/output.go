@@ -201,10 +201,11 @@ func messagesText(w io.Writer, loc *time.Location, items []*chainmailv1.GetItem)
 	return writeString(w, b.String())
 }
 
-// threadText prints a thread oldest first. When the daemon cut the thread
-// to fit its response cap, a closing note lists the get commands that fetch
-// the newer messages it left out.
-func threadText(w io.Writer, loc *time.Location, r *chainmailv1.GetThreadResponse) error {
+// threadText prints a thread oldest first. When the daemon left members
+// out, because the thread did not fit its response cap or because a member
+// could not be read, a closing note lists the get commands that fetch them,
+// with --full when the thread was read with it.
+func threadText(w io.Writer, loc *time.Location, r *chainmailv1.GetThreadResponse, full bool) error {
 	var b strings.Builder
 	for i, m := range r.GetMessages() {
 		if i > 0 {
@@ -220,9 +221,13 @@ func threadText(w io.Writer, loc *time.Location, r *chainmailv1.GetThreadRespons
 		if len(omitted) == 1 {
 			noun = "message"
 		}
-		fmt.Fprintf(&b, "[%d newer %s omitted (response too large); fetch them with:]\n", len(omitted), noun)
+		fmt.Fprintf(&b, "[%d %s omitted: too large or unreadable; fetch them with:]\n", len(omitted), noun)
+		get := "chainmail get"
+		if full {
+			get += " --full"
+		}
 		for batch := range slices.Chunk(omitted, maxGetRefs) {
-			fmt.Fprintf(&b, "  chainmail get %s\n", strings.Join(batch, " "))
+			fmt.Fprintf(&b, "  %s %s\n", get, strings.Join(batch, " "))
 		}
 	}
 	return writeString(w, b.String())

@@ -357,10 +357,17 @@ func TestThreadTextShowsOmittedRefs(t *testing.T) {
 		OmittedRefs: []string{"cm1:host:INBOX:1:3", "cm1:host:INBOX:1:4"},
 	}
 	var buf bytes.Buffer
-	if err := threadText(&buf, time.UTC, resp); err != nil {
+	if err := threadText(&buf, time.UTC, resp, false); err != nil {
 		t.Fatal(err)
 	}
 	golden(t, "thread_truncated_text", buf.String())
+	buf.Reset()
+	if err := threadText(&buf, time.UTC, resp, true); err != nil {
+		t.Fatal(err)
+	}
+	if want := "\n  chainmail get --full cm1:host:INBOX:1:3 cm1:host:INBOX:1:4\n"; !strings.HasSuffix(buf.String(), want) {
+		t.Errorf("--full thread text ends %q, want %q", buf.String()[max(0, buf.Len()-120):], want)
+	}
 }
 
 // Render may trim a hostile body down to nothing. That is still a message.

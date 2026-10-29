@@ -197,7 +197,7 @@ func newThreadCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 				return err
 			}
 			if g.table() {
-				return threadText(env.Stdout, env.location(), resp.Msg)
+				return threadText(env.Stdout, env.location(), resp.Msg, full)
 			}
 			return writeProto(env.Stdout, resp.Msg)
 		},
