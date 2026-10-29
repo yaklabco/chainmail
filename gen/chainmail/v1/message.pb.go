@@ -1769,14 +1769,17 @@ func (x *GetThreadRequest) GetFull() bool {
 type GetThreadResponse struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	ThreadId string                 `protobuf:"bytes,1,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
-	// Oldest first.
+	// Oldest first. A member deleted or moved since the thread was listed is
+	// left out without a trace.
 	Messages  []*Message             `protobuf:"bytes,2,rep,name=messages,proto3" json:"messages,omitempty"`
 	Source    string                 `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`
 	FetchedAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=fetched_at,json=fetchedAt,proto3" json:"fetched_at,omitempty"`
-	// The whole thread would not fit in a 16 MiB response, so messages holds
-	// the oldest messages that fit and omitted_refs the rest.
+	// Some members are not in messages: omitted_refs lists them.
 	Truncated bool `protobuf:"varint,5,opt,name=truncated,proto3" json:"truncated,omitempty"`
-	// Refs of the newer messages left out, oldest first. Pass them to Get.
+	// Refs of the members left out. First the newer messages that would push
+	// the response past 16 MiB, oldest first. Then any member that could not
+	// be read, such as a message too malformed to parse, which does not fail
+	// the thread. Pass them to Get, which returns each message or its error.
 	OmittedRefs   []string `protobuf:"bytes,6,rep,name=omitted_refs,json=omittedRefs,proto3" json:"omitted_refs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

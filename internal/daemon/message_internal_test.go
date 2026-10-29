@@ -206,7 +206,7 @@ func TestFitPrefix(t *testing.T) {
 		kept, dropped []int
 		limit, want   int
 	}{
-		{"all fit", 10, []int{20, 20}, []int{1, 1}, 50, 2},
+		{"all fit", 10, []int{20, 20}, []int{1, 1}, 100, 2},
 		{"exactly at the limit", 10, []int{20, 20}, []int{1, 1}, 50, 2},
 		{"the second crosses", 10, []int{20, 30}, []int{1, 1}, 50, 1},
 		{"a later small one is cut too", 10, []int{20, 30, 1}, []int{1, 1, 1}, 50, 1},

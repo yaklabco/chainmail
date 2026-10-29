@@ -57,12 +57,50 @@ func itemError(err error) *chainmailv1.ItemError {
 	return &chainmailv1.ItemError{Reason: d.GetReason(), Message: cerr.Message(), Hint: d.GetHint()}
 }
 
+// errUnparsable stands in for a per-message failure with reason INTERNAL.
+// Such a failure comes from parsing the message, and parse errors quote the
+// bytes they choke on, so none of its text leaves the daemon: header bytes
+// from the sender are an injection channel.
+var errUnparsable = errors.New("the message could not be parsed")
+
+// apiReason returns the API reason err maps to.
+func apiReason(err error) string { return api.Detail(toConnectError(err)).GetReason() }
+
+// messageErr returns the error to report for a failure of one message, from
+// a store result or from rendering: err itself, or errUnparsable when err
+// maps to INTERNAL. Every per-message error passes through it.
+func messageErr(err error) error {
+	if apiReason(err) == api.ReasonInternal {
+		return errUnparsable
+	}
+	return err
+}
+
+// callLevel reports whether a failure of one message means the whole call
+// failed: the server or the login is down, or time ran out, so the other
+// messages are no more readable than this one.
+func callLevel(err error) bool {
+	switch apiReason(err) {
+	case api.ReasonServerUnavailable, api.ReasonTimeout, api.ReasonAuthRequired, api.ReasonAuthRejected:
+		return true
+	default:
+		return false
+	}
+}
+
+// gone reports whether err says the message went away since its ref
+// was listed.
+func gone(err error) bool {
+	return errors.Is(err, mailstore.ErrNotFound) || errors.Is(err, mailstore.ErrStaleRef)
+}
+
 // renderMessage renders msg's body with the daemon's body_limit and returns
-// the API form. msg may be shared with other items, so it is only read.
+// the API form. msg may be shared with other items, so it is only read. A
+// render error is always errUnparsable.
 func (m *messageService) renderMessage(msg *mailstore.Message, full bool) (*chainmailv1.Message, error) {
 	body, err := render.Render(msg.Raw, render.Options{Limit: m.s.opts.Config.Daemon.BodyLimitBytes(), Full: full})
 	if err != nil {
-		return nil, fmt.Errorf("rendering %s: %w", msg.Summary.Ref, err)
+		return nil, errUnparsable
 	}
 	return messageProto(msg, body), nil
 }
@@ -175,7 +213,7 @@ func (m *messageService) get(ctx context.Context, req *chainmailv1.GetRequest) (
 
 func (m *messageService) fill(item *chainmailv1.GetItem, res mailstore.MessageResult, full bool) {
 	if res.Err != nil {
-		item.Result = &chainmailv1.GetItem_Error{Error: itemError(res.Err)}
+		item.Result = &chainmailv1.GetItem_Error{Error: itemError(messageErr(res.Err))}
 		return
 	}
 	msg, err := m.renderMessage(res.Message, full)
@@ -186,9 +224,10 @@ func (m *messageService) fill(item *chainmailv1.GetItem, res mailstore.MessageRe
 	item.Result = &chainmailv1.GetItem_Message{Message: msg}
 }
 
-// capItems keeps resp within maxResponseBytes: the item that would push it
-// past the cap fails with errTooLarge, and so does every later one, so a
-// caller can retry from the first failed item on.
+// capItems keeps resp within maxResponseBytes: the message item that would
+// push it past the cap fails with errTooLarge, and so does every later
+// message item, so a caller can retry from the first failed item on. An
+// item that already failed keeps its own error, which is small.
 func capItems(resp *chainmailv1.GetResponse) {
 	tooLarge := func(it *chainmailv1.GetItem) *chainmailv1.GetItem {
 		return &chainmailv1.GetItem{Ref: it.GetRef(), Result: &chainmailv1.GetItem_Error{Error: itemError(errTooLarge)}}
@@ -197,13 +236,18 @@ func capItems(resp *chainmailv1.GetResponse) {
 	dropped := make([]int, len(resp.Items))
 	for i, it := range resp.Items {
 		kept[i] = elemSize(1, proto.Size(it))
-		dropped[i] = elemSize(1, proto.Size(tooLarge(it)))
+		dropped[i] = kept[i]
+		if it.GetMessage() != nil {
+			dropped[i] = elemSize(1, proto.Size(tooLarge(it)))
+		}
 	}
 	items := resp.Items
 	resp.Items = nil
 	k := fitPrefix(proto.Size(resp), kept, dropped, maxResponseBytes)
 	for i := k; i < len(items); i++ {
-		items[i] = tooLarge(items[i])
+		if items[i].GetMessage() != nil {
+			items[i] = tooLarge(items[i])
+		}
 	}
 	resp.Items = items
 }
@@ -248,21 +292,30 @@ func (m *messageService) thread(ctx context.Context, req *chainmailv1.GetThreadR
 		return nil, err
 	}
 	var msgs []*mailstore.Message
-	var vanished error
+	var unreadable []string
+	var lost error
 	for i, res := range st.FetchMessages(ctx, refs) {
-		switch {
-		case res.Err == nil:
+		if res.Err == nil {
 			msgs = append(msgs, res.Message)
-		case sameMessage(refs[i], seed):
-			return nil, res.Err
-		case errors.Is(res.Err, mailstore.ErrNotFound), errors.Is(res.Err, mailstore.ErrStaleRef):
-			vanished = res.Err // a member that went away since Thread is left out
+			continue
+		}
+		err := messageErr(res.Err)
+		switch {
+		case callLevel(err):
+			return nil, err
+		case gone(err) && sameMessage(refs[i], seed):
+			return nil, err
+		case gone(err):
+			lost = err // a member that went away since Thread is left out
 		default:
-			return nil, res.Err
+			// A permanent failure of one message is hostile or broken
+			// input: it is listed in omitted_refs rather than failing the
+			// thread.
+			unreadable = append(unreadable, refs[i].String())
 		}
 	}
-	if len(msgs) == 0 && vanished != nil {
-		return nil, vanished
+	if len(msgs) == 0 && len(unreadable) == 0 && lost != nil {
+		return nil, lost
 	}
 	slices.SortStableFunc(msgs, func(a, b *mailstore.Message) int {
 		if c := a.Summary.Date.Compare(b.Summary.Date); c != 0 {
@@ -271,16 +324,19 @@ func (m *messageService) thread(ctx context.Context, req *chainmailv1.GetThreadR
 		return a.Summary.InternalDate.Compare(b.Summary.InternalDate)
 	})
 	resp := &chainmailv1.GetThreadResponse{Source: sourceServer, FetchedAt: timestamppb.New(m.s.opts.Now())}
-	rendered := make([]*chainmailv1.Message, len(msgs))
-	for i, msg := range msgs {
-		if rendered[i], err = m.renderMessage(msg, req.GetFull()); err != nil {
-			return nil, err
-		}
+	rendered := make([]*chainmailv1.Message, 0, len(msgs))
+	for _, msg := range msgs {
 		if sameMessage(msg.Summary.Ref, seed) || resp.ThreadId == "" {
 			resp.ThreadId = msg.Summary.ThreadID
 		}
+		pm, err := m.renderMessage(msg, req.GetFull())
+		if err != nil {
+			unreadable = append(unreadable, msg.Summary.Ref.String())
+			continue
+		}
+		rendered = append(rendered, pm)
 	}
-	capThread(resp, rendered)
+	capThread(resp, rendered, unreadable)
 	entry.Targets = append(entry.Targets, tally("messages", len(resp.Messages)))
 	if resp.Truncated {
 		entry.Targets = append(entry.Targets, tally("omitted", len(resp.OmittedRefs)))
@@ -289,22 +345,25 @@ func (m *messageService) thread(ctx context.Context, req *chainmailv1.GetThreadR
 }
 
 // capThread sets resp.Messages to the oldest of msgs that fit in
-// maxResponseBytes. When some do not, it sets Truncated and lists their refs
-// in OmittedRefs, oldest first, so the caller can Get them.
-func capThread(resp *chainmailv1.GetThreadResponse, msgs []*chainmailv1.Message) {
+// maxResponseBytes, and OmittedRefs to the refs of the rest, oldest first,
+// followed by unreadable, the refs of members that could not be read. It
+// sets Truncated when any ref is omitted, so the caller can Get them.
+func capThread(resp *chainmailv1.GetThreadResponse, msgs []*chainmailv1.Message, unreadable []string) {
 	kept := make([]int, len(msgs))
 	dropped := make([]int, len(msgs))
 	for i, pm := range msgs {
 		kept[i] = elemSize(2, proto.Size(pm))
 		dropped[i] = elemSize(6, len(pm.GetRef()))
 	}
-	resp.Truncated = true // counted in the base, so a cut response still fits
+	// Both are counted in the base, so a cut response still fits.
+	resp.Truncated, resp.OmittedRefs = true, unreadable
 	k := fitPrefix(proto.Size(resp), kept, dropped, maxResponseBytes)
-	resp.Messages = msgs[:k]
-	resp.Truncated = k < len(msgs)
+	resp.Messages, resp.OmittedRefs = msgs[:k], nil
 	for _, pm := range msgs[k:] {
 		resp.OmittedRefs = append(resp.OmittedRefs, pm.GetRef())
 	}
+	resp.OmittedRefs = append(resp.OmittedRefs, unreadable...)
+	resp.Truncated = len(resp.OmittedRefs) > 0
 }
 
 // GetRaw implements chainmailv1connect.MessageServiceHandler.
@@ -375,8 +434,9 @@ func (m *messageService) download(ctx context.Context, req *chainmailv1.Download
 
 // pump copies r to send in chunks of up to chunkBytes and returns the bytes
 // sent. Bytes read before an error are still sent. A read error after bytes
-// went out is ErrUnavailable whatever its cause: the client holds part of
-// the data, and the store never fetches it again.
+// went out is ErrUnavailable whatever its cause, except that a deadline or a
+// cancellation stays TIMEOUT: the client holds part of the data, and the
+// stream is never resumed, since the store never fetches bytes again.
 func pump(r io.Reader, send func([]byte) error) (int, error) {
 	buf := make([]byte, chunkBytes)
 	total, fill := 0, 0
@@ -393,6 +453,8 @@ func pump(r io.Reader, send func([]byte) error) (int, error) {
 		switch {
 		case errors.Is(err, io.EOF):
 			return total, nil
+		case err != nil && total > 0 && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)):
+			return total, fmt.Errorf("the stream stopped after %d bytes: %w", total, err)
 		case err != nil && total > 0 && !errors.Is(err, mailstore.ErrUnavailable):
 			return total, fmt.Errorf("%w: the stream broke after %d bytes: %s", mailstore.ErrUnavailable, total, err.Error())
 		case err != nil:

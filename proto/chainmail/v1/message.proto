@@ -221,14 +221,17 @@ message GetThreadRequest {
 
 message GetThreadResponse {
   string thread_id = 1;
-  // Oldest first.
+  // Oldest first. A member deleted or moved since the thread was listed is
+  // left out without a trace.
   repeated Message messages = 2;
   string source = 3;
   google.protobuf.Timestamp fetched_at = 4;
-  // The whole thread would not fit in a 16 MiB response, so messages holds
-  // the oldest messages that fit and omitted_refs the rest.
+  // Some members are not in messages: omitted_refs lists them.
   bool truncated = 5;
-  // Refs of the newer messages left out, oldest first. Pass them to Get.
+  // Refs of the members left out. First the newer messages that would push
+  // the response past 16 MiB, oldest first. Then any member that could not
+  // be read, such as a message too malformed to parse, which does not fail
+  // the thread. Pass them to Get, which returns each message or its error.
   repeated string omitted_refs = 6;
 }
 
