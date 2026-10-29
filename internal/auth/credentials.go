@@ -67,6 +67,10 @@ func (c Credentials) String() string {
 // which would otherwise reflect over the fields.
 func (c Credentials) Format(f fmt.State, _ rune) { writeFormatted(f, c.String()) }
 
+// GoString is the redacted String. Format already covers %#v; GoString keeps
+// direct callers safe too.
+func (c Credentials) GoString() string { return c.String() }
+
 // LogValue keeps the secret out of slog output.
 func (c Credentials) LogValue() slog.Value {
 	return slog.GroupValue(

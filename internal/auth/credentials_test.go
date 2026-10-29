@@ -79,8 +79,11 @@ func TestCredentialsRedactSecret(t *testing.T) {
 	assertNoLeak(t, "Credentials", "hunter2", c)
 	assertNoLeak(t, "*Credentials", "hunter2", &c)
 	assertNoLeak(t, "PLAIN client", "hunter2", c.SASL())
-	if s := c.String(); !strings.Contains(s, "u") || !strings.Contains(s, string(provider.AuthPassword)) {
-		t.Errorf("String() = %q, want method and username kept", s)
+	if got, want := c.String(), "Credentials{Method: password, Username: u, Secret: [redacted]}"; got != want {
+		t.Errorf("String() = %q, want %q", got, want)
+	}
+	if got := c.GoString(); got != c.String() {
+		t.Errorf("GoString() = %q, want the redacted String", got)
 	}
 }
 
