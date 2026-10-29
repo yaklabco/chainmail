@@ -103,8 +103,10 @@ var (
 	gmailSMTP = Endpoint{Host: "smtp.gmail.com", Port: 587, Security: SecurityStartTLS}
 )
 
-// Gmail allows 15 IMAP connections per account. iCloud and Hostinger don't
-// document a limit, so they start low until the live tests measure them.
+// Gmail allows 15 IMAP connections per account. Both Google presets take 10
+// so the user's other mail clients on the same account keep 5 for
+// themselves. iCloud and Hostinger don't document a limit, so they start
+// low until the live tests measure them.
 var presets = map[string]Preset{
 	"google-workspace": {
 		IMAP: gmailIMAP, SMTP: gmailSMTP,

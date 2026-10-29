@@ -8,25 +8,28 @@ import (
 func TestLookup(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name  string
-		imap  Endpoint
-		smtp  Endpoint
-		auth  []AuthMethod
-		gmail bool
+		name   string
+		imap   Endpoint
+		smtp   Endpoint
+		auth   []AuthMethod
+		oauth2 bool
+		gmail  bool
 	}{
 		{
-			name:  "google-workspace",
-			imap:  Endpoint{Host: "imap.gmail.com", Port: 993, Security: SecurityTLS},
-			smtp:  Endpoint{Host: "smtp.gmail.com", Port: 587, Security: SecurityStartTLS},
-			auth:  []AuthMethod{AuthOAuth2},
-			gmail: true,
+			name:   "google-workspace",
+			imap:   Endpoint{Host: "imap.gmail.com", Port: 993, Security: SecurityTLS},
+			smtp:   Endpoint{Host: "smtp.gmail.com", Port: 587, Security: SecurityStartTLS},
+			auth:   []AuthMethod{AuthOAuth2},
+			oauth2: true,
+			gmail:  true,
 		},
 		{
-			name:  "gmail",
-			imap:  Endpoint{Host: "imap.gmail.com", Port: 993, Security: SecurityTLS},
-			smtp:  Endpoint{Host: "smtp.gmail.com", Port: 587, Security: SecurityStartTLS},
-			auth:  []AuthMethod{AuthOAuth2, AuthPassword},
-			gmail: true,
+			name:   "gmail",
+			imap:   Endpoint{Host: "imap.gmail.com", Port: 993, Security: SecurityTLS},
+			smtp:   Endpoint{Host: "smtp.gmail.com", Port: 587, Security: SecurityStartTLS},
+			auth:   []AuthMethod{AuthOAuth2, AuthPassword},
+			oauth2: true,
+			gmail:  true,
 		},
 		{
 			name: "hostinger",
@@ -38,6 +41,10 @@ func TestLookup(t *testing.T) {
 			name: "icloud",
 			imap: Endpoint{Host: "imap.mail.me.com", Port: 993, Security: SecurityTLS},
 			smtp: Endpoint{Host: "smtp.mail.me.com", Port: 587, Security: SecurityStartTLS},
+			auth: []AuthMethod{AuthPassword},
+		},
+		{
+			name: "custom",
 			auth: []AuthMethod{AuthPassword},
 		},
 	}
@@ -59,6 +66,9 @@ func TestLookup(t *testing.T) {
 			}
 			if !slices.Equal(p.AuthMethods, tt.auth) {
 				t.Errorf("AuthMethods = %v, want %v", p.AuthMethods, tt.auth)
+			}
+			if got := p.OAuth2 != nil; got != tt.oauth2 {
+				t.Errorf("OAuth2 set = %v, want %v", got, tt.oauth2)
 			}
 			if p.Gmail != tt.gmail {
 				t.Errorf("Gmail = %v, want %v", p.Gmail, tt.gmail)
@@ -86,6 +96,9 @@ func TestGooglePresetsUseOAuth2(t *testing.T) {
 		}
 		if !slices.Equal(p.OAuth2.Scopes, []string{"https://mail.google.com/"}) {
 			t.Errorf("%s: scopes = %v", name, p.OAuth2.Scopes)
+		}
+		if p.OAuth2.AuthURL != "https://accounts.google.com/o/oauth2/auth" {
+			t.Errorf("%s: auth URL = %q", name, p.OAuth2.AuthURL)
 		}
 		if p.OAuth2.TokenURL != "https://oauth2.googleapis.com/token" {
 			t.Errorf("%s: token URL = %q", name, p.OAuth2.TokenURL)
@@ -143,5 +156,33 @@ func TestNames(t *testing.T) {
 	want := []string{"custom", "gmail", "google-workspace", "hostinger", "icloud"}
 	if got := Names(); !slices.Equal(got, want) {
 		t.Errorf("Names() = %v, want %v", got, want)
+	}
+}
+
+func TestSupportsAuth(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		preset string
+		method AuthMethod
+		want   bool
+	}{
+		{preset: "google-workspace", method: AuthOAuth2, want: true},
+		{preset: "google-workspace", method: AuthPassword, want: false},
+		{preset: "gmail", method: AuthOAuth2, want: true},
+		{preset: "gmail", method: AuthPassword, want: true},
+		{preset: "hostinger", method: AuthPassword, want: true},
+		{preset: "hostinger", method: AuthOAuth2, want: false},
+		{preset: "icloud", method: AuthOAuth2, want: false},
+		{preset: "custom", method: AuthPassword, want: true},
+		{preset: "custom", method: AuthOAuth2, want: false},
+	}
+	for _, tt := range tests {
+		p, ok := Lookup(tt.preset)
+		if !ok {
+			t.Fatalf("Lookup(%q) not found", tt.preset)
+		}
+		if got := p.SupportsAuth(tt.method); got != tt.want {
+			t.Errorf("%s.SupportsAuth(%s) = %v, want %v", tt.preset, tt.method, got, tt.want)
+		}
 	}
 }
