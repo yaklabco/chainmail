@@ -38,10 +38,13 @@ func treeText(b []byte) (string, bool) {
 	return htmlText(doc), true
 }
 
-func htmlText(doc *html.Node) string {
+func htmlText(doc *html.Node) string { return treeWriter(doc).finish() }
+
+// treeWriter writes the text of doc.
+func treeWriter(doc *html.Node) *textWriter {
 	w := &textWriter{atLineStart: true}
 	w.node(doc)
-	return w.finish()
+	return w
 }
 
 // tokenText converts HTML from its token stream, with no tree. It is the
@@ -52,7 +55,10 @@ func htmlText(doc *html.Node) string {
 // and style, which are skipped on their own. An <svg> ends early at an HTML
 // tag that breaks out of foreign content, as in the tree parser, so an
 // unclosed <svg> does not swallow the rest of the document.
-func tokenText(b []byte) string {
+func tokenText(b []byte) string { return tokenWriter(b).finish() }
+
+// tokenWriter writes the text of b, as tokenText describes.
+func tokenWriter(b []byte) *textWriter {
 	w := &textWriter{atLineStart: true}
 	z := html.NewTokenizer(bytes.NewReader(b))
 	var s skip
@@ -87,7 +93,7 @@ func tokenText(b []byte) string {
 		default: // comments and doctypes
 		}
 	}
-	return w.finish()
+	return w
 }
 
 // skip tracks a skipped element whose content the tokenizer pass is dropping.
@@ -211,6 +217,11 @@ type textWriter struct {
 	lists        int
 	cells        int
 	links        []openLink
+	// quotes counts the open blockquotes. quoted[i] says line i of b holds
+	// text written inside one, where trimming never starts a cut.
+	quotes int
+	line   int
+	quoted []bool
 }
 
 func (w *textWriter) node(n *html.Node) {
@@ -276,11 +287,17 @@ func (w *textWriter) open(n *html.Node) {
 			w.lineBreak()
 		}
 	}
+	if a == atom.Blockquote {
+		w.quotes++
+	}
 }
 
 // close writes what comes after the content of an element. The counters
 // never drop below zero, because the tokenizer pass sees unbalanced end tags.
 func (w *textWriter) close(a atom.Atom) {
+	if a == atom.Blockquote {
+		w.quotes = max(w.quotes-1, 0)
+	}
 	switch a {
 	case atom.Pre:
 		w.pre = max(w.pre-1, 0)
@@ -387,6 +404,7 @@ func (w *textWriter) write(s string) {
 		return
 	}
 	w.b.WriteString(s)
+	w.track(s)
 	trailing := len(s) - len(strings.TrimRight(s, "\n"))
 	if trailing == len(s) {
 		w.newlines += trailing
@@ -410,13 +428,41 @@ func (w *textWriter) blank() {
 	}
 }
 
+// track counts the lines s ends and marks the lines it writes text on while
+// a blockquote is open.
+func (w *textWriter) track(s string) {
+	for {
+		i := strings.IndexByte(s, '\n')
+		text := s
+		if i >= 0 {
+			text = s[:i]
+		}
+		if text != "" && w.quotes > 0 {
+			for len(w.quoted) <= w.line {
+				w.quoted = append(w.quoted, false)
+			}
+			w.quoted[w.line] = true
+		}
+		if i < 0 {
+			return
+		}
+		w.line++
+		s = s[i+1:]
+	}
+}
+
 // finish trims line ends, collapses runs of blank lines to one, and trims
 // blank lines at both ends.
 func (w *textWriter) finish() string {
-	lines := strings.Split(w.b.String(), "\n")
-	out := lines[:0]
+	lines, _ := w.lines()
+	return strings.Join(lines, "\n")
+}
+
+// lines returns the text as finish formats it, one entry per line, and
+// whether each line is blockquote content. A blank line is never quoted.
+func (w *textWriter) lines() (lines []string, quoted []bool) {
 	blanks := 0
-	for _, l := range lines {
+	for i, l := range strings.Split(w.b.String(), "\n") {
 		l = strings.TrimRight(l, " \t")
 		if l == "" {
 			blanks++
@@ -426,9 +472,17 @@ func (w *textWriter) finish() string {
 		} else {
 			blanks = 0
 		}
-		out = append(out, l)
+		lines = append(lines, l)
+		quoted = append(quoted, l != "" && i < len(w.quoted) && w.quoted[i])
 	}
-	return strings.Trim(strings.Join(out, "\n"), "\n")
+	start, end := 0, len(lines)
+	for start < end && lines[start] == "" {
+		start++
+	}
+	for end > start && lines[end-1] == "" {
+		end--
+	}
+	return lines[start:end], quoted[start:end]
 }
 
 func attr(n *html.Node, key string) string {

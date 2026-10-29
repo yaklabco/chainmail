@@ -74,25 +74,28 @@ func Render(raw []byte, opts Options) (Body, error) {
 
 // htmlBody converts an HTML part to text, and to trimmed text when trim is
 // set. HTML the tree parser refuses has no tree to trim, so it is converted
-// tag by tag, as HTMLToText does, and only its text is trimmed.
+// tag by tag, as HTMLToText does, and only its text is trimmed. The text
+// trimming knows which lines came from inside a blockquote, so a signature
+// or header block quoted there is not mistaken for the reply's own.
 func htmlBody(src string, trim bool) (full, text string) {
 	doc, err := html.Parse(strings.NewReader(src))
 	if err != nil {
-		full = tokenText([]byte(src))
+		lines, quoted := tokenWriter([]byte(src)).lines()
+		full = strings.Join(lines, "\n")
 		if !trim {
 			return full, full
 		}
-		return full, trimText(full, true)
+		return full, trimHTMLText(lines, quoted)
 	}
-	full = htmlText(doc)
+	lines, quoted := treeWriter(doc).lines()
+	full = strings.Join(lines, "\n")
 	if !trim {
 		return full, full
 	}
-	text = full
 	if trimHTML(doc) {
-		text = htmlText(doc)
+		lines, quoted = treeWriter(doc).lines()
 	}
-	return full, trimText(text, true)
+	return full, trimHTMLText(lines, quoted)
 }
 
 // forwardSubjectRE matches the subject prefix a client writes on a forward,

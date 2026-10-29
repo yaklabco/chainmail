@@ -245,6 +245,87 @@ func TestRenderHTMLMarkers(t *testing.T) {
 			`<div>Top</div><div class="gmail_quote">Quoted</div><div>After</div>`,
 			"Top\nQuoted\nAfter",
 		},
+		// A signature delimiter or an Outlook header block inside a quote
+		// belongs to the quoted message, so the reply after it stays.
+		{
+			"gmail interleaved reply with a quoted signature",
+			`<div class="gmail_quote"><div class="gmail_attr">On Tue, 3 Sep 2024 at 09:12, Alex Doe &lt;alex@example.com&gt; wrote:</div>` +
+				`<blockquote class="gmail_quote">Can you come on Thursday?<br>-- <br>Alex</blockquote></div><div>Yes, I can come.</div>`,
+			"On Tue, 3 Sep 2024 at 09:12, Alex Doe <alex@example.com> wrote:\n\nCan you come on Thursday?\n--\nAlex\n\nYes, I can come.",
+		},
+		{
+			"thunderbird bottom-post with a quoted moz-signature",
+			`<div class="moz-cite-prefix">On 03/09/2024 09:12, Alex Doe wrote:<br></div><blockquote type="cite"><p>Are we on?</p>` +
+				"<pre class=\"moz-signature\" cols=\"72\">-- \nAlex</pre></blockquote><p>My answer.</p>",
+			"On 03/09/2024 09:12, Alex Doe wrote:\n\nAre we on?\n\n--\nAlex\n\nMy answer.",
+		},
+		{
+			"gmail inline reply quoting an outlook reply",
+			`<div class="gmail_quote"><div class="gmail_attr">On Tue, 3 Sep 2024 at 09:12, Alex Doe &lt;alex@example.com&gt; wrote:</div>` +
+				`<blockquote class="gmail_quote"><div>Alex reply</div><hr><div id="divRplyFwdMsg"><b>From:</b> Sam Roe<br><b>Sent:</b> Monday</div>` +
+				`<div>Older</div></blockquote></div><div>My inline answer</div>`,
+			"On Tue, 3 Sep 2024 at 09:12, Alex Doe <alex@example.com> wrote:\n\nAlex reply\n\nFrom: Sam Roe\nSent: Monday\nOlder\n\nMy inline answer",
+		},
+		{
+			"gmail inline answer between quotes",
+			`<div>Hi</div><div class="gmail_quote"><div class="gmail_attr">On Tue, 3 Sep 2024 at 09:12, Alex Doe &lt;alex@example.com&gt; wrote:</div>` +
+				`<blockquote class="gmail_quote">Can you come?</blockquote><div>Yes.</div><blockquote class="gmail_quote">Shall I book?</blockquote></div>`,
+			"Hi\nOn Tue, 3 Sep 2024 at 09:12, Alex Doe <alex@example.com> wrote:\n\nCan you come?\n\nYes.\n\nShall I book?",
+		},
+		{
+			"apple bottom-post quoting outlook header lines",
+			`<div>On 3 Sep 2024, at 09:12, Alex Doe &lt;alex@example.com&gt; wrote:<br></div><blockquote type="cite"><div>Fine by me.</div>` +
+				`<div><br></div><div>From: Sam Roe &lt;sam@example.org&gt;</div><div>Sent: Monday</div><div>Older</div></blockquote><div>My bottom reply.</div>`,
+			"On 3 Sep 2024, at 09:12, Alex Doe <alex@example.com> wrote:\n\nFine by me.\n\nFrom: Sam Roe <sam@example.org>\nSent: Monday\nOlder\n\nMy bottom reply.",
+		},
+		{
+			"apple bottom-post quoting an outlook html reply",
+			`<div>On 3 Sep 2024, at 09:12, Alex Doe &lt;alex@example.com&gt; wrote:<br></div><blockquote type="cite"><div>Fine by me.</div><hr>` +
+				`<div id="divRplyFwdMsg"><b>From:</b> Sam Roe<br><b>Sent:</b> Monday</div><div>Older</div></blockquote><div>My bottom reply.</div>`,
+			"On 3 Sep 2024, at 09:12, Alex Doe <alex@example.com> wrote:\n\nFine by me.\n\nFrom: Sam Roe\nSent: Monday\nOlder\n\nMy bottom reply.",
+		},
+		// The quote mask only stops cut points. A blockquote is not trimmed
+		// as >-quoted text, since the parser closes an unclosed one at the
+		// end of the document, around the reply.
+		{
+			"quoted signature in a trailing thunderbird quote is not a cut point",
+			`<p>My answer.</p><div class="moz-cite-prefix">On 03/09/2024 09:12, Alex Doe wrote:<br></div><blockquote type="cite"><p>Are we on?</p>` +
+				"<pre class=\"moz-signature\" cols=\"72\">-- \nAlex</pre></blockquote>",
+			"My answer.\n\nOn 03/09/2024 09:12, Alex Doe wrote:\n\nAre we on?\n\n--\nAlex",
+		},
+		{
+			"reply after an unclosed blockquote",
+			`<div>On 3 Sep 2024, at 09:12, Alex &lt;alex@example.com&gt; wrote:</div><blockquote type="cite"><div>quoted</div><p>my bottom reply</p>`,
+			"On 3 Sep 2024, at 09:12, Alex <alex@example.com> wrote:\n\nquoted\n\nmy bottom reply",
+		},
+		{
+			"reply after a self-closed blockquote",
+			`<div>On 3 Sep 2024, at 09:12, Alex &lt;alex@example.com&gt; wrote:</div><blockquote type="cite"/><div>my bottom reply</div>`,
+			"On 3 Sep 2024, at 09:12, Alex <alex@example.com> wrote:\n\nmy bottom reply",
+		},
+		{
+			"gmail indent blockquote below an attribution-like line",
+			`<div>Minutes:</div><div>On 12 March 2024 the board wrote:</div><blockquote style="margin:0 0 0 40px;border:none">We approve the plan.</blockquote>`,
+			"Minutes:\nOn 12 March 2024 the board wrote:\n\nWe approve the plan.",
+		},
+		{
+			"apple forward quoted below a signature",
+			`<div>Look at this</div><div>--</div><div>Sam</div><blockquote type="cite"><div>Begin forwarded message:</div><div><br></div>` +
+				`<div>From: Alex &lt;a@example.com&gt;</div><div>Date: Tue</div><div><br></div><div>Body</div></blockquote>`,
+			"Look at this\n--\nSam\n\nBegin forwarded message:\n\nFrom: Alex <a@example.com>\nDate: Tue\n\nBody",
+		},
+		{
+			"signature above gmail inline answers",
+			`<div>See inline.</div><div>--</div><div>Sam</div><div class="gmail_quote"><div class="gmail_attr">On Tue, 3 Sep 2024 at 09:12, Alex &lt;a@example.com&gt; wrote:</div>` +
+				`<blockquote class="gmail_quote">Q1</blockquote><div>A1 mine</div><blockquote class="gmail_quote">Q2</blockquote><div>A2 mine</div></div>`,
+			"See inline.\n--\nSam\nOn Tue, 3 Sep 2024 at 09:12, Alex <a@example.com> wrote:\n\nQ1\n\nA1 mine\n\nQ2\n\nA2 mine",
+		},
+		// A trailing quote with nothing new after it is still history.
+		{
+			"signature above a trailing html quote",
+			`<div>Thanks</div><div>--</div><div>Sam</div><div class="moz-cite-prefix">On 03/09/2024 09:12, Alex Doe wrote:</div><blockquote type="cite">Are we on?</blockquote>`,
+			"Thanks",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -267,6 +348,31 @@ func TestCleanTextVariationSelectors(t *testing.T) {
 	}
 }
 
+func TestCleanTextIgnorables(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, in, want string }{
+		{
+			"other default ignorables",
+			"a\u034fb\u115fc\u3164d\uffa0e\ufff0f\U000E0080g\U000E01F0h\U000E0FFFi\u180bj",
+			"abcdefghij",
+		},
+		{"emoji zwj sequence", "\U0001F468\u200d\U0001F469\u200d\U0001F467", "\U0001F468\u200d\U0001F469\u200d\U0001F467"},
+		{"emoji presentation then zwj", "\U0001F3F3\ufe0f\u200d\U0001F308 \u2764\ufe0f\u200d\U0001F525", "\U0001F3F3\ufe0f\u200d\U0001F308 \u2764\ufe0f\u200d\U0001F525"},
+		{"persian zwnj word", "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645", "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645"},
+		{"run of zwnj collapses", "a" + strings.Repeat("\u200c", 50) + "b", "a\u200cb"},
+		{"run of mixed joiners collapses", "a" + strings.Repeat("\u200d\ufe0f\u200c\ufe0e", 20) + "b", "a\u200db"},
+		{"selector after a dropped character", "a\u2060\ufe0fb", "ab"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := CleanText(tt.in); got != tt.want {
+				t.Errorf("CleanText(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRenderClippedPartIsTruncated(t *testing.T) {
 	t.Parallel()
 	// A base64 decode error stops the part early, so it is incomplete.
@@ -283,5 +389,20 @@ func TestCleanHeader(t *testing.T) {
 	t.Parallel()
 	if got := CleanHeader(" Re:\r\n  Q3\tplan \u202e"); got != "Re: Q3 plan" {
 		t.Errorf("CleanHeader = %q", got)
+	}
+}
+
+func TestRenderTokenPathReplyAfterUnclosedBlockquote(t *testing.T) {
+	t.Parallel()
+	// In the token pass a </div> does not close the blockquote, so its
+	// count stays open over the reply.
+	raw := "Content-Type: text/html; charset=utf-8\n\n" + deepHTML +
+		`<div>On 3 Sep 2024, at 09:12, Alex &lt;alex@example.com&gt; wrote:</div><div><blockquote type="cite">quoted</div><div>my bottom reply</div>`
+	body, err := Render([]byte(raw), Options{Limit: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body.Text, "my bottom reply") || body.QuotedTrimmed {
+		t.Errorf("Render = %+v, want the reply kept", body)
 	}
 }

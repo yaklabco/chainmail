@@ -55,6 +55,42 @@ func TestTrimText(t *testing.T) {
 			"FYI\n\n-- \nSam\n\n---------- Doorgestuurd bericht ---------\nVan: Alex <a@example.com>\nDatum: di\n\nTekst",
 			false, "FYI\n\n-- \nSam\n\n---------- Doorgestuurd bericht ---------\nVan: Alex <a@example.com>\nDatum: di\n\nTekst",
 		},
+		{
+			"sentence and attribution-like line are kept",
+			"Thanks for the notes.\n\nOn reflection the 3 options look fine.\nHere is what you wrote:\n> the plan",
+			false, "Thanks for the notes.\n\nOn reflection the 3 options look fine.\nHere is what you wrote:\n> the plan",
+		},
+		{
+			"attribution-like sentence without a date is kept",
+			"Sure.\n\nOn Friday at 3pm, as you wrote:\n> meet at 3pm",
+			false, "Sure.\n\nOn Friday at 3pm, as you wrote:\n> meet at 3pm",
+		},
+		{
+			"sentence with a date does not start a wrapped attribution",
+			"Noted.\n\nOn 3 Sep 2024 we met.\nAlex wrote:\n> q",
+			false, "Noted.\n\nOn 3 Sep 2024 we met.\nAlex wrote:\n> q",
+		},
+		{
+			"signature above interleaved answers is kept",
+			"See inline.\n-- \nSam\n\nOn Tue, 3 Sep 2024, Alex wrote:\n> Q1\nA1 mine\n> Q2\nA2 mine",
+			false, "See inline.\n-- \nSam\n\nOn Tue, 3 Sep 2024, Alex wrote:\n> Q1\nA1 mine\n> Q2\nA2 mine",
+		},
+		{"attribution with a 12-hour time", "Yes\n\nOn Tue, Sep 3 at 9:12AM, Alex wrote:\n> q", false, "Yes"},
+		{"two-digit year attribution", "Yes\n\nOn 03/09/24, Alex wrote:\n> q", false, "Yes"},
+		{
+			// A From: block with a Date: line is a pasted header, not history,
+			// unless a separator line introduces it.
+			"pasted header block is kept",
+			"Got this from the bank:\n\nFrom: Bank <x@bank.example>\nDate: Tue, 3 Sep 2024 09:12\nSubject: Verify\n\nClick here.\n\nIs this phishing? What should I do?",
+			false, "Got this from the bank:\n\nFrom: Bank <x@bank.example>\nDate: Tue, 3 Sep 2024 09:12\nSubject: Verify\n\nClick here.\n\nIs this phishing? What should I do?",
+		},
+		{
+			"pasted german header block is kept",
+			"Schau mal:\n\nVon: Bank <x@bank.example>\nDatum: Di\n\nKlicken.\n\nIst das Phishing?",
+			false, "Schau mal:\n\nVon: Bank <x@bank.example>\nDatum: Di\n\nKlicken.\n\nIst das Phishing?",
+		},
+		{"date after a separator", "OK\n\n________________________________\nFrom: Alex\nDate: Tue\n\nOld", false, "OK"},
+		{"datum after original message", "OK\n\n-----Ursprüngliche Nachricht-----\nVon: Alex\nDatum: Di\n\nAlt", false, "OK"},
 		{"nothing to trim", "Just text.", false, "Just text."},
 	}
 	for _, tt := range tests {

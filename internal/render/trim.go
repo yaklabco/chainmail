@@ -26,8 +26,15 @@ var attributionRE = []*regexp.Regexp{
 var (
 	separatorRE = regexp.MustCompile(`^(_{8,}|-{3,} ?(Original Message|Ursprüngliche Nachricht|Message d'origine|Mensaje original|Messaggio originale) ?-{3,})$`)
 	fromRE      = regexp.MustCompile(`^(From|Von|De|Da|Van|Från): .+`)
-	sentRE      = regexp.MustCompile(`^(Sent|Date|Gesendet|Datum|Envoyé|Enviado|Fecha|Inviato|Data|Verzonden|Skickat): .+`)
-	forwardRE   = regexp.MustCompile(`(?i)forwarded message|weitergeleiteten? nachricht|message transféré|message réexpédié|mensaje reenviado|messaggio inoltrato|doorgestuurd bericht|mensagem (re)?encaminhada|vidarebefordrat meddelande`)
+	// sentRE matches the line only Outlook's history header has. dateRE
+	// matches the line any header has, so a pasted header block matches it
+	// too, and it counts only after a separator line.
+	sentRE    = regexp.MustCompile(`^(Sent|Gesendet|Envoyé|Enviado|Inviato|Verzonden|Skickat): .+`)
+	dateRE    = regexp.MustCompile(`^(Date|Datum|Data|Fecha): .+`)
+	forwardRE = regexp.MustCompile(`(?i)forwarded message|weitergeleiteten? nachricht|message transféré|message réexpédié|mensaje reenviado|messaggio inoltrato|doorgestuurd bericht|mensagem (re)?encaminhada|vidarebefordrat meddelande`)
+	// dateEvidenceRE matches what every client attribution names: an
+	// address, a year or a time of day.
+	dateEvidenceRE = regexp.MustCompile(`@|\b(19|20)\d\d\b|\b\d{1,2}:\d\d|\b\d{1,4}[/.-]\d{1,2}[/.-]\d{1,4}\b`)
 )
 
 // trimText removes a trailing signature and then a trailing quoted or
@@ -35,33 +42,67 @@ var (
 // delimiter has lost its trailing space.
 func trimText(s string, fromHTML bool) string {
 	lines := strings.Split(s, "\n")
-	end := trimSignature(lines, fromHTML)
-	if q := trimQuoted(lines[:end]); q < end {
+	return keptText(lines, trimEnd(lines, nil, fromHTML))
+}
+
+// trimHTMLText trims text converted from HTML. quoted[i] says lines[i] was
+// inside a blockquote, so a signature delimiter or an Outlook header block
+// there belongs to the quoted message and is never a cut point. A
+// blockquote is not trimmed as >-quoted text: the parser closes an unclosed
+// one at the end of the document, around any reply after it.
+func trimHTMLText(lines []string, quoted []bool) string {
+	return keptText(lines, trimEnd(lines, quoted, true))
+}
+
+// trimEnd returns how many lines to keep. quoted marks the lines that may
+// not start a cut, and may be nil.
+func trimEnd(lines []string, quoted []bool, fromHTML bool) int {
+	end := trimSignature(lines, quoted, fromHTML)
+	if q := trimQuoted(lines[:end], quoted); q < end {
 		// A signature written above the quoted history is trailing now.
-		end = trimSignature(lines[:q], fromHTML)
+		end = trimSignature(lines[:q], quoted, fromHTML)
 	}
+	return end
+}
+
+func keptText(lines []string, end int) string {
 	return strings.TrimRight(strings.Join(lines[:end], "\n"), " \t\n")
 }
 
+// inQuote reports whether quoted marks line i.
+func inQuote(quoted []bool, i int) bool { return i < len(quoted) && quoted[i] }
+
 // trimSignature returns where the kept text ends: before the last signature
-// delimiter, or len(lines) when there is none. A delimiter with a forward
-// marker after it stays, because cutting there would drop the forwarded
-// message. Gmail writes the signature above a forward.
-func trimSignature(lines []string, fromHTML bool) int {
-	i := signatureLine(lines, fromHTML)
+// delimiter, or len(lines) when there is none. A delimiter stays when a
+// forward marker follows it, because cutting there would drop the forwarded
+// message, and Gmail writes the signature above a forward. It also stays
+// when new text follows a quote below it, as in an interleaved reply.
+func trimSignature(lines []string, quoted []bool, fromHTML bool) int {
+	i := signatureLine(lines, quoted, fromHTML)
 	if i < 0 {
 		return len(lines)
 	}
-	for _, l := range lines[i+1:] {
+	afterQuote := false
+	for k := i + 1; k < len(lines); k++ {
+		l := lines[k]
 		if !isQuoted(l) && forwardRE.MatchString(l) {
+			return len(lines)
+		}
+		switch {
+		case isQuoted(l) || inQuote(quoted, k):
+			afterQuote = true
+		case afterQuote && !blankLine(l):
 			return len(lines)
 		}
 	}
 	return i
 }
 
-func signatureLine(lines []string, fromHTML bool) int {
+func signatureLine(lines []string, quoted []bool, fromHTML bool) int {
 	for i := len(lines) - 1; i >= 0; i-- {
+		if inQuote(quoted, i) {
+			continue
+		}
 		if lines[i] == "-- " || (fromHTML && strings.TrimSpace(lines[i]) == "--") {
 			return i
 		}
@@ -71,12 +112,12 @@ func signatureLine(lines []string, fromHTML bool) int {
 
 // trimQuoted returns where the kept text ends: before a trailing history
 // block, or len(lines) when there is none.
-func trimQuoted(lines []string) int {
+func trimQuoted(lines []string, quoted []bool) int {
 	end := len(lines)
 	for end > 0 && blankLine(lines[end-1]) {
 		end--
 	}
-	if i := outlookHeader(lines[:end]); i >= 0 {
+	if i := outlookHeader(lines[:end], quoted); i >= 0 {
 		return i
 	}
 	q := end
@@ -93,7 +134,7 @@ func trimQuoted(lines []string) int {
 	if isAttribution(unquote(lines[q])) {
 		return q
 	}
-	if q+1 < end && isAttribution(unquote(lines[q])+" "+unquote(lines[q+1])) {
+	if q+1 < end && isWrappedAttribution(unquote(lines[q]), unquote(lines[q+1])) {
 		return q
 	}
 	a := q
@@ -103,7 +144,7 @@ func trimQuoted(lines []string) int {
 	if a > 0 && isAttribution(lines[a-1]) {
 		return a - 1
 	}
-	if a > 1 && isAttribution(lines[a-2]+" "+lines[a-1]) {
+	if a > 1 && isWrappedAttribution(lines[a-2], lines[a-1]) {
 		return a - 2
 	}
 	return len(lines)
@@ -111,18 +152,26 @@ func trimQuoted(lines []string) int {
 
 // outlookHeader returns the line where an Outlook-style history block
 // starts, or -1. The history is not >-quoted, so its header block is the
-// attribution.
-func outlookHeader(lines []string) int {
+// attribution. After a separator line, From: and then Sent: or Date: start
+// the block. After a blank line only From: and Sent: do, since From: and
+// Date: are also what a pasted message header looks like. A block whose
+// separator or From: line quoted marks is part of a quoted message.
+func outlookHeader(lines []string, quoted []bool) int {
 	for i := 1; i < len(lines); i++ {
 		j := i
+		afterSeparator := false
 		if separatorRE.MatchString(strings.TrimSpace(lines[i])) {
 			if j = nextNonBlank(lines, i+1); j < 0 {
 				continue
 			}
+			afterSeparator = true
 		} else if !blankLine(lines[i-1]) {
 			continue
 		}
-		if !fromRE.MatchString(strings.TrimSpace(lines[j])) || !sentWithin(lines, j+1, 4) {
+		if inQuote(quoted, i) || inQuote(quoted, j) {
+			continue
+		}
+		if !fromRE.MatchString(strings.TrimSpace(lines[j])) || !headerWithin(lines, j+1, 4, afterSeparator) {
 			continue
 		}
 		if p := prevNonBlank(lines, i-1); p >= 0 && forwardRE.MatchString(lines[p]) {
@@ -133,9 +182,12 @@ func outlookHeader(lines []string) int {
 	return -1
 }
 
-func sentWithin(lines []string, from, n int) bool {
+// headerWithin reports whether one of the n lines from from is a Sent:
+// line, or with dateOK, a Sent: or Date: line.
+func headerWithin(lines []string, from, n int, dateOK bool) bool {
 	for k := from; k < len(lines) && k < from+n; k++ {
-		if sentRE.MatchString(strings.TrimSpace(lines[k])) {
+		l := strings.TrimSpace(lines[k])
+		if sentRE.MatchString(l) || dateOK && dateRE.MatchString(l) {
 			return true
 		}
 	}
@@ -174,11 +226,11 @@ func unquote(s string) string {
 }
 
 // isAttribution reports whether s is an attribution line. Every client names
-// a date or an address in one, which keeps ordinary sentences, such as two
-// lines that join into "On reflection ... you wrote:", from matching.
+// an address, a year or a time of day in one, which keeps ordinary
+// sentences, such as "On Friday at 3pm, as you wrote:", from matching.
 func isAttribution(s string) bool {
 	s = strings.TrimSpace(s)
-	if !strings.ContainsAny(s, "0123456789@") {
+	if !dateEvidenceRE.MatchString(s) {
 		return false
 	}
 	for _, re := range attributionRE {
@@ -189,24 +241,68 @@ func isAttribution(s string) bool {
 	return false
 }
 
+// isWrappedAttribution reports whether an attribution line was wrapped onto
+// first and second. A first line that ends a sentence is the writer's own
+// text, not the start of an attribution.
+func isWrappedAttribution(first, second string) bool {
+	if f := strings.TrimSpace(first); f != "" && strings.ContainsAny(f[len(f)-1:], ".!?") {
+		return false
+	}
+	return isAttribution(first + " " + second)
+}
+
 // trimHTML removes a trailing quoted block from an HTML document before it
 // is converted, and reports whether it removed anything.
 func trimHTML(doc *html.Node) bool {
 	// The first marker in document order starts the history. A marker
-	// nested inside it belongs to an older message.
-	n := find(doc, func(n *html.Node) bool { return isOutlookMarker(n) || hasClass(n, "gmail_quote") })
+	// nested inside it belongs to an older message, and a marker inside a
+	// blockquote belongs to a quoted message, which a reply may follow.
+	n := find(doc, func(n *html.Node) bool {
+		return (isOutlookMarker(n) || hasClass(n, "gmail_quote")) && !inBlockquote(n)
+	})
 	switch {
 	case n == nil:
 		return false
 	case isOutlookMarker(n):
 		removeFrom(n)
 		return true
-	case textAfter(n):
-		return false // an interleaved reply keeps its quotes
+	case textAfter(n), unquotedText(n):
+		// An interleaved reply keeps its quotes. Gmail writes an inline
+		// answer inside the gmail_quote, between the blockquotes.
+		return false
 	default:
 		n.Parent.RemoveChild(n)
 		return true
 	}
+}
+
+// inBlockquote reports whether n has a blockquote ancestor.
+func inBlockquote(n *html.Node) bool {
+	for p := n.Parent; p != nil; p = p.Parent {
+		if p.Type == html.ElementNode && p.DataAtom == atom.Blockquote {
+			return true
+		}
+	}
+	return false
+}
+
+// unquotedText reports whether n holds visible text outside its
+// blockquotes and its gmail_attr attribution line.
+func unquotedText(n *html.Node) bool {
+	switch {
+	case n.Type == html.TextNode:
+		return strings.TrimSpace(n.Data) != ""
+	case n.Type != html.ElementNode:
+		return false
+	case n.DataAtom == atom.Blockquote, hasClass(n, "gmail_attr"), skipped[n.DataAtom]:
+		return false
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if unquotedText(c) {
+			return true
+		}
+	}
+	return false
 }
 
 func isOutlookMarker(n *html.Node) bool {
