@@ -124,3 +124,27 @@ func TestParsePart(t *testing.T) {
 		}
 	}
 }
+
+func TestRebuildSkipsMalformedHeaderLines(t *testing.T) {
+	t.Parallel()
+	header := []byte(" stray continuation\r\nFrom: a@example.com\r\nthis line has no colon\r\nSubject: s\r\nReferences: <r1@x>\r\n" +
+		"Bad Key: spaces are not allowed in a field name\r\nContent-Type: multipart/mixed; boundary=\"orig\"\r\n\r\n")
+	parts := map[string]string{
+		"[1 1]/MIME/false": "Content-Type: text/plain; charset=utf-8\r\n\r\n",
+		"[1 1]//true":      "Hello",
+	}
+	raw, _, err := rebuild(header, sampleStructure(), func(sec *imap.FetchItemBodySection) []byte { return []byte(parts[sectionKey(sec)]) })
+	if err != nil {
+		t.Fatalf("rebuild with a malformed header line: %v", err)
+	}
+	if !strings.Contains(string(raw), "Subject: s") || strings.Contains(string(raw), "no colon") {
+		t.Errorf("rebuilt header should keep the good fields and drop the bad lines:\n%s", raw)
+	}
+	body, err := render.Render(raw, render.Options{})
+	if err != nil || body.Text != "Hello" {
+		t.Errorf("render of the rebuilt message = %q, %v\n%s", body.Text, err, raw)
+	}
+	if ids := msgIDList(header, "References"); !reflect.DeepEqual(ids, []string{"r1@x"}) {
+		t.Errorf("References = %q, want [r1@x] despite the malformed lines", ids)
+	}
+}

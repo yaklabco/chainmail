@@ -187,10 +187,7 @@ func rebuild(header []byte, bs imap.BodyStructure, part func(*imap.FetchItemBody
 	var buf bytes.Buffer
 	switch root := bs.(type) {
 	case *imap.BodyStructureMultiPart:
-		h, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(header)))
-		if err != nil {
-			return nil, false, fmt.Errorf("parsing header: %w", err)
-		}
+		h := readHeader(header)
 		boundary := newBoundary()
 		h.Set("Content-Type", mime.FormatMediaType("multipart/"+strings.ToLower(root.Subtype), map[string]string{"boundary": boundary}))
 		h.Del("Content-Transfer-Encoding")
@@ -257,14 +254,61 @@ func msgIDList(header []byte, key string) []string {
 	if len(header) == 0 {
 		return nil
 	}
-	h, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(header)))
-	if err != nil {
-		return nil
-	}
+	h := readHeader(header)
 	mh := mail.Header{Header: message.Header{Header: h}}
 	ids, err := mh.MsgIDList(key)
 	if err != nil {
 		return nil
 	}
 	return ids
+}
+
+// readHeader parses a header block leniently. A line that is not a header
+// field, such as one without a colon, is dropped rather than making the
+// whole message unreadable.
+func readHeader(raw []byte) textproto.Header {
+	h, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw)))
+	if err == nil {
+		return h
+	}
+	var kept bytes.Buffer
+	field := false // whether the last line kept was a field, which a continuation may extend
+	for line := range bytes.Lines(raw) {
+		content := bytes.TrimRight(line, "\r\n")
+		if len(content) == 0 {
+			break // the blank line ends the header
+		}
+		switch {
+		case content[0] == ' ' || content[0] == '\t':
+			if !field {
+				continue // it continues a line that was dropped, or none
+			}
+		case headerField(content):
+			field = true
+		default:
+			field = false
+			continue
+		}
+		kept.Write(content)
+		kept.WriteString("\r\n")
+	}
+	kept.WriteString("\r\n")
+	// What is left is well formed. Were it not, h would still hold the
+	// fields parsed before the bad line, which is the best there is.
+	h, _ = textproto.ReadHeader(bufio.NewReader(&kept))
+	return h
+}
+
+// headerField reports whether line starts with a field name and a colon.
+func headerField(line []byte) bool {
+	name, _, ok := bytes.Cut(line, []byte(":"))
+	if !ok || len(name) == 0 {
+		return false
+	}
+	for _, b := range name {
+		if b <= ' ' || b > '~' {
+			return false
+		}
+	}
+	return true
 }
