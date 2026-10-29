@@ -66,7 +66,7 @@ func (Test) Live() error {
 // the fake Gmail server. The test binary starts and removes its own container.
 func (Test) Integration() error {
 	return sh.RunV("go", "test", "-race", "-tags", "integration", "-count=1", "-timeout", "15m",
-		"-p", parallelism(), "./internal/mailstore/imapstore/")
+		"-p", parallelism(), "-parallel", parallelism(), "./internal/mailstore/imapstore/")
 }
 
 // Build compiles bin/chainmail without cgo.
@@ -75,7 +75,8 @@ func Build() error {
 		"go", "build", "-trimpath", "-ldflags", ldflags(), "-o", "bin/chainmail", "./cmd/chainmail")
 }
 
-// parallelism caps go test -p at a quarter of the cores, as the machine rules require.
+// parallelism caps go test -p and -parallel at a quarter of the cores, as the
+// machine rules require.
 func parallelism() string {
 	return strconv.Itoa(max(1, runtime.NumCPU()/4))
 }

@@ -3,6 +3,8 @@ package fakegmail
 import (
 	"bufio"
 	"bytes"
+	"fmt"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -22,7 +24,12 @@ type session struct {
 	selected *folder
 }
 
-var _ imapserver.Session = (*session)(nil)
+var (
+	_ imapserver.Session            = (*session)(nil)
+	_ imapserver.SessionNamespace   = (*session)(nil)
+	_ imapserver.SessionMove        = (*session)(nil)
+	_ imapserver.SessionAppendLimit = (*session)(nil)
+)
 
 func (sess *session) Close() error { return nil }
 
@@ -54,18 +61,44 @@ func (sess *session) Select(name string, options *imap.SelectOptions) (*imap.Sel
 	}, nil
 }
 
-func (sess *session) List(w *imapserver.ListWriter, _ string, patterns []string, _ *imap.ListOptions) error {
-	if slices.Contains(patterns, "") {
+// List treats every folder as subscribed, as Gmail does, so the SUBSCRIBED,
+// REMOTE and RECURSIVEMATCH selection options select everything.
+func (sess *session) List(w *imapserver.ListWriter, ref string, patterns []string, options *imap.ListOptions) error {
+	if len(patterns) == 0 { // imapserver drops the empty pattern of LIST "" ""
 		return w.WriteList(&imap.ListData{Attrs: []imap.MailboxAttr{imap.MailboxAttrNoSelect}, Delim: '/'})
+	}
+	if options.ReturnStatus != nil {
+		if err := checkStatusOptions(options.ReturnStatus); err != nil {
+			return err
+		}
 	}
 	s := sess.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := w.WriteList(&imap.ListData{Attrs: []imap.MailboxAttr{imap.MailboxAttrNoSelect, imap.MailboxAttrHasChildren}, Delim: '/', Mailbox: "[Gmail]"}); err != nil {
-		return err
+	match := func(name string) bool {
+		return slices.ContainsFunc(patterns, func(p string) bool { return imapserver.MatchList(name, '/', ref, p) })
+	}
+	subscribed := options.SelectSubscribed || options.ReturnSubscribed
+	write := func(data *imap.ListData) error {
+		if subscribed {
+			data.Attrs = append(data.Attrs, imap.MailboxAttrSubscribed)
+		}
+		return w.WriteList(data)
+	}
+	if match("[Gmail]") && !options.SelectSpecialUse {
+		if err := write(&imap.ListData{Attrs: []imap.MailboxAttr{imap.MailboxAttrNoSelect, imap.MailboxAttrHasChildren}, Delim: '/', Mailbox: "[Gmail]"}); err != nil {
+			return err
+		}
 	}
 	for _, f := range s.folders {
-		if err := w.WriteList(&imap.ListData{Attrs: append([]imap.MailboxAttr{imap.MailboxAttrHasNoChildren}, f.attrs...), Delim: '/', Mailbox: f.name}); err != nil {
+		if !match(f.name) || (options.SelectSpecialUse && len(f.attrs) == 0) {
+			continue
+		}
+		data := &imap.ListData{Attrs: append([]imap.MailboxAttr{imap.MailboxAttrHasNoChildren}, f.attrs...), Delim: '/', Mailbox: f.name}
+		if options.ReturnStatus != nil {
+			data.Status = statusLocked(f, options.ReturnStatus)
+		}
+		if err := write(data); err != nil {
 			return err
 		}
 	}
@@ -73,6 +106,9 @@ func (sess *session) List(w *imapserver.ListWriter, _ string, patterns []string,
 }
 
 func (sess *session) Status(name string, options *imap.StatusOptions) (*imap.StatusData, error) {
+	if err := checkStatusOptions(options); err != nil {
+		return nil, err
+	}
 	s := sess.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -80,10 +116,28 @@ func (sess *session) Status(name string, options *imap.StatusOptions) (*imap.Sta
 	if f == nil {
 		return nil, &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeNonExistent, Text: "Unknown Mailbox: " + name}
 	}
+	return statusLocked(f, options), nil
+}
+
+// checkStatusOptions refuses the STATUS items of extensions the fake does not
+// advertise. imapserver would otherwise dereference a nil answer and drop the
+// connection.
+func checkStatusOptions(options *imap.StatusOptions) error {
+	if options.NumDeleted || options.Size || options.DeletedStorage || options.HighestModSeq {
+		return &imap.Error{Type: imap.StatusResponseTypeBad, Text: "fakegmail: unsupported STATUS item"}
+	}
+	return nil
+}
+
+func statusLocked(f *folder, options *imap.StatusOptions) *imap.StatusData {
 	data := &imap.StatusData{Mailbox: f.name}
 	if options.NumMessages {
 		n := uint32(len(f.order))
 		data.NumMessages = &n
+	}
+	if options.NumRecent {
+		var n uint32 // the fake has no new arrivals
+		data.NumRecent = &n
 	}
 	if options.NumUnseen {
 		var n uint32
@@ -100,20 +154,44 @@ func (sess *session) Status(name string, options *imap.StatusOptions) (*imap.Sta
 	if options.UIDValidity {
 		data.UIDValidity = f.uidValidity
 	}
-	return data, nil
+	if options.AppendLimit {
+		n := uint32(appendLimit)
+		data.AppendLimit = &n
+	}
+	return data
 }
+
+// Namespace answers as Gmail does: one personal namespace with no prefix.
+func (sess *session) Namespace() (*imap.NamespaceData, error) {
+	return &imap.NamespaceData{Personal: []imap.NamespaceDescriptor{{Prefix: "", Delim: '/'}}}, nil
+}
+
+// AppendLimit is Gmail's APPENDLIMIT. The fake is read-only all the same.
+func (sess *session) AppendLimit() uint32 { return appendLimit }
+
+func (sess *session) Move(*imapserver.MoveWriter, imap.NumSet, string) error { return errReadOnly }
 
 func (sess *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriteria, options *imap.SearchOptions) (*imap.SearchData, error) {
 	if kind != imapserver.NumKindUID {
 		return nil, &imap.Error{Type: imap.StatusResponseTypeBad, Text: "fakegmail answers UID SEARCH only"}
 	}
+	if options != nil && options.ReturnSave {
+		return nil, errSearchRes
+	}
+	if name, ok := unsupportedCriterion(criteria, true); ok {
+		return nil, &imap.Error{Type: imap.StatusResponseTypeBad, Text: "fakegmail: unsupported criterion " + name}
+	}
 	s := sess.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f := sess.selected
+	criteria, err := staticCriteria(f, criteria)
+	if err != nil {
+		return nil, err
+	}
 	var trees []*query.Node
 	for _, raw := range criteria.GmailRaw {
-		s.lastRaw = append(s.lastRaw, raw)
+		s.rawSearches = append(s.rawSearches, RawSearch{Folder: f.name, Raw: raw})
 		n, err := query.Parse(gmailDateRE.ReplaceAllString(raw, "$1:$2-$3-$4"))
 		if err != nil {
 			return nil, &imap.Error{Type: imap.StatusResponseTypeBad, Text: "X-GM-RAW: " + err.Error()}
@@ -124,42 +202,203 @@ func (sess *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriter
 		trees = append(trees, n)
 	}
 	var all imap.UIDSet
-	var count uint32
+	data := &imap.SearchData{}
 	for _, m := range f.order {
 		if matchCriteria(f, m, criteria) && slices.IndexFunc(trees, func(n *query.Node) bool { return !matchRaw(n, m) }) < 0 {
-			all.AddNum(f.uids[m])
-			count++
+			uid := f.uids[m]
+			all.AddNum(uid)
+			data.Count++
+			if data.Min == 0 {
+				data.Min = uint32(uid)
+			}
+			data.Max = uint32(uid) // f.order is in UID order
 		}
 	}
-	data := &imap.SearchData{All: all}
-	if options != nil && options.ReturnCount {
-		data.Count = count
-	}
+	data.All = all
 	return data, nil
 }
 
+var errSearchRes = &imap.Error{Type: imap.StatusResponseTypeBad, Text: "fakegmail: SEARCHRES is not advertised"}
+
+// supportedCriteria zeroes every criterion the fake implements. Whatever is
+// left is one it would otherwise ignore, which would match everything.
+func supportedCriteria(c imap.SearchCriteria, top bool) imap.SearchCriteria {
+	c.UID, c.Header, c.Text, c.Flag, c.NotFlag, c.Not, c.Or = nil, nil, nil, nil, nil, nil, nil
+	c.GmailMsgID, c.GmailThreadID = nil, nil
+	if top {
+		c.GmailRaw = nil // X-GM-RAW is evaluated only at the top level
+	}
+	return c
+}
+
+// unsupportedCriterion names the first criterion in c, or nested in its Not
+// and Or, that the fake does not implement. It inspects every field, so a
+// criterion added to go-imap later is refused until the fake learns it.
+func unsupportedCriterion(c *imap.SearchCriteria, top bool) (string, bool) {
+	rest := reflect.ValueOf(supportedCriteria(*c, top))
+	for i := range rest.NumField() {
+		if !rest.Field(i).IsZero() {
+			return rest.Type().Field(i).Name, true
+		}
+	}
+	for i := range c.Not {
+		if name, ok := unsupportedCriterion(&c.Not[i], false); ok {
+			return name, true
+		}
+	}
+	for i := range c.Or {
+		for j := range c.Or[i] {
+			if name, ok := unsupportedCriterion(&c.Or[i][j], false); ok {
+				return name, true
+			}
+		}
+	}
+	return "", false
+}
+
+// staticCriteria returns a copy of c with every * in its UID sets resolved
+// against f, as a server must before matching.
+func staticCriteria(f *folder, c *imap.SearchCriteria) (*imap.SearchCriteria, error) {
+	out := *c
+	out.UID = make([]imap.UIDSet, len(c.UID))
+	for i, set := range c.UID {
+		static, err := staticUIDSet(f, set)
+		if err != nil {
+			return nil, err
+		}
+		out.UID[i] = static
+	}
+	out.Not = make([]imap.SearchCriteria, len(c.Not))
+	for i := range c.Not {
+		n, err := staticCriteria(f, &c.Not[i])
+		if err != nil {
+			return nil, err
+		}
+		out.Not[i] = *n
+	}
+	out.Or = make([][2]imap.SearchCriteria, len(c.Or))
+	for i := range c.Or {
+		for j := range c.Or[i] {
+			n, err := staticCriteria(f, &c.Or[i][j])
+			if err != nil {
+				return nil, err
+			}
+			out.Or[i][j] = *n
+		}
+	}
+	return &out, nil
+}
+
+// staticUIDSet returns a copy of set with * resolved to f's highest UID, as
+// imapmemserver does. Without it, Contains reads n:* as "n and above" and a
+// bare * as nothing.
+func staticUIDSet(f *folder, set imap.UIDSet) (imap.UIDSet, error) {
+	if imap.IsSearchRes(set) {
+		return nil, errSearchRes
+	}
+	out := slices.Clone(set)
+	for i := range out {
+		staticRange(&out[i].Start, &out[i].Stop, f.nextUID-1)
+	}
+	return out, nil
+}
+
+// staticSeqSet is staticUIDSet for sequence numbers.
+func staticSeqSet(f *folder, set imap.SeqSet) (imap.SeqSet, error) {
+	if imap.IsSearchRes(set) {
+		return nil, errSearchRes
+	}
+	out := slices.Clone(set)
+	for i := range out {
+		staticRange(&out[i].Start, &out[i].Stop, uint32(len(f.order)))
+	}
+	return out, nil
+}
+
+// staticRange replaces * (0) with highest and orders a range that had one:
+// RFC 3501 reads 5:* as 3:5 in a mailbox whose highest number is 3.
+func staticRange[T ~uint32](start, stop *T, highest T) {
+	dynamic := *start == 0 || *stop == 0
+	if *start == 0 {
+		*start = highest
+	}
+	if *stop == 0 {
+		*stop = highest
+	}
+	if dynamic && *start > *stop {
+		*start, *stop = *stop, *start
+	}
+}
+
 func (sess *session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
+	if name, ok := unsupportedFetchItem(options, sess.s.opts); ok {
+		return &imap.Error{Type: imap.StatusResponseTypeBad, Text: "fakegmail: unsupported FETCH item " + name}
+	}
 	s := sess.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f := sess.selected
-	for i, m := range f.order {
-		seq, uid := uint32(i+1), f.uids[m]
-		switch set := numSet.(type) {
-		case imap.UIDSet:
-			if !set.Contains(uid) {
-				continue
-			}
-		case imap.SeqSet:
-			if !set.Contains(seq) {
-				continue
-			}
-		}
-		if err := writeMessage(w.CreateMessage(seq), m, uid, options); err != nil {
+	idx, err := messagesIn(f, numSet)
+	if err != nil {
+		return err
+	}
+	for _, i := range idx {
+		m := f.order[i]
+		if err := writeMessage(w.CreateMessage(uint32(i+1)), m, f.uids[m], options); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// unsupportedFetchItem names the first FETCH item in options that the fake
+// does not answer: BINARY and CONDSTORE items, which Gmail does not
+// advertise, and PREVIEW unless Options.Preview is set. Like
+// unsupportedCriterion it inspects every field, so a new item is refused
+// until the fake learns it.
+func unsupportedFetchItem(options *imap.FetchOptions, opts Options) (string, bool) {
+	rest := *options
+	rest.BodyStructure, rest.BodySection = nil, nil
+	rest.Envelope, rest.Flags, rest.InternalDate, rest.RFC822Size, rest.UID = false, false, false, false, false
+	rest.GmailMsgID, rest.GmailThreadID, rest.GmailLabels = false, false, false
+	if opts.Preview {
+		rest.Preview = false
+	}
+	v := reflect.ValueOf(rest)
+	for i := range v.NumField() {
+		if !v.Field(i).IsZero() {
+			return v.Type().Field(i).Name, true
+		}
+	}
+	return "", false
+}
+
+// messagesIn returns the positions in f.order of the messages numSet names.
+func messagesIn(f *folder, numSet imap.NumSet) ([]int, error) {
+	var contains func(seq uint32, uid imap.UID) bool
+	switch set := numSet.(type) {
+	case imap.UIDSet:
+		static, err := staticUIDSet(f, set)
+		if err != nil {
+			return nil, err
+		}
+		contains = func(_ uint32, uid imap.UID) bool { return static.Contains(uid) }
+	case imap.SeqSet:
+		static, err := staticSeqSet(f, set)
+		if err != nil {
+			return nil, err
+		}
+		contains = func(seq uint32, _ imap.UID) bool { return static.Contains(seq) }
+	default:
+		return nil, &imap.Error{Type: imap.StatusResponseTypeBad, Text: fmt.Sprintf("fakegmail: unexpected message set %T", numSet)}
+	}
+	var idx []int
+	for i, m := range f.order {
+		if contains(uint32(i+1), f.uids[m]) {
+			idx = append(idx, i)
+		}
+	}
+	return idx, nil
 }
 
 func writeMessage(rw *imapserver.FetchResponseWriter, m *Message, uid imap.UID, options *imap.FetchOptions) error {
