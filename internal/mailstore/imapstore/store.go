@@ -235,9 +235,21 @@ func (s *Store) dial(ctx context.Context) (*conn, error) {
 		return nil, &auth.RejectedError{Hint: rejectedHint(s.acct), Err: err}
 	case ctx.Err() != nil:
 		return nil, ctx.Err()
+	case isRefusal(err):
+		// The server answered, so trying again would only resend the
+		// credentials: NO [ALERT] for an app password, NO [UNAVAILABLE],
+		// BAD for LOGINDISABLED and the like.
+		return nil, fmt.Errorf("%w: %s refused the login: %w", mailstore.ErrUnavailable, s.acct.Name, err)
 	default:
+		// A transport or TLS failure, or a BYE: worth a fresh connection.
 		return nil, fmt.Errorf("%w: %w", errConnLost, err)
 	}
+}
+
+// isRefusal reports a NO or BAD reply from the server.
+func isRefusal(err error) bool {
+	var e *imap.Error
+	return errors.As(err, &e) && (e.Type == imap.StatusResponseTypeNo || e.Type == imap.StatusResponseTypeBad)
 }
 
 func rejectedHint(acct config.ResolvedAccount) string {

@@ -222,3 +222,29 @@ func TestStoreCloseWaitsForBorrowedConnections(t *testing.T) {
 		t.Errorf("ListFolders after Close = %v, want ErrUnavailable", err)
 	}
 }
+
+func TestStoreDoesNotRetryLoginRefusals(t *testing.T) {
+	t.Parallel()
+	for name, refusal := range map[string]*imap.Error{
+		"alert":       {Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeAlert, Text: "Application-specific password required"},
+		"unavailable": {Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeUnavailable, Text: "try again later"},
+		"bad":         {Type: imap.StatusResponseTypeBad, Text: "LOGIN is disabled"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var logins atomic.Int32
+			ca := tlstest.New(t)
+			ep := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{Username: "host@example.test", Password: "pw", LoginError: refusal, Logins: &logins})
+			creds := passwordCreds("host@example.test", "pw")
+			s := New(testAccount("host", ep, false), creds, Options{RootCAs: ca.Pool, Backoff: noBackoff})
+			t.Cleanup(func() { _ = s.Close() })
+			_, err := s.ListFolders(t.Context())
+			if !errors.Is(err, mailstore.ErrUnavailable) || errors.Is(err, errConnLost) {
+				t.Errorf("ListFolders = %v, want ErrUnavailable and not a lost connection", err)
+			}
+			if n := logins.Load(); n != 1 || creds.rejections() != 0 {
+				t.Errorf("logins = %d, rejections = %d; want 1 and 0: the server answered, so the login is not retried", n, creds.rejections())
+			}
+		})
+	}
+}
