@@ -299,6 +299,9 @@ func TestBodyLimit(t *testing.T) {
 	if got := cfg.Daemon.BodyLimitBytes(); got != 1<<20 {
 		t.Errorf("1MiB = %d bytes", got)
 	}
+	if got := (Daemon{}).BodyLimitBytes(); got != 64<<10 {
+		t.Errorf("unparsed Daemon{} body limit = %d bytes, want the 64KiB default", got)
+	}
 	for _, bad := range []string{"64kb", "0", "16MiB", "-1", "1.5KiB", "512"} {
 		_, err := Parse([]byte("[daemon]\nbody_limit = \"" + bad + "\"\n"))
 		var verr *ValidationError

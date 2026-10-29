@@ -23,7 +23,7 @@ const (
 	DefaultPath        = "/etc/chainmail/config.toml"
 	DefaultSocket      = "/run/chainmail/chainmail.sock"
 	DefaultClientGroup = "chainmail-clients"
-	// DefaultBodyLimit truncates message bodies longer than 64 KiB unless --full is passed.
+	// DefaultBodyLimit truncates message bodies longer than 64 KiB unless the request asks for the full body.
 	DefaultBodyLimit = "64KiB"
 )
 
@@ -45,8 +45,8 @@ type Daemon struct {
 	BodyLimit string `toml:"body_limit"`
 }
 
-// Body limits accepted in config. The upper bound keeps a batch of 50
-// messages under the 16 MiB unary response cap.
+// Body limits accepted in config. They bound one rendered body only. The Get
+// and GetThread handlers enforce the 16 MiB unary response cap themselves.
 const (
 	minBodyLimit = 1 << 10
 	maxBodyLimit = 8 << 20
@@ -70,9 +70,13 @@ func ParseByteSize(s string) (int64, error) {
 	return n, nil
 }
 
-// BodyLimitBytes returns body_limit in bytes. Parse has validated it.
+// BodyLimitBytes returns body_limit in bytes. Parse has validated it. A Daemon
+// that never went through Parse gets the default.
 func (d Daemon) BodyLimitBytes() int {
-	n, _ := ParseByteSize(d.BodyLimit)
+	n, err := ParseByteSize(d.BodyLimit)
+	if err != nil || n == 0 {
+		n, _ = ParseByteSize(DefaultBodyLimit)
+	}
 	return int(n)
 }
 
