@@ -23,6 +23,8 @@ func (a *adminService) SetSecret(ctx context.Context, req *connect.Request[chain
 	}
 	name, value := req.Msg.GetName(), req.Msg.GetValue()
 	setErr := a.s.opts.Vault.Set(name, value)
+	// A failed final directory sync still leaves the new value live, so an
+	// error audit row for secret.set does not prove the old value is in use.
 	if setErr == nil || a.s.secretIs(name, value) {
 		a.s.auth.SecretChanged(name)
 	}

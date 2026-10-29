@@ -40,7 +40,10 @@ func TestCloseDropsIdleConnections(t *testing.T) {
 		}),
 		ConnState: func(_ net.Conn, s http.ConnState) {
 			if s == http.StateClosed {
-				closed <- struct{}{}
+				select {
+				case closed <- struct{}{}:
+				default:
+				}
 			}
 		},
 	}

@@ -46,7 +46,9 @@ func New(socketPath, kind string) *Client {
 // Close drops the client's idle connections to the daemon, so a daemon shutting
 // down need not wait for them. The client stays usable and redials on the next call.
 func (c *Client) Close() {
-	c.transport.CloseIdleConnections()
+	if c.transport != nil {
+		c.transport.CloseIdleConnections()
+	}
 }
 
 func clientHeader(kind string) connect.UnaryInterceptorFunc {
