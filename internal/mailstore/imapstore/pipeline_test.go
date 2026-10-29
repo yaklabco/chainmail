@@ -54,6 +54,8 @@ type scriptServer struct {
 	dropAfter int
 	// refuse names a command, SEARCH or FETCH, that is answered with refusal.
 	refuse, refusal string
+	// refuseText, when set, refuses the body FETCH of this one UID with NO.
+	refuseText int
 	// encoding is every message's Content-Transfer-Encoding, 7bit if unset,
 	// and text, when set, is every message's body instead of scriptBody.
 	encoding, text string
@@ -261,6 +263,9 @@ func (srv *scriptServer) answer(cmd string) (data, done string) {
 	if err != nil {
 		return "", tag + " BAD unexpected FETCH\r\n"
 	}
+	if uid == srv.refuseText {
+		return "", tag + " NO [SERVERBUG] cannot read this message\r\n"
+	}
 	body := srv.bodyOf(uid)
 	if sec[1] == "" {
 		body = scriptHeader(uid) + body // the whole message
@@ -414,5 +419,29 @@ func TestServerRefusalsAreNotRetried(t *testing.T) {
 				t.Errorf("%s sent %d times on %d connections, want once on one: a refusal is final", tc.refuse, n, c)
 			}
 		})
+	}
+}
+
+// TestFetchMessagesRefusalOfOneMessageIsPerItem checks that a server refusing
+// the text of one message fails that message alone, as unreadable rather
+// than unavailable, so a thread can leave it out.
+func TestFetchMessagesRefusalOfOneMessageIsPerItem(t *testing.T) {
+	t.Parallel()
+	srv := startScriptServer(t, &scriptServer{n: 3, refuseText: 2})
+	s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second})
+	res := fetchWithin(t, s, scriptRefs(srv.n), 5*time.Second)
+	for i, r := range res {
+		if i == 1 {
+			if r.Err == nil || errors.Is(r.Err, mailstore.ErrUnavailable) || errors.Is(r.Err, mailstore.ErrNotFound) || errors.Is(r.Err, mailstore.ErrStaleRef) {
+				t.Errorf("ref 2: %+v, want a permanent error of its own", r)
+			}
+			continue
+		}
+		if r.Err != nil {
+			t.Errorf("ref %d: %v", i+1, r.Err)
+		}
+	}
+	if n := srv.conns.Load(); n != 1 {
+		t.Errorf("%d connections, want 1: a refusal is final", n)
 	}
 }

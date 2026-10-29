@@ -142,7 +142,12 @@ func (s *Store) fetchGroup(ctx context.Context, c *conn, folder string, refs []r
 				var refusal *imap.Error
 				switch err := errs[i]; {
 				case errors.As(err, &refusal):
-					set(p, nil, fmt.Errorf("%w: reading the text: %w", mailstore.ErrUnavailable, err))
+					// The server refused this one message, so it alone
+					// fails, as unreadable rather than unavailable: the
+					// connection still serves the others, and a thread
+					// leaves the message out instead of failing. The error
+					// matches no mailstore sentinel.
+					set(p, nil, fmt.Errorf("the server refused to read the text: %w", err))
 					continue
 				case err != nil:
 					return err
