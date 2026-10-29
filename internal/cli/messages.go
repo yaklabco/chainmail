@@ -112,12 +112,21 @@ func newGetCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		Short: "Read up to 50 messages",
 		Args:  minArgs(1),
 		RunE: func(cmd *cobra.Command, refs []string) error {
+			if raw {
+				switch {
+				case len(refs) != 1:
+					return usageError{err: errors.New("--raw takes exactly one ref"), hint: helpHint(cmd)}
+				case full:
+					return usageError{err: errors.New("--raw and --full cannot be used together"), hint: helpHint(cmd)}
+				case env.StdoutTerminal:
+					// Raw bytes skip the daemon's text cleaning, so a sender's
+					// escape sequences would reach the terminal.
+					return usageError{err: errors.New("refusing to write a raw message to a terminal"), hint: "redirect stdout, for example: > message.eml"}
+				}
+			}
 			c := g.client(env)
 			defer c.Close()
 			if raw {
-				if len(refs) != 1 {
-					return usageError{err: errors.New("--raw takes exactly one ref"), hint: helpHint(cmd)}
-				}
 				return writeRaw(ctx, c, env, refs[0])
 			}
 			resp, err := c.Message.Get(ctx, connect.NewRequest(&chainmailv1.GetRequest{Refs: refs, Full: full}))

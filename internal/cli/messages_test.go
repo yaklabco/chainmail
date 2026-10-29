@@ -169,6 +169,8 @@ func TestMessageCommandExitCodes(t *testing.T) {
 		{"get without refs", Env{}, []string{"get"}, 2, "USAGE"},
 		{"get with too many refs", Env{}, append([]string{"get"}, tooMany...), 2, "INVALID_ARGUMENT"},
 		{"raw with two refs", Env{}, []string{"get", "--raw", m.invoice.String(), staleRef}, 2, "USAGE"},
+		{"raw to a terminal", Env{StdoutTerminal: true}, []string{"get", "--raw", m.invoice.String()}, 2, "USAGE"},
+		{"raw with full", Env{}, []string{"get", "--raw", "--full", m.invoice.String()}, 2, "USAGE"},
 		{"raw stale", Env{}, []string{"get", "--raw", staleRef}, 6, "STALE_REF"},
 		{"bad query", Env{}, []string{"search", "foo:bar"}, 2, "INVALID_ARGUMENT"},
 		{"unknown account", Env{}, []string{"search", "--account", "nope"}, 6, "NOT_FOUND"},
