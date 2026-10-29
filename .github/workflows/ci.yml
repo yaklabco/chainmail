@@ -16,6 +16,6 @@ jobs:
           setup_only: true
       - uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.12.2
+          version: v2.15.0
           install-only: true
       - run: go tool stave check
