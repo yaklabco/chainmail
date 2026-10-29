@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"filippo.io/age"
@@ -35,6 +36,8 @@ type Harness struct {
 	Vault  *vault.Vault
 	DB     *sql.DB
 	Socket string
+
+	stop func() error
 }
 
 // AuditRow is one row of the audit table, as text.
@@ -99,16 +102,25 @@ func Start(t testing.TB, configTOML string, opts Options) *Harness {
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve(ctx) }()
 	c := client.New(socket, "test")
-	t.Cleanup(func() {
+	stop := sync.OnceValue(func() error {
 		// Idle client connections would hold up the graceful shutdown.
 		c.Close()
 		cancel()
-		if err := <-done; err != nil {
+		return <-done
+	})
+	t.Cleanup(func() {
+		if err := stop(); err != nil {
 			t.Errorf("daemon: %v", err)
 		}
 	})
-	return &Harness{Client: c, Vault: v, DB: stateDB, Socket: socket}
+	return &Harness{Client: c, Vault: v, DB: stateDB, Socket: socket, stop: stop}
 }
+
+// Stop shuts the daemon down as a signal would and returns what Serve
+// returned. The database stays open until the test ends, so tests can read
+// the audit rows afterwards. The test's cleanup calls Stop too, and later
+// calls return the first result.
+func (h *Harness) Stop() error { return h.stop() }
 
 // AuditRows returns every audit row in insertion order.
 func (h *Harness) AuditRows(t testing.TB) []AuditRow {

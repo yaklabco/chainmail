@@ -118,6 +118,8 @@ func runDaemon(ctx context.Context, env Env, p daemonPlan) error {
 	if err != nil {
 		return err
 	}
+	// Serve returns only after every handler has, so no request is still
+	// writing an audit row when this runs.
 	defer func() {
 		if err := stateDB.Close(); err != nil {
 			logger.Error("closing state.db", "err", err)

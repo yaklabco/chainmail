@@ -425,6 +425,41 @@ func TestTestAccountTimeout(t *testing.T) {
 	}
 }
 
+// Shutting down cancels a test stuck on a silent server instead of waiting
+// for its 30 second dial timeout, and its audit row is still written.
+func TestShutdownCancelsInFlightTest(t *testing.T) {
+	t.Parallel()
+	silent, accepted := silentEndpointNotify(t)
+	m := mailServers{ca: tlstest.New(t), imap: silent, smtp: silent}
+	h := daemontest.Start(t, localConfig(m), daemontest.Options{RootCAs: m.ca.Pool})
+	setSecret(t, h, "accounts/local", "pw")
+	go func() {
+		// The outcome depends on how the connection ends; the audit row is what matters.
+		_, _ = h.Client.Account.TestAccount(t.Context(), connect.NewRequest(&chainmailv1.TestAccountRequest{Account: "local"}))
+	}()
+	select {
+	case <-accepted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the test never reached the IMAP server")
+	}
+	start := time.Now()
+	if err := h.Stop(); err != nil {
+		t.Errorf("Serve: %v", err)
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Errorf("shutdown took %v, want the in-flight test cancelled", took)
+	}
+	var test daemontest.AuditRow
+	for _, r := range h.AuditRows(t) {
+		if r.Action == "account.test" {
+			test = r
+		}
+	}
+	if test.Result != "error" || test.Reason != api.ReasonTimeout {
+		t.Errorf("account.test audit = %+v, want an error row with TIMEOUT", test)
+	}
+}
+
 // closedPort returns a local port that nothing listens on.
 func closedPort(t *testing.T) int {
 	t.Helper()
@@ -445,6 +480,16 @@ func closedPort(t *testing.T) int {
 // silentEndpoint accepts connections and never sends a byte, until the test ends.
 func silentEndpoint(t *testing.T) provider.Endpoint {
 	t.Helper()
+	ep, _ := silentEndpointNotify(t)
+	return ep
+}
+
+// silentEndpointNotify is silentEndpoint, and the channel is closed once it
+// has accepted a connection.
+func silentEndpointNotify(t *testing.T) (provider.Endpoint, <-chan struct{}) {
+	t.Helper()
+	accepted := make(chan struct{})
+	var once sync.Once
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -460,6 +505,7 @@ func silentEndpoint(t *testing.T) provider.Endpoint {
 			if err != nil {
 				return
 			}
+			once.Do(func() { close(accepted) })
 			wg.Go(func() {
 				<-t.Context().Done()
 				_ = conn.Close() // the test is over; the client may already have hung up
@@ -470,7 +516,7 @@ func silentEndpoint(t *testing.T) provider.Endpoint {
 	if !ok {
 		t.Fatalf("listener address is %T", ln.Addr())
 	}
-	return provider.Endpoint{Host: "127.0.0.1", Port: addr.Port, Security: provider.SecurityTLS}
+	return provider.Endpoint{Host: "127.0.0.1", Port: addr.Port, Security: provider.SecurityTLS}, accepted
 }
 
 // When the checks fail differently, the audit row keeps the rejection, since

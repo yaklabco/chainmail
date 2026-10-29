@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -44,6 +45,11 @@ const (
 	maxRequestBytes = 1 << 20
 	// auditTimeout bounds an audit write that outlives its request.
 	auditTimeout = 5 * time.Second
+	// shutdownTimeout bounds the graceful part of a shutdown, after which
+	// connections are closed.
+	shutdownTimeout = 10 * time.Second
+	// idleTimeout closes keep-alive connections nobody is using.
+	idleTimeout = 2 * time.Minute
 )
 
 // Server is the chainmail daemon.
@@ -55,6 +61,7 @@ type Server struct {
 	httpSrv *http.Server
 	// accountLocks serializes account tests, one account at a time.
 	accountLocks keyedLock
+	handlers     inflight
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -82,31 +89,88 @@ func New(opts Options) (*Server, error) {
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
+	// ReadTimeout and WriteTimeout stay unset. The socket is local, and a
+	// unary call such as accounts test legitimately runs for up to a
+	// minute, which a whole-request timeout would cut off. Handlers bound
+	// their own work instead, and shutdown cancels it.
 	s.httpSrv = &http.Server{
-		Handler:           opts.Authorizer.Middleware(mux),
+		Handler:           s.handlers.track(opts.Authorizer.Middleware(mux)),
 		ConnContext:       connContext,
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       idleTimeout,
 		Protocols:         protocols,
 	}
 	return s, nil
 }
 
-// Serve handles requests until ctx ends, then shuts down gracefully.
+// Serve handles requests until ctx ends, then shuts down. Shutting down
+// cancels every request in flight, so mail server probes stop and report
+// TIMEOUT while their audit rows are still written. Serve returns only once
+// every handler has returned, so the caller can close the state database.
 func (s *Server) Serve(ctx context.Context) error {
+	base, cancelBase := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelBase()
+	s.httpSrv.BaseContext = func(net.Listener) context.Context { return base }
 	errc := make(chan error, 1)
 	go func() { errc <- s.httpSrv.Serve(s.opts.Listener) }()
 	s.opts.Logger.Info("daemon listening", "addr", s.opts.Listener.Addr().String(), "dev", s.opts.DevMode)
 	select {
 	case err := <-errc:
-		return fmt.Errorf("serving: %w", err)
+		cancelBase()
+		// Serve has stopped, so nothing will finish the connections it
+		// left open but Close.
+		closeErr := s.httpSrv.Close()
+		s.handlers.wait()
+		return errors.Join(fmt.Errorf("serving: %w", err), closeErr)
 	case <-ctx.Done():
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	cancelBase()
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer cancel()
-	if err := s.httpSrv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutting down: %w", err)
+	var err error
+	if shutdownErr := s.httpSrv.Shutdown(shutdownCtx); shutdownErr != nil {
+		// Close drops the connections still open. It does not wait for
+		// their handlers, which wait does below.
+		err = errors.Join(fmt.Errorf("shutting down: %w", shutdownErr), s.httpSrv.Close())
 	}
-	return nil
+	// Shutdown and Close make Serve return http.ErrServerClosed, which is
+	// the normal outcome. Anything else is reported.
+	if serveErr := <-errc; !errors.Is(serveErr, http.ErrServerClosed) {
+		err = errors.Join(err, fmt.Errorf("serving: %w", serveErr))
+	}
+	s.handlers.wait()
+	return err
+}
+
+// inflight counts running handlers so shutdown can wait for them. Once
+// draining has begun it refuses new requests rather than race the wait.
+type inflight struct {
+	mu       sync.Mutex
+	draining bool
+	wg       sync.WaitGroup
+}
+
+func (f *inflight) track(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		if f.draining {
+			f.mu.Unlock()
+			http.Error(w, "the daemon is shutting down", http.StatusServiceUnavailable)
+			return
+		}
+		f.wg.Add(1)
+		f.mu.Unlock()
+		defer f.wg.Done()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// wait refuses new requests and waits for the running ones to return.
+func (f *inflight) wait() {
+	f.mu.Lock()
+	f.draining = true
+	f.mu.Unlock()
+	f.wg.Wait()
 }
 
 type caller struct {
