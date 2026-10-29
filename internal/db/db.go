@@ -80,6 +80,9 @@ func migrate(ctx context.Context, conn *sql.DB, migrations fs.FS, names []string
 	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&current); err != nil {
 		return fmt.Errorf("reading user_version: %w", err)
 	}
+	if current < 0 {
+		return fmt.Errorf("invalid schema version %d", current)
+	}
 	if current > len(names) {
 		return fmt.Errorf("schema version %d is newer than this binary (%d)", current, len(names))
 	}

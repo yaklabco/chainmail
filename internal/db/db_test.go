@@ -111,3 +111,23 @@ func TestOpenRejectsURIMetacharacters(t *testing.T) {
 		}
 	}
 }
+
+func TestNegativeSchemaVersionIsRejected(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "x.db")
+	empty := fstest.MapFS{}
+	conn, err := Open(t.Context(), path, empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(t.Context(), "PRAGMA user_version = -1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	one := fstest.MapFS{"0001_a.sql": {Data: []byte("CREATE TABLE a (x INTEGER);")}}
+	if _, err := Open(t.Context(), path, one); err == nil || !strings.Contains(err.Error(), "invalid schema version -1") {
+		t.Errorf("err = %v, want an invalid-schema-version error", err)
+	}
+}
