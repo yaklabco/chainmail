@@ -98,12 +98,16 @@ func walkMultipart(mr message.MultipartReader, alternative bool, depth int) *tex
 // headerType returns the lower-case type of a Content-Type or
 // Content-Disposition value, or "" when the type itself is unreadable.
 // Hostile mail often breaks the parameters (an unquoted filename with a
-// space, an unterminated quote, a repeated name), and go-message then reports
-// an error for the whole field. Only the part before the first ";" is parsed
-// here, so broken parameters never hide the type.
+// space, an unterminated quote, a repeated name, a missing ";"), and
+// go-message then reports an error for the whole field. Only the leading
+// token, up to the first ";" or space, is parsed here, so broken parameters
+// never hide the type.
 func headerType(v string) string {
-	base, _, _ := strings.Cut(v, ";")
-	t, _, err := mime.ParseMediaType(base)
+	v = strings.TrimSpace(v)
+	if i := strings.IndexAny(v, "; \t\r\n"); i >= 0 {
+		v = v[:i]
+	}
+	t, _, err := mime.ParseMediaType(v)
 	if err != nil {
 		return ""
 	}

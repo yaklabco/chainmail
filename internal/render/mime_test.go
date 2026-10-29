@@ -107,6 +107,12 @@ func TestPickTextMalformedHeaders(t *testing.T) {
 		},
 		{"unterminated charset quote", "Content-Type: text/html; charset=\"utf-8\n\n<p>Hi</p>\n", true, "<p>Hi</p>\n"},
 		{"upper case type with broken parameter", "Content-Type: TEXT/HTML; charset\n\n<p>Hi</p>\n", true, "<p>Hi</p>\n"},
+		{
+			"disposition without a semicolon",
+			"Content-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: text/plain\nContent-Disposition: attachment filename=x.txt\n\nATTACHED\n--b\nContent-Type: text/plain\n\nbody\n--b--\n",
+			false, "body",
+		},
+		{"type without a semicolon", "Content-Type: text/html charset=utf-8\n\n<p>Hi</p>\n", true, "<p>Hi</p>\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

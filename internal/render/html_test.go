@@ -76,6 +76,18 @@ func TestHTMLToTextDeepNestingFormats(t *testing.T) {
 		{"link", deep + `<p>See <a href="https://example.com/agenda">the agenda</a>.</p>`, "See the agenda (https://example.com/agenda)."},
 		{"image", deep + `<p>Logo <img src="x.png" alt="Logo"> here <svg/>now</p>`, "Logo here now"},
 		{"entities", deep + "Fish &amp; chips", "Fish & chips"},
+		{"self-closing script", deep + "<p>Hi<script/>alert(1)</script> there</p>", "Hi there"},
+		{"self-closing style", deep + "<p>Hi<style/>p{color:red}</style> there</p>", "Hi there"},
+		{"self-closing title", deep + "<title/>Secret</title><p>Hi there</p>", "Hi there"},
+		{"self-closing noscript", deep + "<p>Hi<noscript/>no js</noscript> there</p>", "Hi there"},
+		{"self-closing iframe", deep + "<p>Hi<iframe/>framed</iframe> there</p>", "Hi there"},
+		{"unclosed svg", deep + "<p>Hi</p><svg><p>Body after unclosed svg</p>", "Hi\n\nBody after unclosed svg"},
+		{"svg br breaks out", deep + "<svg><text>drawn</text><br/>After</svg>", "After"},
+		{"svg font with color breaks out", deep + `<svg><font color="red">Shown</font>`, "Shown"},
+		{"svg font without attributes stays", deep + "<svg><font>drawn</font></svg>After", "After"},
+		{"svg foreignObject keeps html inside", deep + "<svg><foreignObject><p>drawn</p></foreignObject></svg><p>After</p>", "After"},
+		{"svg title keeps html inside", deep + "<svg><title><p>drawn</p></title></svg><p>After</p>", "After"},
+		{"svg script is not raw text", deep + "<svg><script/><p>After</p>", "After"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -98,12 +110,23 @@ func TestHTMLToTextDeepNestingFormats(t *testing.T) {
 
 func TestHTMLToTextLinkTargetWhitespace(t *testing.T) {
 	t.Parallel()
-	in := "<a href=\"https://x.test/a\n  /b\r\n\">go</a>"
-	got, err := HTMLToText(strings.NewReader(in))
-	if err != nil {
-		t.Fatalf("HTMLToText: %v", err)
+	tests := []struct {
+		name, in, want string
+	}{
+		{"embedded newline", "<a href=\"https://x.test/a\n/b\r\n\">go</a>", "go (https://x.test/a/b)"},
+		{"tab and leading space", "<a href=\" \thttps://x.test/a\t/b \">go</a>", "go (https://x.test/a/b)"},
+		{"interior space", `<a href="mailto:a@b.test?subject=Meeting notes">write</a>`, "write (mailto:a@b.test?subject=Meeting notes)"},
 	}
-	if want := "go (https://x.test/a/b)"; got != want {
-		t.Errorf("HTMLToText = %q, want %q", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := HTMLToText(strings.NewReader(tt.in))
+			if err != nil {
+				t.Fatalf("HTMLToText: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("HTMLToText(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }

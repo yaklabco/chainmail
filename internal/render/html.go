@@ -49,12 +49,13 @@ func htmlText(doc *html.Node) string {
 // inside a skipped element is dropped up to its end tag, and every other tag
 // formats as it does in htmlText. The head is not skipped as a whole, because
 // an unclosed <head> would swallow the body. Its text lives in title, script
-// and style, which are skipped on their own.
+// and style, which are skipped on their own. An <svg> ends early at an HTML
+// tag that breaks out of foreign content, as in the tree parser, so an
+// unclosed <svg> does not swallow the rest of the document.
 func tokenText(b []byte) string {
 	w := &textWriter{atLineStart: true}
 	z := html.NewTokenizer(bytes.NewReader(b))
-	var skip atom.Atom // the skipped element being dropped, while depth > 0
-	depth := 0
+	var s skip
 	for {
 		tt := z.Next()
 		if tt == html.ErrorToken {
@@ -62,13 +63,7 @@ func tokenText(b []byte) string {
 		}
 		tok := z.Token()
 		a := tok.DataAtom
-		if depth > 0 {
-			switch {
-			case tt == html.StartTagToken && a == skip:
-				depth++
-			case tt == html.EndTagToken && a == skip:
-				depth--
-			}
+		if s.drop(z, tt, &tok) {
 			continue
 		}
 		switch tt {
@@ -76,8 +71,10 @@ func tokenText(b []byte) string {
 			w.text(tok.Data)
 		case html.StartTagToken, html.SelfClosingTagToken:
 			if a != atom.Head && skipped[a] {
-				if tt == html.StartTagToken && !voidElements[a] {
-					skip, depth = a, 1
+				// The tokenizer reads a raw-text element's content as text
+				// even when the tag is written <x/>, so that starts a skip too.
+				if !voidElements[a] && (tt == html.StartTagToken || rawText[a]) {
+					s = skip{el: a, depth: 1}
 				}
 				continue
 			}
@@ -93,9 +90,93 @@ func tokenText(b []byte) string {
 	return w.finish()
 }
 
+// skip tracks a skipped element whose content the tokenizer pass is dropping.
+type skip struct {
+	el    atom.Atom // the skipped element, while depth > 0
+	depth int       // open elements of type el
+	// htmlIn counts the open svg integration points (desc, foreignObject and
+	// title) inside a skipped <svg>. Their content is HTML, so it neither
+	// breaks out of the svg nor escapes raw-text mode.
+	htmlIn int
+}
+
+// drop reports whether the token belongs to the skipped element and must be
+// dropped. A tag that breaks out of an <svg> ends the skip and is not dropped.
+func (s *skip) drop(z *html.Tokenizer, tt html.TokenType, tok *html.Token) bool {
+	if s.depth == 0 {
+		return false
+	}
+	a := tok.DataAtom
+	start := tt == html.StartTagToken || tt == html.SelfClosingTagToken
+	if s.el == atom.Svg && s.htmlIn == 0 && start {
+		if breaksOut(tok) {
+			*s = skip{}
+			return false
+		}
+		// The tree parser reads foreign content with raw-text mode off, so
+		// an svg <title> or <script> does not swallow the markup after it.
+		z.NextIsNotRawText()
+		if tt == html.StartTagToken && svgHTMLPoints[a] {
+			s.htmlIn++
+		}
+	}
+	switch {
+	case tt == html.StartTagToken && a == s.el:
+		s.depth++
+	case tt == html.EndTagToken && a == s.el:
+		s.depth--
+	case tt == html.EndTagToken && s.el == atom.Svg && s.htmlIn > 0 && svgHTMLPoints[a]:
+		s.htmlIn--
+	}
+	if s.depth == 0 {
+		*s = skip{}
+	}
+	return true
+}
+
+// breaksOut reports whether a start tag inside <svg> ends the svg, as the
+// tree parser decides it for foreign content.
+func breaksOut(tok *html.Token) bool {
+	if tok.DataAtom != atom.Font {
+		return breakout[tok.DataAtom]
+	}
+	for _, at := range tok.Attr {
+		switch at.Key {
+		case "color", "face", "size":
+			return true
+		}
+	}
+	return false
+}
+
+// breakout lists the HTML start tags that end foreign content (WHATWG HTML,
+// "parsing tokens in foreign content"). <font> breaks out only with a color,
+// face or size attribute.
+var breakout = map[atom.Atom]bool{
+	atom.B: true, atom.Big: true, atom.Blockquote: true, atom.Body: true, atom.Br: true,
+	atom.Center: true, atom.Code: true, atom.Dd: true, atom.Div: true, atom.Dl: true,
+	atom.Dt: true, atom.Em: true, atom.Embed: true, atom.H1: true, atom.H2: true,
+	atom.H3: true, atom.H4: true, atom.H5: true, atom.H6: true, atom.Head: true,
+	atom.Hr: true, atom.I: true, atom.Img: true, atom.Li: true, atom.Listing: true,
+	atom.Menu: true, atom.Meta: true, atom.Nobr: true, atom.Ol: true, atom.P: true,
+	atom.Pre: true, atom.Ruby: true, atom.S: true, atom.Small: true, atom.Span: true,
+	atom.Strong: true, atom.Strike: true, atom.Sub: true, atom.Sup: true, atom.Table: true,
+	atom.Tt: true, atom.U: true, atom.Ul: true, atom.Var: true,
+}
+
+// svgHTMLPoints are the svg elements whose content is HTML. The tokenizer
+// lower-cases tag names, so foreignObject arrives as foreignobject.
+var svgHTMLPoints = map[atom.Atom]bool{atom.Desc: true, atom.Foreignobject: true, atom.Title: true}
+
 // voidElements in the skipped set have no end tag, so the tokenizer pass must
 // not wait for one.
 var voidElements = map[atom.Atom]bool{atom.Img: true, atom.Embed: true}
+
+// rawText elements in the skipped set hold raw text up to their end tag, even
+// when written self-closing, because the tokenizer reads them that way.
+var rawText = map[atom.Atom]bool{
+	atom.Title: true, atom.Script: true, atom.Style: true, atom.Noscript: true, atom.Iframe: true,
+}
 
 // skipped elements contribute no text.
 var skipped = map[atom.Atom]bool{
@@ -238,11 +319,13 @@ type openLink struct {
 }
 
 // link follows the text of l with its target in parentheses when the target
-// is a web or mail address that differs from the text. Whitespace inside the
-// target is dropped, as browsers do, so a wrapped href stays on one line.
+// is a web or mail address that differs from the text. The target is cleaned
+// as the WHATWG URL parser cleans its input, so a wrapped href stays on one
+// line: leading and trailing C0 controls and spaces are trimmed, and tab, LF
+// and CR are removed from anywhere. Interior spaces are kept.
 func (w *textWriter) link(l openLink) {
 	text := strings.TrimSpace(w.b.String()[l.start:])
-	href := strings.Join(strings.Fields(l.href), "")
+	href := cleanHref(l.href)
 	if text == "" || !showableLink(href) || href == text || strings.TrimPrefix(href, "mailto:") == text {
 		return
 	}
@@ -352,4 +435,16 @@ func attr(n *html.Node, key string) string {
 		}
 	}
 	return ""
+}
+
+// cleanHref trims C0 controls and spaces from both ends of href and removes
+// every tab, LF and CR.
+func cleanHref(href string) string {
+	href = strings.TrimFunc(href, func(r rune) bool { return r <= ' ' })
+	return strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\n' || r == '\r' {
+			return -1
+		}
+		return r
+	}, href)
 }
