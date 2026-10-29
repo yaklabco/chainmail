@@ -6,11 +6,13 @@ require (
 	connectrpc.com/connect v1.21.1
 	filippo.io/age v1.3.2
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
+	github.com/emersion/go-message v0.18.2
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
 	github.com/emersion/go-smtp v0.25.0
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/spf13/cobra v1.10.2
 	github.com/yaklabco/stave v0.17.6
+	golang.org/x/net v0.62.0
 	golang.org/x/oauth2 v0.37.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
@@ -40,7 +42,6 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
-	github.com/emersion/go-message v0.18.2 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/go-logfmt/logfmt v0.6.1 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
@@ -70,7 +71,7 @@ require (
 	github.com/xo/terminfo v1.2.0 // indirect
 	github.com/yaklabco/direnv/v2 v2.38.2-0.20261020123124-a1b95736f4db // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20261014143641-f0251eb4aa3e // indirect
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
@@ -86,3 +87,5 @@ tool (
 	github.com/yaklabco/stave
 	google.golang.org/protobuf/cmd/protoc-gen-go
 )
+
+replace github.com/emersion/go-imap/v2 => github.com/jamesainslie/go-imap/v2 v2.0.0-beta.8.0.20261029164137-0bd4e366225f

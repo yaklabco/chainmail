@@ -1,0 +1,13 @@
+From: Sam Roe <sam@example.org>
+To: Alex Doe <alex@example.com>
+Subject: RE: Thursday
+MIME-Version: 1.0
+Content-Type: text/html; charset="utf-8"
+
+<html><head><style>p{margin:0}</style></head><body>
+<p>Sounds good, see the <a href="https://example.com/agenda">agenda</a>.</p>
+<p>Sam</p>
+<hr style="display:inline-block;width:98%" tabindex="-1">
+<div id="divRplyFwdMsg" dir="ltr"><b>From:</b> Alex Doe &lt;alex@example.com&gt;<br><b>Sent:</b> Tuesday, September 3, 2024 9:12 AM<br><b>Subject:</b> Thursday</div>
+<div>Are we still on for Thursday?</div>
+</body></html>

@@ -2,6 +2,8 @@ version: "2"
 run:
   build-tags:
     - stave
+    - integration
+    - live
 linters:
   default: standard
   enable:
@@ -12,6 +14,11 @@ linters:
     - contextcheck
     - misspell
     - bodyclose
+  settings:
+    misspell:
+      # X-GM-THRID is Gmail's IMAP thread-ID attribute, not a typo of "third".
+      ignore-rules:
+        - thrid
   exclusions:
     generated: lax
     # Doc comments are still written for every exported name; this preset only

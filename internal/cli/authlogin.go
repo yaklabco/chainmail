@@ -51,6 +51,9 @@ func newAuthCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			if _, err := c.Admin.FinishAuthLogin(ctx, finish); err != nil {
 				return err
 			}
+			if g.table() {
+				return writeString(env.Stdout, "logged in to "+account+"\n")
+			}
 			return writeJSON(env.Stdout, map[string]any{"account": account, "logged_in": true})
 		},
 	})

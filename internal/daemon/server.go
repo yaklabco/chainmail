@@ -20,6 +20,8 @@ import (
 	"github.com/jamesainslie/chainmail/internal/audit"
 	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/mailstore/imapstore"
 	"github.com/jamesainslie/chainmail/internal/vault"
 )
 
@@ -35,6 +37,9 @@ type Options struct {
 	RootCAs *x509.CertPool
 	// AuthOptions are passed to auth.NewManager. Tests use them to point OAuth2 at a fake server.
 	AuthOptions []auth.Option
+	// NewStore builds the mail store for an account, once, on its first read.
+	// Nil means IMAP through internal/mailstore/imapstore. Tests pass mailstore/fake.
+	NewStore func(config.ResolvedAccount) mailstore.Store
 	// Logger defaults to discarding everything.
 	Logger *slog.Logger
 	// Now defaults to time.Now.
@@ -63,6 +68,7 @@ type Server struct {
 	// accountLocks serializes account tests, one account at a time.
 	accountLocks keyedLock
 	handlers     inflight
+	stores       *storeSet
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -83,10 +89,18 @@ func New(opts Options) (*Server, error) {
 		audit:   audit.NewWriter(opts.StateDB, opts.Now),
 		started: opts.Now(),
 	}
+	newStore := opts.NewStore
+	if newStore == nil {
+		newStore = func(acct config.ResolvedAccount) mailstore.Store {
+			return imapstore.New(acct, s.auth, imapstore.Options{RootCAs: opts.RootCAs, Logger: opts.Logger, Now: opts.Now})
+		}
+	}
+	s.stores = &storeSet{newStore: newStore}
 	mux := http.NewServeMux()
 	handlerOpts := connect.WithReadMaxBytes(maxRequestBytes)
 	mux.Handle(chainmailv1connect.NewAccountServiceHandler(&accountService{s: s}, handlerOpts))
 	mux.Handle(chainmailv1connect.NewAdminServiceHandler(&adminService{s: s}, handlerOpts))
+	mux.Handle(chainmailv1connect.NewMessageServiceHandler(&messageService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
@@ -121,7 +135,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		// Serve has stopped, so nothing will finish the connections it
 		// left open but Close.
 		closeErr := s.httpSrv.Close()
-		s.handlers.wait()
+		s.drain()
 		return errors.Join(fmt.Errorf("serving: %w", err), closeErr)
 	case <-ctx.Done():
 	}
@@ -139,8 +153,17 @@ func (s *Server) Serve(ctx context.Context) error {
 	if serveErr := <-errc; !errors.Is(serveErr, http.ErrServerClosed) {
 		err = errors.Join(err, fmt.Errorf("serving: %w", serveErr))
 	}
-	s.handlers.wait()
+	s.drain()
 	return err
+}
+
+// drain waits for every handler to return, then logs out of the mail
+// servers. Each store logs out within 5 seconds, all in parallel.
+func (s *Server) drain() {
+	s.handlers.wait()
+	if err := s.stores.closeAll(); err != nil {
+		s.opts.Logger.Warn("logging out of mail servers", "err", err)
+	}
 }
 
 // inflight counts running handlers so shutdown can wait for them. Once

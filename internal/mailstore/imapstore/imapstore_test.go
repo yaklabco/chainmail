@@ -316,3 +316,24 @@ func serveStalling(conn net.Conn, stall string) {
 		}
 	}
 }
+
+func TestClientOptionsDecodeEveryCharset(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, encoded, want string
+	}{
+		{"windows-1252", "=?windows-1252?q?caf=E9?=", "café"},
+		{"koi8-r", "=?koi8-r?b?8NLJ18XU?=", "Привет"},
+		{"utf-8", "=?utf-8?q?na=C3=AFve?=", "naïve"},
+	}
+	opts := clientOptions(nil)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := opts.WordDecoder.DecodeHeader(tt.encoded)
+			if err != nil || got != tt.want {
+				t.Errorf("DecodeHeader(%q) = %q, %v; want %q", tt.encoded, got, err, tt.want)
+			}
+		})
+	}
+}

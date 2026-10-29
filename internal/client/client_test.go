@@ -2,6 +2,7 @@ package client
 
 import (
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -64,5 +65,50 @@ func TestCloseDropsIdleConnections(t *testing.T) {
 	case <-closed:
 	case <-time.After(5 * time.Second):
 		t.Fatal("connection still open after Close")
+	}
+}
+
+func TestStreamingCallsCarryClientHeader(t *testing.T) {
+	t.Parallel()
+	dir, err := os.MkdirTemp("", "cmc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "s.sock")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := make(chan string, 1)
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	srv := &http.Server{
+		Protocols: protocols,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			headers <- r.Header.Get(api.HeaderClient)
+			_, _ = io.Copy(io.Discard, r.Body)
+			http.Error(w, "nope", http.StatusTeapot)
+		}),
+	}
+	go func() { _ = srv.Serve(ln) }() // returns http.ErrServerClosed on Close
+	t.Cleanup(func() { _ = srv.Close() })
+
+	c := New(socket, "cli")
+	defer c.Close()
+	stream, err := c.Message.GetRaw(t.Context(), connect.NewRequest(&chainmailv1.GetRawRequest{Ref: "x"}))
+	if err == nil {
+		for stream.Receive() {
+		}
+		_ = stream.Close()
+	}
+	select {
+	case got := <-headers:
+		if got != "cli" {
+			t.Errorf("%s on a stream = %q, want cli", api.HeaderClient, got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream never reached the server")
 	}
 }

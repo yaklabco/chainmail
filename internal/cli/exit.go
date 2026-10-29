@@ -44,6 +44,16 @@ func exactArgs(n int) cobra.PositionalArgs {
 	}
 }
 
+// minArgs is cobra.MinimumNArgs, reported as a usage error.
+func minArgs(n int) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := cobra.MinimumNArgs(n)(cmd, args); err != nil {
+			return usageError{err: err, hint: helpHint(cmd)}
+		}
+		return nil
+	}
+}
+
 // classification is how a failure is reported: its exit code, reason, message and hint.
 type classification struct {
 	code    int

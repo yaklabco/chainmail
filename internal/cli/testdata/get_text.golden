@@ -1,0 +1,20 @@
+From: Acme Billing <billing@acme.example>
+To: me@example.com
+Date: Wed, 28 Oct 2026 10:00 UTC
+Subject: Invoice 7
+Ref: cm1:host:INBOX:1:1
+
+Please pay by Friday.
+[quoted text trimmed; --full shows it]
+
+------------------------------------------------------------------------
+
+From: Sam <sam@example.org>
+To: me@gmail.example
+Date: Thu, 29 Oct 2026 10:00 UTC
+Subject: Lunch
+Labels: Friends
+Ref: cm1:gmail:%5BGmail%5D%2FAll%20Mail:1:1:g1000
+Attachment: 2 menu.pdf (application/pdf, 12 bytes)
+
+Noon?

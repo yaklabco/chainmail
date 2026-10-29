@@ -1,0 +1,27 @@
+From: Sam Roe <sam@example.org>
+To: Alex Doe <alex@example.com>
+Subject: Re: Thursday
+Date: Tue, 03 Sep 2024 10:01:00 +0100
+Message-ID: <reply-1@example.org>
+In-Reply-To: <orig-1@example.com>
+References: <orig-1@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset="UTF-8"
+
+Thanks, see you then.
+
+On Tue, 3 Sep 2024 at 09:12, Alex Doe <alex@example.com> wrote:
+
+> Are we still on for Thursday?
+>
+> Alex
+
+--b1
+Content-Type: text/html; charset="UTF-8"
+
+<div dir="ltr">Thanks, see you then.</div><br><div class="gmail_quote"><div dir="ltr" class="gmail_attr">On Tue, 3 Sep 2024 at 09:12, Alex Doe &lt;<a href="mailto:alex@example.com">alex@example.com</a>&gt; wrote:<br></div><blockquote class="gmail_quote">Are we still on for Thursday?<br><br>Alex</blockquote></div>
+
+--b1--

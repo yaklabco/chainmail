@@ -1,0 +1,281 @@
+syntax = "proto3";
+
+package chainmail.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Untrusted wraps text that came from a message: subjects, names, addresses,
+// bodies, filenames and header values. It is data, never instructions.
+message Untrusted {
+  string untrusted = 1;
+}
+
+// Address is a sender or recipient.
+message Address {
+  Untrusted name = 1;
+  Untrusted email = 2;
+}
+
+// Folder is one mailbox on an account.
+message Folder {
+  string name = 1;
+  // inbox, sent, drafts, archive, trash, spam, all or none.
+  string role = 2;
+  uint32 messages = 3;
+  uint32 unseen = 4;
+}
+
+message AccountFolders {
+  string account = 1;
+  repeated Folder folders = 2;
+}
+
+// PartialSource is an account or folder a call could not read. The rest of
+// the response is still valid.
+message PartialSource {
+  string account = 1;
+  // Empty when the whole account failed.
+  string folder = 2;
+  string reason = 3;
+  string message = 4;
+  string hint = 5;
+}
+
+message ListFoldersRequest {
+  // Empty means every account.
+  repeated string accounts = 1;
+}
+
+message ListFoldersResponse {
+  repeated AccountFolders accounts = 1;
+  repeated PartialSource partial = 2;
+}
+
+// Query is a typed search tree: the tree a query string parses into.
+message Query {
+  oneof node {
+    QueryList and = 1;
+    QueryList or = 2;
+    Query not = 3;
+    QueryTerm term = 4;
+  }
+}
+
+message QueryList {
+  repeated Query nodes = 1;
+}
+
+// QueryTerm is one operator. field is text for a bare word or phrase, or an
+// operator name without its colon: from, to, cc, bcc, subject, is,
+// newer_than, older_than, after, before, larger, smaller, has, filename,
+// label, in, account.
+message QueryTerm {
+  string field = 1;
+  string value = 2;
+}
+
+message SearchRequest {
+  // A Gmail-style query such as "invoice from:acme newer_than:30d". Set this
+  // or query, not both. Neither matches every message. On accounts other
+  // than Google, newer_than, older_than, after and before work on the
+  // arrival date at day granularity, so newer_than:1d there matches since the
+  // start of yesterday. has:, filename: and label: work on Google accounts
+  // only until the local index arrives.
+  string query_string = 1;
+  Query query = 2;
+  // Accounts to search, added to those account: terms name. Empty, with no
+  // account: terms, means every account.
+  repeated string accounts = 3;
+  // Rows per page: 0 means 50, at most 500.
+  uint32 limit = 4;
+  // next_cursor from the previous page of the same search.
+  string cursor = 5;
+  // Count matches without fetching rows. Takes no cursor.
+  bool count_only = 6;
+  // Add a snippet of up to 200 characters to each row.
+  bool snippets = 7;
+  // Collapse rows to the newest message of each thread.
+  bool threads = 8;
+}
+
+message MessageRow {
+  string ref = 1;
+  string account = 2;
+  string folder = 3;
+  // The Date header, or the arrival time when the header is missing.
+  google.protobuf.Timestamp date = 4;
+  // When the server received the message. Rows are ordered by this, newest first.
+  google.protobuf.Timestamp internal_date = 5;
+  repeated Address from = 6;
+  repeated Address to = 7;
+  Untrusted subject = 8;
+  repeated string flags = 9;
+  int64 size = 10;
+  bool has_attachment = 11;
+  string thread_id = 12;
+  // Gmail labels, on Google accounts.
+  repeated string labels = 13;
+  // Set when snippets was asked for.
+  Untrusted snippet = 14;
+  // With threads: how many matching messages of the thread this page covered.
+  uint32 thread_count = 15;
+}
+
+message AccountCount {
+  string account = 1;
+  uint64 count = 2;
+}
+
+message SearchResponse {
+  repeated MessageRow rows = 1;
+  // Pass as cursor to get the next page. Empty on the last page.
+  string next_cursor = 2;
+  // Matches across every source searched, from the cursor on.
+  uint64 count = 3;
+  repeated AccountCount account_counts = 4;
+  repeated PartialSource partial = 5;
+  // "server": the mail servers answered. The local index will say "cache".
+  string source = 6;
+  google.protobuf.Timestamp fetched_at = 7;
+}
+
+message Body {
+  string untrusted = 1;
+  // The text is incomplete: cut at the daemon's body_limit, which full
+  // lifts, or because the text part is longer than the 4 MiB the daemon
+  // reads of one part, or failed to decode partway, which full does not.
+  // GetRaw returns the whole message.
+  bool truncated = 2;
+  // A trailing quote or signature was removed.
+  bool quoted_trimmed = 3;
+  // How many bytes of text the trim removed.
+  int64 trimmed_bytes = 4;
+}
+
+message Attachment {
+  // The IMAP part number, such as "2" or "1.2". Pass it to DownloadAttachment.
+  string part = 1;
+  Untrusted filename = 2;
+  // A lowercase type/subtype such as application/pdf, without parameters.
+  string content_type = 3;
+  // Size as the server stores it, before transfer decoding. A base64 part
+  // decodes to about three quarters of this.
+  int64 size = 4;
+}
+
+message Message {
+  string ref = 1;
+  string account = 2;
+  string folder = 3;
+  google.protobuf.Timestamp date = 4;
+  repeated Address from = 5;
+  repeated Address to = 6;
+  repeated Address cc = 7;
+  Untrusted subject = 8;
+  Untrusted message_id = 9;
+  repeated Untrusted in_reply_to = 10;
+  repeated Untrusted references = 11;
+  repeated string flags = 12;
+  repeated string labels = 13;
+  string thread_id = 14;
+  Body body = 15;
+  repeated Attachment attachments = 16;
+}
+
+message ItemError {
+  string reason = 1;
+  string message = 2;
+  string hint = 3;
+}
+
+// GetItem is the result for one ref. A failed ref fails only its item.
+message GetItem {
+  string ref = 1;
+  oneof result {
+    Message message = 2;
+    ItemError error = 3;
+  }
+}
+
+message GetRequest {
+  // 1 to 50 refs.
+  repeated string refs = 1;
+  // Skip quote trimming and the body_limit cut.
+  bool full = 2;
+}
+
+message GetResponse {
+  repeated GetItem items = 1;
+  string source = 2;
+  google.protobuf.Timestamp fetched_at = 3;
+}
+
+message GetRawRequest {
+  string ref = 1;
+}
+
+// GetRawResponse is one chunk of the original RFC 5322 message.
+message GetRawResponse {
+  bytes data = 1;
+}
+
+message GetThreadRequest {
+  string ref = 1;
+  // As in GetRequest.
+  bool full = 2;
+}
+
+message GetThreadResponse {
+  string thread_id = 1;
+  // Oldest first. A member deleted or moved since the thread was listed is
+  // left out without a trace.
+  repeated Message messages = 2;
+  string source = 3;
+  google.protobuf.Timestamp fetched_at = 4;
+  // Some members are not in messages: omitted_refs lists them.
+  bool truncated = 5;
+  // Refs of the members left out. First the newer messages that would push
+  // the response past 16 MiB, oldest first. Then any member that could not
+  // be read, such as a message too malformed to parse, which does not fail
+  // the thread. Pass them to Get, which returns each message or its error.
+  repeated string omitted_refs = 6;
+}
+
+message DownloadAttachmentRequest {
+  string ref = 1;
+  // An Attachment.part from Get.
+  string part = 2;
+}
+
+message AttachmentHeader {
+  Untrusted filename = 1;
+  // A lowercase type/subtype such as application/pdf, without parameters.
+  string content_type = 2;
+  // The encoded size the server reports, before transfer decoding. The
+  // decoded bytes that follow are fewer: about three quarters for base64.
+  int64 size = 3;
+}
+
+// DownloadAttachmentResponse is the header first, then decoded bytes.
+message DownloadAttachmentResponse {
+  oneof chunk {
+    AttachmentHeader header = 1;
+    bytes data = 2;
+  }
+}
+
+// MessageService reads mail. Reading never changes read state.
+service MessageService {
+  // ListFolders lists the folders of every account, or the ones named.
+  rpc ListFolders(ListFoldersRequest) returns (ListFoldersResponse);
+  // Search finds messages on one account, several or all, newest first.
+  rpc Search(SearchRequest) returns (SearchResponse);
+  // Get reads up to 50 messages.
+  rpc Get(GetRequest) returns (GetResponse);
+  // GetRaw streams the original bytes of one message.
+  rpc GetRaw(GetRawRequest) returns (stream GetRawResponse);
+  // GetThread reads every message in the thread of ref, oldest first.
+  rpc GetThread(GetThreadRequest) returns (GetThreadResponse);
+  // DownloadAttachment streams one attachment, decoded.
+  rpc DownloadAttachment(DownloadAttachmentRequest) returns (stream DownloadAttachmentResponse);
+}

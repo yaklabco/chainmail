@@ -65,8 +65,16 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 	// not know, outside the exit contract. Its help command is replaced below.
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.SetHelpCommand(newHelpCmd())
-	root.PersistentPreRunE = func(*cobra.Command, []string) error {
-		if g.output != "json" && g.output != "table" {
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		// Changed tells an unset flag from an explicit --output "", which is a mistake.
+		switch {
+		case !cmd.Flags().Changed("output"):
+			g.output = "json"
+			if env.StdoutTerminal {
+				g.output = "table"
+			}
+		case g.output == "json", g.output == "table":
+		default:
 			return usageError{err: fmt.Errorf("--output must be json or table, got %q", g.output), hint: "run: chainmail --help"}
 		}
 		return nil
@@ -76,14 +84,19 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 	root.SetErr(env.Stderr)
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error { return usageError{err: err, hint: helpHint(cmd)} })
 	root.PersistentFlags().StringVar(&g.socket, "socket", "", "daemon socket (default $CHAINMAIL_SOCKET, then "+config.DefaultSocket+")")
-	root.PersistentFlags().StringVar(&g.output, "output", "json", "output format: json or table (table is honoured only by accounts commands)")
+	root.PersistentFlags().StringVar(&g.output, "output", "", "output format: json or table (default: table on a terminal, json otherwise)")
 	root.AddCommand(
-		newVersionCmd(env),
+		newVersionCmd(env, g),
 		newDaemonCmd(ctx, env, g),
 		newAccountsCmd(ctx, env, g),
 		newSecretCmd(ctx, env, g),
 		newAuthCmd(ctx, env, g),
 		newAdminCmd(ctx, env, g),
+		newFoldersCmd(ctx, env, g),
+		newSearchCmd(ctx, env, g),
+		newGetCmd(ctx, env, g),
+		newThreadCmd(ctx, env, g),
+		newAttachmentCmd(ctx, env, g),
 	)
 	return root
 }

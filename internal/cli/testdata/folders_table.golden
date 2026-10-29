@@ -1,0 +1,12 @@
+ACCOUNT  FOLDER             ROLE     MESSAGES  UNSEEN
+gmail    INBOX              inbox    0         0
+gmail    [Gmail]/All Mail   all      1         1
+gmail    [Gmail]/Sent Mail  sent     0         0
+gmail    [Gmail]/Spam       spam     0         0
+gmail    [Gmail]/Trash      trash    0         0
+host     INBOX              inbox    1         1
+host     Archive            archive  0         0
+host     Drafts             drafts   0         0
+host     Junk               spam     0         0
+host     Sent               sent     0         0
+host     Trash              trash    0         0

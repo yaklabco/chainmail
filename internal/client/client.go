@@ -12,10 +12,15 @@ import (
 	"github.com/jamesainslie/chainmail/internal/api"
 )
 
+// maxMessageBytes is the largest unary message response accepted. The
+// daemon caps its responses at 16 MiB; the rest is protocol overhead.
+const maxMessageBytes = 17 << 20
+
 // Client holds one Connect client per daemon service.
 type Client struct {
 	Account chainmailv1connect.AccountServiceClient
 	Admin   chainmailv1connect.AdminServiceClient
+	Message chainmailv1connect.MessageServiceClient
 
 	transport *http.Transport
 }
@@ -33,13 +38,14 @@ func New(socketPath, kind string) *Client {
 		},
 	}
 	hc := &http.Client{Transport: transport}
-	opts := connect.WithInterceptors(clientHeader(kind))
+	opts := connect.WithInterceptors(clientHeader{kind: kind})
 	// The host is ignored: every request goes to the socket.
 	const baseURL = "http://chainmail.local"
 	return &Client{
 		transport: transport,
 		Account:   chainmailv1connect.NewAccountServiceClient(hc, baseURL, opts),
 		Admin:     chainmailv1connect.NewAdminServiceClient(hc, baseURL, opts),
+		Message:   chainmailv1connect.NewMessageServiceClient(hc, baseURL, opts, connect.WithReadMaxBytes(maxMessageBytes)),
 	}
 }
 
@@ -51,11 +57,25 @@ func (c *Client) Close() {
 	}
 }
 
-func clientHeader(kind string) connect.UnaryInterceptorFunc {
-	return func(next connect.UnaryFunc) connect.UnaryFunc {
-		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			req.Header().Set(api.HeaderClient, kind)
-			return next(ctx, req)
-		}
+// clientHeader names the client kind on every call, unary and streaming,
+// for the daemon's audit log.
+type clientHeader struct{ kind string }
+
+func (h clientHeader) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		req.Header().Set(api.HeaderClient, h.kind)
+		return next(ctx, req)
 	}
+}
+
+func (h clientHeader) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
+	return func(ctx context.Context, spec connect.Spec) connect.StreamingClientConn {
+		conn := next(ctx, spec)
+		conn.RequestHeader().Set(api.HeaderClient, h.kind)
+		return conn
+	}
+}
+
+func (h clientHeader) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
+	return next
 }

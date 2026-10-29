@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -27,15 +28,30 @@ type Env struct {
 	ReadPassword func() ([]byte, error)
 	// PassShow returns the output of `pass show path`.
 	PassShow func(ctx context.Context, path string) ([]byte, error)
+	// StdoutTerminal says stdout is a terminal, which makes table the default output.
+	StdoutTerminal bool
+	// TZ is the time zone tables and text show dates in. Nil means UTC.
+	TZ *time.Location
 }
 
 // DefaultEnv returns the real process environment.
 func DefaultEnv() Env {
-	env := Env{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Getenv: os.Getenv, PassShow: passShow}
+	env := Env{
+		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Getenv: os.Getenv, PassShow: passShow,
+		StdoutTerminal: term.IsTerminal(int(os.Stdout.Fd())), TZ: time.Local,
+	}
 	if fd := int(os.Stdin.Fd()); term.IsTerminal(fd) {
 		env.ReadPassword = func() ([]byte, error) { return readTerminalPassword(fd) }
 	}
 	return env
+}
+
+// location is the time zone for dates in tables and text.
+func (e Env) location() *time.Location {
+	if e.TZ == nil {
+		return time.UTC
+	}
+	return e.TZ
 }
 
 // passShow reads a pass entry through a pipe. gpg asks for a passphrase

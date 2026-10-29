@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
+	"strings"
 	"text/tabwriter"
+	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 )
@@ -86,4 +90,230 @@ func stateLabel(s chainmailv1.AuthState) string {
 	default:
 		return "unknown"
 	}
+}
+
+const messageSeparator = "\n------------------------------------------------------------------------\n\n"
+
+// maxGetRefs is how many refs one get takes, so the omitted-refs note
+// suggests commands that work.
+const maxGetRefs = 50
+
+func statusTable(w io.Writer, loc *time.Location, r *chainmailv1.GetStatusResponse) error {
+	tw := newTable(w)
+	_, _ = fmt.Fprintf(tw, "version\t%s\n", r.GetVersion())
+	_, _ = fmt.Fprintf(tw, "started\t%s\n", longDate(r.GetStartedAt(), loc))
+	_, _ = fmt.Fprintf(tw, "dev mode\t%t\n", r.GetDevMode())
+	_, _ = fmt.Fprintf(tw, "secrets\t%s\n", strings.Join(r.GetSecretNames(), ", "))
+	return tw.Flush()
+}
+
+func foldersTable(w io.Writer, r *chainmailv1.ListFoldersResponse) error {
+	tw := newTable(w)
+	_, _ = fmt.Fprintln(tw, "ACCOUNT\tFOLDER\tROLE\tMESSAGES\tUNSEEN")
+	for _, a := range r.GetAccounts() {
+		for _, f := range a.GetFolders() {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\n", a.GetAccount(), f.GetName(), f.GetRole(), f.GetMessages(), f.GetUnseen())
+		}
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	return partialLines(w, r.GetPartial())
+}
+
+// partialLines reports the accounts and folders a call could not read.
+func partialLines(w io.Writer, partial []*chainmailv1.PartialSource) error {
+	var b strings.Builder
+	for _, p := range partial {
+		where := p.GetAccount()
+		if p.GetFolder() != "" {
+			where += "/" + p.GetFolder()
+		}
+		fmt.Fprintf(&b, "partial: %s: %s: %s\n", where, p.GetReason(), p.GetMessage())
+		writeHint(&b, p.GetHint())
+	}
+	return writeString(w, b.String())
+}
+
+func searchTable(w io.Writer, loc *time.Location, r *chainmailv1.SearchResponse) error {
+	snippets := false
+	for _, row := range r.GetRows() {
+		snippets = snippets || row.GetSnippet() != nil
+	}
+	tw := newTable(w)
+	header := "DATE\tACCOUNT\tFROM\tSUBJECT\tREF"
+	if snippets {
+		header += "\tSNIPPET"
+	}
+	_, _ = fmt.Fprintln(tw, header)
+	for _, row := range r.GetRows() {
+		subject := row.GetSubject().GetUntrusted()
+		if n := row.GetThreadCount(); n > 1 {
+			subject = fmt.Sprintf("%s (%d)", subject, n)
+		}
+		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s", shortDate(row.GetDate(), loc), row.GetAccount(),
+			clip(firstSender(row.GetFrom()), 30), clip(subject, 60), row.GetRef())
+		if snippets {
+			line += "\t" + clip(row.GetSnippet().GetUntrusted(), 60)
+		}
+		_, _ = fmt.Fprintln(tw, line)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if err := partialLines(w, r.GetPartial()); err != nil {
+		return err
+	}
+	if next := r.GetNextCursor(); next != "" {
+		return writeString(w, "more: --cursor "+next+"\n")
+	}
+	return nil
+}
+
+func countTable(w io.Writer, r *chainmailv1.SearchResponse) error {
+	tw := newTable(w)
+	_, _ = fmt.Fprintln(tw, "ACCOUNT\tCOUNT")
+	for _, c := range r.GetAccountCounts() {
+		_, _ = fmt.Fprintf(tw, "%s\t%d\n", c.GetAccount(), c.GetCount())
+	}
+	_, _ = fmt.Fprintf(tw, "total\t%d\n", r.GetCount())
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	return partialLines(w, r.GetPartial())
+}
+
+// messagesText prints get's items in order. A failed item prints its error
+// and hint where its message would be, so the rest of the batch still reads.
+func messagesText(w io.Writer, loc *time.Location, items []*chainmailv1.GetItem) error {
+	var b strings.Builder
+	for i, it := range items {
+		if i > 0 {
+			b.WriteString(messageSeparator)
+		}
+		if e := it.GetError(); e != nil {
+			fmt.Fprintf(&b, "error %s: %s: %s\n", it.GetRef(), e.GetReason(), e.GetMessage())
+			writeHint(&b, e.GetHint())
+			continue
+		}
+		writeMessageText(&b, loc, it.GetMessage())
+	}
+	return writeString(w, b.String())
+}
+
+// threadText prints a thread oldest first. When the daemon left members
+// out, because the thread did not fit its response cap or because a member
+// could not be read, a closing note lists the get commands that fetch them,
+// with --full when the thread was read with it.
+func threadText(w io.Writer, loc *time.Location, r *chainmailv1.GetThreadResponse, full bool) error {
+	var b strings.Builder
+	for i, m := range r.GetMessages() {
+		if i > 0 {
+			b.WriteString(messageSeparator)
+		}
+		writeMessageText(&b, loc, m)
+	}
+	if omitted := r.GetOmittedRefs(); r.GetTruncated() && len(omitted) > 0 {
+		if len(r.GetMessages()) > 0 {
+			b.WriteString(messageSeparator)
+		}
+		noun := "messages"
+		if len(omitted) == 1 {
+			noun = "message"
+		}
+		fmt.Fprintf(&b, "[%d %s omitted: too large or unreadable; fetch them with:]\n", len(omitted), noun)
+		get := "chainmail get"
+		if full {
+			get += " --full"
+		}
+		for batch := range slices.Chunk(omitted, maxGetRefs) {
+			fmt.Fprintf(&b, "  %s %s\n", get, strings.Join(batch, " "))
+		}
+	}
+	return writeString(w, b.String())
+}
+
+func writeMessageText(b *strings.Builder, loc *time.Location, m *chainmailv1.Message) {
+	fmt.Fprintf(b, "From: %s\n", addressList(m.GetFrom()))
+	fmt.Fprintf(b, "To: %s\n", addressList(m.GetTo()))
+	if len(m.GetCc()) > 0 {
+		fmt.Fprintf(b, "Cc: %s\n", addressList(m.GetCc()))
+	}
+	fmt.Fprintf(b, "Date: %s\n", longDate(m.GetDate(), loc))
+	fmt.Fprintf(b, "Subject: %s\n", m.GetSubject().GetUntrusted())
+	if len(m.GetLabels()) > 0 {
+		fmt.Fprintf(b, "Labels: %s\n", strings.Join(m.GetLabels(), ", "))
+	}
+	fmt.Fprintf(b, "Ref: %s\n", m.GetRef())
+	for _, a := range m.GetAttachments() {
+		fmt.Fprintf(b, "Attachment: %s %s (%s, %d bytes)\n", a.GetPart(), a.GetFilename().GetUntrusted(), a.GetContentType(), a.GetSize())
+	}
+	b.WriteString("\n")
+	b.WriteString(m.GetBody().GetUntrusted())
+	b.WriteString("\n")
+	if m.GetBody().GetQuotedTrimmed() {
+		b.WriteString("[quoted text trimmed; --full shows it]\n")
+	}
+	if m.GetBody().GetTruncated() {
+		b.WriteString("[truncated; --full shows the rest]\n")
+	}
+}
+
+func writeHint(b *strings.Builder, hint string) {
+	if hint != "" {
+		fmt.Fprintf(b, "  hint: %s\n", hint)
+	}
+}
+
+func writeString(w io.Writer, s string) error {
+	if _, err := io.WriteString(w, s); err != nil {
+		return fmt.Errorf("writing output: %w", err)
+	}
+	return nil
+}
+
+func addressList(list []*chainmailv1.Address) string {
+	parts := make([]string, len(list))
+	for i, a := range list {
+		name, email := a.GetName().GetUntrusted(), a.GetEmail().GetUntrusted()
+		if name == "" {
+			parts[i] = email
+			continue
+		}
+		parts[i] = name + " <" + email + ">"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func firstSender(list []*chainmailv1.Address) string {
+	if len(list) == 0 {
+		return ""
+	}
+	if name := list[0].GetName().GetUntrusted(); name != "" {
+		return name
+	}
+	return list[0].GetEmail().GetUntrusted()
+}
+
+// clip shortens s to n characters, marking the cut with "...".
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-3]) + "..."
+}
+
+func shortDate(ts *timestamppb.Timestamp, loc *time.Location) string {
+	if ts == nil {
+		return ""
+	}
+	return ts.AsTime().In(loc).Format("2006-01-02 15:04")
+}
+
+func longDate(ts *timestamppb.Timestamp, loc *time.Location) string {
+	if ts == nil {
+		return ""
+	}
+	return ts.AsTime().In(loc).Format("Mon, 02 Jan 2006 15:04 MST")
 }
