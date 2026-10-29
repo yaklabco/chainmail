@@ -287,7 +287,7 @@ Reasons and exit codes are a contract with agents and never change. They come fr
 | 3 | `POLICY_DENIED`, `FORBIDDEN` | Refused. `FORBIDDEN` means your user may not use the socket. |
 | 4 | `HELD` | Held for approval (sub-project 4) |
 | 5 | `AUTH_REQUIRED`, `AUTH_REJECTED` | A human must set a secret or log in. The hint says what to run. |
-| 6 | `NOT_FOUND`, `STALE_REF` | No such account, pass entry or message |
+| 6 | `NOT_FOUND`, `STALE_REF` | No such account, pass entry or message. A name that breaks the naming rules, such as `Work`, is `INVALID_ARGUMENT` instead. |
 | 7 | `SERVER_UNAVAILABLE`, `TIMEOUT`, `DAEMON_UNREACHABLE` | A mail server or the daemon could not be reached in time |
 | 8 | `SEND_OUTCOME_UNKNOWN` | A send may or may not have gone out (sub-project 3) |
 | 9 | `TOTP_INVALID`, `TOTP_LOCKED` | Approval code refused (sub-project 4) |
