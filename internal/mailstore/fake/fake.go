@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"mime"
 	"net/mail"
 	"slices"
@@ -35,7 +36,8 @@ type Attachment struct {
 }
 
 // Message is a fake message. Add assigns its UID and, on Gmail accounts, any
-// GmailMsgID or GmailThreadID left zero.
+// GmailMsgID or GmailThreadID left zero. It has no Bcc, as a received message
+// has none, so bcc: matches no fake message and -bcc: matches every one.
 type Message struct {
 	Folder      string
 	Date        time.Time
@@ -615,15 +617,19 @@ func (s *Store) gmailSourcesLocked(in string) ([]string, error) {
 	return out, nil
 }
 
-// standardSourcesLocked searches every folder but Trash and Junk, or the
-// folders in: names by role or by exact name.
+// standardSourcesLocked searches every folder but Trash, Junk and \All, or
+// the folders in: names by role or by exact name. in:anywhere adds Trash and
+// Junk. A \All folder copies every message, so only naming it searches it.
 func (s *Store) standardSourcesLocked(in string) ([]string, error) {
 	lower := strings.ToLower(in)
 	var out []string
 	switch lower {
 	case "", "anywhere":
 		for _, f := range s.folders {
-			if f.Selectable && (lower == "anywhere" || (f.Role != mailstore.RoleTrash && f.Role != mailstore.RoleSpam)) {
+			if !f.Selectable || f.Role == mailstore.RoleAll {
+				continue
+			}
+			if lower == "anywhere" || (f.Role != mailstore.RoleTrash && f.Role != mailstore.RoleSpam) {
 				out = append(out, f.Name)
 			}
 		}
@@ -681,6 +687,15 @@ func hasLabel(m *Message, label string) bool {
 	return slices.ContainsFunc(m.Labels, func(l string) bool { return strings.EqualFold(l, label) })
 }
 
+// minDate and maxSize are the bounds imapstore sends in IMAP SEARCH: dates
+// from 1970 and 32-bit sizes.
+var minDate = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+
+const maxSize = math.MaxUint32
+
+// checkSupported refuses on standard accounts what imapstore's standard
+// dialect refuses: the Gmail-only operators, sizes past 32 bits and dates
+// before 1970. Gmail takes them all.
 func (s *Store) checkSupported(n *query.Node) error {
 	if s.gmail {
 		return nil
@@ -689,9 +704,34 @@ func (s *Store) checkSupported(n *query.Node) error {
 		switch t.Field {
 		case query.FieldHas, query.FieldFilename, query.FieldLabel:
 			return fmt.Errorf("%w: %s: works on Gmail accounts only until the local index arrives", mailstore.ErrUnsupportedQuery, t.Field)
+		case query.FieldLarger, query.FieldSmaller:
+			if size, _ := query.ParseSize(t.Value); size > maxSize {
+				return fmt.Errorf("%w: %s:%s is past %d bytes", mailstore.ErrUnsupportedQuery, t.Field, t.Value, int64(maxSize))
+			}
+		case query.FieldAfter, query.FieldBefore, query.FieldNewerThan, query.FieldOlderThan:
+			if s.dateBoundLocked(t).Before(minDate) {
+				return fmt.Errorf("%w: %s:%s reaches back before 1970-01-01", mailstore.ErrUnsupportedQuery, t.Field, t.Value)
+			}
 		}
 	}
 	return nil
+}
+
+// dateBoundLocked is the date an after:, before:, newer_than: or older_than:
+// term compares the internal date with. On standard accounts an age is
+// day-granular, as IMAP SINCE and BEFORE are: newer_than:1d is since the
+// start of yesterday. Gmail compares the time itself.
+func (s *Store) dateBoundLocked(n *query.Node) time.Time {
+	if n.Field == query.FieldAfter || n.Field == query.FieldBefore {
+		d, _ := query.ParseDate(n.Value) // the tree was validated
+		return d
+	}
+	now := s.now()
+	if !s.gmail {
+		y, m, d := now.Date()
+		now = time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	}
+	return ageCutoff(now, n.Value)
 }
 
 func (s *Store) match(n *query.Node, m *Message) bool {
@@ -735,6 +775,10 @@ func (s *Store) matchTerm(n *query.Node, m *Message) bool {
 		return addrs(m.To)
 	case query.FieldCc:
 		return addrs(m.Cc)
+	case query.FieldBcc:
+		// A fake message has no Bcc, as a received one has none, so
+		// bcc: matches nothing and -bcc: everything.
+		return false
 	case query.FieldSubject:
 		return contains(m.Subject)
 	case query.FieldIs:
@@ -752,16 +796,10 @@ func (s *Store) matchTerm(n *query.Node, m *Message) bool {
 		return slices.ContainsFunc(m.Attachments, func(a Attachment) bool { return contains(a.Filename) })
 	case query.FieldLabel:
 		return hasLabel(m, n.Value)
-	case query.FieldAfter, query.FieldBefore:
+	case query.FieldAfter, query.FieldBefore, query.FieldNewerThan, query.FieldOlderThan:
 		// IMAP SINCE and BEFORE compare the internal date.
-		d, _ := query.ParseDate(n.Value) // the tree was validated
-		if n.Field == query.FieldAfter {
-			return !m.InternalDate.Before(d)
-		}
-		return m.InternalDate.Before(d)
-	case query.FieldNewerThan, query.FieldOlderThan:
-		cut := ageCutoff(s.now(), n.Value)
-		if n.Field == query.FieldNewerThan {
+		cut := s.dateBoundLocked(n)
+		if n.Field == query.FieldAfter || n.Field == query.FieldNewerThan {
 			return !m.InternalDate.Before(cut)
 		}
 		return m.InternalDate.Before(cut)
@@ -778,18 +816,32 @@ func (s *Store) matchTerm(n *query.Node, m *Message) bool {
 	}
 }
 
+// ageCutoff is now less an age such as 7d. A month or year back from a day
+// the target month lacks is that month's last day, as in imapstore.
 func ageCutoff(now time.Time, v string) time.Time {
 	n, unit, _ := query.ParseAge(v) // the tree was validated
 	switch unit {
 	case 'w':
 		return now.AddDate(0, 0, -7*n)
 	case 'm':
-		return now.AddDate(0, -n, 0)
+		return addMonths(now, -n)
 	case 'y':
-		return now.AddDate(-n, 0, 0)
+		return addMonths(now, -12*n)
 	default:
 		return now.AddDate(0, 0, -n)
 	}
+}
+
+// addMonths moves t by months, keeping its time of day, and stops at the
+// last day of a target month shorter than t's day: 31 March less a month is
+// 28 February, where time.AddDate gives 3 March.
+func addMonths(t time.Time, months int) time.Time {
+	y, m, d := t.Date()
+	first := time.Date(y, m+time.Month(months), 1, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
+	if last := first.AddDate(0, 1, -1).Day(); d > last {
+		d = last
+	}
+	return first.AddDate(0, 0, d-1)
 }
 
 func (s *Store) summaryLocked(m *Message, opts mailstore.SummaryOptions) mailstore.Summary {

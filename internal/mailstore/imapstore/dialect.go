@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/emersion/go-imap/v2"
 
@@ -16,30 +18,149 @@ import (
 // compileGmail turns a query tree, with in: and account: split off, into an
 // X-GM-RAW string. in:trash, in:spam and in:anywhere chose the source
 // folders instead, so they are left out. in:archive becomes -in:inbox, All
-// Mail without \Inbox. Dates become Gmail's YYYY/MM/DD.
+// Mail without \Inbox. Dates become Gmail's YYYY/MM/DD, ages use the d, m
+// and y units Gmail documents, and sizes go as plain bytes. Text Gmail would
+// read as an operator is quoted, and a double negation is dropped.
 func compileGmail(n *query.Node, in string) string {
 	var parts []string
 	switch strings.ToLower(in) {
 	case "", "trash", "spam", "junk", "anywhere":
 	case "archive":
-		parts = append(parts, query.Not(query.Term(query.FieldIn, "inbox")).String())
+		parts = append(parts, "-in:inbox")
 	default:
-		parts = append(parts, query.Term(query.FieldIn, in).String())
+		parts = append(parts, string(query.FieldIn)+":"+gmailQuote(in, false))
 	}
 	if n != nil {
-		rest := n.Clone()
-		for _, t := range rest.Terms() {
-			if t.Field == query.FieldAfter || t.Field == query.FieldBefore {
-				t.Value = strings.ReplaceAll(t.Value, "-", "/")
-			}
-		}
-		s := rest.String()
-		if len(parts) > 0 && rest.Op == query.OpOr {
+		var b strings.Builder
+		writeGmail(&b, n, false)
+		s := b.String()
+		if len(parts) > 0 && dropDoubleNot(n).Op == query.OpOr {
 			s = "(" + s + ")"
 		}
 		parts = append(parts, s)
 	}
 	return strings.Join(parts, " ")
+}
+
+// writeGmail prints n in Gmail search syntax. It follows query.Node.String,
+// where OR binds tighter than the implicit AND, so inOr says n is a direct
+// child of an OR and an AND needs parentheses. It reads n and never changes it.
+func writeGmail(b *strings.Builder, n *query.Node, inOr bool) {
+	n = dropDoubleNot(n)
+	switch n.Op {
+	case query.OpTerm:
+		if n.Field == query.FieldText {
+			b.WriteString(gmailQuote(n.Value, true))
+			return
+		}
+		b.WriteString(string(n.Field))
+		b.WriteByte(':')
+		b.WriteString(gmailQuote(gmailValue(n), false))
+	case query.OpNot:
+		// dropDoubleNot leaves no NOT directly under a NOT.
+		b.WriteByte('-')
+		child := n.Children[0]
+		if child.Op == query.OpTerm {
+			writeGmail(b, child, false)
+			return
+		}
+		b.WriteByte('(')
+		writeGmail(b, child, false)
+		b.WriteByte(')')
+	case query.OpAnd:
+		if inOr {
+			b.WriteByte('(')
+		}
+		for i, c := range n.Children {
+			if i > 0 {
+				b.WriteByte(' ')
+			}
+			writeGmail(b, c, false)
+		}
+		if inOr {
+			b.WriteByte(')')
+		}
+	case query.OpOr:
+		for i, c := range n.Children {
+			if i > 0 {
+				b.WriteString(" OR ")
+			}
+			writeGmail(b, c, true)
+		}
+	}
+}
+
+// dropDoubleNot strips pairs of NOTs from the top of n: --a means a. Gmail
+// documents no meaning for a doubled minus.
+func dropDoubleNot(n *query.Node) *query.Node {
+	for n.Op == query.OpNot && n.Children[0].Op == query.OpNot {
+		n = n.Children[0].Children[0]
+	}
+	return n
+}
+
+// gmailValue is a term's value in the form Gmail documents. The tree was
+// validated, so a value that does not parse is left as it is.
+func gmailValue(n *query.Node) string {
+	switch n.Field {
+	case query.FieldAfter, query.FieldBefore:
+		return strings.ReplaceAll(n.Value, "-", "/")
+	case query.FieldNewerThan, query.FieldOlderThan:
+		// Gmail documents d, m and y, lowercase, so weeks become days.
+		num, unit, err := query.ParseAge(n.Value)
+		if err != nil {
+			return n.Value
+		}
+		if unit == 'w' {
+			num, unit = 7*num, 'd'
+		}
+		return strconv.Itoa(num) + string(unit)
+	case query.FieldLarger, query.FieldSmaller:
+		// K and M are KiB and MiB here. Gmail does not say which it
+		// means, so the size goes as bytes.
+		size, err := query.ParseSize(n.Value)
+		if err != nil {
+			return n.Value
+		}
+		return strconv.FormatInt(size, 10)
+	default:
+		return n.Value
+	}
+}
+
+// gmailOperatorWords are bare words Gmail reads as operators.
+var gmailOperatorWords = []string{"AND", "AROUND"}
+
+// gmailQuote returns v as it must appear in X-GM-RAW. It quotes what
+// query.Node.String quotes, and also braces, which Gmail reads as an OR
+// group, and bare AND and AROUND in any case. text says v is a bare word.
+func gmailQuote(v string, text bool) string {
+	if !gmailNeedsQuotes(v, text) {
+		return v
+	}
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range v {
+		if r == '"' || r == '\\' {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+func gmailNeedsQuotes(v string, text bool) bool {
+	if v == "" {
+		return true
+	}
+	if text && (v == "OR" || strings.HasPrefix(v, "-") || strings.ContainsRune(v, ':') ||
+		slices.ContainsFunc(gmailOperatorWords, func(w string) bool { return strings.EqualFold(v, w) })) {
+		return true
+	}
+	return strings.ContainsFunc(v, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune(`()"{}`, r)
+	})
 }
 
 // gmailCriteria wraps an X-GM-RAW string. An empty one matches everything.
@@ -125,11 +246,11 @@ func standardTerm(n *query.Node, now time.Time) (*imap.SearchCriteria, error) {
 		case "starred":
 			return &imap.SearchCriteria{Flag: []imap.Flag{imap.FlagFlagged}}, nil
 		default:
-			return nil, fmt.Errorf("is:%s is not valid", n.Value)
+			return nil, fmt.Errorf("%w: is:%s is not valid; use is:unread, is:read or is:starred", mailstore.ErrUnsupportedQuery, n.Value)
 		}
 	case query.FieldNewerThan, query.FieldOlderThan:
 		if _, _, err := query.ParseAge(n.Value); err != nil {
-			return nil, err
+			return nil, badValue(n, err)
 		}
 		d := ageStart(now, n.Value)
 		if err := checkDate(n, d); err != nil {
@@ -142,7 +263,7 @@ func standardTerm(n *query.Node, now time.Time) (*imap.SearchCriteria, error) {
 	case query.FieldAfter, query.FieldBefore:
 		d, err := query.ParseDate(n.Value)
 		if err != nil {
-			return nil, err
+			return nil, badValue(n, err)
 		}
 		if err := checkDate(n, d); err != nil {
 			return nil, err
@@ -154,7 +275,7 @@ func standardTerm(n *query.Node, now time.Time) (*imap.SearchCriteria, error) {
 	case query.FieldLarger, query.FieldSmaller:
 		size, err := query.ParseSize(n.Value)
 		if err != nil {
-			return nil, err
+			return nil, badValue(n, err)
 		}
 		if size > maxSize {
 			return nil, fmt.Errorf("%w: %s:%s is %d bytes, and IMAP SEARCH sizes go up to %d bytes",
@@ -179,6 +300,12 @@ func standardTerm(n *query.Node, now time.Time) (*imap.SearchCriteria, error) {
 	}
 }
 
+// badValue wraps a parse error for a term in ErrUnsupportedQuery. Validated
+// trees never get here, but a bad value is the caller's, not an internal error.
+func badValue(n *query.Node, err error) error {
+	return fmt.Errorf("%w: %s: %w", mailstore.ErrUnsupportedQuery, n.Field, err)
+}
+
 // checkDate refuses a SINCE or BEFORE date earlier than minDate.
 func checkDate(n *query.Node, d time.Time) error {
 	if !d.Before(minDate) {
@@ -189,8 +316,10 @@ func checkDate(n *query.Node, d time.Time) error {
 }
 
 // ageStart is the day an age such as 7d reaches back to. IMAP compares dates
-// without times, so newer_than:1d means since the start of yesterday. The
-// longest age the parser allows, 9999y, still fits a time.Time.
+// without times, so newer_than:1d means since the start of yesterday. A month
+// or year back from a day the target month lacks is that month's last day:
+// newer_than:1m on 31 March is since 28 February. The longest age the parser
+// allows, 9999y, still fits a time.Time.
 func ageStart(now time.Time, v string) time.Time {
 	n, unit, _ := query.ParseAge(v) // the tree was validated
 	y, m, d := now.Date()
@@ -199,12 +328,24 @@ func ageStart(now time.Time, v string) time.Time {
 	case 'w':
 		return day.AddDate(0, 0, -7*n)
 	case 'm':
-		return day.AddDate(0, -n, 0)
+		return addMonths(day, -n)
 	case 'y':
-		return day.AddDate(-n, 0, 0)
+		return addMonths(day, -12*n)
 	default:
 		return day.AddDate(0, 0, -n)
 	}
+}
+
+// addMonths moves t by months, keeping its time of day. Where time.AddDate
+// would spill past the end of a shorter target month, as 31 March less a
+// month gives 3 March, addMonths stops at that month's last day.
+func addMonths(t time.Time, months int) time.Time {
+	y, m, d := t.Date()
+	first := time.Date(y, m+time.Month(months), 1, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
+	if last := first.AddDate(0, 1, -1).Day(); d > last {
+		d = last
+	}
+	return first.AddDate(0, 0, d-1)
 }
 
 // intersect adds src to dst as AND. imap.SearchCriteria.And clears dst's
@@ -354,14 +495,20 @@ func gmailSources(folders []mailstore.Folder, in string) ([]string, error) {
 }
 
 // standardSources picks the folders a search runs in on a non-Gmail account:
-// every selectable folder but Trash and Junk, or what in: names.
+// every selectable folder but Trash, Junk and \All, or what in: names.
+// in:anywhere adds Trash and Junk. A \All folder, such as a Dovecot virtual
+// one, holds a copy of every message in the others, so it is searched only
+// when in: names it, or each match would be found twice.
 func standardSources(folders []mailstore.Folder, in string) ([]string, error) {
 	lower := strings.ToLower(in)
 	var out []string
 	switch lower {
 	case "", "anywhere":
 		for _, f := range folders {
-			if f.Selectable && (lower == "anywhere" || (f.Role != mailstore.RoleTrash && f.Role != mailstore.RoleSpam)) {
+			if !f.Selectable || f.Role == mailstore.RoleAll {
+				continue
+			}
+			if lower == "anywhere" || (f.Role != mailstore.RoleTrash && f.Role != mailstore.RoleSpam) {
 				out = append(out, f.Name)
 			}
 		}

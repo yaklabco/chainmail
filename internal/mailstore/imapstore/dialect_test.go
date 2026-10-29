@@ -46,6 +46,32 @@ func TestCompileGmail(t *testing.T) {
 		// backslash form String prints; a live test must confirm it.
 		{`"say \"hi\""`, `"say \"hi\""`},
 		{"", ""},
+		// Braces are Gmail's OR group, so text and values with them are
+		// quoted: {a b} is the words "{a" and "b}" here, not a OR b.
+		{"{a b}", `"{a" "b}"`},
+		{"from:{acme} subject:x}", `from:"{acme}" subject:"x}"`},
+		{"in:{x} y", `in:"{x}" y`},
+		// AND and AROUND are Gmail operators, in any case.
+		{"a AND b", `a "AND" b`},
+		{"a and b", `a "and" b`},
+		{"a AROUND b", `a "AROUND" b`},
+		{"Around", `"Around"`},
+		{"from:AND", "from:AND"},
+		// A double negation means the term itself.
+		{"--a", "a"},
+		{"---a", "-a"},
+		{"x --from:y", "x from:y"},
+		{"-(-(a OR b)) c", "a OR b c"},
+		{"in:inbox --(a OR b)", "in:inbox (a OR b)"},
+		// Gmail documents d, m and y ages, in lowercase.
+		{"newer_than:2w", "newer_than:14d"},
+		{"older_than:9999W", "older_than:69993d"},
+		{"newer_than:3M older_than:1Y", "newer_than:3m older_than:1y"},
+		{"newer_than:5D", "newer_than:5d"},
+		// Sizes go as bytes: K and M are KiB and MiB here.
+		{"larger:5M smaller:10k", "larger:5242880 smaller:10240"},
+		{"larger:100", "larger:100"},
+		{"-(larger:1K OR smaller:2m)", "-(larger:1024 OR smaller:2097152)"},
 	}
 	for _, tt := range tests {
 		rest, in := split(t, tt.query)
@@ -175,6 +201,47 @@ func TestAgeStart(t *testing.T) {
 			t.Errorf("ageStart(%s) = %v, want %v", v, got, want)
 		}
 	}
+
+	// Months and years land on the last day of a shorter target month
+	// rather than spilling into the next one.
+	ends := []struct {
+		now  time.Time
+		age  string
+		want time.Time
+	}{
+		{time.Date(2026, 3, 31, 9, 0, 0, 0, time.UTC), "1m", time.Date(2026, 2, 28, 0, 0, 0, 0, time.UTC)},
+		{time.Date(2026, 3, 31, 9, 0, 0, 0, time.UTC), "13m", time.Date(2025, 2, 28, 0, 0, 0, 0, time.UTC)},
+		{time.Date(2026, 5, 31, 9, 0, 0, 0, time.UTC), "1M", time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC)},
+		{time.Date(2028, 3, 31, 9, 0, 0, 0, time.UTC), "1m", time.Date(2028, 2, 29, 0, 0, 0, 0, time.UTC)},
+		{time.Date(2028, 2, 29, 9, 0, 0, 0, time.UTC), "1y", time.Date(2027, 2, 28, 0, 0, 0, 0, time.UTC)},
+		{time.Date(2028, 2, 29, 9, 0, 0, 0, time.UTC), "4y", time.Date(2024, 2, 29, 0, 0, 0, 0, time.UTC)},
+		{time.Date(2026, 1, 31, 9, 0, 0, 0, time.UTC), "1m", time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC)},
+	}
+	for _, tt := range ends {
+		if got := ageStart(tt.now, tt.age); !got.Equal(tt.want) {
+			t.Errorf("ageStart(%s, %s) = %v, want %v", tt.now.Format(time.DateOnly), tt.age, got, tt.want)
+		}
+	}
+}
+
+// TestCompileStandardBadValues covers trees that skipped validation: every
+// error is ErrUnsupportedQuery, never an internal error.
+func TestCompileStandardBadValues(t *testing.T) {
+	t.Parallel()
+	for _, n := range []*query.Node{
+		query.Term(query.FieldIs, "important"),
+		query.Term(query.FieldNewerThan, "7x"),
+		query.Term(query.FieldOlderThan, "0d"),
+		query.Term(query.FieldAfter, "yesterday"),
+		query.Term(query.FieldBefore, "2026-13-01"),
+		query.Term(query.FieldLarger, "big"),
+		query.Term(query.FieldSmaller, "5G"),
+		query.Or(query.Term(query.FieldText, "a"), query.Not(query.Term(query.FieldIs, "x"))),
+	} {
+		if _, err := compileStandard(n, time.Now()); !errors.Is(err, mailstore.ErrUnsupportedQuery) {
+			t.Errorf("compileStandard(%s) = %v, want ErrUnsupportedQuery", n, err)
+		}
+	}
 }
 
 func TestIntersect(t *testing.T) {
@@ -256,13 +323,16 @@ func TestSources(t *testing.T) {
 		{Name: "[Gmail]/All Mail", Role: mailstore.RoleAll, Selectable: true},
 	}
 	standard := map[string][]string{
-		"":         {"INBOX", "Sent", "Projects", "[Gmail]/All Mail"},
-		"anywhere": {"INBOX", "Sent", "Trash", "Junk", "Projects", "[Gmail]/All Mail"},
-		"trash":    {"Trash"},
-		"junk":     {"Junk"},
-		"spam":     {"Junk"},
-		"INBOX":    {"INBOX"},
-		"Projects": {"Projects"},
+		// A \All folder, such as a Dovecot virtual one, holds a copy of
+		// every message, so it is searched only when in: names it.
+		"":                 {"INBOX", "Sent", "Projects"},
+		"anywhere":         {"INBOX", "Sent", "Trash", "Junk", "Projects"},
+		"[Gmail]/All Mail": {"[Gmail]/All Mail"},
+		"trash":            {"Trash"},
+		"junk":             {"Junk"},
+		"spam":             {"Junk"},
+		"INBOX":            {"INBOX"},
+		"Projects":         {"Projects"},
 	}
 	for in, want := range standard {
 		got, err := standardSources(folders, in)

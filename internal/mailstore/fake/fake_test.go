@@ -282,17 +282,21 @@ func TestFakeHostInRoles(t *testing.T) {
 	t.Parallel()
 	s := New("host", false)
 	s.AddFolder("Projects", mailstore.RoleNone)
+	// A \All folder, such as a Dovecot virtual one, copies every message,
+	// so it is searched only when in: names it, as imapstore does.
+	s.AddFolder("Virtual/All", mailstore.RoleAll)
 	tests := map[string][]string{
-		"":         {"INBOX", "Archive", "Drafts", "Projects", "Sent"},
-		"anywhere": {"INBOX", "Archive", "Drafts", "Junk", "Projects", "Sent", "Trash"},
-		"inbox":    {"INBOX"},
-		"sent":     {"Sent"},
-		"drafts":   {"Drafts"},
-		"archive":  {"Archive"},
-		"trash":    {"Trash"},
-		"spam":     {"Junk"},
-		"junk":     {"Junk"},
-		"Projects": {"Projects"},
+		"":            {"INBOX", "Archive", "Drafts", "Projects", "Sent"},
+		"anywhere":    {"INBOX", "Archive", "Drafts", "Junk", "Projects", "Sent", "Trash"},
+		"Virtual/All": {"Virtual/All"},
+		"inbox":       {"INBOX"},
+		"sent":        {"Sent"},
+		"drafts":      {"Drafts"},
+		"archive":     {"Archive"},
+		"trash":       {"Trash"},
+		"spam":        {"Junk"},
+		"junk":        {"Junk"},
+		"Projects":    {"Projects"},
 	}
 	for in, want := range tests {
 		if got := folders(search(t, s, mailstore.SearchRequest{In: in})); !slices.Equal(got, want) {
@@ -666,5 +670,113 @@ func TestFakeRawAttachmentFilename(t *testing.T) {
 	}
 	if got := part.FileName(); got != `Été "q".pdf` {
 		t.Errorf("attachment filename in the raw message = %q", got)
+	}
+}
+
+// count is the number of matches for q across every source.
+func count(t *testing.T, s *Store, q, in string) int {
+	t.Helper()
+	var n int
+	for _, r := range search(t, s, mailstore.SearchRequest{Query: mustParse(t, q), In: in}) {
+		n += len(r.UIDs)
+	}
+	return n
+}
+
+func TestFakeBcc(t *testing.T) {
+	t.Parallel()
+	// The fake keeps no Bcc, as a received message has none: bcc: matches
+	// nothing and -bcc: everything, on both kinds of account.
+	for _, gmail := range []bool{false, true} {
+		s := New("acct", gmail)
+		folder := "INBOX"
+		if gmail {
+			folder = "[Gmail]/All Mail"
+		}
+		s.Add(Message{Folder: folder, Subject: "s", To: []mailstore.Address{{Email: "x@example.com"}}})
+		if n := count(t, s, "bcc:x", ""); n != 0 {
+			t.Errorf("gmail=%v: bcc:x matched %d, want 0", gmail, n)
+		}
+		if n := count(t, s, "-bcc:x", ""); n != 1 {
+			t.Errorf("gmail=%v: -bcc:x matched %d, want 1", gmail, n)
+		}
+	}
+}
+
+func TestFakeHostAgesAreDays(t *testing.T) {
+	t.Parallel()
+	// IMAP SINCE and BEFORE compare whole days, so on a standard account
+	// newer_than:1d is since the start of yesterday, as imapstore sends it.
+	at := func(d, h int) time.Time { return time.Date(2026, 10, d, h, 0, 0, 0, time.UTC) }
+	host := New("host", false)
+	host.SetNow(func() time.Time { return at(29, 12) })
+	host.Add(Message{Folder: "INBOX", InternalDate: at(28, 6), Subject: "early yesterday"})
+	host.Add(Message{Folder: "INBOX", InternalDate: at(27, 23), Subject: "late two days ago"})
+	if n := count(t, host, "newer_than:1d", ""); n != 1 {
+		t.Errorf("host newer_than:1d matched %d, want 1", n)
+	}
+	if n := count(t, host, "older_than:1d", ""); n != 1 {
+		t.Errorf("host older_than:1d matched %d, want 1", n)
+	}
+	// Gmail compares the time itself.
+	gmail := New("gmail", true)
+	gmail.SetNow(func() time.Time { return at(29, 12) })
+	gmail.Add(Message{Folder: "[Gmail]/All Mail", InternalDate: at(28, 6), Subject: "early yesterday"})
+	if n := count(t, gmail, "newer_than:1d", ""); n != 0 {
+		t.Errorf("gmail newer_than:1d matched %d, want 0", n)
+	}
+}
+
+func TestFakeMonthEndAges(t *testing.T) {
+	t.Parallel()
+	// A month back from 31 March is 28 February, not 3 March.
+	now := time.Date(2026, 3, 31, 12, 0, 0, 0, time.UTC)
+	for _, gmail := range []bool{false, true} {
+		s := New("acct", gmail)
+		folder := "INBOX"
+		if gmail {
+			folder = "[Gmail]/All Mail"
+		}
+		s.SetNow(func() time.Time { return now })
+		s.Add(Message{Folder: folder, InternalDate: time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC), Subject: "2 March"})
+		s.Add(Message{Folder: folder, InternalDate: time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC), Subject: "27 February"})
+		if n := count(t, s, "newer_than:1m", ""); n != 1 {
+			t.Errorf("gmail=%v: newer_than:1m on 31 March matched %d, want 1", gmail, n)
+		}
+	}
+	leap := New("host", false)
+	leap.SetNow(func() time.Time { return time.Date(2028, 2, 29, 12, 0, 0, 0, time.UTC) })
+	leap.Add(Message{Folder: "INBOX", InternalDate: time.Date(2027, 2, 28, 1, 0, 0, 0, time.UTC), Subject: "28 February"})
+	if n := count(t, leap, "newer_than:1y", ""); n != 1 {
+		t.Errorf("newer_than:1y on 29 February matched %d, want 1", n)
+	}
+}
+
+func TestFakeHostRefusesOutOfRange(t *testing.T) {
+	t.Parallel()
+	now := func() time.Time { return time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC) }
+	// RFC 3501 sizes are 32 bits, and dates go back to 1970, as in imapstore.
+	for _, q := range []string{
+		"larger:4294967296", "smaller:4096M", "a OR -larger:5000M",
+		"before:1969-12-31", "after:0001-01-01", "older_than:57y", "newer_than:9999y", "a OR -older_than:100y",
+	} {
+		host := New("host", false)
+		host.SetNow(now)
+		if _, err := host.Search(t.Context(), mailstore.SearchRequest{Query: mustParse(t, q)}); !errors.Is(err, mailstore.ErrUnsupportedQuery) {
+			t.Errorf("%s on a standard account: %v, want ErrUnsupportedQuery", q, err)
+		}
+		gmail := New("gmail", true)
+		gmail.SetNow(now)
+		if _, err := gmail.Search(t.Context(), mailstore.SearchRequest{Query: mustParse(t, q)}); err != nil {
+			t.Errorf("%s on Gmail: %v", q, err)
+		}
+	}
+	// The limits themselves are allowed.
+	host := New("host", false)
+	host.SetNow(now)
+	for _, q := range []string{"larger:4294967295", "after:1970-01-01", "newer_than:56y"} {
+		if _, err := host.Search(t.Context(), mailstore.SearchRequest{Query: mustParse(t, q)}); err != nil {
+			t.Errorf("%s on a standard account: %v", q, err)
+		}
 	}
 }
