@@ -143,18 +143,35 @@ func (s *Store) standardThread(ctx context.Context, r ref.Ref) ([]ref.Ref, error
 		})
 	}
 	wg.Wait()
-	// A folder that fails on its own is left out, since the thread is still
-	// useful without it. A failure of the whole account is not hidden that way.
+	return threadOf(ctx, found, errs, r)
+}
+
+// threadOf merges the matches found in each folder into the thread, seed
+// included. A folder that failed on its own is left out, since the thread is
+// still useful without it. A failure of the whole account fails the call
+// instead of hiding behind a partial thread: a login refusal, the end of
+// ctx, or every folder failing.
+func threadOf(ctx context.Context, found [][]ref.Ref, errs []error, seed ref.Ref) ([]ref.Ref, error) {
 	if err := accountFailure(ctx, errs); err != nil {
 		return nil, err
 	}
 	var out []ref.Ref
+	var first error
+	failed := 0
 	for i, refs := range found {
-		if errs[i] == nil {
-			out = append(out, refs...)
+		if errs[i] != nil {
+			failed++
+			if first == nil {
+				first = errs[i]
+			}
+			continue
 		}
+		out = append(out, refs...)
 	}
-	return withSeed(out, r), nil
+	if failed > 0 && failed == len(found) {
+		return nil, first
+	}
+	return withSeed(out, seed), nil
 }
 
 // withSeed adds seed to refs unless a ref already names the same message: the
