@@ -10,6 +10,7 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
@@ -22,6 +23,8 @@ const (
 	DefaultPath        = "/etc/chainmail/config.toml"
 	DefaultSocket      = "/run/chainmail/chainmail.sock"
 	DefaultClientGroup = "chainmail-clients"
+	// DefaultBodyLimit truncates message bodies longer than 64 KiB unless --full is passed.
+	DefaultBodyLimit = "64KiB"
 )
 
 // ErrUnknownAccount means no account has the requested name.
@@ -34,10 +37,43 @@ type Config struct {
 	Accounts     map[string]Account     `toml:"accounts"`
 }
 
-// Daemon configures the socket.
+// Daemon configures the socket and how messages are rendered.
 type Daemon struct {
 	Socket      string `toml:"socket"`
 	ClientGroup string `toml:"client_group"`
+	// BodyLimit truncates message bodies longer than this, such as "64KiB".
+	BodyLimit string `toml:"body_limit"`
+}
+
+// Body limits accepted in config. The upper bound keeps a batch of 50
+// messages under the 16 MiB unary response cap.
+const (
+	minBodyLimit = 1 << 10
+	maxBodyLimit = 8 << 20
+)
+
+var byteSizeRE = regexp.MustCompile(`^([0-9]{1,12})(B|KiB|MiB)?$`)
+
+// ParseByteSize parses a size such as 65536, 512B, 64KiB or 2MiB.
+func ParseByteSize(s string) (int64, error) {
+	m := byteSizeRE.FindStringSubmatch(s)
+	if m == nil {
+		return 0, fmt.Errorf("size %q: want a number of bytes, optionally followed by B, KiB or MiB", s)
+	}
+	n, _ := strconv.ParseInt(m[1], 10, 64) // at most 12 digits always fits
+	switch m[2] {
+	case "KiB":
+		n <<= 10
+	case "MiB":
+		n <<= 20
+	}
+	return n, nil
+}
+
+// BodyLimitBytes returns body_limit in bytes. Parse has validated it.
+func (d Daemon) BodyLimitBytes() int {
+	n, _ := ParseByteSize(d.BodyLimit)
+	return int(n)
 }
 
 // OAuthClient is an OAuth2 client registration. Its secret lives in the vault
@@ -164,6 +200,9 @@ func (c *Config) applyDefaults() {
 	if c.Daemon.ClientGroup == "" {
 		c.Daemon.ClientGroup = DefaultClientGroup
 	}
+	if c.Daemon.BodyLimit == "" {
+		c.Daemon.BodyLimit = DefaultBodyLimit
+	}
 	for name, a := range c.Accounts {
 		if a.Username == "" {
 			a.Username = a.Address
@@ -184,6 +223,11 @@ func (c *Config) validate() error {
 	var problems []string
 	add := func(format string, args ...any) {
 		problems = append(problems, fmt.Sprintf(format, args...))
+	}
+	if n, err := ParseByteSize(c.Daemon.BodyLimit); err != nil {
+		add("daemon.body_limit: %v", err)
+	} else if n < minBodyLimit || n > maxBodyLimit {
+		add("daemon.body_limit: %s must be between 1KiB and 8MiB", c.Daemon.BodyLimit)
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.OAuthClients)) {
 		where := "oauth_clients." + name

@@ -282,3 +282,43 @@ func TestLoad(t *testing.T) {
 		t.Errorf("missing file err = %v, want os.ErrNotExist", err)
 	}
 }
+
+func TestBodyLimit(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse([]byte(validConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Daemon.BodyLimit != DefaultBodyLimit || cfg.Daemon.BodyLimitBytes() != 64<<10 {
+		t.Errorf("default body limit = %q (%d bytes)", cfg.Daemon.BodyLimit, cfg.Daemon.BodyLimitBytes())
+	}
+	cfg, err = Parse([]byte("[daemon]\nbody_limit = \"1MiB\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Daemon.BodyLimitBytes(); got != 1<<20 {
+		t.Errorf("1MiB = %d bytes", got)
+	}
+	for _, bad := range []string{"64kb", "0", "16MiB", "-1", "1.5KiB", "512"} {
+		_, err := Parse([]byte("[daemon]\nbody_limit = \"" + bad + "\"\n"))
+		var verr *ValidationError
+		if !errors.As(err, &verr) || !strings.Contains(err.Error(), "daemon.body_limit") {
+			t.Errorf("body_limit %q: err = %v, want a daemon.body_limit problem", bad, err)
+		}
+	}
+}
+
+func TestParseByteSize(t *testing.T) {
+	t.Parallel()
+	tests := map[string]int64{"65536": 65536, "512B": 512, "64KiB": 64 << 10, "2MiB": 2 << 20}
+	for in, want := range tests {
+		if got, err := ParseByteSize(in); err != nil || got != want {
+			t.Errorf("ParseByteSize(%q) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "KiB", "1 KiB", "1kib", "1GiB", "9999999999999999999"} {
+		if _, err := ParseByteSize(bad); err == nil {
+			t.Errorf("ParseByteSize(%q) succeeded", bad)
+		}
+	}
+}
