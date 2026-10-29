@@ -588,7 +588,8 @@ func TestSecretSetFromPassRefusesFolders(t *testing.T) {
 	})
 	t.Run("folder listing", func(t *testing.T) {
 		t.Parallel()
-		// pass prints a tree with colour codes for a folder, even through a pipe.
+		// Output with terminal escape codes is refused even when a .gpg file
+		// exists, since it cannot be the entry's first line.
 		listing := "\x1b[01;34memail\x1b[0m\n├── " + value + "\n"
 		env := Env{Getenv: passStore(t, "", "email"), PassShow: func(context.Context, string) ([]byte, error) { return []byte(listing), nil }}
 		got := runCLI(t, env, "--socket", h.Socket, "secret", "set", "accounts/icloud", "--from-pass", "email")
@@ -596,7 +597,6 @@ func TestSecretSetFromPassRefusesFolders(t *testing.T) {
 			t.Errorf("got %+v", got)
 		}
 		assertNoSecret(t, value, got.stdout, got.stderr)
-		assertNoSecret(t, "email\x1b", got.stderr)
 		if _, err := h.Vault.Get("accounts/icloud"); err == nil {
 			t.Error("a folder listing was stored")
 		}

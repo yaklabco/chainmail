@@ -87,6 +87,8 @@ func readSecret(ctx context.Context, env Env, name, passPath string) ([]byte, er
 			return nil, err
 		}
 		raw, _, _ = bytes.Cut(raw, []byte("\n"))
+		// checkPassEntry already refuses folders. Terminal escape codes in a
+		// secret still mean pass printed something other than the entry.
 		if bytes.IndexByte(raw, 0x1b) >= 0 {
 			return nil, &exitError{
 				reason: api.ReasonInvalidArgument,
