@@ -25,13 +25,15 @@ group, and values with spaces are quoted.
   from: to: cc: bcc:            address or display name contains
   subject:                      subject contains
   is:unread is:read is:starred
-  newer_than: older_than:       7d, 2w, 3m, 1y
+  newer_than: older_than:       days, weeks, months or years: 7d, 2w, 3m, 1y
   after: before:                YYYY-MM-DD
-  larger: smaller:              bytes, or 10K, 5M
-  has:attachment filename: label:   Google accounts only, for now
-  in:                           inbox, sent, drafts, archive, trash, spam,
-                                anywhere, or a folder name
-  account:                      narrow to an account
+  larger: smaller:              bytes, or KiB and MiB: 10K, 5M
+  has:attachment filename: label:
+                                Google accounts only, for now
+  in:                           inbox, sent, drafts, archive, trash, spam
+                                (or junk), anywhere, or a folder name
+  account:                      this account; each account: term and each
+                                --account adds one
 
 Every folder except Trash and Spam is searched unless in: says otherwise.
 On accounts other than Google, dates work at day granularity on the arrival
@@ -144,8 +146,8 @@ func newGetCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			return itemsResult(resp.Msg.GetItems())
 		},
 	}
-	cmd.Flags().BoolVar(&full, "full", false, "keep quoted text and signatures, and do not truncate")
-	cmd.Flags().BoolVar(&raw, "raw", false, "write the original RFC 5322 bytes of one message to stdout")
+	cmd.Flags().BoolVar(&full, "full", false, "keep quoted text and signatures, and do not cut at body_limit")
+	cmd.Flags().BoolVar(&raw, "raw", false, "write the original RFC 5322 bytes of one message to stdout, which must not be a terminal")
 	return cmd
 }
 
@@ -200,7 +202,7 @@ func newThreadCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			return writeProto(env.Stdout, resp.Msg)
 		},
 	}
-	cmd.Flags().BoolVar(&full, "full", false, "keep quoted text and signatures, and do not truncate")
+	cmd.Flags().BoolVar(&full, "full", false, "keep quoted text and signatures, and do not cut at body_limit")
 	return cmd
 }
 
@@ -261,7 +263,7 @@ func newAttachmentCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&out, "out", "", "file to write, or - for stdout")
+	cmd.Flags().StringVar(&out, "out", "", "file to write, or - for stdout when it is not a terminal (required)")
 	return cmd
 }
 

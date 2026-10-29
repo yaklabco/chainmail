@@ -644,13 +644,14 @@ type SearchRequest struct {
 	// only until the local index arrives.
 	QueryString string `protobuf:"bytes,1,opt,name=query_string,json=queryString,proto3" json:"query_string,omitempty"`
 	Query       *Query `protobuf:"bytes,2,opt,name=query,proto3" json:"query,omitempty"`
-	// Narrows the search, together with account: terms. Empty means every account.
+	// Accounts to search, added to those account: terms name. Empty, with no
+	// account: terms, means every account.
 	Accounts []string `protobuf:"bytes,3,rep,name=accounts,proto3" json:"accounts,omitempty"`
 	// Rows per page: 0 means 50, at most 500.
 	Limit uint32 `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
 	// next_cursor from the previous page of the same search.
 	Cursor string `protobuf:"bytes,5,opt,name=cursor,proto3" json:"cursor,omitempty"`
-	// Count matches without fetching rows.
+	// Count matches without fetching rows. Takes no cursor.
 	CountOnly bool `protobuf:"varint,6,opt,name=count_only,json=countOnly,proto3" json:"count_only,omitempty"`
 	// Add a snippet of up to 200 characters to each row.
 	Snippets bool `protobuf:"varint,7,opt,name=snippets,proto3" json:"snippets,omitempty"`
@@ -1057,10 +1058,14 @@ func (x *SearchResponse) GetFetchedAt() *timestamppb.Timestamp {
 type Body struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	Untrusted string                 `protobuf:"bytes,1,opt,name=untrusted,proto3" json:"untrusted,omitempty"`
-	// Cut at the daemon's body_limit. Ask again with full to get everything.
+	// The text is incomplete: cut at the daemon's body_limit, which full
+	// lifts, or because the text part is longer than the 4 MiB the daemon
+	// reads of one part, or failed to decode partway, which full does not.
+	// GetRaw returns the whole message.
 	Truncated bool `protobuf:"varint,2,opt,name=truncated,proto3" json:"truncated,omitempty"`
 	// A trailing quote or signature was removed.
-	QuotedTrimmed bool  `protobuf:"varint,3,opt,name=quoted_trimmed,json=quotedTrimmed,proto3" json:"quoted_trimmed,omitempty"`
+	QuotedTrimmed bool `protobuf:"varint,3,opt,name=quoted_trimmed,json=quotedTrimmed,proto3" json:"quoted_trimmed,omitempty"`
+	// How many bytes of text the trim removed.
 	TrimmedBytes  int64 `protobuf:"varint,4,opt,name=trimmed_bytes,json=trimmedBytes,proto3" json:"trimmed_bytes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1515,7 +1520,7 @@ type GetRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 1 to 50 refs.
 	Refs []string `protobuf:"bytes,1,rep,name=refs,proto3" json:"refs,omitempty"`
-	// Skip quote trimming and body truncation.
+	// Skip quote trimming and the body_limit cut.
 	Full          bool `protobuf:"varint,2,opt,name=full,proto3" json:"full,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1715,9 +1720,10 @@ func (x *GetRawResponse) GetData() []byte {
 }
 
 type GetThreadRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ref           string                 `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	Full          bool                   `protobuf:"varint,2,opt,name=full,proto3" json:"full,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Ref   string                 `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
+	// As in GetRequest.
+	Full          bool `protobuf:"varint,2,opt,name=full,proto3" json:"full,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

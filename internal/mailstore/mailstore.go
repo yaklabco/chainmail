@@ -214,9 +214,10 @@ type Store interface {
 	StreamPart(ctx context.Context, r ref.Ref, part string) (PartInfo, io.ReadCloser, error)
 	// Thread returns the refs of every message in r's thread, r included.
 	// On Google accounts the thread is every message in All Mail with r's
-	// Gmail thread ID. Elsewhere it is every message outside Trash and Junk
-	// whose Message-ID is r's root Message-ID or whose References contain
-	// it. The order is unspecified: callers sort.
+	// Gmail thread ID. Elsewhere it is every message outside Trash, Junk and
+	// any \All folder whose Message-ID is r's root Message-ID or whose
+	// References or In-Reply-To contain it. The order is unspecified:
+	// callers sort.
 	Thread(ctx context.Context, r ref.Ref) ([]ref.Ref, error)
 	// Close logs out of every connection, within 5 seconds.
 	Close() error
