@@ -7,41 +7,97 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-)
 
-const helpHint = "run: chainmail --help"
+	"github.com/jamesainslie/chainmail/internal/api"
+	"github.com/jamesainslie/chainmail/internal/client"
+	"github.com/jamesainslie/chainmail/internal/config"
+)
 
 // Execute runs chainmail with args and returns the process exit code.
 func Execute(ctx context.Context, args []string, env Env) int {
-	root := newRoot(env)
+	root := newRoot(ctx, env)
+	// cobra reads os.Args when args is nil, which would parse the host's command line.
+	if args == nil {
+		args = []string{}
+	}
 	root.SetArgs(args)
 	if err := root.ExecuteContext(ctx); err != nil {
 		return reportError(env.Stderr, err)
 	}
-	return exitOK
+	return api.ExitOK
 }
 
-func newRoot(env Env) *cobra.Command {
-	root := &cobra.Command{
-		Use:           "chainmail",
-		Short:         "Email for AI agents, behind a policy daemon",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		// The root runs only when no subcommand matched. Setting Args stops cobra
-		// reporting unknown commands itself, and RunE makes the root runnable so
-		// cobra does not answer a bare invocation with help.
-		Args: cobra.ArbitraryArgs,
-		RunE: func(_ *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				return usageError{err: errors.New("no command given"), hint: helpHint}
-			}
-			return usageError{err: fmt.Errorf("unknown command %q", args[0]), hint: helpHint}
-		},
+// globals holds the flags every command shares.
+type globals struct {
+	socket string
+	output string
+}
+
+func (g *globals) socketPath(env Env) string {
+	if g.socket != "" {
+		return g.socket
+	}
+	if s := env.Getenv("CHAINMAIL_SOCKET"); s != "" {
+		return s
+	}
+	return config.DefaultSocket
+}
+
+// client connects to the daemon. Callers Close it, so idle connections do
+// not hold up a daemon shutting down.
+func (g *globals) client(env Env) *client.Client {
+	return client.New(g.socketPath(env), "cli")
+}
+
+func (g *globals) table() bool { return g.output == "table" }
+
+// newRoot builds the command tree. Commands use ctx, the context given to
+// Execute, rather than cmd.Context(). The two are the same context, but only
+// a ctx passed down by parameter lets contextcheck follow cancellation from
+// Execute into each command.
+func newRoot(ctx context.Context, env Env) *cobra.Command {
+	g := &globals{}
+	root := newGroup("chainmail", "Email for AI agents, behind a policy daemon")
+	root.SilenceUsage = true
+	root.SilenceErrors = true
+	root.PersistentPreRunE = func(*cobra.Command, []string) error {
+		if g.output != "json" && g.output != "table" {
+			return usageError{err: fmt.Errorf("--output must be json or table, got %q", g.output), hint: "run: chainmail --help"}
+		}
+		return nil
 	}
 	root.SetIn(env.Stdin)
 	root.SetOut(env.Stdout)
 	root.SetErr(env.Stderr)
-	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError{err: err} })
-	root.AddCommand(newVersionCmd(env))
+	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error { return usageError{err: err, hint: helpHint(cmd)} })
+	root.PersistentFlags().StringVar(&g.socket, "socket", "", "daemon socket (default $CHAINMAIL_SOCKET, then "+config.DefaultSocket+")")
+	root.PersistentFlags().StringVar(&g.output, "output", "json", "output format: json or table")
+	root.AddCommand(
+		newVersionCmd(env),
+		newDaemonCmd(ctx, env, g),
+		newAccountsCmd(ctx, env, g),
+		newSecretCmd(ctx, env, g),
+		newAuthCmd(ctx, env, g),
+		newAdminCmd(ctx, env, g),
+	)
 	return root
+}
+
+// newGroup returns a command that only holds subcommands. It runs only when
+// no subcommand matched. Setting Args stops cobra reporting unknown commands
+// itself, or printing help and exiting 0 for them, and RunE makes the group
+// runnable so cobra does not answer a bare invocation with help. Both become
+// usage errors.
+func newGroup(use, short string) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: short,
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return usageError{err: errors.New("no command given"), hint: helpHint(cmd)}
+			}
+			return usageError{err: fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath()), hint: helpHint(cmd)}
+		},
+	}
 }

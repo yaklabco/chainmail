@@ -1,0 +1,1 @@
+{"accounts":[{"name":"host","provider":"hostinger","address":"me@example.com","auth_method":"password","auth_state":"AUTH_STATE_REQUIRED","auth_detail":"run: chainmail secret set accounts/host"},{"name":"icloud","provider":"icloud","address":"me@icloud.com","auth_method":"password","auth_state":"AUTH_STATE_OK","auth_detail":""}]}

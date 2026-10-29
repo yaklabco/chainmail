@@ -1,0 +1,58 @@
+package cli
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+
+	"connectrpc.com/connect"
+	"github.com/spf13/cobra"
+
+	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+)
+
+const loginInstructions = `Open this URL in a browser and approve access:
+
+  %s
+
+The browser will then fail to load a page on 127.0.0.1. That is expected.
+Copy the full URL from the address bar, paste it here and press Enter.
+The link expires at %s.
+`
+
+func newAuthCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	cmd := newGroup("auth", "Log in to OAuth2 accounts")
+	cmd.AddCommand(&cobra.Command{
+		Use:   "login <account>",
+		Short: "Run the OAuth2 consent flow for an account",
+		Args:  exactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			account := args[0]
+			c := g.client(env)
+			defer c.Close()
+			begin, err := c.Admin.BeginAuthLogin(ctx, connect.NewRequest(&chainmailv1.BeginAuthLoginRequest{Account: account}))
+			if err != nil {
+				return err
+			}
+			expires := begin.Msg.GetExpiresAt().AsTime().Local().Format("15:04 MST")
+			_, _ = fmt.Fprintf(env.Stderr, loginInstructions, begin.Msg.GetConsentUrl(), expires) // if stderr is gone the user can't see the URL; the login then expires unused
+			line, err := bufio.NewReader(env.Stdin).ReadString('\n')
+			if err != nil && !errors.Is(err, io.EOF) {
+				return fmt.Errorf("reading the redirect URL: %w", err)
+			}
+			redirect := strings.TrimSpace(line)
+			if redirect == "" {
+				return usageError{err: errors.New("no redirect URL was pasted"), hint: "run: chainmail auth login " + account + " again"}
+			}
+			finish := connect.NewRequest(&chainmailv1.FinishAuthLoginRequest{Account: account, RedirectUrl: redirect})
+			if _, err := c.Admin.FinishAuthLogin(ctx, finish); err != nil {
+				return err
+			}
+			return writeJSON(env.Stdout, map[string]any{"account": account, "logged_in": true})
+		},
+	})
+	return cmd
+}

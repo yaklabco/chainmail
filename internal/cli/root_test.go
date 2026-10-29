@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/jamesainslie/chainmail/internal/api"
 )
 
 type cliResult struct {
@@ -54,6 +56,17 @@ func TestUsageErrorsExitTwo(t *testing.T) {
 		{name: "extra argument", args: []string{"version", "extra"}},
 		{name: "unknown command", args: []string{"nope"}},
 		{name: "no arguments", args: nil},
+		{name: "bare accounts", args: []string{"accounts"}},
+		{name: "unknown accounts subcommand", args: []string{"accounts", "nope"}},
+		{name: "bare secret", args: []string{"secret"}},
+		{name: "unknown secret subcommand", args: []string{"secret", "nope"}},
+		{name: "bare auth", args: []string{"auth"}},
+		{name: "unknown auth subcommand", args: []string{"auth", "nope"}},
+		{name: "bare admin", args: []string{"admin"}},
+		{name: "unknown admin subcommand", args: []string{"admin", "nope"}},
+		{name: "extra argument to a subcommand", args: []string{"accounts", "list", "extra"}},
+		{name: "missing argument", args: []string{"accounts", "test"}},
+		{name: "daemon argument", args: []string{"daemon", "extra"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -72,10 +85,49 @@ func TestUsageErrorsExitTwo(t *testing.T) {
 			if err := json.Unmarshal([]byte(got.stderr), &out); err != nil {
 				t.Fatalf("stderr = %q is not JSON: %v", got.stderr, err)
 			}
-			if out.Error.Reason != reasonUsage {
-				t.Errorf("error.reason = %q, want %q", out.Error.Reason, reasonUsage)
+			if out.Error.Reason != api.ReasonUsage {
+				t.Errorf("error.reason = %q, want %q", out.Error.Reason, api.ReasonUsage)
 			}
 		})
+	}
+}
+
+func TestGroupUsageHints(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		args []string
+		hint string
+	}{
+		{args: nil, hint: "run: chainmail --help"},
+		{args: []string{"accounts"}, hint: "run: chainmail accounts --help"},
+		{args: []string{"secret", "nope"}, hint: "run: chainmail secret --help"},
+		{args: []string{"auth", "nope"}, hint: "run: chainmail auth --help"},
+		{args: []string{"admin"}, hint: "run: chainmail admin --help"},
+		{args: []string{"accounts", "test"}, hint: "run: chainmail accounts test --help"},
+		{args: []string{"admin", "status", "--nope"}, hint: "run: chainmail admin status --help"},
+	}
+	for _, tt := range tests {
+		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
+			t.Parallel()
+			got := runCLI(t, Env{}, tt.args...)
+			var out errorOutput
+			if err := json.Unmarshal([]byte(got.stderr), &out); err != nil {
+				t.Fatalf("stderr = %q is not JSON: %v", got.stderr, err)
+			}
+			if out.Error.Hint != tt.hint {
+				t.Errorf("hint = %q, want %q", out.Error.Hint, tt.hint)
+			}
+		})
+	}
+}
+
+func TestGroupHelpExitsZero(t *testing.T) {
+	t.Parallel()
+	for _, group := range []string{"accounts", "secret", "auth", "admin"} {
+		got := runCLI(t, Env{}, group, "--help")
+		if got.code != 0 || !strings.Contains(got.stdout, group) || got.stderr != "" {
+			t.Errorf("%s --help: %+v", group, got)
+		}
 	}
 }
 
