@@ -74,7 +74,7 @@ func TestAccountsListGolden(t *testing.T) {
 	if got := runCLI(t, Env{Stdin: strings.NewReader("pw\n")}, "--socket", h.Socket, "secret", "set", "accounts/icloud"); got.code != 0 {
 		t.Fatalf("secret set: %+v", got)
 	}
-	got := runCLI(t, Env{}, "--socket", h.Socket, "accounts", "list")
+	got := runCLI(t, Env{}, "--socket", h.Socket, "--output", "json", "accounts", "list")
 	if got.code != 0 {
 		t.Fatalf("accounts list: %+v", got)
 	}
@@ -118,7 +118,7 @@ smtp = { host = "127.0.0.1", port = %[2]d, security = "starttls" }
 		}
 	}
 
-	good := runCLI(t, Env{}, "--socket", h.Socket, "accounts", "test", "good")
+	good := runCLI(t, Env{}, "--socket", h.Socket, "--output", "json", "accounts", "test", "good")
 	if good.code != 0 {
 		t.Errorf("good: %+v", good)
 	}
@@ -145,7 +145,7 @@ smtp = { host = "127.0.0.1", port = %[2]d, security = "starttls" }
 func TestSecretSet(t *testing.T) {
 	t.Parallel()
 	h := daemontest.Start(t, twoAccounts, daemontest.Options{})
-	got := runCLI(t, Env{Stdin: strings.NewReader("hunter2\n")}, "--socket", h.Socket, "secret", "set", "accounts/host")
+	got := runCLI(t, Env{Stdin: strings.NewReader("hunter2\n")}, "--socket", h.Socket, "--output", "json", "secret", "set", "accounts/host")
 	if got.code != 0 || got.stdout != `{"name":"accounts/host","set":true}`+"\n" {
 		t.Fatalf("secret set: %+v", got)
 	}
@@ -153,7 +153,7 @@ func TestSecretSet(t *testing.T) {
 		t.Errorf("vault = %q, %v (the trailing newline must be trimmed)", v, err)
 	}
 	assertNoSecret(t, "hunter2", got.stdout, got.stderr)
-	status := runCLI(t, Env{}, "--socket", h.Socket, "admin", "status")
+	status := runCLI(t, Env{}, "--socket", h.Socket, "--output", "json", "admin", "status")
 	if status.code != 0 || !strings.Contains(status.stdout, `"secret_names":["accounts/host"]`) {
 		t.Errorf("admin status: %+v", status)
 	}
@@ -266,7 +266,7 @@ oauth_client = "g"
 	}
 	var stderr bytes.Buffer
 	env := Env{Stderr: &stderr, Stdin: &pasteReader{t: t, stderr: &stderr}}
-	got := runCLI(t, env, "--socket", h.Socket, "auth", "login", "gm")
+	got := runCLI(t, env, "--socket", h.Socket, "--output", "json", "auth", "login", "gm")
 	if got.code != 0 {
 		t.Fatalf("auth login: code %d, stderr %s", got.code, stderr.String())
 	}
@@ -365,7 +365,7 @@ func TestDaemonCommandServes(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		got := runCLI(t, Env{}, "--socket", socket, "admin", "status")
+		got := runCLI(t, Env{}, "--socket", socket, "--output", "json", "admin", "status")
 		if got.code == 0 {
 			if !strings.Contains(got.stdout, `"dev_mode":true`) {
 				t.Errorf("status = %s", got.stdout)

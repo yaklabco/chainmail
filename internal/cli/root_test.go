@@ -37,7 +37,7 @@ func runCLI(t *testing.T, env Env, args ...string) cliResult {
 
 func TestVersion(t *testing.T) {
 	t.Parallel()
-	got := runCLI(t, Env{}, "version")
+	got := runCLI(t, Env{}, "--output", "json", "version")
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, stderr = %s", got.code, got.stderr)
 	}
@@ -160,10 +160,10 @@ func TestHelpCommand(t *testing.T) {
 	}
 }
 
-func TestOutputFlagHelpNamesTableCommands(t *testing.T) {
+func TestOutputFlagHelpNamesDefault(t *testing.T) {
 	t.Parallel()
 	got := runCLI(t, Env{}, "--help")
-	if !strings.Contains(got.stdout, "table is honoured only by accounts commands") {
+	if !strings.Contains(got.stdout, "table on a terminal, json otherwise") {
 		t.Errorf("help = %s", got.stdout)
 	}
 }

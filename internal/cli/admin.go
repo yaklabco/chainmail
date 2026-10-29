@@ -22,6 +22,9 @@ func newAdminCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if g.table() {
+				return statusTable(env.Stdout, env.location(), resp.Msg)
+			}
 			return writeProto(env.Stdout, resp.Msg)
 		},
 	})

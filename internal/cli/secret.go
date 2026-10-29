@@ -60,6 +60,9 @@ func newSecretCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			if _, err := c.Admin.SetSecret(ctx, req); err != nil {
 				return err
 			}
+			if g.table() {
+				return writeString(env.Stdout, "stored secret "+name+"\n")
+			}
 			return writeJSON(env.Stdout, map[string]any{"name": name, "set": true})
 		},
 	}
