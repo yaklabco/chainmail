@@ -1,0 +1,28 @@
+From: Sam Roe <sam@example.org>
+To: Alex Doe <alex@example.com>
+Subject: RE: Thursday
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="_000_"
+
+--_000_
+Content-Type: text/plain; charset="us-ascii"
+
+Sounds good.
+
+Best,
+Sam
+
+________________________________
+From: Alex Doe <alex@example.com>
+Sent: Tuesday, September 3, 2024 9:12 AM
+To: Sam Roe <sam@example.org>
+Subject: Thursday
+
+Are we still on for Thursday?
+
+--_000_
+Content-Type: text/html; charset="us-ascii"
+
+<html><body><p>Sounds good.</p><p>Best,<br>Sam</p><hr><div id="divRplyFwdMsg"><b>From:</b> Alex Doe<br><b>Sent:</b> Tuesday</div><div>Are we still on for Thursday?</div></body></html>
+
+--_000_--
