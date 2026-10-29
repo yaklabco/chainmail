@@ -50,7 +50,15 @@ func TestPeerCredentials(t *testing.T) {
 	if err := resp.Body.Close(); err != nil {
 		t.Fatal(err)
 	}
-	p := <-got
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var p Peer
+	select {
+	case p = <-got:
+	case <-t.Context().Done():
+		t.Fatal("handler never saw a peer")
+	}
 	if int(p.UID) != os.Getuid() || int(p.PID) != os.Getpid() {
 		t.Errorf("peer = %+v, want uid %d pid %d", p, os.Getuid(), os.Getpid())
 	}
@@ -100,6 +108,30 @@ func TestMiddlewareRejectsMissingPeer(t *testing.T) {
 	h := NewAuthorizer(500, -1).Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", nil))
+	if rec.Code != http.StatusForbidden || called {
+		t.Errorf("status = %d, called = %v; want 403 and not called", rec.Code, called)
+	}
+}
+
+func TestMiddlewarePassesAllowedPeer(t *testing.T) {
+	t.Parallel()
+	called := false
+	h := NewAuthorizer(500, -1).Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	rec := httptest.NewRecorder()
+	ctx := context.WithValue(t.Context(), peerKey{}, Peer{UID: 500})
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodPost, "/", nil))
+	if rec.Code != http.StatusOK || !called {
+		t.Errorf("status = %d, called = %v; want 200 and called", rec.Code, called)
+	}
+}
+
+func TestMiddlewareRejectsDisallowedPeer(t *testing.T) {
+	t.Parallel()
+	called := false
+	h := NewAuthorizer(500, -1).Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	rec := httptest.NewRecorder()
+	ctx := context.WithValue(t.Context(), peerKey{}, Peer{UID: 1001, GID: 100})
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(ctx, http.MethodPost, "/", nil))
 	if rec.Code != http.StatusForbidden || called {
 		t.Errorf("status = %d, called = %v; want 403 and not called", rec.Code, called)
 	}

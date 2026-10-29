@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -16,8 +17,10 @@ import (
 // not negative the socket's group is set to it. A stale socket left by a
 // crashed daemon is replaced; a live one is an error.
 //
-// The socket briefly has the umask's mode before the chmod. In production it
-// lives in a 0750 runtime directory, so nobody outside the group can reach it.
+// The socket briefly has the umask's mode before the chmod, so the umask must
+// be 0022 or stricter. The socket's directory must be traversable by members
+// of the client group: systemd's default RuntimeDirectory mode 0755 works, as
+// does 0750 with the directory's group set to the client group.
 func Listen(ctx context.Context, path string, gid int) (net.Listener, error) {
 	if err := removeStale(ctx, path); err != nil {
 		return nil, err
@@ -32,7 +35,7 @@ func Listen(ctx context.Context, path string, gid int) (net.Listener, error) {
 		return nil, fmt.Errorf("setting socket mode: %w", err)
 	}
 	if gid >= 0 {
-		if err := os.Chown(path, -1, gid); err != nil {
+		if err := os.Lchown(path, -1, gid); err != nil {
 			_ = ln.Close() // the chown error is the one to report
 			return nil, fmt.Errorf("setting socket group: %w", err)
 		}
@@ -52,11 +55,17 @@ func removeStale(ctx context.Context, path string) error {
 		return fmt.Errorf("%s exists and is not a socket", path)
 	}
 	dialer := net.Dialer{Timeout: time.Second}
-	if conn, err := dialer.DialContext(ctx, "unix", path); err == nil {
+	conn, err := dialer.DialContext(ctx, "unix", path)
+	if err == nil {
 		_ = conn.Close() // we only wanted to know if something answers
 		return fmt.Errorf("another daemon is listening on %s", path)
 	}
-	if err := os.Remove(path); err != nil {
+	// Only a refused connection proves nobody is listening. Any other error,
+	// such as EACCES, may hide a live daemon whose path we must not take over.
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		return fmt.Errorf("cannot tell whether %s is live: %w", path, err)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("removing stale socket %s: %w", path, err)
 	}
 	return nil
