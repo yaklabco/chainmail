@@ -366,3 +366,42 @@ func TestStoreThreadReportsCancellation(t *testing.T) {
 		t.Errorf("Thread = %v, %v; want context.Canceled, not a partial thread", refs, err)
 	}
 }
+
+func TestStoreRetriesADialTimeoutOnce(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accepted atomic.Int32
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		_ = ln.Close() // ends Accept; nothing to do about a close error at test end
+		wg.Wait()
+	})
+	wg.Go(func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			// Never answer the TLS handshake; hang up when the test ends.
+			wg.Go(func() {
+				<-t.Context().Done()
+				_ = conn.Close() // the client gave up long ago
+			})
+		}
+	})
+	addr, _ := ln.Addr().(*net.TCPAddr)
+	ep := provider.Endpoint{Host: "127.0.0.1", Port: addr.Port, Security: provider.SecurityTLS}
+	s := New(testAccount("host", ep, false), passwordCreds("host@example.test", "pw"), Options{Backoff: noBackoff})
+	s.dialTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { _ = s.Close() })
+	if _, err := s.ListFolders(t.Context()); !errors.Is(err, mailstore.ErrUnavailable) {
+		t.Errorf("ListFolders = %v, want ErrUnavailable", err)
+	}
+	if n := accepted.Load(); n != 2 {
+		t.Errorf("%d connection attempts, want 2: a dial that timed out is retried once, like a command", n)
+	}
+}

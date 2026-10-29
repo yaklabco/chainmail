@@ -120,6 +120,9 @@ type Store struct {
 	// chunk is how much of a part each FETCH asks for while streaming:
 	// chunkSize, unless a test shrinks it.
 	chunk int64
+	// dialTimeout bounds connecting and logging in: the package's
+	// dialTimeout, unless a test shrinks it.
+	dialTimeout time.Duration
 
 	mu      sync.Mutex
 	folders []mailstore.Folder // cached; nil until listed
@@ -137,7 +140,7 @@ const closeWait = 5 * time.Second
 // New returns a Store for acct. It connects on first use.
 func New(acct config.ResolvedAccount, creds Credentialer, opts Options) *Store {
 	opts = opts.withDefaults()
-	s := &Store{acct: acct, creds: creds, opts: opts, loginGate: make(chan struct{}, 1), chunk: chunkSize}
+	s := &Store{acct: acct, creds: creds, opts: opts, loginGate: make(chan struct{}, 1), chunk: chunkSize, dialTimeout: dialTimeout}
 	s.pool = newPool(s.dial, poolOptions{size: opts.PoolSize, noopAfter: opts.NoopAfter, idleLogout: opts.IdleLogout, now: opts.Now})
 	return s
 }
@@ -222,7 +225,7 @@ func (s *Store) dial(ctx context.Context) (*conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	sess, err := Dial(ctx, s.acct.IMAP, creds, DialOptions{RootCAs: s.opts.RootCAs, Timeout: dialTimeout})
+	sess, err := Dial(ctx, s.acct.IMAP, creds, DialOptions{RootCAs: s.opts.RootCAs, Timeout: s.dialTimeout})
 	switch {
 	case err == nil:
 		return newConn(sess, s.opts.CommandTimeout, s.opts.Now), nil
@@ -235,10 +238,16 @@ func (s *Store) dial(ctx context.Context) (*conn, error) {
 		return nil, &auth.RejectedError{Hint: rejectedHint(s.acct), Err: err}
 	case ctx.Err() != nil:
 		return nil, ctx.Err()
+	case errors.Is(err, context.DeadlineExceeded):
+		// The dial's own timeout, since ctx is still live: as slow as a
+		// command that timed out, and retried as sparingly.
+		return nil, fmt.Errorf("%w: %w: %w", errConnLost, errCommandTimeout, err)
 	case isRefusal(err):
 		// The server answered, so trying again would only resend the
-		// credentials: NO [ALERT] for an app password, NO [UNAVAILABLE],
-		// BAD for LOGINDISABLED and the like.
+		// credentials: NO [ALERT] for an app password, BAD for
+		// LOGINDISABLED and the like. NO [UNAVAILABLE] and NO [INUSE] are
+		// temporary (RFC 5530), but the account is reported unavailable
+		// for the caller to try later rather than retried here at once.
 		return nil, fmt.Errorf("%w: %s refused the login: %w", mailstore.ErrUnavailable, s.acct.Name, err)
 	default:
 		// A transport or TLS failure, or a BYE: worth a fresh connection.
