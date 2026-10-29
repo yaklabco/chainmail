@@ -116,9 +116,12 @@ func (s *skip) drop(z *html.Tokenizer, tt html.TokenType, tok *html.Token) bool 
 		// The tree parser reads foreign content with raw-text mode off, so
 		// an svg <title> or <script> does not swallow the markup after it.
 		z.NextIsNotRawText()
-		if tt == html.StartTagToken && svgHTMLPoints[a] {
-			s.htmlIn++
-		}
+	}
+	// Integration points are counted by tag name in both directions, so a
+	// nested <title> or <desc> closing inside one cannot reopen svg rules
+	// early and let raw script or style text through.
+	if s.el == atom.Svg && tt == html.StartTagToken && svgHTMLPoints[a] {
+		s.htmlIn++
 	}
 	switch {
 	case tt == html.StartTagToken && a == s.el:

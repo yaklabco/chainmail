@@ -88,6 +88,9 @@ func TestHTMLToTextDeepNestingFormats(t *testing.T) {
 		{"svg foreignObject keeps html inside", deep + "<svg><foreignObject><p>drawn</p></foreignObject></svg><p>After</p>", "After"},
 		{"svg title keeps html inside", deep + "<svg><title><p>drawn</p></title></svg><p>After</p>", "After"},
 		{"svg script is not raw text", deep + "<svg><script/><p>After</p>", "After"},
+		{"svg nested title in foreignObject hides script", deep + `<svg><foreignObject><title>t</title><script>x="<p>secret-script";</script></foreignObject></svg><p>After</p>`, "After"},
+		{"svg nested title hides style", deep + `<svg><title><title>t</title><style>a{}<p>secret-style</style></title></svg><p>After</p>`, "After"},
+		{"svg nested desc hides script", deep + `<svg><desc><desc></desc><script><b>secret-desc</script></desc></svg><p>After</p>`, "After"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
