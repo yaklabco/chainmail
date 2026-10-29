@@ -32,6 +32,8 @@ type DialOptions struct {
 // Session is a logged-in IMAP connection.
 type Session struct {
 	client *imapclient.Client
+	// caps is fetched in Dial, under its deadline, and sorted.
+	caps []string
 }
 
 // Dial connects to ep, secures the connection and logs in with creds.
@@ -55,14 +57,18 @@ func Dial(ctx context.Context, ep provider.Endpoint, creds auth.Credentials, opt
 	if err == nil {
 		err = login(client, creds)
 	}
+	var caps []string
+	if err == nil {
+		caps, err = capabilities(client)
+	}
 	if !stop() {
 		return nil, fmt.Errorf("connecting to %s: %w", ep.Addr(), ctx.Err())
 	}
 	if err != nil {
-		_ = conn.Close() // the login error is the one to report
+		_ = conn.Close() // the handshake, login or capability error is the one to report
 		return nil, err
 	}
-	return &Session{client: client}, nil
+	return &Session{client: client, caps: caps}, nil
 }
 
 func handshake(ctx context.Context, conn net.Conn, ep provider.Endpoint, roots *x509.CertPool) (*imapclient.Client, error) {
@@ -95,25 +101,64 @@ func login(c *imapclient.Client, creds auth.Credentials) error {
 	default:
 		return fmt.Errorf("unsupported auth method %q", creds.Method)
 	}
-	var imapErr *imap.Error
-	if errors.As(err, &imapErr) && imapErr.Type == imap.StatusResponseTypeNo {
-		return fmt.Errorf("%w: %s", auth.ErrRejected, imapErr.Text)
-	}
-	if err != nil {
-		return fmt.Errorf("logging in: %w", err)
-	}
-	return nil
+	return loginError(err)
 }
 
-// Capabilities returns the server's capabilities in sorted order.
-func (s *Session) Capabilities() []string {
-	caps := s.client.Caps()
-	out := make([]string, 0, len(caps))
-	for c := range caps {
-		out = append(out, string(c))
+// responseCodeWebAlert is Gmail's code for a login that needs the user to
+// sign in on the web first. go-imap has no constant for it.
+const responseCodeWebAlert imap.ResponseCode = "WEBALERT"
+
+// loginError sorts a failed LOGIN or AUTHENTICATE into a credential
+// rejection or an ordinary error. Either way the *imap.Error stays in the
+// chain. Its text comes from the server, never from creds.
+func loginError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var imapErr *imap.Error
+	if errors.As(err, &imapErr) && rejectsCredentials(imapErr) {
+		return fmt.Errorf("%w: %w", auth.ErrRejected, imapErr)
+	}
+	return fmt.Errorf("logging in: %w", err)
+}
+
+// rejectsCredentials reports whether a reply to LOGIN or AUTHENTICATE refuses
+// the credentials themselves, so a human has to supply new ones.
+func rejectsCredentials(e *imap.Error) bool {
+	if e.Type != imap.StatusResponseTypeNo {
+		return false
+	}
+	switch e.Code {
+	case "", imap.ResponseCodeAuthenticationFailed, imap.ResponseCodeAuthorizationFailed,
+		imap.ResponseCodeExpired, responseCodeWebAlert:
+		return true
+	default:
+		// ALERT is deliberately not a rejection: Gmail sends it for too many
+		// simultaneous connections. UNAVAILABLE, INUSE, LIMIT and the rest
+		// are server trouble, and an unknown code is not assumed to be about
+		// the credentials.
+		return false
+	}
+}
+
+// capabilities asks for the capabilities again, since logging in invalidates
+// the ones from the greeting, and returns them sorted.
+func capabilities(c *imapclient.Client) ([]string, error) {
+	set, err := c.Capability().Wait()
+	if err != nil {
+		return nil, fmt.Errorf("fetching capabilities: %w", err)
+	}
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, string(name))
 	}
 	slices.Sort(out)
-	return out
+	return out, nil
+}
+
+// Capabilities returns a copy of the capabilities fetched by Dial, sorted.
+func (s *Session) Capabilities() []string {
+	return slices.Clone(s.caps)
 }
 
 // Close logs out and closes the connection.

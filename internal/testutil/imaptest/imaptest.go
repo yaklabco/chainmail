@@ -24,6 +24,10 @@ type User struct {
 	Username string
 	Password string
 	Token    string
+	// LoginError, when set, answers every login for this user, whatever the
+	// credentials. Tests use it to make the server report trouble, such as
+	// NO [UNAVAILABLE].
+	LoginError error
 }
 
 // Start runs a server until the test ends and returns its endpoint.
@@ -70,6 +74,14 @@ func Start(t testing.TB, ca *tlstest.CA, security provider.Security, users ...Us
 type session struct {
 	imapserver.Session
 	users map[string]User
+}
+
+// Login answers with the user's LoginError when one is set.
+func (s *session) Login(username, password string) error {
+	if u, ok := s.users[username]; ok && u.LoginError != nil {
+		return u.LoginError
+	}
+	return s.Session.Login(username, password)
 }
 
 func (s *session) AuthenticateMechanisms() []string {
