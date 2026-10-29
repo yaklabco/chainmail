@@ -170,7 +170,9 @@ func (v *Vault) Get(name string) ([]byte, error) {
 	return bytes.Clone(s), nil
 }
 
-// Set stores value under name and rewrites the vault file atomically.
+// Set stores value under name and rewrites the vault file atomically. An
+// error from the final directory sync means the value is stored but may not
+// survive a crash, so retrying Set is safe.
 func (v *Vault) Set(name string, value []byte) error {
 	if !ValidName(name) {
 		return fmt.Errorf("%w: %q", ErrInvalidName, name)
