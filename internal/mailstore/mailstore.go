@@ -197,7 +197,7 @@ type PartInfo struct {
 // changes anything on the server: folders are opened read-only and bodies
 // are fetched with BODY.PEEK.
 type Store interface {
-	// ListFolders returns every folder, INBOX first, then by name.
+	// ListFolders returns every folder, INBOX first, then by name ignoring case.
 	ListFolders(ctx context.Context) ([]Folder, error)
 	// Search returns the matches in each source folder. An error means the
 	// whole account failed, such as an unsupported operator or a login refusal.

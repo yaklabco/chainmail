@@ -413,7 +413,7 @@ func TestFakeListFolders(t *testing.T) {
 		names = append(names, f.Name)
 		counts[f.Name] = [2]uint32{f.Messages, f.Unseen}
 	}
-	if want := []string{"INBOX", "Receipts", allMail, "[Gmail]/Sent Mail", "[Gmail]/Spam", "[Gmail]/Trash"}; !slices.Equal(names, want) {
+	if want := []string{"INBOX", allMail, "[Gmail]/Sent Mail", "[Gmail]/Spam", "[Gmail]/Trash", "Receipts"}; !slices.Equal(names, want) {
 		t.Errorf("Gmail folders = %v, want %v", names, want)
 	}
 	want := map[string][2]uint32{
@@ -429,6 +429,8 @@ func TestFakeTestHelpers(t *testing.T) {
 	host := New("host", false)
 	mustPanic(t, "Add to an unknown folder", func() { host.Add(Message{Folder: "nope"}) })
 	mustPanic(t, "AddFolder of an existing name", func() { host.AddFolder("INBOX", mailstore.RoleInbox) })
+	mustPanic(t, "SetUIDValidity of an unknown folder", func() { host.SetUIDValidity("Inbox", 9) })
+	mustPanic(t, "FailFolder of an unknown folder", func() { host.FailFolder("nope", errors.New("x")) })
 
 	gmail := New("gmail", true)
 	explicit := gmail.Add(Message{Folder: allMail, Subject: "explicit", GmailMsgID: 1001})

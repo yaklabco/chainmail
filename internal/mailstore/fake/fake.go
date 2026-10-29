@@ -138,7 +138,7 @@ func (s *Store) AddFolder(name string, role mailstore.Role) {
 	s.nextUID[name] = 1
 }
 
-// compareFolders orders INBOX first, then by name.
+// compareFolders orders INBOX first, then by name ignoring case, as imapstore does.
 func compareFolders(a, b string) int {
 	if ai, bi := strings.EqualFold(a, "INBOX"), strings.EqualFold(b, "INBOX"); ai != bi {
 		if ai {
@@ -146,7 +146,7 @@ func compareFolders(a, b string) int {
 		}
 		return 1
 	}
-	return strings.Compare(a, b)
+	return cmp.Compare(strings.ToLower(a), strings.ToLower(b))
 }
 
 // Add stores a copy of m and returns its ref. InternalDate defaults to Date.
@@ -225,6 +225,7 @@ func (s *Store) SetNow(now func() time.Time) {
 func (s *Store) SetUIDValidity(folder string, v uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.mustHaveFolderLocked(folder)
 	s.uidValidity[folder] = v
 }
 
@@ -239,6 +240,7 @@ func (s *Store) Fail(method string, err error) {
 func (s *Store) FailFolder(folder string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.mustHaveFolderLocked(folder)
 	s.folderFail[folder] = err
 }
 
@@ -911,4 +913,12 @@ func rawMessage(m *Message, withAttachments bool) []byte {
 	}
 	b.WriteString("--" + boundary + "--\r\n")
 	return b.Bytes()
+}
+
+// mustHaveFolderLocked panics when folder was never added, so a typo in a test
+// cannot silently inject nothing.
+func (s *Store) mustHaveFolderLocked(folder string) {
+	if _, ok := s.uidValidity[folder]; !ok {
+		panic(fmt.Sprintf("fake: no folder %q; call AddFolder first", folder))
+	}
 }
