@@ -1,0 +1,27 @@
+version: "2"
+linters:
+  default: standard
+  enable:
+    - errorlint
+    - gocritic
+    - revive
+    - nilerr
+    - contextcheck
+    - misspell
+    - bodyclose
+  exclusions:
+    generated: lax
+    # Doc comments are still written for every exported name; this preset only
+    # stops revive failing the build on interface methods like Error and Next.
+    presets:
+      - comments
+    paths:
+      - gen
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/jamesainslie/chainmail
