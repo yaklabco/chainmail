@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"filippo.io/age"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/daemon"
 	"github.com/jamesainslie/chainmail/internal/db"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/vault"
 )
 
@@ -28,6 +30,10 @@ type Options struct {
 	AuthOptions []auth.Option
 	// Authorizer replaces the default, which allows only the current user.
 	Authorizer *daemon.Authorizer
+	// NewStore builds each account's mail store. Nil means IMAP.
+	NewStore func(config.ResolvedAccount) mailstore.Store
+	// Now replaces the daemon's clock.
+	Now func() time.Time
 }
 
 // Harness is a running daemon and a client connected to it.
@@ -94,6 +100,8 @@ func Start(t testing.TB, configTOML string, opts Options) *Harness {
 		DevMode:     true,
 		RootCAs:     opts.RootCAs,
 		AuthOptions: opts.AuthOptions,
+		NewStore:    opts.NewStore,
+		Now:         opts.Now,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -20,6 +20,9 @@ import (
 	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/db"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/query"
+	"github.com/jamesainslie/chainmail/internal/ref"
 	"github.com/jamesainslie/chainmail/internal/vault"
 )
 
@@ -215,6 +218,15 @@ func TestToConnectError(t *testing.T) {
 		{err: context.Canceled, code: connect.CodeCanceled, reason: api.ReasonTimeout},
 		{err: fmt.Errorf("refreshing: %w", auth.ErrTokenEndpoint), code: connect.CodeUnavailable, reason: api.ReasonServerUnavailable},
 		{err: fmt.Errorf("%w: %w", auth.ErrTokenEndpoint, context.DeadlineExceeded), code: connect.CodeDeadlineExceeded, reason: api.ReasonTimeout},
+		{err: &query.SyntaxError{Pos: 3, Msg: "bad"}, code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
+		{err: fmt.Errorf("%w: has:attachment", mailstore.ErrUnsupportedQuery), code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
+		{err: fmt.Errorf("%w: x", ref.ErrInvalid), code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
+		{err: fmt.Errorf("%w: x", ref.ErrInvalidCursor), code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
+		{err: &argError{msg: "limit", hint: "h"}, code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
+		{err: fmt.Errorf("%w: gone", mailstore.ErrStaleRef), code: connect.CodeNotFound, reason: api.ReasonStaleRef},
+		{err: fmt.Errorf("%w: part 9", mailstore.ErrNotFound), code: connect.CodeNotFound, reason: api.ReasonNotFound},
+		{err: fmt.Errorf("%w: down", mailstore.ErrUnavailable), code: connect.CodeUnavailable, reason: api.ReasonServerUnavailable},
+		{err: fmt.Errorf("%w: %w", mailstore.ErrUnavailable, context.DeadlineExceeded), code: connect.CodeDeadlineExceeded, reason: api.ReasonTimeout},
 		{err: errors.New("boom"), code: connect.CodeInternal, reason: api.ReasonInternal},
 	}
 	for _, tt := range tests {
