@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,9 +34,14 @@ func dove() *dovecot.Server { return dovecot.Shared() }
 
 var nonWord = regexp.MustCompile(`[^a-z0-9]+`)
 
-// doveUser is a mailbox of this test's own.
+// doveRun numbers the mailboxes doveUser hands out, so a test run more than
+// once, as with -count, starts from an empty mailbox each time.
+var doveRun atomic.Int64
+
+// doveUser is a mailbox of this test run's own.
 func doveUser(t *testing.T) string {
-	return strings.Trim(nonWord.ReplaceAllString(strings.ToLower(t.Name()), "-"), "-") + "@example.test"
+	name := strings.Trim(nonWord.ReplaceAllString(strings.ToLower(t.Name()), "-"), "-")
+	return fmt.Sprintf("%s-%d@example.test", name, doveRun.Add(1))
 }
 
 func doveStore(t *testing.T, user string) *Store {
@@ -341,5 +347,43 @@ func TestDovecotReadsRenderAndNeverSetSeen(t *testing.T) {
 		if slices.Contains(flags, imap.FlagSeen) {
 			t.Errorf("%s/%d is \\Seen after get, thread, attachment and snippets", folder, uid)
 		}
+	}
+}
+
+func TestDovecotExpungedRefIsStale(t *testing.T) {
+	user := doveUser(t)
+	gone := put(t, user, "INBOX", doveMail{from: "a@example.com", subject: "gone", messageID: "gone@x", body: "x"}, oct(20))
+	kept := put(t, user, "INBOX", doveMail{from: "a@example.com", subject: "kept", messageID: "kept@x", body: "y"}, oct(21))
+	r := refFor(t, user, "INBOX", gone)
+	// The store connects after the expunge. A session that already had INBOX
+	// open may still serve the message until the server reports the expunge
+	// to it, which IMAP allows.
+	c, err := dove().Client(user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Select("INBOX", nil).Wait()
+	if err == nil {
+		err = c.Store(imap.UIDSetNum(gone), &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagDeleted}}, nil).Close()
+	}
+	if err == nil {
+		err = c.Expunge().Close()
+	}
+	if err := errors.Join(err, c.Logout().Wait(), c.Close()); err != nil {
+		t.Fatalf("expunging UID %d: %v", gone, err)
+	}
+	s := doveStore(t, user)
+	got := s.FetchMessages(t.Context(), []ref.Ref{r, refFor(t, user, "INBOX", kept)})
+	if !errors.Is(got[0].Err, mailstore.ErrStaleRef) {
+		t.Errorf("FetchMessages of an expunged UID = %+v, want ErrStaleRef", got[0])
+	}
+	if got[1].Err != nil || got[1].Message == nil {
+		t.Errorf("FetchMessages of the message kept = %+v", got[1])
+	}
+	if _, _, err := s.StreamPart(t.Context(), r, ""); !errors.Is(err, mailstore.ErrStaleRef) {
+		t.Errorf("StreamPart of an expunged UID = %v, want ErrStaleRef", err)
+	}
+	if _, err := s.Thread(t.Context(), r); !errors.Is(err, mailstore.ErrStaleRef) {
+		t.Errorf("Thread of an expunged UID = %v, want ErrStaleRef", err)
 	}
 }
