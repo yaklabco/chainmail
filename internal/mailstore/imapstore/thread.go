@@ -125,11 +125,11 @@ func (s *Store) standardThread(ctx context.Context, r ref.Ref) ([]ref.Ref, error
 		{Or: [][2]imap.SearchCriteria{{header("References"), header("In-Reply-To")}}},
 	}}}
 	found := make([][]ref.Ref, len(sources))
+	errs := make([]error, len(sources))
 	var wg sync.WaitGroup
 	for i, folder := range sources {
 		wg.Go(func() {
-			// A folder that fails is left out; the thread is still useful without it.
-			_ = s.withConn(ctx, folder, func(c *conn) error {
+			errs[i] = s.withConn(ctx, folder, func(c *conn) error {
 				found[i] = nil
 				if err := s.open(ctx, c, folder); err != nil {
 					return err
@@ -143,9 +143,16 @@ func (s *Store) standardThread(ctx context.Context, r ref.Ref) ([]ref.Ref, error
 		})
 	}
 	wg.Wait()
+	// A folder that fails on its own is left out, since the thread is still
+	// useful without it. A failure of the whole account is not hidden that way.
+	if err := accountFailure(ctx, errs); err != nil {
+		return nil, err
+	}
 	var out []ref.Ref
-	for _, refs := range found {
-		out = append(out, refs...)
+	for i, refs := range found {
+		if errs[i] == nil {
+			out = append(out, refs...)
+		}
 	}
 	return withSeed(out, r), nil
 }

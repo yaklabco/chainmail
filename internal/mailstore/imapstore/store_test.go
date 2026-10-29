@@ -29,6 +29,10 @@ type fixedCreds struct {
 	creds    auth.Credentials
 	parked   bool
 	rejected int
+	// then, when set, is the secret handed out after the first call, as if
+	// the password were rotated once the daemon was running.
+	then  string
+	calls int
 }
 
 func (f *fixedCreds) Credentials(_ context.Context, account string) (auth.Credentials, error) {
@@ -36,6 +40,12 @@ func (f *fixedCreds) Credentials(_ context.Context, account string) (auth.Creden
 	defer f.mu.Unlock()
 	if f.parked {
 		return auth.Credentials{}, &auth.RequiredError{Account: account, Hint: "run: chainmail secret set accounts/" + account}
+	}
+	f.calls++
+	if f.then != "" && f.calls > 1 {
+		c := f.creds
+		c.Secret = f.then
+		return c, nil
 	}
 	return f.creds, nil
 }
@@ -304,5 +314,55 @@ func TestStoreDialWaitingForTheLoginGateGivesUpOnCancel(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Errorf("dial took %v to give up after a 50ms deadline", elapsed)
+	}
+}
+
+func TestStoreThreadReportsLoginRefusalForTheAccount(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	raw := "From: a@example.com\r\nSubject: s\r\nMessage-ID: <t1@x>\r\n\r\nbody\r\n"
+	ep := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{
+		Username: "host@example.test", Password: "right", Folders: []string{"Archive", "Sent"}, Mail: map[string][]string{"INBOX": {raw}},
+	})
+	creds := passwordCreds("host@example.test", "right")
+	creds.then = "stale" // the seed's login works; the folder searches that dial afresh are refused
+	s := New(testAccount("host", ep, false), creds, Options{RootCAs: ca.Pool, Backoff: noBackoff})
+	t.Cleanup(func() { _ = s.Close() })
+	res, err := s.Search(t.Context(), mailstore.SearchRequest{In: "INBOX"})
+	if err != nil || len(res) != 1 || len(res[0].UIDs) != 1 {
+		t.Fatalf("Search = %+v, %v", res, err)
+	}
+	r := ref.Ref{Account: "host", Folder: "INBOX", UIDValidity: res[0].Source.UIDValidity, UID: res[0].UIDs[0]}
+	refs, err := s.Thread(t.Context(), r)
+	if !errors.Is(err, auth.ErrRejected) && !errors.Is(err, auth.ErrAuthRequired) {
+		t.Errorf("Thread = %v, %v; want the login refusal for the whole account, not a partial thread", refs, err)
+	}
+}
+
+func TestStoreThreadReportsCancellation(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	raw := "From: a@example.com\r\nSubject: s\r\nMessage-ID: <t1@x>\r\n\r\nbody\r\n"
+	// The context ends while the folder searches run: when one opens Archive.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ep := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{
+		Username: "host@example.test", Password: "pw", Folders: []string{"Archive", "Sent"}, Mail: map[string][]string{"INBOX": {raw}},
+		OnSelect: func(name string, _ bool) {
+			if name == "Archive" {
+				cancel()
+			}
+		},
+	})
+	s := New(testAccount("host", ep, false), passwordCreds("host@example.test", "pw"), Options{RootCAs: ca.Pool, Backoff: noBackoff, PoolSize: 1})
+	t.Cleanup(func() { _ = s.Close() })
+	res, err := s.Search(t.Context(), mailstore.SearchRequest{In: "INBOX"})
+	if err != nil || len(res) != 1 || len(res[0].UIDs) != 1 {
+		t.Fatalf("Search = %+v, %v", res, err)
+	}
+	r := ref.Ref{Account: "host", Folder: "INBOX", UIDValidity: res[0].Source.UIDValidity, UID: res[0].UIDs[0]}
+	refs, err := s.Thread(ctx, r)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Thread = %v, %v; want context.Canceled, not a partial thread", refs, err)
 	}
 }

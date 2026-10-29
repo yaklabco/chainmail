@@ -61,12 +61,23 @@ func (s *Store) Search(ctx context.Context, req mailstore.SearchRequest) ([]mail
 // of ctx. A search with bounds meets these first in a source, since it
 // skips the folder list.
 func accountError(ctx context.Context, results []mailstore.SourceResult) error {
+	errs := make([]error, len(results))
+	for i, r := range results {
+		errs[i] = r.Err
+	}
+	return accountFailure(ctx, errs)
+}
+
+// accountFailure picks, from per-folder errors, the one that is about the
+// whole account: the end of ctx, or a login refusal. It returns nil when
+// every error is about its own folder.
+func accountFailure(ctx context.Context, errs []error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	for _, r := range results {
-		if errors.Is(r.Err, auth.ErrRejected) || errors.Is(r.Err, auth.ErrAuthRequired) {
-			return r.Err
+	for _, err := range errs {
+		if errors.Is(err, auth.ErrRejected) || errors.Is(err, auth.ErrAuthRequired) {
+			return err
 		}
 	}
 	return nil
