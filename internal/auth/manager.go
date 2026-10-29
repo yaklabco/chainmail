@@ -28,6 +28,9 @@ const LoginRedirectURL = "http://127.0.0.1:53682/"
 const (
 	loginTTL     = 10 * time.Minute
 	refreshEarly = 5 * time.Minute
+	// readAttempts bounds how often Credentials rereads secrets that keep
+	// changing under it.
+	readAttempts = 3
 )
 
 // Login flow errors.
@@ -105,12 +108,11 @@ type Manager struct {
 	required map[string]string
 	pending  map[string]pendingLogin
 	sources  map[string]oauth2.TokenSource
-	// gen counts changes to secrets and auth state. Work that read a
-	// secret before gen moved is stale and must not be recorded.
-	gen uint64
-	// accountGen counts the same changes per account, so a change to one
+	// accountGen counts changes to each account's secrets and auth state.
+	// Work that read a secret before its account's generation moved is
+	// stale and must not be recorded. It is per account, so a change to one
 	// account does not hide a rejection on another. Credentials carry the
-	// value they were issued at.
+	// generation of the secret they hold.
 	accountGen map[string]uint64
 }
 
@@ -202,34 +204,47 @@ func (m *Manager) Credentials(ctx context.Context, account string) (Credentials,
 		return Credentials{}, &RequiredError{Account: account, Hint: hint}
 	}
 	if acct.Auth == provider.AuthPassword {
-		// The generation is read before the secret, so a change that lands
-		// in between makes Rejected ignore these credentials rather than
-		// park a password that was never tried.
-		gen := m.generation(account)
-		pw, err := m.secret(acct, PasswordSecret(account))
-		if err != nil {
-			return Credentials{}, err
-		}
-		return Credentials{Method: provider.AuthPassword, Username: acct.Username, Secret: string(pw), gen: gen}, nil
+		return m.passwordCredentials(acct)
 	}
 	return m.oauthCredentials(ctx, acct)
 }
 
-// oauthCredentials returns a cached or refreshed access token. When the
-// token endpoint refuses a secret that changed while the refresh was in
-// flight, it tries once more with the new secrets instead of telling the
+// passwordCredentials reads account's password like a seqlock: the
+// generation before and after the read must match, so the credentials are
+// tagged with the generation of the password they carry. If the password
+// keeps changing, the last read is tagged with the generation from before
+// it, which errs toward Rejected ignoring a refusal rather than parking a
+// password nobody tried.
+func (m *Manager) passwordCredentials(acct config.ResolvedAccount) (Credentials, error) {
+	for attempt := 1; ; attempt++ {
+		gen := m.generation(acct.Name)
+		pw, err := m.secret(acct, PasswordSecret(acct.Name))
+		if err != nil {
+			return Credentials{}, err
+		}
+		if m.generation(acct.Name) == gen || attempt == readAttempts {
+			return Credentials{Method: provider.AuthPassword, Username: acct.Username, Secret: string(pw), gen: gen}, nil
+		}
+	}
+}
+
+// oauthCredentials returns a cached or refreshed access token, tagged with
+// the generation of the secrets it came from, as passwordCredentials does.
+// When the token endpoint refuses a secret that changed while the refresh
+// was in flight, it tries again with the new secrets instead of telling the
 // human who just fixed them to fix them again.
 func (m *Manager) oauthCredentials(ctx context.Context, acct config.ResolvedAccount) (Credentials, error) {
-	for attempt := 0; ; attempt++ {
-		// As for passwords, the generation is read before the secrets.
-		acctGen := m.generation(acct.Name)
+	for attempt := 1; ; attempt++ {
 		src, gen, err := m.tokenSource(ctx, acct)
 		if err != nil {
 			return Credentials{}, err
 		}
 		tok, err := src.Token()
 		if err == nil {
-			return Credentials{Method: provider.AuthOAuth2, Username: acct.Username, Secret: tok.AccessToken, gen: acctGen}, nil
+			if m.generation(acct.Name) == gen || attempt == readAttempts {
+				return Credentials{Method: provider.AuthOAuth2, Username: acct.Username, Secret: tok.AccessToken, gen: gen}, nil
+			}
+			continue
 		}
 		hint, ok := refreshHint(acct, err)
 		if !ok {
@@ -238,7 +253,7 @@ func (m *Manager) oauthCredentials(ctx context.Context, acct config.ResolvedAcco
 			// response at all, is the endpoint's trouble.
 			return Credentials{}, fmt.Errorf("%w: refreshing access token for %s: %w", ErrTokenEndpoint, acct.Name, tokenError(err))
 		}
-		if m.markRequiredAt(acct.Name, hint, gen) || attempt > 0 {
+		if m.markRequiredAt(acct.Name, hint, gen) || attempt == readAttempts {
 			return Credentials{}, &RequiredError{Account: acct.Name, Hint: hint}
 		}
 	}
@@ -313,7 +328,6 @@ func (m *Manager) SecretChanged(name string) {
 			m.accountGen[account]++
 		}
 	}
-	m.gen++
 }
 
 // BeginLogin starts an OAuth2 consent flow for account.
@@ -396,7 +410,6 @@ func (m *Manager) FinishLogin(ctx context.Context, account, redirectURL string) 
 	m.dropPendingLocked(account, p)
 	delete(m.required, account)
 	m.sources[account] = src
-	m.gen++
 	m.accountGen[account]++
 	m.mu.Unlock()
 	return nil
@@ -409,12 +422,12 @@ func (m *Manager) requiredHint(account string) (string, bool) {
 	return hint, ok
 }
 
-// markRequiredAt marks account only if nothing changed since gen, so a
+// markRequiredAt marks account only if its generation is still gen, so a
 // refusal of a secret that has since been replaced is not recorded.
 func (m *Manager) markRequiredAt(account, hint string, gen uint64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.gen != gen {
+	if m.accountGen[account] != gen {
 		return false
 	}
 	m.markRequiredLocked(account, hint)
@@ -424,7 +437,6 @@ func (m *Manager) markRequiredAt(account, hint string, gen uint64) bool {
 func (m *Manager) markRequiredLocked(account, hint string) {
 	m.required[account] = hint
 	delete(m.sources, account)
-	m.gen++
 	m.accountGen[account]++
 }
 
@@ -461,12 +473,13 @@ func (m *Manager) secret(acct config.ResolvedAccount, name string) ([]byte, erro
 }
 
 // tokenSource returns account's cached token source, or builds one from the
-// vault. It also returns the generation the source is current for, which
-// markRequiredAt checks before blaming the secrets.
+// vault. It also returns the account generation the source is current for,
+// read before the secrets, which markRequiredAt checks before blaming the
+// secrets and oauthCredentials compares again after the refresh.
 func (m *Manager) tokenSource(ctx context.Context, acct config.ResolvedAccount) (oauth2.TokenSource, uint64, error) {
 	m.mu.Lock()
 	src, ok := m.sources[acct.Name]
-	gen := m.gen
+	gen := m.accountGen[acct.Name]
 	m.mu.Unlock()
 	if ok {
 		return src, gen, nil
@@ -486,11 +499,11 @@ func (m *Manager) tokenSource(ctx context.Context, acct config.ResolvedAccount) 
 	// A concurrent caller may have built one meanwhile. Sharing it keeps
 	// the refreshes to one, since a source serializes its own.
 	if existing, ok := m.sources[acct.Name]; ok {
-		return existing, m.gen, nil
+		return existing, m.accountGen[acct.Name], nil
 	}
 	// A source built from secrets that changed while they were read is
 	// used once but not cached.
-	if m.gen == gen {
+	if m.accountGen[acct.Name] == gen {
 		m.sources[acct.Name] = src
 	}
 	return src, gen, nil

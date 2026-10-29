@@ -261,6 +261,96 @@ func TestRejectionBeforeFinishLoginIsIgnored(t *testing.T) {
 	}
 }
 
+// hookStore runs hook once, the first time name is read, before the read.
+// Tests use it to land a "chainmail secret set" between the manager reading
+// an account's generation and reading its secret.
+type hookStore struct {
+	*memStore
+	name string
+	hook func()
+	once sync.Once
+}
+
+func (s *hookStore) Get(name string) ([]byte, error) {
+	if name == s.name {
+		s.once.Do(s.hook)
+	}
+	return s.memStore.Get(name)
+}
+
+func newHookManager(t *testing.T, store auth.SecretStore, ep oauth2.Endpoint) *auth.Manager {
+	t.Helper()
+	cfg, err := config.Parse([]byte(testConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return auth.NewManager(cfg, store, auth.WithOAuthEndpoint(ep))
+}
+
+// A password set while Credentials reads it is tagged with the generation
+// it belongs to, so a rejection of the new password parks the account.
+func TestCredentialsTagMatchesPasswordRead(t *testing.T) {
+	t.Parallel()
+	store := &hookStore{memStore: &memStore{m: map[string][]byte{auth.PasswordSecret("host"): []byte("old-pw")}}, name: auth.PasswordSecret("host")}
+	m := newHookManager(t, store, oauthtest.Start(t).Endpoint())
+	store.hook = func() {
+		_ = store.Set(auth.PasswordSecret("host"), []byte("new-pw")) // memStore.Set never fails
+		m.SecretChanged(auth.PasswordSecret("host"))
+	}
+	c, err := m.Credentials(t.Context(), "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Secret != "new-pw" {
+		t.Fatalf("Secret = %q, want new-pw", c.Secret)
+	}
+	m.Rejected("host", c)
+	if st, _ := m.State("host"); !st.Required {
+		t.Errorf("State = %+v, want required: the server rejected the password it was given", st)
+	}
+}
+
+// The same holds for an access token refreshed from a secret that changed
+// while it was read.
+func TestCredentialsTagMatchesTokenRefresh(t *testing.T) {
+	t.Parallel()
+	store := &hookStore{memStore: &memStore{m: map[string][]byte{
+		auth.ClientSecret("g"):        []byte(oauthtest.ClientSecret),
+		auth.RefreshTokenSecret("gm"): []byte(oauthtest.RefreshToken),
+	}}, name: auth.RefreshTokenSecret("gm")}
+	m := newHookManager(t, store, oauthtest.Start(t).Endpoint())
+	store.hook = func() { m.SecretChanged(auth.RefreshTokenSecret("gm")) }
+	c, err := m.Credentials(t.Context(), "gm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Rejected("gm", c)
+	if st, _ := m.State("gm"); !st.Required {
+		t.Errorf("State = %+v, want required", st)
+	}
+}
+
+// A refresh refusal parks its own account at once, even if another
+// account's secret changed meanwhile.
+func TestRefreshRefusalIgnoresOtherAccountsChanges(t *testing.T) {
+	t.Parallel()
+	ep, n := cannedTokenServer(t, http.StatusBadRequest, `{"error":"invalid_grant"}`)
+	store := &hookStore{memStore: &memStore{m: map[string][]byte{
+		auth.ClientSecret("g"):        []byte(oauthtest.ClientSecret),
+		auth.RefreshTokenSecret("gm"): []byte("revoked"),
+	}}, name: auth.RefreshTokenSecret("gm")}
+	m := newHookManager(t, store, ep)
+	store.hook = func() { m.SecretChanged(auth.PasswordSecret("host")) }
+	_, err := m.Credentials(t.Context(), "gm")
+	requireHint(t, err, "chainmail auth login gm")
+	if st, _ := m.State("gm"); !st.Required {
+		t.Errorf("State = %+v, want required", st)
+	}
+	if got := n.Load(); got != 1 {
+		t.Errorf("token requests = %d, want 1: host's change says nothing about gm", got)
+	}
+}
+
 func TestUnknownAccount(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
