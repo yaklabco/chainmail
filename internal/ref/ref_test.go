@@ -45,6 +45,7 @@ func TestParseRejects(t *testing.T) {
 		"cm1:A:INBOX:1:1", "cm1:a::1:1", "cm1:a:INBOX:0:1", "cm1:a:INBOX:1:0", "cm1:a:INBOX:x:1",
 		"cm1:a:INBOX:01:1", "cm1:a:INBOX:1:4294967296", "cm1:a:INBOX:1:1:x5", "cm1:a:INBOX:1:1:g0",
 		"cm1:a:IN BOX:1:1", "cm1:a:%5bGmail%5d:1:1", "cm1:a:%ZZ:1:1", "cm1:a:%FF:1:1",
+		"cm1:a:IN%00BOX:1:1", "cm1:a:INBOX%0D:1:1", "cm1:a:INBOX%0A:1:1", "cm1:a:IN%1FBOX:1:1", "cm1:a:IN%7FBOX:1:1",
 		"cm1:a:" + strings.Repeat("x", 3000) + ":1:1",
 	} {
 		if _, err := Parse(in); !errors.Is(err, ErrInvalid) {
@@ -85,6 +86,9 @@ func TestDecodeCursorRejects(t *testing.T) {
 		EncodeCursor(Cursor{Query: Fingerprint("x"), Sources: []CursorSource{{Account: "Bad", Folder: "INBOX", UIDValidity: 1}}}),
 		EncodeCursor(Cursor{Query: Fingerprint("x"), Sources: []CursorSource{{Account: "a", Folder: "", UIDValidity: 1}}}),
 		EncodeCursor(Cursor{Query: Fingerprint("x"), Sources: []CursorSource{{Account: "a", Folder: "INBOX"}}}),
+		EncodeCursor(Cursor{Query: Fingerprint("x"), Sources: []CursorSource{{Account: "a", Folder: "IN\x00BOX", UIDValidity: 1}}}),
+		EncodeCursor(Cursor{Query: Fingerprint("x"), Sources: []CursorSource{{Account: "a", Folder: "INBOX\r\n", UIDValidity: 1}}}),
+		EncodeCursor(Cursor{Query: Fingerprint("x"), Sources: []CursorSource{{Account: "a", Folder: "IN\x7fBOX", UIDValidity: 1}}}),
 		"c1." + strings.Repeat("A", 70000),
 	} {
 		if _, err := DecodeCursor(in); !errors.Is(err, ErrInvalidCursor) {

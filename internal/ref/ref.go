@@ -134,8 +134,23 @@ func unescapeFolder(s string) (string, error) {
 		}
 	}
 	folder := b.String()
-	if folder == "" || !utf8.ValidString(folder) {
+	if !validFolder(folder) {
 		return "", fmt.Errorf("%w: bad folder", ErrInvalid)
 	}
 	return folder, nil
+}
+
+// validFolder reports a folder name a ref or cursor may carry: non-empty
+// UTF-8 without control bytes. No real folder has those, and a server
+// answers them with BAD, so they are refused here as a bad argument.
+func validFolder(folder string) bool {
+	if folder == "" || !utf8.ValidString(folder) {
+		return false
+	}
+	for i := range len(folder) {
+		if c := folder[i]; c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }

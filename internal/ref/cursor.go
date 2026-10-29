@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"unicode/utf8"
 )
 
 // ErrInvalidCursor means a string is not a cursor this daemon issued.
@@ -72,7 +71,7 @@ func DecodeCursor(s string) (Cursor, error) {
 		return Cursor{}, fmt.Errorf("%w: no sources", ErrInvalidCursor)
 	}
 	for _, src := range c.Sources {
-		if !accountRE.MatchString(src.Account) || src.Folder == "" || !utf8.ValidString(src.Folder) || src.UIDValidity == 0 {
+		if !accountRE.MatchString(src.Account) || !validFolder(src.Folder) || src.UIDValidity == 0 {
 			return Cursor{}, fmt.Errorf("%w: bad source", ErrInvalidCursor)
 		}
 	}
