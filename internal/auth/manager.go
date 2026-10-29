@@ -143,7 +143,8 @@ func NewManager(cfg *config.Config, store SecretStore, opts ...Option) *Manager 
 	return m
 }
 
-// String summarizes m without the tokens and login state it holds.
+// String summarizes m without the tokens and login state it holds. It takes
+// m.mu, so formatting or logging m while holding m.mu deadlocks.
 func (m *Manager) String() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -235,8 +236,12 @@ func refreshHint(acct config.ResolvedAccount, err error) (string, bool) {
 	switch re.ErrorCode {
 	case "invalid_grant":
 		return "the refresh token was rejected; run: chainmail auth login " + acct.Name, true
-	case "invalid_client", "unauthorized_client":
+	case "invalid_client":
 		return "the OAuth client was rejected; run: chainmail secret set " + ClientSecret(acct.OAuthClient), true
+	case "unauthorized_client":
+		// Google sends this when the refresh token belongs to another
+		// client, such as after client_id changed. Only a new login fixes it.
+		return "the refresh token was issued to another OAuth client; run: chainmail auth login " + acct.Name, true
 	default:
 		return "", false
 	}

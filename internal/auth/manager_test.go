@@ -396,7 +396,7 @@ func TestAccessTokenRefreshesFiveMinutesEarly(t *testing.T) {
 		expiresIn int
 		want      int32
 	}{
-		{expiresIn: 310, want: 1}, // still 10s of use left after the 5 minute margin
+		{expiresIn: 360, want: 1}, // still a minute of use left after the 5 minute margin
 		{expiresIn: 290, want: 2}, // already inside the margin, so every call refreshes
 	}
 	for _, tt := range tests {
@@ -617,5 +617,20 @@ func TestNilHTTPClientUsesDefault(t *testing.T) {
 	m := auth.NewManager(cfg, store, auth.WithOAuthEndpoint(srv.Endpoint()), auth.WithHTTPClient(nil))
 	if _, err := m.Credentials(t.Context(), "gm"); err != nil {
 		t.Errorf("Credentials: %v", err)
+	}
+}
+
+func TestUnauthorizedClientNeedsLogin(t *testing.T) {
+	t.Parallel()
+	// Google returns unauthorized_client when the refresh token was issued
+	// to another client, which only a new login fixes.
+	ep, _ := cannedTokenServer(t, http.StatusBadRequest, `{"error":"unauthorized_client"}`)
+	f := newFixtureAt(t, ep)
+	f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
+	f.set(t, auth.RefreshTokenSecret("gm"), oauthtest.RefreshToken)
+	_, err := f.m.Credentials(t.Context(), "gm")
+	requireHint(t, err, "chainmail auth login gm")
+	if st, _ := f.m.State("gm"); !st.Required || !strings.Contains(st.Detail, "chainmail auth login gm") {
+		t.Errorf("State = %+v, want required with the login hint", st)
 	}
 }
