@@ -86,7 +86,9 @@ func (e *ValidationError) Error() string {
 	return "invalid config: " + strings.Join(e.Problems, "; ")
 }
 
-var accountNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+// nameRE matches account and OAuth client names. Both become vault secret
+// names (accounts/<name>, oauth_clients/<name>), so no path characters.
+var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // Load reads and parses the config file at path.
 func Load(path string) (*Config, error) {
@@ -120,6 +122,8 @@ func (c *Config) AccountNames() []string {
 }
 
 // Account returns the named account with its preset and overrides applied.
+// It is only valid on a Config returned by Parse or Load, which validate the
+// providers and endpoint security that Account relies on.
 func (c *Config) Account(name string) (ResolvedAccount, error) {
 	a, ok := c.Accounts[name]
 	if !ok {
@@ -179,8 +183,12 @@ func (c *Config) validate() error {
 		problems = append(problems, fmt.Sprintf(format, args...))
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.OAuthClients)) {
+		where := "oauth_clients." + name
+		if !nameRE.MatchString(name) {
+			add("%s: name must be lowercase letters, digits and hyphens", where)
+		}
 		if c.OAuthClients[name].ClientID == "" {
-			add("oauth_clients.%s: client_id is required", name)
+			add("%s: client_id is required", where)
 		}
 	}
 	for _, name := range c.AccountNames() {
@@ -195,7 +203,7 @@ func (c *Config) validate() error {
 func (c *Config) validateAccount(name string, add func(string, ...any)) {
 	a := c.Accounts[name]
 	where := "accounts." + name
-	if !accountNameRE.MatchString(name) {
+	if !nameRE.MatchString(name) {
 		add("%s: name must be lowercase letters, digits and hyphens", where)
 	}
 	p, ok := provider.Lookup(a.Provider)

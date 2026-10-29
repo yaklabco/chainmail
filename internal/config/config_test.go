@@ -74,6 +74,14 @@ func TestParseValid(t *testing.T) {
 		t.Errorf("work IMAP = %s", work.IMAP.Addr())
 	}
 
+	hostinger, err := cfg.Account("hostinger")
+	if err != nil {
+		t.Fatalf("Account(hostinger): %v", err)
+	}
+	if hostinger.Auth != provider.AuthPassword {
+		t.Errorf("hostinger auth = %q, want password by default", hostinger.Auth)
+	}
+
 	icloud, err := cfg.Account("icloud")
 	if err != nil {
 		t.Fatalf("Account(icloud): %v", err)
@@ -188,6 +196,11 @@ func TestParseInvalid(t *testing.T) {
 			config:  "[oauth_clients.x]\nclient_id = \"\"",
 			problem: "client_id is required",
 		},
+		{
+			name:    "bad oauth client name",
+			config:  "[oauth_clients.\"../x\"]\nclient_id = \"i\"",
+			problem: "oauth_clients.../x: name must be lowercase",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -206,10 +219,37 @@ func TestParseInvalid(t *testing.T) {
 
 func TestParseRejectsUnknownFields(t *testing.T) {
 	t.Parallel()
-	_, err := Parse([]byte("[daemon]\nsockett = \"/x\""))
-	var strict *toml.StrictMissingError
-	if !errors.As(err, &strict) {
-		t.Errorf("err = %v, want *toml.StrictMissingError", err)
+	tests := []struct {
+		name   string
+		config string
+	}{
+		{name: "daemon", config: "[daemon]\nsockett = \"/x\""},
+		{name: "account", config: "[accounts.x]\nprovder = \"hostinger\"\naddress = \"a@b.c\""},
+		{name: "inline imap", config: "[accounts.x]\nprovider = \"hostinger\"\naddress = \"a@b.c\"\nimap = { host = \"h\", prot = 993 }"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(tt.config))
+			var strict *toml.StrictMissingError
+			if !errors.As(err, &strict) {
+				t.Errorf("err = %v, want *toml.StrictMissingError", err)
+			}
+		})
+	}
+}
+
+func TestParseReportsEveryProblem(t *testing.T) {
+	t.Parallel()
+	config := "[accounts.a]\nprovider = \"aol\"\naddress = \"a@b.c\"\n" +
+		"[accounts.b]\nprovider = \"hostinger\"\naddress = \"Bob <b@b.c>\""
+	_, err := Parse([]byte(config))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err = %v, want *ValidationError", err)
+	}
+	if len(ve.Problems) < 2 {
+		t.Errorf("problems = %q, want at least 2", ve.Problems)
 	}
 }
 
