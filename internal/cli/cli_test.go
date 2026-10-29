@@ -574,7 +574,7 @@ func TestSecretSetFromPassRefusesFolders(t *testing.T) {
 		env := Env{Getenv: passStore(t, "HOME", "email/hostinger"), PassShow: func(context.Context, string) ([]byte, error) {
 			return []byte(value + "\n"), nil
 		}}
-		if got := runCLI(t, env, "--socket", h.Socket, "secret", "set", "oauth_clients/home", "--from-pass", "email/hostinger"); got.code != 0 {
+		if got := runCLI(t, env, "--socket", h.Socket, "secret", "set", "accounts/host", "--from-pass", "email/hostinger"); got.code != 0 {
 			t.Errorf("got %+v", got)
 		}
 	})

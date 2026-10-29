@@ -20,7 +20,10 @@ var invalidArgument = []error{
 
 // toConnectError maps a Go error to a Connect error with a stable reason.
 func toConnectError(err error) *connect.Error {
-	var required *auth.RequiredError
+	var (
+		required *auth.RequiredError
+		badName  *secretNameError
+	)
 	switch {
 	case errors.As(err, &required):
 		return api.New(connect.CodeUnauthenticated, api.ReasonAuthRequired, required.Hint, err)
@@ -28,6 +31,8 @@ func toConnectError(err error) *connect.Error {
 		return api.New(connect.CodeUnauthenticated, api.ReasonAuthRejected, "", err)
 	case errors.Is(err, config.ErrUnknownAccount):
 		return api.New(connect.CodeNotFound, api.ReasonNotFound, "run: chainmail accounts list", err)
+	case errors.As(err, &badName):
+		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, badName.hint, err)
 	case isAny(err, invalidArgument):
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, "", err)
 	case errors.Is(err, context.DeadlineExceeded):

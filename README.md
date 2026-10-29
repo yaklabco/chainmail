@@ -195,6 +195,8 @@ Vault secret names:
 | `oauth_clients/<client>` | OAuth2 client secret | `chainmail secret set oauth_clients/<client>` |
 | `tokens/<account>` | OAuth2 refresh token | `chainmail auth login <account>` |
 
+`secret set` accepts only names the config uses: `accounts/<account>` where the account has `auth = "password"`, and `oauth_clients/<client>` where the client is defined. It refuses `tokens/<account>`, because only `auth login` writes a refresh token.
+
 Keys from the full design, such as `body_limit`, `watch`, `sync`, `policy` and `rules`, belong to later sub-projects. This version rejects them as unknown.
 
 ## Dev quickstart
@@ -256,7 +258,7 @@ Every command accepts `--socket <path>` and `--output json|table`. Only the `acc
 | `chainmail daemon` | Runs the daemon. Flags: `--dev`, `--config` (default `/etc/chainmail/config.toml`), `--state-dir` (default `/var/lib/chainmail`), `--vault-key-file` (default `$CREDENTIALS_DIRECTORY/vault-key`). | JSON log lines on stderr |
 | `chainmail accounts list` | Lists accounts with provider, address, auth method and auth state. `auth_detail` says what to run when `auth_state` is `AUTH_STATE_REQUIRED`. | `{"accounts":[...]}` |
 | `chainmail accounts test <account>` | Logs in to the account's IMAP server, then its SMTP server, and reports each check. | `{"account":...,"imap":{...},"smtp":{...}}` |
-| `chainmail secret set <name> [--from-pass <entry>]` | Stores a secret in the vault. Names look like `accounts/<account>` or `oauth_clients/<client>`. | `{"name":...,"set":true}` |
+| `chainmail secret set <name> [--from-pass <entry>]` | Stores a secret in the vault. The name must be `accounts/<account>` for a configured password account, or `oauth_clients/<client>` for a configured OAuth2 client. Any other name, including `tokens/<account>`, fails with `INVALID_ARGUMENT` (exit 2). | `{"name":...,"set":true}` |
 | `chainmail auth login <account>` | Runs the OAuth2 paste-back flow and stores the refresh token. | `{"account":...,"logged_in":true}` |
 | `chainmail admin status` | Shows the daemon's version, start time, dev mode and stored secret names. | `{"version":...,"started_at":...,"dev_mode":...,"secret_names":[...]}` |
 | `chainmail help [command]` | Prints help. `--help` on any command does the same. | help text |

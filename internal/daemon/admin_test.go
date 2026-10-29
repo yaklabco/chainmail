@@ -92,6 +92,53 @@ func TestSetSecretRejectsInvalidName(t *testing.T) {
 	}
 }
 
+// SetSecret takes only the names the config uses. Refresh tokens come from
+// auth login alone.
+func TestSetSecretOnlyConfiguredNames(t *testing.T) {
+	t.Parallel()
+	h := daemontest.Start(t, gmailConfig, daemontest.Options{})
+	for _, name := range []string{"accounts/host", "oauth_clients/g"} {
+		setSecret(t, h, name, "hunter2")
+	}
+	tests := []struct {
+		name string
+		hint string
+	}{
+		{name: "tokens/gm", hint: "chainmail auth login"},
+		{name: "accounts/gm", hint: "accounts/<account>"}, // an OAuth2 account has no password
+		{name: "accounts/nope", hint: "accounts/<account>"},
+		{name: "oauth_clients/other", hint: "oauth_clients/<client>"},
+		{name: "other/x", hint: "accounts/<account>"},
+		{name: "accounts", hint: "accounts/<account>"},
+	}
+	for _, tt := range tests {
+		_, err := h.Client.Admin.SetSecret(t.Context(), connect.NewRequest(&chainmailv1.SetSecretRequest{Name: tt.name, Value: []byte("hunter2")}))
+		d := api.Detail(err)
+		if connect.CodeOf(err) != connect.CodeInvalidArgument || d.GetReason() != api.ReasonInvalidArgument {
+			t.Errorf("%s: err = %v, want INVALID_ARGUMENT", tt.name, err)
+			continue
+		}
+		if !strings.Contains(d.GetHint(), tt.hint) {
+			t.Errorf("%s: hint = %q, want it to mention %q", tt.name, d.GetHint(), tt.hint)
+		}
+		if strings.Contains(err.Error(), "hunter2") || strings.Contains(d.GetHint(), "hunter2") {
+			t.Errorf("%s: error %v contains the value", tt.name, err)
+		}
+	}
+	if names := h.Vault.Names(); !slices.Equal(names, []string{"accounts/host", "oauth_clients/g"}) {
+		t.Errorf("vault names = %v, want only the allowed ones", names)
+	}
+	rows := h.AuditRows(t)
+	if len(rows) != 2+len(tests) {
+		t.Fatalf("audit rows = %+v", rows)
+	}
+	for i, r := range rows[2:] {
+		if r.Action != "secret.set" || r.Result != "error" || r.Reason != api.ReasonInvalidArgument || r.Targets != `["`+tests[i].name+`"]` {
+			t.Errorf("audit row for %s = %+v", tests[i].name, r)
+		}
+	}
+}
+
 func TestOAuthLogin(t *testing.T) {
 	t.Parallel()
 	o := oauthtest.Start(t)
