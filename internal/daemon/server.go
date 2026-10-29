@@ -1,0 +1,235 @@
+package daemon
+
+import (
+	"context"
+	"crypto/x509"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"regexp"
+	"sync"
+	"time"
+
+	"connectrpc.com/connect"
+
+	"github.com/jamesainslie/chainmail/gen/chainmail/v1/chainmailv1connect"
+	"github.com/jamesainslie/chainmail/internal/api"
+	"github.com/jamesainslie/chainmail/internal/audit"
+	"github.com/jamesainslie/chainmail/internal/auth"
+	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/vault"
+)
+
+// Options configures a Server. Config, Vault, StateDB, Listener and Authorizer are required.
+type Options struct {
+	Config     *config.Config
+	Vault      *vault.Vault
+	StateDB    *sql.DB
+	Listener   net.Listener
+	Authorizer *Authorizer
+	DevMode    bool
+	// RootCAs replaces the system roots for IMAP and SMTP connections. Tests use it.
+	RootCAs *x509.CertPool
+	// AuthOptions are passed to auth.NewManager. Tests use them to point OAuth2 at a fake server.
+	AuthOptions []auth.Option
+	// Logger defaults to discarding everything.
+	Logger *slog.Logger
+	// Now defaults to time.Now.
+	Now func() time.Time
+}
+
+const (
+	// maxRequestBytes caps a request message. Secrets and redirect URLs are far smaller.
+	maxRequestBytes = 1 << 20
+	// auditTimeout bounds an audit write that outlives its request.
+	auditTimeout = 5 * time.Second
+	// shutdownTimeout bounds the graceful part of a shutdown, after which
+	// connections are closed.
+	shutdownTimeout = 10 * time.Second
+	// idleTimeout closes keep-alive connections nobody is using.
+	idleTimeout = 2 * time.Minute
+)
+
+// Server is the chainmail daemon.
+type Server struct {
+	opts    Options
+	auth    *auth.Manager
+	audit   *audit.Writer
+	started time.Time
+	httpSrv *http.Server
+	// accountLocks serializes account tests, one account at a time.
+	accountLocks keyedLock
+	handlers     inflight
+}
+
+// New wires up a Server. Call Serve to run it.
+func New(opts Options) (*Server, error) {
+	if opts.Config == nil || opts.Vault == nil || opts.StateDB == nil || opts.Listener == nil || opts.Authorizer == nil {
+		return nil, errors.New("daemon: Config, Vault, StateDB, Listener and Authorizer are required")
+	}
+	if opts.Logger == nil {
+		opts.Logger = slog.New(slog.DiscardHandler)
+	}
+	if opts.Now == nil {
+		opts.Now = time.Now
+	}
+	authOpts := append([]auth.Option{auth.WithClock(opts.Now)}, opts.AuthOptions...)
+	s := &Server{
+		opts:    opts,
+		auth:    auth.NewManager(opts.Config, opts.Vault, authOpts...),
+		audit:   audit.NewWriter(opts.StateDB, opts.Now),
+		started: opts.Now(),
+	}
+	mux := http.NewServeMux()
+	handlerOpts := connect.WithReadMaxBytes(maxRequestBytes)
+	mux.Handle(chainmailv1connect.NewAccountServiceHandler(&accountService{s: s}, handlerOpts))
+	mux.Handle(chainmailv1connect.NewAdminServiceHandler(&adminService{s: s}, handlerOpts))
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	// ReadTimeout and WriteTimeout stay unset. The socket is local, and a
+	// unary call such as accounts test legitimately runs for up to a
+	// minute, which a whole-request timeout would cut off. Handlers bound
+	// their own work instead, and shutdown cancels it.
+	s.httpSrv = &http.Server{
+		Handler:           s.handlers.track(opts.Authorizer.Middleware(mux)),
+		ConnContext:       connContext,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       idleTimeout,
+		Protocols:         protocols,
+	}
+	return s, nil
+}
+
+// Serve handles requests until ctx ends, then shuts down. Shutting down
+// cancels every request in flight, so mail server probes stop and report
+// TIMEOUT while their audit rows are still written. Serve returns only once
+// every handler has returned, so the caller can close the state database.
+func (s *Server) Serve(ctx context.Context) error {
+	base, cancelBase := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelBase()
+	s.httpSrv.BaseContext = func(net.Listener) context.Context { return base }
+	errc := make(chan error, 1)
+	go func() { errc <- s.httpSrv.Serve(s.opts.Listener) }()
+	s.opts.Logger.Info("daemon listening", "addr", s.opts.Listener.Addr().String(), "dev", s.opts.DevMode)
+	select {
+	case err := <-errc:
+		cancelBase()
+		// Serve has stopped, so nothing will finish the connections it
+		// left open but Close.
+		closeErr := s.httpSrv.Close()
+		s.handlers.wait()
+		return errors.Join(fmt.Errorf("serving: %w", err), closeErr)
+	case <-ctx.Done():
+	}
+	cancelBase()
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	defer cancel()
+	var err error
+	if shutdownErr := s.httpSrv.Shutdown(shutdownCtx); shutdownErr != nil {
+		// Close drops the connections still open. It does not wait for
+		// their handlers, which wait does below.
+		err = errors.Join(fmt.Errorf("shutting down: %w", shutdownErr), s.httpSrv.Close())
+	}
+	// Shutdown and Close make Serve return http.ErrServerClosed, which is
+	// the normal outcome. Anything else is reported.
+	if serveErr := <-errc; !errors.Is(serveErr, http.ErrServerClosed) {
+		err = errors.Join(err, fmt.Errorf("serving: %w", serveErr))
+	}
+	s.handlers.wait()
+	return err
+}
+
+// inflight counts running handlers so shutdown can wait for them. Once
+// draining has begun it refuses new requests rather than race the wait.
+type inflight struct {
+	mu       sync.Mutex
+	draining bool
+	wg       sync.WaitGroup
+}
+
+func (f *inflight) track(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		if f.draining {
+			f.mu.Unlock()
+			http.Error(w, "the daemon is shutting down", http.StatusServiceUnavailable)
+			return
+		}
+		f.wg.Add(1)
+		f.mu.Unlock()
+		defer f.wg.Done()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// wait refuses new requests and waits for the running ones to return.
+func (f *inflight) wait() {
+	f.mu.Lock()
+	f.draining = true
+	f.mu.Unlock()
+	f.wg.Wait()
+}
+
+type caller struct {
+	uid    uint32
+	client string
+}
+
+// callerOf identifies who sent a request. The middleware refuses requests
+// without a peer, so a missing one here is a wiring bug, and the request
+// fails rather than being audited as uid 0.
+func callerOf(ctx context.Context, h http.Header) (caller, error) {
+	p, ok := PeerFromContext(ctx)
+	if !ok {
+		return caller{}, api.New(connect.CodePermissionDenied, api.ReasonForbidden, "", errors.New("the socket peer is unknown"))
+	}
+	c := caller{uid: p.UID, client: h.Get(api.HeaderClient)}
+	switch {
+	case c.client == "":
+		c.client = "unknown"
+	case !clientKindRE.MatchString(c.client):
+		c.client = invalidTarget
+	}
+	return c, nil
+}
+
+// clientKindRE matches the client kinds the audit log records, such as
+// "cli" or "mcp". The kind is self-reported, so anything else is recorded
+// as invalidTarget. The peer's uid is the authoritative identity.
+var clientKindRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
+
+// record writes an audit entry for an action that has run, then returns the
+// action's own error as a Connect error. If e.Result is empty it is derived
+// from actionErr. A failed audit write fails the request: chainmail must not
+// report success for something it could not record.
+func (s *Server) record(ctx context.Context, c caller, e audit.Entry, actionErr error) error {
+	e.CallerUID = c.uid
+	e.Client = c.client
+	var cerr *connect.Error
+	if actionErr != nil {
+		cerr = toConnectError(actionErr)
+		e.Reason = api.Detail(cerr).GetReason()
+	}
+	if e.Result == "" {
+		e.Result = audit.ResultOK
+		if actionErr != nil {
+			e.Result = audit.ResultError
+		}
+	}
+	// The action has already run, so its row is written even if the client
+	// has gone away.
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+	defer cancel()
+	if err := s.audit.Record(auditCtx, e); err != nil {
+		s.opts.Logger.Error("audit write failed", "action", e.Action, "err", err)
+		return api.New(connect.CodeInternal, api.ReasonInternal, "", fmt.Errorf("%s finished but the audit write failed: %w", e.Action, err))
+	}
+	if cerr != nil {
+		return cerr
+	}
+	return nil
+}
