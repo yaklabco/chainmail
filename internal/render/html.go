@@ -1,6 +1,7 @@
 package render
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"strings"
@@ -13,13 +14,28 @@ import (
 // HTMLToText converts an HTML document to plain text. Block elements become
 // line breaks, list items become "- " lines, links become "text (url)",
 // table rows become tab-separated lines, and scripts, styles, the head and
-// images are dropped.
+// images are dropped. HTML the tree parser refuses, such as elements nested
+// deeper than it allows, is converted tag by tag instead, so the text always
+// survives. The only error is a failure to read r.
 func HTMLToText(r io.Reader) (string, error) {
-	doc, err := html.Parse(r)
+	b, err := io.ReadAll(r)
 	if err != nil {
-		return "", fmt.Errorf("parsing HTML: %w", err)
+		return "", fmt.Errorf("reading HTML: %w", err)
 	}
-	return htmlText(doc), nil
+	if s, ok := treeText(b); ok {
+		return s, nil
+	}
+	return tokenText(b), nil
+}
+
+// treeText converts b through the tree parser, and reports false when the
+// parser refuses it.
+func treeText(b []byte) (string, bool) {
+	doc, err := html.Parse(bytes.NewReader(b))
+	if err != nil {
+		return "", false
+	}
+	return htmlText(doc), true
 }
 
 func htmlText(doc *html.Node) string {
@@ -27,6 +43,59 @@ func htmlText(doc *html.Node) string {
 	w.node(doc)
 	return w.finish()
 }
+
+// tokenText converts HTML from its token stream, with no tree. It is the
+// fallback for documents html.Parse rejects. Tags need not balance: content
+// inside a skipped element is dropped up to its end tag, and every other tag
+// formats as it does in htmlText. The head is not skipped as a whole, because
+// an unclosed <head> would swallow the body. Its text lives in title, script
+// and style, which are skipped on their own.
+func tokenText(b []byte) string {
+	w := &textWriter{atLineStart: true}
+	z := html.NewTokenizer(bytes.NewReader(b))
+	var skip atom.Atom // the skipped element being dropped, while depth > 0
+	depth := 0
+	for {
+		tt := z.Next()
+		if tt == html.ErrorToken {
+			break // io.EOF, or input the tokenizer cannot read further
+		}
+		tok := z.Token()
+		a := tok.DataAtom
+		if depth > 0 {
+			switch {
+			case tt == html.StartTagToken && a == skip:
+				depth++
+			case tt == html.EndTagToken && a == skip:
+				depth--
+			}
+			continue
+		}
+		switch tt {
+		case html.TextToken:
+			w.text(tok.Data)
+		case html.StartTagToken, html.SelfClosingTagToken:
+			if a != atom.Head && skipped[a] {
+				if tt == html.StartTagToken && !voidElements[a] {
+					skip, depth = a, 1
+				}
+				continue
+			}
+			w.open(&html.Node{Type: html.ElementNode, DataAtom: a, Data: tok.Data, Attr: tok.Attr})
+			if tt == html.SelfClosingTagToken {
+				w.close(a)
+			}
+		case html.EndTagToken:
+			w.close(a)
+		default: // comments and doctypes
+		}
+	}
+	return w.finish()
+}
+
+// voidElements in the skipped set have no end tag, so the tokenizer pass must
+// not wait for one.
+var voidElements = map[atom.Atom]bool{atom.Img: true, atom.Embed: true}
 
 // skipped elements contribute no text.
 var skipped = map[atom.Atom]bool{
@@ -57,6 +126,7 @@ type textWriter struct {
 	pre          int
 	lists        int
 	cells        int
+	links        []openLink
 }
 
 func (w *textWriter) node(n *html.Node) {
@@ -71,10 +141,24 @@ func (w *textWriter) node(n *html.Node) {
 	default:
 		return // comments and doctypes
 	}
-	a := n.DataAtom
-	if skipped[a] {
+	if skipped[n.DataAtom] {
 		return
 	}
+	w.open(n)
+	w.children(n)
+	w.close(n.DataAtom)
+}
+
+func (w *textWriter) children(n *html.Node) {
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		w.node(c)
+	}
+}
+
+// open writes what comes before the content of element n. Only n's atom and
+// attributes are read, so the tokenizer pass can hand it a lone tag.
+func (w *textWriter) open(n *html.Node) {
+	a := n.DataAtom
 	switch a {
 	case atom.Br:
 		w.write("\n")
@@ -84,52 +168,57 @@ func (w *textWriter) node(n *html.Node) {
 	case atom.Pre:
 		w.blank()
 		w.pre++
-		w.children(n)
-		w.pre--
-		w.blank()
 	case atom.A:
-		w.link(n)
+		w.links = append(w.links, openLink{start: w.b.Len(), href: attr(n, "href")})
 	case atom.Ul, atom.Ol:
 		w.listEdge()
 		w.lists++
-		w.children(n)
-		w.lists--
-		w.listEdge()
 	case atom.Li:
 		w.lineBreak()
 		w.prefix(strings.Repeat("  ", max(w.lists-1, 0)) + "- ")
-		w.children(n)
-		w.lineBreak()
 	case atom.Tr:
 		w.lineBreak()
 		w.cells = 0
-		w.children(n)
-		w.lineBreak()
 	case atom.Td, atom.Th:
 		if w.cells > 0 {
 			w.prefix("\t")
 		}
 		w.cells++
-		w.children(n)
 	default:
 		switch {
 		case blankBlocks[a]:
 			w.blank()
-			w.children(n)
-			w.blank()
 		case lineBlocks[a]:
 			w.lineBreak()
-			w.children(n)
-			w.lineBreak()
-		default:
-			w.children(n)
 		}
 	}
 }
 
-func (w *textWriter) children(n *html.Node) {
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		w.node(c)
+// close writes what comes after the content of an element. The counters
+// never drop below zero, because the tokenizer pass sees unbalanced end tags.
+func (w *textWriter) close(a atom.Atom) {
+	switch a {
+	case atom.Pre:
+		w.pre = max(w.pre-1, 0)
+		w.blank()
+	case atom.A:
+		if len(w.links) > 0 {
+			l := w.links[len(w.links)-1]
+			w.links = w.links[:len(w.links)-1]
+			w.link(l)
+		}
+	case atom.Ul, atom.Ol:
+		w.lists = max(w.lists-1, 0)
+		w.listEdge()
+	case atom.Li, atom.Tr:
+		w.lineBreak()
+	default:
+		switch {
+		case blankBlocks[a]:
+			w.blank()
+		case lineBlocks[a]:
+			w.lineBreak()
+		}
 	}
 }
 
@@ -142,13 +231,18 @@ func (w *textWriter) listEdge() {
 	w.lineBreak()
 }
 
-// link writes the link text, then the target in parentheses when it is a
-// web or mail address that differs from the text.
-func (w *textWriter) link(n *html.Node) {
-	start := w.b.Len()
-	w.children(n)
-	text := strings.TrimSpace(w.b.String()[start:])
-	href := strings.TrimSpace(attr(n, "href"))
+// openLink is an <a> whose text is being written.
+type openLink struct {
+	start int // offset in b where the link text begins
+	href  string
+}
+
+// link follows the text of l with its target in parentheses when the target
+// is a web or mail address that differs from the text. Whitespace inside the
+// target is dropped, as browsers do, so a wrapped href stays on one line.
+func (w *textWriter) link(l openLink) {
+	text := strings.TrimSpace(w.b.String()[l.start:])
+	href := strings.Join(strings.Fields(l.href), "")
 	if text == "" || !showableLink(href) || href == text || strings.TrimPrefix(href, "mailto:") == text {
 		return
 	}

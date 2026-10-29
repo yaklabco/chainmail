@@ -6,9 +6,12 @@ package render
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/emersion/go-message"
 	_ "github.com/emersion/go-message/charset" // registers charset decoders with go-message
@@ -45,11 +48,11 @@ func walk(e *message.Entity, depth int) *textPart {
 	if depth > maxDepth {
 		return nil
 	}
-	if disp, _, err := e.Header.ContentDisposition(); err == nil && strings.EqualFold(disp, "attachment") {
+	if headerType(e.Header.Get("Content-Disposition")) == "attachment" {
 		return nil
 	}
-	mediaType, _, err := e.Header.ContentType()
-	if err != nil || mediaType == "" {
+	mediaType := headerType(e.Header.Get("Content-Type"))
+	if mediaType == "" {
 		mediaType = "text/plain"
 	}
 	if mr := e.MultipartReader(); mr != nil {
@@ -92,13 +95,44 @@ func walkMultipart(mr message.MultipartReader, alternative bool, depth int) *tex
 	return html
 }
 
+// headerType returns the lower-case type of a Content-Type or
+// Content-Disposition value, or "" when the type itself is unreadable.
+// Hostile mail often breaks the parameters (an unquoted filename with a
+// space, an unterminated quote, a repeated name), and go-message then reports
+// an error for the whole field. Only the part before the first ";" is parsed
+// here, so broken parameters never hide the type.
+func headerType(v string) string {
+	base, _, _ := strings.Cut(v, ";")
+	t, _, err := mime.ParseMediaType(base)
+	if err != nil {
+		return ""
+	}
+	return t
+}
+
 func readPart(e *message.Entity, html bool) *textPart {
-	b, _ := io.ReadAll(io.LimitReader(e.Body, maxPartBytes+1)) // a decoding error keeps what was read before it
-	clipped := len(b) > maxPartBytes
-	if clipped {
-		b = b[:maxPartBytes]
+	b, err := io.ReadAll(io.LimitReader(e.Body, maxPartBytes+1))
+	// A decoding error midway keeps what was decoded before it, marked as
+	// incomplete.
+	clipped := err != nil && !errors.Is(err, io.EOF)
+	if len(b) > maxPartBytes {
+		b = b[:runeBoundary(b, maxPartBytes)]
+		clipped = true
 	}
 	return &textPart{html: html, text: toText(b), clipped: clipped}
+}
+
+// runeBoundary backs n off to the start of the UTF-8 sequence that b[n]
+// belongs to, so clipping b at the result splits no rune. It moves at most
+// utf8.UTFMax-1 bytes, which leaves invalid input clipped at n. b must be
+// longer than n.
+func runeBoundary(b []byte, n int) int {
+	for i := n; i > n-utf8.UTFMax && i > 0; i-- {
+		if utf8.RuneStart(b[i]) {
+			return i
+		}
+	}
+	return n
 }
 
 // toText makes b valid UTF-8 with LF line ends.

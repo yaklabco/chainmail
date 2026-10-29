@@ -43,3 +43,67 @@ func TestHTMLToText(t *testing.T) {
 		})
 	}
 }
+
+func TestHTMLToTextDeepNesting(t *testing.T) {
+	t.Parallel()
+	for _, tag := range []string{"div", "b", "span"} {
+		t.Run(tag, func(t *testing.T) {
+			t.Parallel()
+			in := strings.Repeat("<"+tag+">", 600) + "The sentence survives." + strings.Repeat("</"+tag+">", 600)
+			got, err := HTMLToText(strings.NewReader(in))
+			if err != nil {
+				t.Fatalf("HTMLToText: %v", err)
+			}
+			if got != "The sentence survives." {
+				t.Errorf("HTMLToText = %q, want %q", got, "The sentence survives.")
+			}
+		})
+	}
+}
+
+func TestHTMLToTextDeepNestingFormats(t *testing.T) {
+	t.Parallel()
+	deep := strings.Repeat("<div>", 600)
+	tests := []struct {
+		name, in, want string
+	}{
+		{"dropped elements", deep + "<head><title>T</title><style>p{}</style></head><p>Hi<script>alert(1)</script></p>", "Hi"},
+		{"head without end tag", deep + "<head><title>T</title><body><p>Hi</p>", "Hi"},
+		{"blocks", deep + "<p>One</p><p>Two</p><div>a</div><div>b</div>", "One\n\nTwo\n\na\nb"},
+		{"line break", deep + "Line one<br>Line two", "Line one\nLine two"},
+		{"list", deep + "<ul><li>One</li><li>Two</li></ul>", "- One\n- Two"},
+		{"table", deep + "<table><tr><td>Name</td><td>Qty</td></tr></table>", "Name\tQty"},
+		{"link", deep + `<p>See <a href="https://example.com/agenda">the agenda</a>.</p>`, "See the agenda (https://example.com/agenda)."},
+		{"image", deep + `<p>Logo <img src="x.png" alt="Logo"> here <svg/>now</p>`, "Logo here now"},
+		{"entities", deep + "Fish &amp; chips", "Fish & chips"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := HTMLToText(strings.NewReader(tt.in))
+			if err != nil {
+				t.Fatalf("HTMLToText: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("HTMLToText = %q, want %q", got, tt.want)
+			}
+			// The fallback must format like the tree path does.
+			tree, err := HTMLToText(strings.NewReader(strings.TrimPrefix(tt.in, deep)))
+			if err != nil || tree != tt.want {
+				t.Errorf("tree path = %q, %v; want %q", tree, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestHTMLToTextLinkTargetWhitespace(t *testing.T) {
+	t.Parallel()
+	in := "<a href=\"https://x.test/a\n  /b\r\n\">go</a>"
+	got, err := HTMLToText(strings.NewReader(in))
+	if err != nil {
+		t.Fatalf("HTMLToText: %v", err)
+	}
+	if want := "go (https://x.test/a/b)"; got != want {
+		t.Errorf("HTMLToText = %q, want %q", got, want)
+	}
+}

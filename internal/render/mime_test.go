@@ -1,6 +1,9 @@
 package render
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestPickText(t *testing.T) {
 	t.Parallel()
@@ -81,5 +84,74 @@ func TestPickTextClipsHugeParts(t *testing.T) {
 	}
 	if !tp.clipped || len(tp.text) > maxPartBytes {
 		t.Errorf("clipped = %t, len = %d", tp.clipped, len(tp.text))
+	}
+}
+
+func TestPickTextMalformedHeaders(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  string
+		html bool
+		text string
+	}{
+		{
+			"unquoted filename with a space",
+			"Content-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: text/plain\nContent-Disposition: attachment; filename=my notes.txt\n\nATTACHED\n--b\nContent-Type: text/plain\n\nbody\n--b--\n",
+			false, "body",
+		},
+		{
+			"duplicate filename",
+			"Content-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: text/plain\nContent-Disposition: attachment; filename=a.txt; filename=b.txt\n\nATTACHED\n--b\nContent-Type: text/plain\n\nbody\n--b--\n",
+			false, "body",
+		},
+		{"unterminated charset quote", "Content-Type: text/html; charset=\"utf-8\n\n<p>Hi</p>\n", true, "<p>Hi</p>\n"},
+		{"upper case type with broken parameter", "Content-Type: TEXT/HTML; charset\n\n<p>Hi</p>\n", true, "<p>Hi</p>\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tp, err := pickText([]byte(tt.raw))
+			if err != nil {
+				t.Fatalf("pickText: %v", err)
+			}
+			if tp == nil {
+				t.Fatal("pickText found no text part")
+			}
+			if tp.html != tt.html || tp.text != tt.text {
+				t.Errorf("pickText = html %t %q, want html %t %q", tp.html, tp.text, tt.html, tt.text)
+			}
+		})
+	}
+}
+
+func TestPickTextDecodeErrorMarksClipped(t *testing.T) {
+	t.Parallel()
+	raw := "Content-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: base64\n\nSGVsbG8s\nIHdvcmxk!!!!\nSGVsbG8s\n"
+	tp, err := pickText([]byte(raw))
+	if err != nil || tp == nil {
+		t.Fatalf("pickText = %v, %v", tp, err)
+	}
+	if !tp.clipped || tp.text != "Hello, world" {
+		t.Errorf("pickText = clipped %t %q, want clipped true %q", tp.clipped, tp.text, "Hello, world")
+	}
+}
+
+func TestPickTextClipsOnRuneBoundary(t *testing.T) {
+	t.Parallel()
+	// The two-byte é straddles the clip point.
+	raw := "Content-Type: text/plain; charset=utf-8\n\n" + strings.Repeat("a", maxPartBytes-1) + "étail"
+	tp, err := pickText([]byte(raw))
+	if err != nil || tp == nil {
+		t.Fatalf("pickText = %v, %v", tp, err)
+	}
+	if !tp.clipped {
+		t.Error("clipped = false, want true")
+	}
+	if strings.ContainsRune(tp.text, '�') {
+		t.Errorf("text ends %q, want no U+FFFD", tp.text[len(tp.text)-8:])
+	}
+	if len(tp.text) != maxPartBytes-1 {
+		t.Errorf("len = %d, want %d", len(tp.text), maxPartBytes-1)
 	}
 }
