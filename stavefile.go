@@ -62,6 +62,13 @@ func (Test) Live() error {
 	return sh.RunV("go", "test", "-tags", "live", "-count=1", "-v", "./internal/live/")
 }
 
+// Integration runs the integration suite: Dovecot in a Docker container and
+// the fake Gmail server. The test binary starts and removes its own container.
+func (Test) Integration() error {
+	return sh.RunV("go", "test", "-race", "-tags", "integration", "-count=1", "-timeout", "15m",
+		"-p", parallelism(), "./internal/mailstore/imapstore/")
+}
+
 // Build compiles bin/chainmail without cgo.
 func Build() error {
 	return sh.RunWithV(map[string]string{"CGO_ENABLED": "0"}, "",

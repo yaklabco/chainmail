@@ -8,6 +8,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
+	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"testing"
@@ -23,9 +26,18 @@ type CA struct {
 // New makes a fresh CA for one test.
 func New(t testing.TB) *CA {
 	t.Helper()
+	ca, err := NewCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ca
+}
+
+// NewCA makes a fresh CA, for callers without a testing.TB such as TestMain.
+func NewCA() (*CA, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatalf("generating key: %v", err)
+		return nil, fmt.Errorf("generating key: %w", err)
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
@@ -41,11 +53,11 @@ func New(t testing.TB) *CA {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
-		t.Fatalf("creating certificate: %v", err)
+		return nil, fmt.Errorf("creating certificate: %w", err)
 	}
 	cert, err := x509.ParseCertificate(der)
 	if err != nil {
-		t.Fatalf("parsing certificate: %v", err)
+		return nil, fmt.Errorf("parsing certificate: %w", err)
 	}
 	pool := x509.NewCertPool()
 	pool.AddCert(cert)
@@ -55,5 +67,22 @@ func New(t testing.TB) *CA {
 			MinVersion:   tls.VersionTLS12,
 		},
 		Pool: pool,
+	}, nil
+}
+
+// PEM returns the server certificate and its private key as PEM, for a
+// server running outside the test process.
+func (ca *CA) PEM() (cert, key []byte, err error) {
+	c := ca.Server.Certificates[0]
+	k, ok := c.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, nil, errors.New("tlstest: the key is not ECDSA")
 	}
+	der, err := x509.MarshalECPrivateKey(k)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encoding key: %w", err)
+	}
+	cert = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Certificate[0]})
+	key = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+	return cert, key, nil
 }
