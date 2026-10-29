@@ -8,12 +8,14 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"mime"
 	"net"
 	"slices"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
+	"github.com/emersion/go-message/charset"
 
 	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/provider"
@@ -87,9 +89,9 @@ func handshake(ctx context.Context, conn net.Conn, ep provider.Endpoint, roots *
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			return nil, fmt.Errorf("TLS handshake with %s: %w", ep.Addr(), err)
 		}
-		return imapclient.New(tlsConn, nil), nil
+		return imapclient.New(tlsConn, clientOptions(nil)), nil
 	case provider.SecurityStartTLS:
-		c, err := imapclient.NewStartTLS(conn, &imapclient.Options{TLSConfig: tlsConfig})
+		c, err := imapclient.NewStartTLS(conn, clientOptions(tlsConfig))
 		if err != nil {
 			return nil, fmt.Errorf("STARTTLS with %s: %w", ep.Addr(), err)
 		}
@@ -97,6 +99,13 @@ func handshake(ctx context.Context, conn net.Conn, ep provider.Endpoint, roots *
 	default:
 		return nil, fmt.Errorf("unsupported security %v for %s", ep.Security, ep.Addr())
 	}
+}
+
+// clientOptions decodes RFC 2047 encoded words in every charset go-message
+// knows, not only UTF-8 and ISO-8859-1, so subjects and display names arrive
+// as UTF-8.
+func clientOptions(tlsConfig *tls.Config) *imapclient.Options {
+	return &imapclient.Options{TLSConfig: tlsConfig, WordDecoder: &mime.WordDecoder{CharsetReader: charset.Reader}}
 }
 
 func login(c *imapclient.Client, creds auth.Credentials) error {

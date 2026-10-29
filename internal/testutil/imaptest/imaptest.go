@@ -6,8 +6,10 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
@@ -31,6 +33,12 @@ type User struct {
 	LoginError error
 	// Logins, when set, counts this user's login attempts, whatever their outcome.
 	Logins *atomic.Int32
+	// Folders are created at start, besides INBOX.
+	Folders []string
+	// Mail holds raw messages to append at start, by folder.
+	Mail map[string][]string
+	// OnSelect, when set, hears every SELECT and EXAMINE this user sends.
+	OnSelect func(mailbox string, readOnly bool)
 }
 
 // Start runs a server until the test ends and returns its endpoint.
@@ -41,8 +49,17 @@ func Start(t testing.TB, ca *tlstest.CA, security provider.Security, users ...Us
 	byName := map[string]User{}
 	for _, u := range users {
 		mu := imapmemserver.NewUser(u.Username, u.Password)
-		if err := mu.Create("INBOX", nil); err != nil {
-			t.Fatalf("creating INBOX: %v", err)
+		for _, name := range append([]string{"INBOX"}, u.Folders...) {
+			if err := mu.Create(name, nil); err != nil {
+				t.Fatalf("creating %s: %v", name, err)
+			}
+		}
+		for folder, msgs := range u.Mail {
+			for _, raw := range msgs {
+				if _, err := mu.Append(folder, strings.NewReader(raw), &imap.AppendOptions{Time: time.Now()}); err != nil {
+					t.Fatalf("appending to %s: %v", folder, err)
+				}
+			}
 		}
 		mem.AddUser(mu)
 		byName[u.Username] = u
@@ -77,6 +94,8 @@ func Start(t testing.TB, ca *tlstest.CA, security provider.Security, users ...Us
 type session struct {
 	imapserver.Session
 	users map[string]User
+	// current is the logged-in user, for OnSelect.
+	current *User
 }
 
 // Login counts the attempt and answers with the user's LoginError when one is set.
@@ -88,7 +107,21 @@ func (s *session) Login(username, password string) error {
 	if ok && u.LoginError != nil {
 		return u.LoginError
 	}
-	return s.Session.Login(username, password)
+	if err := s.Session.Login(username, password); err != nil {
+		return err
+	}
+	if ok {
+		s.current = &u
+	}
+	return nil
+}
+
+// Select reports SELECT and EXAMINE to the user's OnSelect.
+func (s *session) Select(mailbox string, options *imap.SelectOptions) (*imap.SelectData, error) {
+	if s.current != nil && s.current.OnSelect != nil {
+		s.current.OnSelect(mailbox, options != nil && options.ReadOnly)
+	}
+	return s.Session.Select(mailbox, options)
 }
 
 func (s *session) AuthenticateMechanisms() []string {
