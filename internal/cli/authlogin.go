@@ -39,7 +39,7 @@ func newAuthCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			}
 			expires := begin.Msg.GetExpiresAt().AsTime().Local().Format("15:04 MST")
 			_, _ = fmt.Fprintf(env.Stderr, loginInstructions, begin.Msg.GetConsentUrl(), expires) // if stderr is gone the user can't see the URL; the login then expires unused
-			line, err := bufio.NewReader(env.Stdin).ReadString('\n')
+			line, err := readLine(ctx, env.Stdin)
 			if err != nil && !errors.Is(err, io.EOF) {
 				return fmt.Errorf("reading the redirect URL: %w", err)
 			}
@@ -55,4 +55,24 @@ func newAuthCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		},
 	})
 	return cmd
+}
+
+// readLine reads one line from r, or gives up when ctx ends, so Ctrl-C at a
+// prompt returns at once. The abandoned read ends with the process.
+func readLine(ctx context.Context, r io.Reader) (string, error) {
+	type result struct {
+		line string
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		line, err := bufio.NewReader(r).ReadString('\n')
+		done <- result{line, err}
+	}()
+	select {
+	case res := <-done:
+		return res.line, res.err
+	case <-ctx.Done():
+		return "", fmt.Errorf("%w: %w", errInterrupted, ctx.Err())
+	}
 }

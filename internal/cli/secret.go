@@ -6,6 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -37,8 +41,8 @@ func newSecretCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 				}
 			}
 			// pass would read a leading - as an option, and --clip would put
-			// the secret on the clipboard.
-			if strings.HasPrefix(fromPass, "-") {
+			// the secret on the clipboard. A .. segment would leave the store.
+			if strings.HasPrefix(fromPass, "-") || slices.Contains(strings.Split(fromPass, "/"), "..") {
 				return &exitError{reason: api.ReasonInvalidArgument, msg: fmt.Sprintf("invalid pass entry %q", fromPass)}
 			}
 			value, err := readSecret(ctx, env, name, fromPass)
@@ -73,11 +77,23 @@ func readSecret(ctx context.Context, env Env, name, passPath string) ([]byte, er
 		if env.PassShow == nil {
 			return nil, errNoPass
 		}
+		// For a folder, pass show prints a tree listing and succeeds, so
+		// insist on an entry file and refuse anything that looks like a tree.
+		if err := checkPassEntry(env, passPath); err != nil {
+			return nil, err
+		}
 		raw, err = env.PassShow(ctx, passPath)
 		if err != nil {
 			return nil, err
 		}
 		raw, _, _ = bytes.Cut(raw, []byte("\n"))
+		if bytes.IndexByte(raw, 0x1b) >= 0 {
+			return nil, &exitError{
+				reason: api.ReasonInvalidArgument,
+				msg:    fmt.Sprintf("pass entry %q printed a folder listing, not a secret", passPath),
+				hint:   "run: pass ls, then name an entry rather than a folder",
+			}
+		}
 	case env.ReadPassword != nil:
 		_, _ = fmt.Fprintf(env.Stderr, "Secret for %s: ", name) // a failed prompt write only loses the prompt
 		raw, err = env.ReadPassword()
@@ -107,4 +123,29 @@ func readSecret(ctx context.Context, env Env, name, passPath string) ([]byte, er
 		}
 	}
 	return value, nil
+}
+
+// checkPassEntry makes sure entry is a file in the password store, which is
+// $PASSWORD_STORE_DIR or ~/.password-store, as pass itself decides.
+func checkPassEntry(env Env, entry string) error {
+	store := env.Getenv("PASSWORD_STORE_DIR")
+	if store == "" {
+		home := env.Getenv("HOME")
+		if home == "" {
+			return usageError{err: errors.New("cannot find the password store: set PASSWORD_STORE_DIR or HOME")}
+		}
+		store = filepath.Join(home, ".password-store")
+	}
+	info, err := os.Stat(filepath.Join(store, entry+".gpg"))
+	switch {
+	case errors.Is(err, fs.ErrNotExist) || (err == nil && !info.Mode().IsRegular()):
+		return &exitError{
+			reason: api.ReasonNotFound,
+			msg:    fmt.Sprintf("pass entry %q is not in the password store %s", entry, store),
+			hint:   "run: pass ls",
+		}
+	case err != nil:
+		return fmt.Errorf("checking pass entry %q: %w", entry, err)
+	}
+	return nil
 }

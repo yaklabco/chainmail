@@ -67,6 +67,10 @@ func TestUsageErrorsExitTwo(t *testing.T) {
 		{name: "extra argument to a subcommand", args: []string{"accounts", "list", "extra"}},
 		{name: "missing argument", args: []string{"accounts", "test"}},
 		{name: "daemon argument", args: []string{"daemon", "extra"}},
+		{name: "completion command", args: []string{"completion", "nope"}},
+		{name: "completion for a shell", args: []string{"completion", "bash"}},
+		{name: "help for an unknown topic", args: []string{"help", "nope"}},
+		{name: "help for an unknown subcommand", args: []string{"help", "accounts", "nope"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -142,5 +146,24 @@ func TestHelpExitsZero(t *testing.T) {
 	}
 	if got.stderr != "" {
 		t.Errorf("stderr = %q, want empty", got.stderr)
+	}
+}
+
+func TestHelpCommand(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{{"help"}, {"help", "accounts"}, {"help", "accounts", "list"}} {
+		got := runCLI(t, Env{}, args...)
+		want := "chainmail " + strings.Join(args[1:], " ")
+		if got.code != 0 || got.stderr != "" || !strings.Contains(got.stdout, strings.TrimSpace(want)) {
+			t.Errorf("%v: %+v", args, got)
+		}
+	}
+}
+
+func TestOutputFlagHelpNamesTableCommands(t *testing.T) {
+	t.Parallel()
+	got := runCLI(t, Env{}, "--help")
+	if !strings.Contains(got.stdout, "table is honoured only by accounts commands") {
+		t.Errorf("help = %s", got.stdout)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,6 +152,7 @@ func TestSecretSet(t *testing.T) {
 	if v, err := h.Vault.Get("accounts/host"); err != nil || string(v) != "hunter2" {
 		t.Errorf("vault = %q, %v (the trailing newline must be trimmed)", v, err)
 	}
+	assertNoSecret(t, "hunter2", got.stdout, got.stderr)
 	status := runCLI(t, Env{}, "--socket", h.Socket, "admin", "status")
 	if status.code != 0 || !strings.Contains(status.stdout, `"secret_names":["accounts/host"]`) {
 		t.Errorf("admin status: %+v", status)
@@ -161,7 +163,7 @@ func TestSecretSetFromPass(t *testing.T) {
 	t.Parallel()
 	h := daemontest.Start(t, twoAccounts, daemontest.Options{})
 	var asked string
-	env := Env{PassShow: func(_ context.Context, path string) ([]byte, error) {
+	env := Env{Getenv: passStore(t, "", "email/hostinger"), PassShow: func(_ context.Context, path string) ([]byte, error) {
 		asked = path
 		return []byte("s3cret\nuser: me@example.com\n"), nil
 	}}
@@ -175,20 +177,23 @@ func TestSecretSetFromPass(t *testing.T) {
 	if v, err := h.Vault.Get("accounts/host"); err != nil || string(v) != "s3cret" {
 		t.Errorf("vault = %q, %v, want only the first line", v, err)
 	}
+	assertNoSecret(t, "s3cret", got.stdout, got.stderr)
 }
 
 func TestSecretSetFromTerminal(t *testing.T) {
 	t.Parallel()
 	h := daemontest.Start(t, twoAccounts, daemontest.Options{})
 	var stderr bytes.Buffer
-	env := Env{Stderr: &stderr, ReadPassword: func() ([]byte, error) { return []byte("typed"), nil }}
-	if got := runCLI(t, env, "--socket", h.Socket, "secret", "set", "accounts/host"); got.code != 0 {
+	env := Env{Stderr: &stderr, ReadPassword: func() ([]byte, error) { return []byte("typed-value"), nil }}
+	got := runCLI(t, env, "--socket", h.Socket, "secret", "set", "accounts/host")
+	if got.code != 0 {
 		t.Fatalf("secret set: %+v %s", got, stderr.String())
 	}
+	assertNoSecret(t, "typed-value", got.stdout, stderr.String())
 	if !strings.Contains(stderr.String(), "Secret for accounts/host:") {
 		t.Errorf("no prompt: %q", stderr.String())
 	}
-	if v, err := h.Vault.Get("accounts/host"); err != nil || string(v) != "typed" {
+	if v, err := h.Vault.Get("accounts/host"); err != nil || string(v) != "typed-value" {
 		t.Errorf("vault = %q, %v", v, err)
 	}
 }
@@ -204,7 +209,7 @@ func TestSecretSetErrors(t *testing.T) {
 	if badName.code != 2 || errorReason(t, badName.stderr) != "INVALID_ARGUMENT" {
 		t.Errorf("bad name: %+v", badName)
 	}
-	passFails := runCLI(t, Env{PassShow: func(context.Context, string) ([]byte, error) { return nil, errors.New("gpg locked") }},
+	passFails := runCLI(t, Env{Getenv: passStore(t, "", "x"), PassShow: func(context.Context, string) ([]byte, error) { return nil, errors.New("gpg locked") }},
 		"--socket", h.Socket, "secret", "set", "accounts/host", "--from-pass", "x")
 	if passFails.code != 1 || !strings.Contains(passFails.stderr, "gpg locked") {
 		t.Errorf("pass failure: %+v", passFails)
@@ -369,6 +374,9 @@ func TestDaemonCommandServes(t *testing.T) {
 	if code := <-done; code != 0 {
 		t.Errorf("daemon exit code = %d; stderr: %s", code, daemonErr.String())
 	}
+	if !strings.Contains(daemonErr.String(), socket) {
+		t.Errorf("daemon did not log its socket %s: %s", socket, daemonErr.String())
+	}
 }
 
 func TestSecretSetInvalidNameDoesNotPrompt(t *testing.T) {
@@ -446,6 +454,10 @@ func TestSecretSetRejectsBadInput(t *testing.T) {
 	if dash.code != 2 || errorReason(t, dash.stderr) != "INVALID_ARGUMENT" || passCalled {
 		t.Errorf("pass path starting with -: %+v (pass called %t)", dash, passCalled)
 	}
+	dots := runCLI(t, env, "--socket", h.Socket, "secret", "set", "accounts/host", "--from-pass", "email/../../x")
+	if dots.code != 2 || errorReason(t, dots.stderr) != "INVALID_ARGUMENT" || passCalled {
+		t.Errorf("pass path with ..: %+v (pass called %t)", dots, passCalled)
+	}
 	multi := runCLI(t, Env{Stdin: strings.NewReader("s3cret\nuser: me@example.com\n")}, "--socket", h.Socket, "secret", "set", "accounts/host")
 	if multi.code != 2 || errorReason(t, multi.stderr) != "USAGE" || !strings.Contains(multi.stderr, "--from-pass") {
 		t.Errorf("multi-line stdin: %+v", multi)
@@ -497,5 +509,222 @@ func TestWriteJSONDoesNotEscapeHTML(t *testing.T) {
 	}
 	if want := `{"hint":"a&b <c>"}` + "\n"; buf.String() != want {
 		t.Errorf("got %q, want %q", buf.String(), want)
+	}
+}
+
+// assertNoSecret fails if secret appears in any of the outputs.
+func assertNoSecret(t *testing.T, secret string, outputs ...string) {
+	t.Helper()
+	for _, out := range outputs {
+		if strings.Contains(out, secret) {
+			t.Errorf("output leaks the secret: %q", out)
+		}
+	}
+}
+
+// passStore creates a password store holding entries and returns a Getenv
+// that points at it through PASSWORD_STORE_DIR, or through HOME when via is "HOME".
+func passStore(t *testing.T, via string, entries ...string) func(string) string {
+	t.Helper()
+	dir := t.TempDir()
+	store := dir
+	if via == "HOME" {
+		store = filepath.Join(dir, ".password-store")
+	}
+	for _, e := range entries {
+		path := filepath.Join(store, e+".gpg")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("encrypted"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := "PASSWORD_STORE_DIR"
+	if via == "HOME" {
+		key = "HOME"
+	}
+	return func(k string) string {
+		if k == key {
+			return dir
+		}
+		return ""
+	}
+}
+
+func TestSecretSetFromPassRefusesFolders(t *testing.T) {
+	t.Parallel()
+	h := daemontest.Start(t, twoAccounts, daemontest.Options{})
+	const value = "do-not-print-me"
+
+	t.Run("missing entry", func(t *testing.T) {
+		t.Parallel()
+		called := false
+		env := Env{Getenv: passStore(t, "", "email/other"), PassShow: func(context.Context, string) ([]byte, error) {
+			called = true
+			return []byte(value), nil
+		}}
+		got := runCLI(t, env, "--socket", h.Socket, "secret", "set", "accounts/host", "--from-pass", "email")
+		if got.code != 6 || errorReason(t, got.stderr) != "NOT_FOUND" || !strings.Contains(got.stderr, `\"email\"`) || called {
+			t.Errorf("got %+v (pass called %t)", got, called)
+		}
+	})
+	t.Run("store found through HOME", func(t *testing.T) {
+		t.Parallel()
+		env := Env{Getenv: passStore(t, "HOME", "email/hostinger"), PassShow: func(context.Context, string) ([]byte, error) {
+			return []byte(value + "\n"), nil
+		}}
+		if got := runCLI(t, env, "--socket", h.Socket, "secret", "set", "oauth_clients/home", "--from-pass", "email/hostinger"); got.code != 0 {
+			t.Errorf("got %+v", got)
+		}
+	})
+	t.Run("no store", func(t *testing.T) {
+		t.Parallel()
+		env := Env{PassShow: func(context.Context, string) ([]byte, error) { return []byte(value), nil }}
+		got := runCLI(t, env, "--socket", h.Socket, "secret", "set", "accounts/host", "--from-pass", "email/hostinger")
+		if got.code == 0 || !strings.Contains(got.stderr, "PASSWORD_STORE_DIR") {
+			t.Errorf("got %+v", got)
+		}
+	})
+	t.Run("folder listing", func(t *testing.T) {
+		t.Parallel()
+		// pass prints a tree with colour codes for a folder, even through a pipe.
+		listing := "\x1b[01;34memail\x1b[0m\n├── " + value + "\n"
+		env := Env{Getenv: passStore(t, "", "email"), PassShow: func(context.Context, string) ([]byte, error) { return []byte(listing), nil }}
+		got := runCLI(t, env, "--socket", h.Socket, "secret", "set", "accounts/icloud", "--from-pass", "email")
+		if got.code != 2 || errorReason(t, got.stderr) != "INVALID_ARGUMENT" || !strings.Contains(got.stderr, `\"email\"`) {
+			t.Errorf("got %+v", got)
+		}
+		assertNoSecret(t, value, got.stdout, got.stderr)
+		assertNoSecret(t, "email\x1b", got.stderr)
+		if _, err := h.Vault.Get("accounts/icloud"); err == nil {
+			t.Error("a folder listing was stored")
+		}
+	})
+}
+
+// cancelReader cancels the command's context on its first Read, then blocks
+// like a terminal nobody types into.
+type cancelReader struct {
+	cancel context.CancelFunc
+	block  chan struct{}
+}
+
+func (r *cancelReader) Read([]byte) (int, error) {
+	r.cancel()
+	<-r.block
+	return 0, io.EOF
+}
+
+func TestAuthLoginPasteCancel(t *testing.T) {
+	t.Parallel()
+	o := oauthtest.Start(t)
+	cfg := `
+[oauth_clients.g]
+client_id = "client-id"
+
+[accounts.gm]
+provider = "gmail"
+address = "me@gmail.com"
+auth = "oauth2"
+oauth_client = "g"
+`
+	h := daemontest.Start(t, cfg, daemontest.Options{AuthOptions: []auth.Option{auth.WithOAuthEndpoint(o.Endpoint())}})
+	if got := runCLI(t, Env{Stdin: strings.NewReader(oauthtest.ClientSecret)}, "--socket", h.Socket, "secret", "set", "oauth_clients/g"); got.code != 0 {
+		t.Fatalf("secret set: %+v", got)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	r := &cancelReader{cancel: cancel, block: make(chan struct{})}
+	t.Cleanup(func() { close(r.block) })
+	done := make(chan int, 1)
+	go func() {
+		done <- Execute(ctx, []string{"--socket", h.Socket, "auth", "login", "gm"},
+			Env{Stdin: r, Stdout: io.Discard, Stderr: io.Discard, Getenv: func(string) string { return "" }})
+	}()
+	select {
+	case code := <-done:
+		if code == 0 {
+			t.Error("a cancelled login exited 0")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("auth login kept waiting for a paste after its context was cancelled")
+	}
+}
+
+func TestReadInterruptible(t *testing.T) {
+	t.Parallel()
+	got, err := readInterruptible(func() ([]byte, error) { return []byte("pw"), nil }, make(chan os.Signal), func() { t.Error("restored after a normal read") })
+	if err != nil || string(got) != "pw" {
+		t.Errorf("read = %q, %v", got, err)
+	}
+
+	block := make(chan struct{})
+	defer close(block)
+	sig := make(chan os.Signal, 1)
+	sig <- os.Interrupt
+	restored := false
+	_, err = readInterruptible(func() ([]byte, error) { <-block; return nil, nil }, sig, func() { restored = true })
+	if !errors.Is(err, errInterrupted) || !restored {
+		t.Errorf("interrupted read: err %v, restored %t", err, restored)
+	}
+}
+
+func TestDaemonSocketResolution(t *testing.T) {
+	t.Parallel()
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(twoAccounts+"\n[daemon]\nsocket = \"/run/from-config.sock\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name    string
+		flag    string
+		env     map[string]string
+		dev     bool
+		want    string
+		wantErr bool
+	}{
+		{name: "dev flag wins", flag: "/f.sock", env: map[string]string{"CHAINMAIL_SOCKET": "/e.sock", "XDG_RUNTIME_DIR": "/x"}, dev: true, want: "/f.sock"},
+		{name: "dev environment next", env: map[string]string{"CHAINMAIL_SOCKET": "/e.sock", "XDG_RUNTIME_DIR": "/x"}, dev: true, want: "/e.sock"},
+		{name: "dev runtime dir last", env: map[string]string{"XDG_RUNTIME_DIR": "/x"}, dev: true, want: "/x/chainmail-dev.sock"},
+		{name: "dev with nothing", dev: true, wantErr: true},
+		{name: "production flag", flag: "/f.sock", want: "/f.sock"},
+		{name: "production uses the config", env: map[string]string{"CHAINMAIL_SOCKET": "/e.sock"}, want: "/run/from-config.sock"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &daemonFlags{configPath: cfgPath, stateDir: t.TempDir(), vaultKey: "/k", dev: tt.dev}
+			env := Env{Getenv: func(k string) string { return tt.env[k] }}
+			p, err := f.resolve(env, &globals{socket: tt.flag})
+			if tt.wantErr {
+				var ue usageError
+				if !errors.As(err, &ue) {
+					t.Fatalf("err = %v, want a usage error", err)
+				}
+				return
+			}
+			if err != nil || p.socket != tt.want {
+				t.Errorf("socket = %q, %v, want %q", p.socket, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestChecksTable(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	err := checksTable(&buf, &chainmailv1.TestAccountResponse{
+		Account: "a",
+		Imap:    &chainmailv1.Check{Ok: true, LatencyMs: 12},
+		Smtp:    &chainmailv1.Check{Reason: "AUTH_REJECTED", LatencyMs: 30, Error: "535 bad credentials"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "CHECK  OK     REASON         LATENCY  ERROR\n" +
+		"imap   true                  12ms     \n" +
+		"smtp   false  AUTH_REJECTED  30ms     535 bad credentials\n"
+	if buf.String() != want {
+		t.Errorf("table =\n%s\nwant\n%s", buf.String(), want)
 	}
 }

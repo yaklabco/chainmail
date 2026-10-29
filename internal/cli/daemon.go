@@ -81,13 +81,18 @@ func (f *daemonFlags) resolve(env Env, g *globals) (daemonPlan, error) {
 		return p, err
 	}
 	p.cfg = cfg
+	// Clients find the socket through --socket, then CHAINMAIL_SOCKET. A dev
+	// daemon follows the same order before its own default, so one exported
+	// variable points both at it. Production uses the config file instead.
 	switch {
 	case g.socket != "":
 		p.socket = g.socket
+	case p.dev && env.Getenv("CHAINMAIL_SOCKET") != "":
+		p.socket = env.Getenv("CHAINMAIL_SOCKET")
 	case p.dev:
 		runtimeDir := env.Getenv("XDG_RUNTIME_DIR")
 		if runtimeDir == "" {
-			return p, usageError{err: errors.New("--dev needs XDG_RUNTIME_DIR or --socket"), hint: daemonHint}
+			return p, usageError{err: errors.New("--dev needs --socket, CHAINMAIL_SOCKET or XDG_RUNTIME_DIR"), hint: daemonHint}
 		}
 		p.socket = filepath.Join(runtimeDir, "chainmail-dev.sock")
 	default:

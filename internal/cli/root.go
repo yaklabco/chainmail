@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -60,6 +61,10 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 	root := newGroup("chainmail", "Email for AI agents, behind a policy daemon")
 	root.SilenceUsage = true
 	root.SilenceErrors = true
+	// cobra's completion command prints help and exits 0 for anything it does
+	// not know, outside the exit contract. Its help command is replaced below.
+	root.CompletionOptions.DisableDefaultCmd = true
+	root.SetHelpCommand(newHelpCmd())
 	root.PersistentPreRunE = func(*cobra.Command, []string) error {
 		if g.output != "json" && g.output != "table" {
 			return usageError{err: fmt.Errorf("--output must be json or table, got %q", g.output), hint: "run: chainmail --help"}
@@ -71,7 +76,7 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 	root.SetErr(env.Stderr)
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error { return usageError{err: err, hint: helpHint(cmd)} })
 	root.PersistentFlags().StringVar(&g.socket, "socket", "", "daemon socket (default $CHAINMAIL_SOCKET, then "+config.DefaultSocket+")")
-	root.PersistentFlags().StringVar(&g.output, "output", "json", "output format: json or table")
+	root.PersistentFlags().StringVar(&g.output, "output", "json", "output format: json or table (table is honoured only by accounts commands)")
 	root.AddCommand(
 		newVersionCmd(env),
 		newDaemonCmd(ctx, env, g),
@@ -98,6 +103,23 @@ func newGroup(use, short string) *cobra.Command {
 				return usageError{err: errors.New("no command given"), hint: helpHint(cmd)}
 			}
 			return usageError{err: fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath()), hint: helpHint(cmd)}
+		},
+	}
+}
+
+// newHelpCmd replaces cobra's help command, which prints the root help and
+// exits 0 for an unknown topic. Here an unknown topic is a usage error.
+func newHelpCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "help [command]",
+		Short: "Help about any command",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target, rest, err := cmd.Root().Find(args)
+			if err != nil || len(rest) > 0 {
+				return usageError{err: fmt.Errorf("unknown help topic %q", strings.Join(args, " ")), hint: helpHint(cmd.Root())}
+			}
+			target.InitDefaultHelpFlag()
+			return target.Help()
 		},
 	}
 }
