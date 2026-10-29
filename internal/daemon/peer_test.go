@@ -53,12 +53,8 @@ func TestPeerCredentials(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	var p Peer
-	select {
-	case p = <-got:
-	case <-t.Context().Done():
-		t.Fatal("handler never saw a peer")
-	}
+	// A 200 means the handler already sent on the buffered channel.
+	p := <-got
 	if int(p.UID) != os.Getuid() || int(p.PID) != os.Getpid() {
 		t.Errorf("peer = %+v, want uid %d pid %d", p, os.Getuid(), os.Getpid())
 	}
