@@ -86,3 +86,5 @@ tool (
 	github.com/yaklabco/stave
 	google.golang.org/protobuf/cmd/protoc-gen-go
 )
+
+replace github.com/emersion/go-imap/v2 => github.com/jamesainslie/go-imap/v2 v2.0.0-beta.8.0.20261029164137-0bd4e366225f

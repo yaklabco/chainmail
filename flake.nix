@@ -15,7 +15,7 @@
           pname = "chainmail";
           inherit version;
           src = ./.;
-          vendorHash = "sha256-ILE1i/ObuyjbQr7SiSxC90ZPHQkrBGL9S1nLaPREUIU=";
+          vendorHash = "sha256-EDd5shV/lOZ/WSzs+hY7LDINdbS60W8lfe8S4Zh41pw=";
           subPackages = [ "cmd/chainmail" ];
           env.CGO_ENABLED = 0;
           ldflags = [ "-s" "-w" "-X github.com/jamesainslie/chainmail/internal/version.Version=${version}" ];
