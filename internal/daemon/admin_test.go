@@ -166,14 +166,3 @@ func TestSetSecretRejectsOversizedRequest(t *testing.T) {
 		t.Errorf("vault names = %v, want none", names)
 	}
 }
-
-func TestAccountServiceIsUnimplemented(t *testing.T) {
-	t.Parallel()
-	h := daemontest.Start(t, hostingerConfig, daemontest.Options{})
-	if _, err := h.Client.Account.ListAccounts(t.Context(), connect.NewRequest(&chainmailv1.ListAccountsRequest{})); connect.CodeOf(err) != connect.CodeUnimplemented {
-		t.Errorf("ListAccounts: %v", err)
-	}
-	if _, err := h.Client.Account.TestAccount(t.Context(), connect.NewRequest(&chainmailv1.TestAccountRequest{Account: "host"})); connect.CodeOf(err) != connect.CodeUnimplemented {
-		t.Errorf("TestAccount: %v", err)
-	}
-}
