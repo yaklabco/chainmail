@@ -504,7 +504,7 @@ func TestWriteArchive(t *testing.T) {
 				tt.setup(s)
 			}
 			r := s.Add(Message{Folder: tt.from, Subject: "archived", Labels: []string{`\Inbox`, "Receipts"}})
-			res := one(t, s.Archive(t.Context(), []ref.Ref{r}))
+			res := s.Archive(t.Context(), []ref.Ref{r})[0]
 			if tt.wantErr != nil {
 				if !errors.Is(res.Err, tt.wantErr) {
 					t.Fatalf("Archive = %+v, want %v", res, tt.wantErr)
@@ -1186,51 +1186,98 @@ func TestWriteCanceledContext(t *testing.T) {
 	}
 }
 
-// TestWriteConcurrent runs writers and readers together, for -race.
+// TestWriteConcurrent runs writers and readers together, for -race, and
+// checks every result and the state each surviving message ends in.
 func TestWriteConcurrent(t *testing.T) {
 	t.Parallel()
 	for _, gmail := range []bool{false, true} {
 		t.Run(fmt.Sprintf("gmail=%v", gmail), func(t *testing.T) {
 			t.Parallel()
-			s, inbox := newHost(), "INBOX"
+			s, inbox, archive := newHost(), "INBOX", "Archive"
 			if gmail {
-				s = newGmail()
+				s, archive = newGmail(), allMail
+			}
+			type survivor struct {
+				r        ref.Ref
+				archived bool
 			}
 			const workers, each = 8, 20
-			var wg sync.WaitGroup
+			var (
+				wg        sync.WaitGroup
+				mu        sync.Mutex
+				survivors []survivor
+			)
 			for w := range workers {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					for i := range each {
 						r, err := s.Append(t.Context(), inbox, nil, time.Now(), raw("c", fmt.Sprintf("%d.%d@x", w, i)))
 						if err != nil {
 							t.Error(err)
 							return
 						}
-						refs := []ref.Ref{r}
-						s.StoreFlags(t.Context(), refs, []string{`\Seen`}, nil)
-						if i%2 == 0 {
-							refs = []ref.Ref{s.Archive(t.Context(), refs)[0].Ref}
+						if res := s.StoreFlags(t.Context(), []ref.Ref{r}, []string{`\Seen`}, nil)[0]; res.Err != nil || res.Ref != r {
+							t.Errorf("StoreFlags = %+v, want %s", res, r)
+							return
+						}
+						archived := i%2 == 0
+						if archived {
+							res := s.Archive(t.Context(), []ref.Ref{r})[0]
+							if res.Err != nil || res.Ref.Folder != archive {
+								t.Errorf("Archive = %+v, want a ref in %s", res, archive)
+								return
+							}
+							r = res.Ref
 						}
 						if i%5 == 0 {
-							s.Expunge(t.Context(), refs)
+							if res := s.Expunge(t.Context(), []ref.Ref{r})[0]; res.Err != nil || res.Ref != (ref.Ref{}) {
+								t.Errorf("Expunge = %+v, want a zero ref", res)
+								return
+							}
+						} else {
+							mu.Lock()
+							survivors = append(survivors, survivor{r: r, archived: archived})
+							mu.Unlock()
 						}
-						_, _ = s.ListFolders(t.Context())
+						if _, err := s.ListFolders(t.Context()); err != nil {
+							t.Error(err)
+						}
 						_ = s.Ops()
 						_ = s.Appended()
 					}
-				}()
+				})
 			}
 			wg.Wait()
 			if n := len(s.Appended()); n != workers*each {
 				t.Errorf("Appended = %d, want %d", n, workers*each)
 			}
+			want := workers * (each - each/5)
+			if len(survivors) != want {
+				t.Fatalf("survivors = %d, want %d", len(survivors), want)
+			}
 			s.mu.Lock()
 			left := len(s.msgs)
 			s.mu.Unlock()
-			if want := workers * (each - each/5); left != want {
+			if left != want {
 				t.Errorf("messages left = %d, want %d", left, want)
+			}
+			var inInbox uint32
+			for _, sv := range survivors {
+				m := fetch(t, s, sv.r)
+				if !slices.Contains(m.Summary.Flags, `\Seen`) {
+					t.Errorf("%s flags = %v, want \\Seen", sv.r, m.Summary.Flags)
+				}
+				switch {
+				case gmail && sv.archived == hasLabelIn(m.Summary.Labels, `\Inbox`):
+					t.Errorf("%s labels = %v, archived=%v", sv.r, m.Summary.Labels, sv.archived)
+				case !gmail && sv.archived && sv.r.Folder != archive, !gmail && !sv.archived && sv.r.Folder != inbox:
+					t.Errorf("%s is in the wrong folder, archived=%v", sv.r, sv.archived)
+				}
+				if !sv.archived {
+					inInbox++
+				}
+			}
+			if n := listed(t, s, inbox); n != inInbox {
+				t.Errorf("INBOX holds %d messages, want %d", n, inInbox)
 			}
 		})
 	}
