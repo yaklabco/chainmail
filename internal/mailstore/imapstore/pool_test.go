@@ -409,3 +409,50 @@ func TestPoolCountsConnectionsStillLoggingOut(t *testing.T) {
 		})
 	}
 }
+
+// The peak since a reset counts every connection that held a slot meanwhile,
+// those that closed again included, and those open at the reset.
+func TestPoolConnPeakSinceTheReset(t *testing.T) {
+	t.Parallel()
+	p := newTestPool(4, &fakeDialer{}, &testClock{t: time.Unix(0, 0)}, time.Hour)
+	held, _ := p.get(t.Context(), "", false)
+	if got := p.connPeak(); got != 1 {
+		t.Errorf("peak before any reset = %d, want 1", got)
+	}
+	p.resetConnPeak()
+	if got := p.connPeak(); got != 1 {
+		t.Errorf("peak at the reset = %d, want 1: the open connection holds a slot", got)
+	}
+	// Two more open and close again before the peak is read.
+	a, _ := p.get(t.Context(), "", false)
+	b, _ := p.get(t.Context(), "", false)
+	p.discard(a)
+	p.put(b)
+	_ = p.close()
+	p.put(held)
+	if n := p.openCount(); n != 0 {
+		t.Fatalf("open after close = %d, want 0", n)
+	}
+	if got := p.connPeak(); got != 3 {
+		t.Errorf("peak = %d, want 3: connections that closed since the reset still count", got)
+	}
+	p.resetConnPeak()
+	if got := p.connPeak(); got != 0 {
+		t.Errorf("peak after a reset with none open = %d, want 0", got)
+	}
+}
+
+// A dial in progress holds a slot, so the peak counts it even when the dial
+// then fails.
+func TestPoolConnPeakCountsDials(t *testing.T) {
+	t.Parallel()
+	d := &fakeDialer{failNext: errors.New("refused")}
+	p := newTestPool(2, d, &testClock{t: time.Unix(0, 0)}, time.Hour)
+	p.resetConnPeak()
+	if _, err := p.get(t.Context(), "", false); err == nil {
+		t.Fatal("get = nil error, want the dial's")
+	}
+	if got := p.connPeak(); got != 1 {
+		t.Errorf("peak = %d, want 1 for the dial", got)
+	}
+}

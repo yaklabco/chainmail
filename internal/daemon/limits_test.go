@@ -542,6 +542,8 @@ type streams struct {
 	srv   *capServer
 	mu    sync.Mutex
 	conns []io.Closer
+	// peak is the most open at once since resetPeak.
+	peak int
 }
 
 // open takes n of srv's slots.
@@ -555,6 +557,7 @@ func (s *streams) open(t *testing.T, n int) {
 			t.Fatal(err)
 		}
 		s.conns = append(s.conns, c)
+		s.peak = max(s.peak, len(s.conns))
 	}
 }
 
@@ -563,6 +566,20 @@ func (s *streams) count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.conns)
+}
+
+// resetPeak starts a new peak from those open now.
+func (s *streams) resetPeak() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.peak = len(s.conns)
+}
+
+// maxOpen is the most open at once since resetPeak.
+func (s *streams) maxOpen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.peak
 }
 
 // closeAll frees every slot they hold.
@@ -583,6 +600,12 @@ type streamFake struct {
 }
 
 func (f *streamFake) OpenConns() int { return f.streams.count() }
+
+// ResetConnPeak and ConnPeak count the streams as imapstore.Store counts
+// its connections.
+func (f *streamFake) ResetConnPeak() { f.streams.resetPeak() }
+
+func (f *streamFake) ConnPeak() int { return f.streams.maxOpen() }
 
 // cleanupFake is a probe fake that runs onClose as it closes its first probe
 // connection, before that connection gives its slot back.
@@ -1060,5 +1083,55 @@ func TestProbeFailuresKeepServerTextOutOfLogs(t *testing.T) {
 	}
 	if strings.Contains(out, private) {
 		t.Errorf("the logs hold the server's text:\n%s", out)
+	}
+}
+
+// busyFake is a probe fake whose dial number at runs while the account's
+// calls are busy: busy runs before it dials and idle once the server has
+// answered, both before the dial returns.
+type busyFake struct {
+	*probeFake
+	at         int
+	busy, idle func()
+
+	mu    sync.Mutex
+	dials int
+}
+
+func (f *busyFake) ProbeDial(ctx context.Context) (io.Closer, error) {
+	f.mu.Lock()
+	f.dials++
+	n := f.dials
+	f.mu.Unlock()
+	if n != f.at {
+		return f.probeFake.ProbeDial(ctx)
+	}
+	f.busy()
+	c, err := f.probeFake.ProbeDial(ctx)
+	f.idle()
+	return c, err
+}
+
+// Connections the account's calls open after the probe starts and close
+// before the server's refusal reaches the probe held server slots at the
+// refusal, so they count toward the cap, which does not read low.
+func TestProbeCountsConnectionsThatClosedBeforeTheRefusal(t *testing.T) {
+	t.Parallel()
+	srv := &capServer{cap: 4}
+	held := &streams{srv: srv}
+	// Two probe connections succeed; the third is refused while the calls
+	// hold the other two slots, which they give back before it returns.
+	s := newStreamsServer(t, srv, held, func(p *probeFake) mailstore.Store {
+		return &busyFake{probeFake: p, at: 3, busy: func() { held.open(t, 2) }, idle: held.closeAll}
+	})
+	got := probeLimits(t, s, "host").GetLimits()
+	if len(got) != 1 || got[0].GetImapCap() != 4 || got[0].GetPoolSize() != 2 {
+		t.Fatalf("limits = %v, want host cap 4 pool 2", got)
+	}
+	if l, ok := storedLimit(t, s, "host"); !ok || l.IMAPCap != 4 {
+		t.Errorf("stored = %+v (ok %v), want cap 4", l, ok)
+	}
+	if held.count() != 0 {
+		t.Errorf("calls' connections open = %d, want 0 before the probe returned", held.count())
 	}
 }

@@ -54,10 +54,21 @@ type connCounter interface {
 	OpenConns() int
 }
 
+// connPeaker is a store that keeps the most connections it held open at
+// once since it was last reset, those that have closed since included.
+// imapstore.Store is one. A probe resets it before its first dial and adds
+// the peak after its last, so a call's connection that came and went while
+// it dialed still counts.
+type connPeaker interface {
+	ResetConnPeak()
+	ConnPeak() int
+}
+
 // The real store is probed and counted through these interfaces.
 var (
 	_ prober      = (*imapstore.Store)(nil)
 	_ connCounter = (*imapstore.Store)(nil)
+	_ connPeaker  = (*imapstore.Store)(nil)
 )
 
 // openConns is how many connections st holds open, or 0 when it cannot say.
@@ -243,14 +254,12 @@ type probeResult struct {
 // install a store sized from it.
 //
 // The account's own connections, in its current and retired stores, hold
-// server slots the probe cannot get, so they are added to its count. They
-// are sampled before the first dial and again when the server refuses one,
-// and the larger is added. A connection that closes before the refusal is
-// still counted, so its slot, which the probe then takes too, reads one
-// high. That is accepted: the pool shrinks on the next runtime refusal. A
-// low cap is not, and a connection a call opens while the probe dials is in
-// the second sample. Neither is taken after the probe has logged out, when
-// connections that held slots at the refusal may have closed.
+// server slots the probe cannot get, so they are added to its count: the
+// most the current store held at once from before the first dial to after
+// the last, and what the retired ones held at the start (storeSet.countConns).
+// A connection that came and went while the probe dialed is counted even if
+// it closed before the server refused the probe, so the cap can read high,
+// which the next runtime refusal corrects, but not low.
 // With onlyIfStale, a limit that is fresh once the probe lock is held is
 // kept.
 func (s *Server) probeAccount(ctx context.Context, acct config.ResolvedAccount, onlyIfStale bool) probeResult {
@@ -297,20 +306,13 @@ func (s *Server) probeLocked(ctx context.Context, acct config.ResolvedAccount, o
 	if !ok {
 		return errProbeUnsupported
 	}
-	inUse := s.stores.openConns(acct)
-	dial := func(ctx context.Context) (io.Closer, error) {
-		c, err := p.ProbeDial(ctx)
-		if err != nil {
-			inUse = max(inUse, s.stores.openConns(acct))
-		}
-		return c, err
-	}
-	n, err := limits.Probe(ctx, dial, s.lim.probeOpts)
+	inUse := s.stores.countConns(acct)
+	n, err := limits.Probe(ctx, p.ProbeDial, s.lim.probeOpts)
 	if err != nil {
 		// A cancelled probe returns no count, and a failed one no cap.
 		return err
 	}
-	n += inUse
+	n += inUse()
 	l := limits.Limit{Account: acct.Name, IMAPCap: n, ProbedAt: s.opts.Now().UTC()}
 	if err := s.lim.store.Put(ctx, l); err != nil {
 		return err

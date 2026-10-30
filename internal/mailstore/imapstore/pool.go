@@ -45,9 +45,13 @@ type pool[C pooled] struct {
 	// They no longer count against max, but the server still holds their
 	// slots, so openCount reports them.
 	closing int
-	idle    []*idleConn[C]
-	wake    chan struct{}
-	closed  bool
+	// peak is the most of open plus closing since the last resetConnPeak.
+	// Only a dial raises the sum: a logout moves a connection from open to
+	// closing.
+	peak   int
+	idle   []*idleConn[C]
+	wake   chan struct{}
+	closed bool
 }
 
 func newPool[C pooled](dial func(context.Context) (C, error), opts poolOptions) *pool[C] {
@@ -81,6 +85,7 @@ func (p *pool[C]) get(ctx context.Context, folder string, writable bool) (C, err
 		}
 		if p.open < p.max {
 			p.open++
+			p.peak = max(p.peak, p.open+p.closing)
 			p.mu.Unlock()
 			c, err := p.dial(ctx)
 			if err != nil {
@@ -180,6 +185,22 @@ func (p *pool[C]) openCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.open + p.closing
+}
+
+// resetConnPeak starts a new peak from the connections holding a slot now.
+func (p *pool[C]) resetConnPeak() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.peak = p.open + p.closing
+}
+
+// connPeak returns the most connections that held a slot at once since the
+// last resetConnPeak, or since the pool was made: dialing, borrowed, idle or
+// still logging out. Connections that have closed since still count.
+func (p *pool[C]) connPeak() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.peak
 }
 
 // startLogoutLocked moves a connection about to be logged out from open to

@@ -219,6 +219,17 @@ func (s *Store) Close() error {
 // count.
 func (s *Store) OpenConns() int { return s.pool.openCount() }
 
+// ResetConnPeak starts a new ConnPeak from the pooled connections holding a
+// slot now.
+func (s *Store) ResetConnPeak() { s.pool.resetConnPeak() }
+
+// ConnPeak returns the most pooled connections that held a slot on the
+// server at once since the last ResetConnPeak, or since the store was made,
+// as OpenConns counts them. Connections that have closed since still count,
+// so a connection-limit probe that adds it to its own count cannot read the
+// limit low because the account's connections came and went while it dialed.
+func (s *Store) ConnPeak() int { return s.pool.connPeak() }
+
 // PoolSize returns the most connections the store opens at once:
 // Options.PoolSize, less one for each time the server refused a connection
 // for being over its limit.

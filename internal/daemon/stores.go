@@ -172,18 +172,49 @@ func (e *storeEntry) retiredConnsLocked() int {
 	return n
 }
 
-// openConns is how many connections acct's stores hold on the server: the
-// current store's and those of every retired store not yet drained. A
-// store that cannot count its connections, such as a fake, counts 0.
-func (s *storeSet) openConns(acct config.ResolvedAccount) int {
+// countConns starts counting the connections acct's stores hold on the
+// server, for a probe, and returns the count so far. That is what every
+// retired store not yet drained holds now, which only falls since no call
+// uses them, plus the most the current store held at once since the start,
+// connections that have closed since included. A store built after the
+// start, on the account's first use, counts all it held. A store that
+// cannot keep that peak counts what it holds at the start or the end,
+// whichever is more, and one that cannot count, such as a fake, counts 0.
+func (s *storeSet) countConns(acct config.ResolvedAccount) (sofar func() int) {
 	e := s.entry(acct)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	n := e.retiredConnsLocked()
-	if e.cur != nil {
-		n += openConns(e.cur)
+	retired := e.retiredConnsLocked()
+	start := e.cur
+	startOpen := 0
+	if start != nil {
+		startOpen = openConns(start)
+		if p, ok := start.(connPeaker); ok {
+			p.ResetConnPeak()
+		}
 	}
-	return n
+	return func() int {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		n := retired
+		if start != nil {
+			n += peakConns(start, startOpen)
+		}
+		if e.cur != nil && e.cur != start {
+			n += peakConns(e.cur, 0)
+		}
+		return n
+	}
+}
+
+// peakConns is the most connections st held at once since its peak was
+// reset, or since it was made. A store that keeps no peak gives the larger
+// of sampled and what it holds now.
+func peakConns(st mailstore.Store, sampled int) int {
+	if p, ok := st.(connPeaker); ok {
+		return p.ConnPeak()
+	}
+	return max(sampled, openConns(st))
 }
 
 // closeAll closes every store in parallel. Stores are not built again.
