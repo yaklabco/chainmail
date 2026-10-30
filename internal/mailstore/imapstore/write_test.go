@@ -1213,17 +1213,37 @@ func TestReadAfterAWriteSyncsAReusedFolder(t *testing.T) {
 	})
 	s := writeStore(t, srv, Options{PoolSize: 2})
 	inbox := hostRef("INBOX", 7, 1)
+	lookupCtx, cancelLookup := context.WithCancel(t.Context())
+	defer cancelLookup()
+	lookupDone := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		if _, err := s.FindByMessageID(t.Context(), "Archive", "5@x"); err != nil {
+		defer close(lookupDone)
+		if _, err := s.FindByMessageID(lookupCtx, "Archive", "5@x"); err != nil {
 			t.Error(err)
 		}
 	})
+	// fail stops the test while the lookup is still out, once it has ended.
+	fail := func(format string, args ...any) {
+		t.Helper()
+		cancelLookup()
+		wg.Wait()
+		t.Fatalf(format, args...)
+	}
+	deadline := time.After(5 * time.Second)
 	for srv.sent("UID SEARCH") == 0 {
-		time.Sleep(time.Millisecond)
+		select {
+		case <-lookupDone:
+			if srv.sent("UID SEARCH") == 0 {
+				fail("the lookup ended before it sent UID SEARCH; commands %q", srv.received())
+			}
+		case <-deadline:
+			fail("no UID SEARCH within 5s; commands %q", srv.received())
+		case <-time.After(time.Millisecond):
+		}
 	}
 	if got := one(t, s.StoreFlags(t.Context(), []ref.Ref{inbox}, []string{`\Seen`}, nil)); got.Err != nil {
-		t.Fatal(got.Err)
+		fail("StoreFlags: %v", got.Err)
 	}
 	wg.Wait()
 	if n := srv.sent("NOOP"); n != 0 || srv.conns.Load() != 2 {
