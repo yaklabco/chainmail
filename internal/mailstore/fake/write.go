@@ -133,35 +133,18 @@ func (s *Store) batch(ctx context.Context, op string, refs []ref.Ref, prep func(
 			out[i].Err = err
 			continue
 		}
-		m, rerr := s.resolveWriteLocked(r)
+		m, rerr := s.resolveLocked(r)
 		if rerr != nil {
 			out[i].Err = rerr
 			continue
 		}
-		out[i].Ref, out[i].Err = each(m, r)
+		// A Gmail ref found again by X-GM-MSGID is given as it is now.
+		now := s.refInLocked(m, r.Folder)
+		now.GmailMsgID = r.GmailMsgID
+		out[i].Ref, out[i].Err = each(m, now)
 	}
 	s.pruneViewsLocked()
 	return out
-}
-
-// resolveWriteLocked finds the message a write names. Unlike reads it does
-// not recover a Gmail ref by X-GM-MSGID: a changed UIDVALIDITY is
-// ErrStaleRef, and the caller searches again.
-func (s *Store) resolveWriteLocked(r ref.Ref) (*Message, error) {
-	if r.Account != s.account {
-		return nil, fmt.Errorf("%w: ref is for account %s", mailstore.ErrNotFound, r.Account)
-	}
-	v, ok := s.uidValidity[r.Folder]
-	switch {
-	case !ok:
-		return nil, fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, r.Folder)
-	case v != r.UIDValidity:
-		return nil, fmt.Errorf("%w: %s changed; search again", mailstore.ErrStaleRef, r.Folder)
-	}
-	if m := s.findLocked(r.Folder, r.UID); m != nil {
-		return m, nil
-	}
-	return nil, fmt.Errorf("%w: message is gone; search again", mailstore.ErrStaleRef)
 }
 
 // folderLocked returns the folder named name.

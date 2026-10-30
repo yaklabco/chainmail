@@ -367,6 +367,7 @@ func TestWriteRefErrors(t *testing.T) {
 				s.msgs = slices.DeleteFunc(s.msgs, func(m *Message) bool { return m.Subject == "missing" })
 				s.mu.Unlock()
 				stale.UIDValidity = 77
+				stale.GmailMsgID = 0 // with it, a Gmail write finds the message again
 				other := good
 				other.Account = "elsewhere"
 				noFolder := good
@@ -1453,5 +1454,39 @@ func TestWriteGmailLabelFolderRefs(t *testing.T) {
 	}
 	if got := one(t, s.Expunge(ctx, []ref.Ref{back[0]})); !errors.Is(got.Err, mailstore.ErrStaleRef) {
 		t.Errorf("Expunge of an INBOX ref the message left = %+v, want ErrStaleRef", got)
+	}
+}
+
+// TestWriteGmailRecoversRefsByMsgID: like imapstore, a Gmail write whose
+// ref's UIDVALIDITY changed finds the message again by its X-GM-MSGID, and
+// a kept ref comes back with the folder's UIDVALIDITY now. Standard
+// accounts have no such ID, so the ref is stale.
+func TestWriteGmailRecoversRefsByMsgID(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := newGmail()
+	r := s.Add(Message{Folder: allMail, Subject: "kept", Labels: []string{`\Inbox`}})
+	gone := s.Add(Message{Folder: allMail, Subject: "gone"})
+	if res := one(t, s.Expunge(ctx, []ref.Ref{gone})); res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	s.SetUIDValidity(allMail, 50)
+	now := r
+	now.UIDValidity = 50
+	if got := one(t, s.StoreFlags(ctx, []ref.Ref{r}, []string{`\Seen`}, nil)); got != (mailstore.RefResult{Ref: now}) {
+		t.Errorf("StoreFlags with an old UIDVALIDITY = %+v, want the ref as it is now, %v", got, now)
+	}
+	if got := one(t, s.Archive(ctx, []ref.Ref{gone})); !errors.Is(got.Err, mailstore.ErrStaleRef) {
+		t.Errorf("Archive of an expunged message = %+v, want ErrStaleRef", got)
+	}
+	if got := one(t, s.Trash(ctx, []ref.Ref{r})); got.Err != nil || got.Ref.Folder != gmailTrash {
+		t.Errorf("Trash with an old UIDVALIDITY = %+v, want it moved", got)
+	}
+
+	std := newHost()
+	sr := std.Add(Message{Folder: "INBOX", Subject: "x"})
+	std.SetUIDValidity("INBOX", 50)
+	if got := one(t, std.StoreFlags(ctx, []ref.Ref{sr}, []string{`\Seen`}, nil)); !errors.Is(got.Err, mailstore.ErrStaleRef) {
+		t.Errorf("standard StoreFlags with an old UIDVALIDITY = %+v, want ErrStaleRef", got)
 	}
 }
