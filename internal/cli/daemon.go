@@ -144,6 +144,7 @@ func runDaemon(ctx context.Context, env Env, p daemonPlan) error {
 		Authorizer: daemon.NewAuthorizer(uint32(os.Getuid()), gid),
 		DevMode:    p.dev,
 		Logger:     logger,
+		StateDir:   p.stateDir,
 	})
 	if err != nil {
 		_ = ln.Close() // the New error is the one to report

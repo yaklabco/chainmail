@@ -20,8 +20,10 @@ import (
 	"github.com/jamesainslie/chainmail/internal/audit"
 	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/idempotency"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/mailstore/imapstore"
+	"github.com/jamesainslie/chainmail/internal/upload"
 	"github.com/jamesainslie/chainmail/internal/vault"
 )
 
@@ -44,6 +46,13 @@ type Options struct {
 	Logger *slog.Logger
 	// Now defaults to time.Now.
 	Now func() time.Time
+	// StateDir holds the daemon's files. Uploads live in its uploads
+	// directory. Empty means uploads are refused.
+	StateDir string
+	// OutcomeSearchInterval is the wait between the tries of the Sent
+	// search for a send whose outcome is unknown. Zero means 5 seconds,
+	// which makes 3 tries over 10 seconds. Tests shorten it.
+	OutcomeSearchInterval time.Duration
 }
 
 const (
@@ -77,6 +86,11 @@ type Server struct {
 	accountLocks keyedLock
 	handlers     inflight
 	stores       *storeSet
+	// idem records send-type calls by idempotency key.
+	idem *idempotency.Store
+	// uploads holds attachment bytes for later sends. Nil without a StateDir.
+	uploads *upload.Store
+	compose *composeService
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -104,12 +118,16 @@ func New(opts Options) (*Server, error) {
 		}
 	}
 	s.stores = &storeSet{newStore: newStore}
+	if err := s.openSendState(); err != nil {
+		return nil, err
+	}
+	s.compose = newComposeService(s)
 	mux := http.NewServeMux()
 	handlerOpts := connect.WithReadMaxBytes(maxRequestBytes)
 	mux.Handle(chainmailv1connect.NewAccountServiceHandler(&accountService{s: s}, handlerOpts))
 	mux.Handle(chainmailv1connect.NewAdminServiceHandler(&adminService{s: s}, handlerOpts))
 	mux.Handle(chainmailv1connect.NewMessageServiceHandler(&messageService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
-	mux.Handle(chainmailv1connect.NewComposeServiceHandler(&composeService{s: s},
+	mux.Handle(chainmailv1connect.NewComposeServiceHandler(s.compose,
 		connect.WithReadMaxBytes(composeMaxRequestBytes), connect.WithSendMaxBytes(composeMaxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewOrganizeServiceHandler(&organizeService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	protocols := new(http.Protocols)
@@ -134,8 +152,13 @@ func New(opts Options) (*Server, error) {
 // TIMEOUT while their audit rows are still written. Serve returns only once
 // every handler has returned, so the caller can close the state database.
 func (s *Server) Serve(ctx context.Context) error {
+	if err := s.recoverSends(ctx); err != nil {
+		_ = s.opts.Listener.Close() // the recovery error is the one to report
+		return err
+	}
 	base, cancelBase := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelBase()
+	defer s.startBackground(base)()
 	s.httpSrv.BaseContext = func(net.Listener) context.Context { return base }
 	errc := make(chan error, 1)
 	go func() { errc <- s.httpSrv.Serve(s.opts.Listener) }()
