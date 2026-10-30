@@ -340,17 +340,21 @@ func (s *sweeper) expunge(ctx context.Context) (int, error) {
 // deleteTestFolder deletes the test's folder without force, so it never
 // takes mail the sweep did not find with it. A folder that is not there is
 // fine: the create may not have taken effect, or the test deleted it
-// already. While the server refuses, it tries again for
-// folderSettleTimeout.
-func deleteTestFolder(ctx context.Context, c *client.Client, account, folder string) error {
+// already. While the server refuses, it runs resweep, which expunges only
+// the test's own token mail, and tries again, for folderSettleTimeout.
+func deleteTestFolder(ctx context.Context, c *client.Client, account, folder string, resweep func(context.Context) error) error {
 	start := time.Now()
+	var sweepErr error
 	for n := 0; ; n++ {
 		_, err := c.Organize.DeleteFolder(ctx, connect.NewRequest(&chainmailv1.DeleteFolderRequest{Account: account, Name: folder}))
 		if err == nil || reasonOf(err) == api.ReasonNotFound {
 			return nil
 		}
 		if time.Since(start) >= folderSettleTimeout || pause(ctx, n) != nil {
-			return fmt.Errorf("DeleteFolder %s: %w (%s)", folder, err, hint(err))
+			return errors.Join(fmt.Errorf("DeleteFolder %s: %w (%s)", folder, err, hint(err)), sweepErr)
+		}
+		if resweep != nil {
+			sweepErr = resweep(ctx)
 		}
 	}
 }
@@ -586,17 +590,25 @@ func TestEveryAccountOrganizes(t *testing.T) {
 				t.Fatalf("%s already exists; run the test again for another name", folder)
 			}
 			base := context.WithoutCancel(t.Context())
+			var sw *sweeper // set below; the folder cleanup re-sweeps with it
 			// Registered before CreateFolder, so a create that took effect
 			// but returned an error is still cleaned up, and before the
 			// sweeper, so it runs after the sweep has emptied the folder.
 			t.Cleanup(func() {
 				ctx, cancel := context.WithTimeout(base, cleanupTimeout)
 				defer cancel()
-				if err := deleteTestFolder(ctx, c, name, folder); err != nil {
+				resweep := func(ctx context.Context) error {
+					if sw == nil {
+						return nil
+					}
+					_, err := sw.expunge(ctx)
+					return err
+				}
+				if err := deleteTestFolder(ctx, c, name, folder, resweep); err != nil {
 					t.Errorf("cleanup on %s: %v; delete it by hand", name, err)
 				}
 			})
-			sw := newSweeper(t, c, a, roles, token)
+			sw = newSweeper(t, c, a, roles, token)
 
 			if _, err := c.Organize.CreateFolder(t.Context(), connect.NewRequest(&chainmailv1.CreateFolderRequest{Account: name, Name: folder})); err != nil {
 				t.Fatalf("CreateFolder %s: %v (%s)", folder, err, hint(err))
