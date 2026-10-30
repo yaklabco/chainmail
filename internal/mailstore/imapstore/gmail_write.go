@@ -55,27 +55,86 @@ type gmailFolder struct {
 	label string // for gmailLabel
 }
 
+// systemAttrs are the special-use attributes of Gmail's own folders.
+var systemAttrs = []imap.MailboxAttr{
+	imap.MailboxAttrAll, imap.MailboxAttrTrash, imap.MailboxAttrJunk, imap.MailboxAttrSent,
+	imap.MailboxAttrDrafts, imap.MailboxAttrImportant, imap.MailboxAttrFlagged,
+}
+
+// reservedSystem are the names Gmail gives the parent of its own folders.
+// They are refused on every Gmail account, whichever one its listing shows.
+var reservedSystem = systemSpace{"[Gmail]/", "[Google Mail]/", "[GoogleMail]/"}
+
+// systemSpace is the system namespace of a Gmail account: the parents of
+// Gmail's own folders, each with the delimiter after it, such as
+// "[Gmail]/". It is found from the folders' special-use attributes rather
+// than their names, which some accounts have localised or under
+// "[Google Mail]", so it is known while All Mail, or any other of them, is
+// hidden from IMAP.
+type systemSpace []string
+
+// systemNamespace finds the system namespace in a LIST reply: the parent of
+// each folder with one of systemAttrs. A top-level folder with one has no
+// namespace and is known by its attribute alone.
+func systemNamespace(list []*imap.ListData) systemSpace {
+	var out systemSpace
+	for _, l := range list {
+		if l.Delim == 0 || !hasSystemAttr(l.Attrs) {
+			continue
+		}
+		i := strings.LastIndex(l.Mailbox, string(l.Delim))
+		if i <= 0 {
+			continue
+		}
+		p := l.Mailbox[:i+len(string(l.Delim))]
+		if !slices.ContainsFunc(out, func(q string) bool { return strings.EqualFold(p, q) }) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// hasSystemAttr reports whether attrs mark one of Gmail's own folders.
+func hasSystemAttr(attrs []imap.MailboxAttr) bool {
+	return slices.ContainsFunc(attrs, func(a imap.MailboxAttr) bool {
+		return slices.ContainsFunc(systemAttrs, func(s imap.MailboxAttr) bool { return strings.EqualFold(string(a), string(s)) })
+	})
+}
+
+// parent returns, without its delimiter, the parent in s or reservedSystem
+// that name is or is below, ignoring case.
+func (s systemSpace) parent(name string) (string, bool) {
+	for _, p := range slices.Concat(s, reservedSystem) {
+		_, n := utf8.DecodeLastRuneInString(p)
+		top := p[:len(p)-n]
+		if strings.EqualFold(name, top) || (len(name) > len(p) && strings.EqualFold(name[:len(p)], p)) {
+			return top, true
+		}
+	}
+	return "", false
+}
+
+// holds reports whether name is one of Gmail's own folders or their parent.
+func (s systemSpace) holds(name string) bool {
+	_, ok := s.parent(name)
+	return ok
+}
+
 // gmailView is a Gmail account's folders, for its writes.
 type gmailView struct {
 	folders []mailstore.Folder
 	allMail string // "" when All Mail is hidden from IMAP
 	trash   string
-	// system starts the names of Gmail's own folders: "[Gmail]/", or
-	// "[Google Mail]/" on accounts that have that name.
-	system string
+	system  systemSpace
 }
 
 // gmailView returns the account's folders, listed afresh when refresh.
 func (s *Store) gmailView(ctx context.Context, refresh bool) (gmailView, error) {
-	folders, err := s.folderList(ctx, refresh)
+	folders, system, err := s.folderListing(ctx, refresh)
 	if err != nil {
 		return gmailView{}, err
 	}
-	v := gmailView{folders: folders, allMail: byRole(folders, mailstore.RoleAll), trash: byRole(folders, mailstore.RoleTrash), system: "[Gmail]/"}
-	if i := strings.LastIndex(v.allMail, "/"); i > 0 {
-		v.system = v.allMail[:i+1] // Gmail's delimiter is always "/"
-	}
-	return v, nil
+	return gmailView{folders: folders, allMail: byRole(folders, mailstore.RoleAll), trash: byRole(folders, mailstore.RoleTrash), system: system}, nil
 }
 
 // gmailDest finds the folder a move or copy names, listing the folders
@@ -93,21 +152,13 @@ func (s *Store) gmailDest(ctx context.Context, name string) (gmailView, gmailFol
 	return gmailView{}, gmailFolder{}, fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, name)
 }
 
-// find returns the folder called name. INBOX matches in any case.
+// find returns the folder called name, or else the one whose name is name
+// ignoring case, as Gmail matches labels and INBOX.
 func (v gmailView) find(name string) (gmailFolder, bool) {
-	i := slices.IndexFunc(v.folders, func(f mailstore.Folder) bool {
-		return f.Name == name || (f.Role == mailstore.RoleInbox && strings.EqualFold(name, "INBOX"))
-	})
+	i := slices.IndexFunc(v.folders, func(f mailstore.Folder) bool { return f.Name == name })
 	if i < 0 {
-		return gmailFolder{}, false
+		i = slices.IndexFunc(v.folders, func(f mailstore.Folder) bool { return strings.EqualFold(f.Name, name) })
 	}
-	return v.classify(v.folders[i]), true
-}
-
-// fold returns the folder whose name is name ignoring case, as Gmail
-// matches labels.
-func (v gmailView) fold(name string) (gmailFolder, bool) {
-	i := slices.IndexFunc(v.folders, func(f mailstore.Folder) bool { return strings.EqualFold(f.Name, name) })
 	if i < 0 {
 		return gmailFolder{}, false
 	}
@@ -147,21 +198,29 @@ func (v gmailView) classify(f mailstore.Folder) gmailFolder {
 }
 
 // isSystem reports whether name is one of Gmail's own folders or their parent.
-func (v gmailView) isSystem(name string) bool {
-	parent := strings.TrimSuffix(v.system, "/")
-	return strings.EqualFold(name, parent) || (len(name) > len(v.system) && strings.EqualFold(name[:len(v.system)], v.system))
-}
+func (v gmailView) isSystem(name string) bool { return v.system.holds(name) }
 
 // labelEdit is a label change applied to every group of a batch.
 type labelEdit struct {
 	add, remove []string
 	// into is the folder a move or copy names: a group already in it is
-	// left as it is.
+	// left as it is, once a UID FETCH has found which messages are there.
 	into string
 	// restore says a move: groups in Trash or Spam go back to All Mail
 	// first, under new refs, and take the labels there.
 	restore bool
+	// binErr, when set, fails a group in Trash or Spam without a command.
+	binErr error
 }
+
+// errBinNotInAllMail refuses a copy into All Mail of a message in Trash or
+// Spam, which is not in All Mail: Gmail keeps one copy of a message, so
+// only a move takes it there.
+var errBinNotInAllMail = fmt.Errorf("%w: the message is in Trash or Spam, not All Mail, and Gmail keeps one copy of a message; move it to All Mail instead", mailstore.ErrUnsupported)
+
+// errRemovalFailed reports a label edit whose additions went through but
+// whose removals did not, or may not have.
+var errRemovalFailed = fmt.Errorf("%w: the labels were added, but removing the others failed, so the message may still be in its folder; search before trying again", mailstore.ErrUnavailable)
 
 func (s *Store) gmailMove(ctx context.Context, refs []ref.Ref, folder string) []mailstore.RefResult {
 	v, dest, err := s.gmailDest(ctx, folder)
@@ -195,7 +254,7 @@ func (s *Store) gmailCopy(ctx context.Context, refs []ref.Ref, folder string) []
 		return failAll(refs, otherFolder(dest.name))
 	case gmailAll:
 		// Every message outside Trash and Spam is in All Mail already.
-		return s.gmailEdit(ctx, refs, v, labelEdit{into: dest.name})
+		return s.gmailEdit(ctx, refs, v, labelEdit{into: dest.name, binErr: errBinNotInAllMail})
 	}
 	return s.gmailEdit(ctx, refs, v, labelEdit{add: []string{dest.label}, into: dest.name})
 }
@@ -311,7 +370,7 @@ func (v gmailView) labels(names []string) (out []string, created bool, err error
 			out = append(out, gmailSystemLabels[i])
 			continue
 		}
-		f, ok := v.fold(n)
+		f, ok := v.find(n)
 		switch {
 		case !ok && v.isSystem(n):
 			return nil, false, fmt.Errorf("%w: %s is one of Gmail's own folders, not a label", mailstore.ErrUnsupported, n)
@@ -334,9 +393,9 @@ func (s *Store) gmailEdit(ctx context.Context, refs []ref.Ref, v gmailView, e la
 		src := v.source(c.Selected())
 		switch {
 		case e.into != "" && src.name == e.into:
-			for _, uid := range g.uids {
-				g.keep(uid)
-			}
+			return keepPresent(ctx, c, g)
+		case e.binErr != nil && src.kind == gmailBin:
+			g.failAll(e.binErr)
 			return nil
 		case e.restore && src.kind == gmailBin:
 			return s.restoreThenLabel(ctx, c, g, v.allMail, e, sent)
@@ -349,22 +408,33 @@ func (s *Store) gmailEdit(ctx context.Context, refs []ref.Ref, v gmailView, e la
 	})
 }
 
-// storeLabels starts the label STOREs of e on set, for pipelined.
-func storeLabels(cl *imapclient.Client, set imap.UIDSet, e labelEdit) []func() error {
-	var waits []func() error
-	if len(e.add) > 0 {
-		waits = append(waits, cl.StoreGmailLabels(set, &imap.StoreGmailLabels{Op: imap.StoreFlagsAdd, Silent: true, Labels: e.add}, nil).Close)
+// addLabels starts the label additions of e on set, for pipelined.
+func addLabels(cl *imapclient.Client, set imap.UIDSet, e labelEdit) []func() error {
+	if len(e.add) == 0 {
+		return nil
 	}
-	if len(e.remove) > 0 {
-		waits = append(waits, cl.StoreGmailLabels(set, &imap.StoreGmailLabels{Op: imap.StoreFlagsDel, Silent: true, Labels: e.remove}, nil).Close)
-	}
-	return waits
+	return []func() error{cl.StoreGmailLabels(set, &imap.StoreGmailLabels{Op: imap.StoreFlagsAdd, Silent: true, Labels: e.add}, nil).Close}
 }
 
-// labelInPlace edits the group's labels in the folder open on c, pipelined
-// after a UID FETCH that learns which messages still exist. When leaves,
-// the edit takes them out of that folder, so the FETCH also reads their
-// X-GM-MSGIDs, by which their All Mail refs are found afterwards.
+// removeLabels sends the label removals of e on set and waits for the
+// answer. It runs only once the additions are confirmed: a removal
+// pipelined after a refused addition would still go through, and a Move's
+// -\Inbox would take the message out of INBOX without its new label.
+func (c *conn) removeLabels(ctx context.Context, set imap.UIDSet, e labelEdit) error {
+	if len(e.remove) == 0 {
+		return nil
+	}
+	return c.pipelined(ctx, func(cl *imapclient.Client) []func() error {
+		return []func() error{cl.StoreGmailLabels(set, &imap.StoreGmailLabels{Op: imap.StoreFlagsDel, Silent: true, Labels: e.remove}, nil).Close}
+	})
+}
+
+// labelInPlace edits the group's labels in the folder open on c. The
+// additions are pipelined after a UID FETCH that learns which messages
+// still exist, and the removals follow for those messages once the server
+// has accepted the additions. When leaves, the edit takes the messages out
+// of that folder, so the FETCH also reads their X-GM-MSGIDs, by which their
+// All Mail refs are found afterwards.
 func (s *Store) labelInPlace(ctx context.Context, c *conn, g *groupWrite, allMail string, e labelEdit, leaves bool, sent func()) error {
 	set := uidSet(g.uids)
 	var bufs []*imapclient.FetchMessageBuffer
@@ -376,10 +446,26 @@ func (s *Store) labelInPlace(ctx context.Context, c *conn, g *groupWrite, allMai
 			bufs, err = fetch.Collect()
 			return err
 		}
-		return append([]func() error{read}, storeLabels(cl, set, e)...)
+		return append([]func() error{read}, addLabels(cl, set, e)...)
 	})
 	if err != nil {
 		return err
+	}
+	present := make([]uint32, 0, len(bufs))
+	for _, b := range bufs {
+		present = append(present, uint32(b.UID))
+	}
+	slices.Sort(present)
+	if len(present) > 0 {
+		if err := c.removeLabels(ctx, uidSet(present), e); err != nil {
+			// A broken connection has been dropped from the pool already;
+			// either way the removal may not have happened.
+			s.opts.Logger.Debug("removing labels after adding them", "account", s.acct.Name, "err", err)
+			for _, uid := range present {
+				g.set(uid, mailstore.RefResult{Err: errRemovalFailed})
+			}
+			return nil
+		}
 	}
 	if !leaves {
 		for _, b := range bufs {
@@ -468,5 +554,8 @@ func (s *Store) labelMoved(ctx context.Context, c *conn, allMail string, validit
 		return fmt.Errorf("%s changed UIDVALIDITY after the move", allMail)
 	}
 	set := uidSet(slices.Sorted(maps.Values(pairs)))
-	return c.pipelined(ctx, func(cl *imapclient.Client) []func() error { return storeLabels(cl, set, e) })
+	if err := c.pipelined(ctx, func(cl *imapclient.Client) []func() error { return addLabels(cl, set, e) }); err != nil {
+		return err
+	}
+	return c.removeLabels(ctx, set, e)
 }

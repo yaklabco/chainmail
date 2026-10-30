@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -432,4 +434,241 @@ func TestGmailMoveMixedBatch(t *testing.T) {
 			t.Errorf("result %d = %+v, message in %v; want its All Mail ref, labelled Receipts", i, res[i], where)
 		}
 	}
+}
+
+func TestGmailCopyToAllMailFromABinIsUnsupported(t *testing.T) {
+	t.Parallel()
+	w := newGmailWrites(t)
+	kept := w.ref(t, allMail, 1)
+	res := w.store.Copy(t.Context(), []ref.Ref{w.ref(t, gmailTrash, 301), w.ref(t, gmailSpam, 401), kept}, allMail)
+	for i, tc := range []struct {
+		msg int
+		bin string
+	}{{gwTrashed, gmailTrash}, {gwSpammed, gmailSpam}} {
+		if !errors.Is(res[i].Err, mailstore.ErrUnsupported) {
+			t.Errorf("Copy from %s to All Mail = %+v, want ErrUnsupported: the message is not in All Mail", tc.bin, res[i])
+		}
+		if where := w.where(t, tc.msg); !in(where, tc.bin) {
+			t.Errorf("message %d is in %v, want it left in %s", tc.msg, where, tc.bin)
+		}
+	}
+	if res[2] != (mailstore.RefResult{Ref: kept}) {
+		t.Errorf("Copy of an All Mail ref to All Mail = %+v, want it unchanged", res[2])
+	}
+}
+
+// TestGmailSameFolderWritesCheckTheMessageIsThere covers a move or copy into
+// the folder a ref already names: a message that is gone is stale, not a
+// success.
+func TestGmailSameFolderWritesCheckTheMessageIsThere(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		folder string
+		uid    uint32
+		write  func(s *Store, t *testing.T, refs []ref.Ref, folder string) []mailstore.RefResult
+	}{
+		{"move to a label", "Work", 1101, func(s *Store, t *testing.T, refs []ref.Ref, f string) []mailstore.RefResult {
+			return s.Move(t.Context(), refs, f)
+		}},
+		{"copy to a label", "Work", 1101, func(s *Store, t *testing.T, refs []ref.Ref, f string) []mailstore.RefResult {
+			return s.Copy(t.Context(), refs, f)
+		}},
+		{"move to Trash", gmailTrash, 301, func(s *Store, t *testing.T, refs []ref.Ref, f string) []mailstore.RefResult {
+			return s.Move(t.Context(), refs, f)
+		}},
+		{"trash", gmailTrash, 301, func(s *Store, t *testing.T, refs []ref.Ref, _ string) []mailstore.RefResult {
+			return s.Trash(t.Context(), refs)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newGmailWrites(t)
+			live := w.ref(t, tc.folder, tc.uid)
+			gone := live
+			gone.UID = 999
+			res := tc.write(w.store, t, []ref.Ref{live, gone}, tc.folder)
+			if res[0] != (mailstore.RefResult{Ref: live}) {
+				t.Errorf("live ref: %+v, want it unchanged", res[0])
+			}
+			if !errors.Is(res[1].Err, mailstore.ErrStaleRef) {
+				t.Errorf("gone ref: %+v, want ErrStaleRef", res[1])
+			}
+		})
+	}
+}
+
+func TestGmailMoveMatchesTheDestinationIgnoringCase(t *testing.T) {
+	t.Parallel()
+	w := newGmailWrites(t)
+	r := w.ref(t, allMail, 1)
+	if got := one(t, w.store.Move(t.Context(), []ref.Ref{r}, "work")); got != (mailstore.RefResult{Ref: r}) {
+		t.Errorf("Move to work = %+v, want the ref unchanged: Gmail labels ignore case", got)
+	}
+	if got := w.where(t, gwInbox); !in(got, allMail, "Receipts", "Work") {
+		t.Errorf("message is in %v, want All Mail, Receipts and Work", got)
+	}
+}
+
+// gmailScripted is a Gmail account on the scripted writeServer.
+func gmailScripted(t *testing.T, srv *writeServer) *Store {
+	t.Helper()
+	s := New(testAccount("gmail", srv.ep, true), passwordCreds("gmail@example.test", "pw"),
+		Options{RootCAs: srv.ca.Pool, Backoff: noBackoff, CommandTimeout: 2 * time.Second})
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+// Folders of scriptedGmailFolders. The scripted server reads a SELECT's
+// folder name up to the first space.
+const (
+	sAll   = "[Gmail]/Everything"
+	sTrash = "[Gmail]/Bin"
+)
+
+// scriptedGmailFolders is a Gmail layout for the scripted server: All Mail
+// holds UIDs 1 and 2, Trash UID 5.
+func scriptedGmailFolders() []*wsFolder {
+	return []*wsFolder{
+		wsMailbox("INBOX", "", 7, 1),
+		wsMailbox("[Gmail]", `\Noselect`, 1),
+		wsMailbox(sAll, `\All`, 10, 1, 2),
+		wsMailbox(sTrash, `\Trash`, 30, 5),
+		wsMailbox("Work", "", 20),
+	}
+}
+
+func gmailRef(folder string, validity, uid uint32) ref.Ref {
+	return ref.Ref{Account: "gmail", Folder: folder, UIDValidity: validity, UID: uid}
+}
+
+// TestGmailLabelRemovalWaitsForTheAddition checks that a label edit sends
+// its removals (Move's -\Inbox) only once the server has accepted the
+// additions, so a refused addition leaves the message where it was.
+func TestGmailLabelRemovalWaitsForTheAddition(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		write func(s *Store, t *testing.T) mailstore.RefResult
+	}{
+		{"move to a label", func(s *Store, t *testing.T) mailstore.RefResult {
+			return one(t, s.Move(t.Context(), []ref.Ref{gmailRef(sAll, 10, 1)}, "Work"))
+		}},
+		{"move from Trash", func(s *Store, t *testing.T) mailstore.RefResult {
+			return one(t, s.Move(t.Context(), []ref.Ref{gmailRef(sTrash, 30, 5)}, "Work"))
+		}},
+		{"store labels", func(s *Store, t *testing.T) mailstore.RefResult {
+			return one(t, s.StoreLabels(t.Context(), []ref.Ref{gmailRef(sAll, 10, 1)}, []string{"Work"}, []string{`\Inbox`}))
+		}},
+	} {
+		t.Run(tc.name+": a refused addition removes nothing", func(t *testing.T) {
+			t.Parallel()
+			srv := startWriteServer(t, &writeServer{caps: "MOVE UIDPLUS X-GM-EXT-1", refuse: "UID STORE", folders: scriptedGmailFolders()})
+			got := tc.write(gmailScripted(t, srv), t)
+			if got.Err == nil {
+				t.Errorf("result = %+v, want the refusal", got)
+			}
+			if n := srv.sent("UID STORE"); n != 1 {
+				t.Errorf("commands %q, want only the refused addition: a removal after it takes the message out of INBOX unlabelled", srv.received())
+			}
+		})
+		t.Run(tc.name+": a refused removal after the addition is reported", func(t *testing.T) {
+			t.Parallel()
+			srv := startWriteServer(t, &writeServer{caps: "MOVE UIDPLUS X-GM-EXT-1", folders: scriptedGmailFolders()})
+			srv.after = func(srv *writeServer, kind string) {
+				if kind == "UID STORE" {
+					srv.refuse = "UID STORE" // the next STORE, the removal
+				}
+			}
+			got := tc.write(gmailScripted(t, srv), t)
+			if !errors.Is(got.Err, mailstore.ErrUnavailable) {
+				t.Errorf("result = %+v, want ErrUnavailable: the label went on, but the removal failed", got)
+			}
+			add, remove := srv.storeIndex("+X-GM-LABELS"), srv.storeIndex("-X-GM-LABELS")
+			if add < 0 || remove < 0 || remove < srv.eventIndex("sent UID STORE") {
+				t.Errorf("events %q, want the removal sent after the addition's reply", srv.events)
+			}
+		})
+	}
+}
+
+// storeIndex is the position of the first UID STORE received with item.
+func (srv *writeServer) storeIndex(item string) int {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	return slices.IndexFunc(srv.events, func(e string) bool {
+		return strings.HasPrefix(e, "recv UID STORE") && strings.Contains(e, item)
+	})
+}
+
+// TestGmailSystemFoldersByAttribute covers an account whose system folders
+// sit under [Google Mail], with localised names and All Mail hidden from
+// IMAP: they are known by their special-use attributes, not their names.
+func TestGmailSystemFoldersByAttribute(t *testing.T) {
+	t.Parallel()
+	const ns = "[Google Mail]"
+	folders := func() []*wsFolder {
+		return []*wsFolder{
+			wsMailbox("INBOX", "", 7, 1),
+			wsMailbox(ns, `\Noselect`, 1),
+			wsMailbox(ns+"/Gesendet", `\Sent`, 2),
+			wsMailbox(ns+"/Entwurfe", `\Drafts`, 3),
+			wsMailbox(ns+"/Papierkorb", `\Trash`, 4),
+			wsMailbox(ns+"/Spam", `\Junk`, 5),
+			wsMailbox(ns+"/Markiert", `\Flagged`, 6),
+			wsMailbox(ns+"/Wichtig", `\Important`, 8),
+			wsMailbox("Work", "", 20),
+		}
+	}
+	t.Run("folder changes are refused", func(t *testing.T) {
+		t.Parallel()
+		srv := startWriteServer(t, &writeServer{caps: "MOVE UIDPLUS X-GM-EXT-1 SPECIAL-USE", folders: folders()})
+		s := gmailScripted(t, srv)
+		ctx := t.Context()
+		for _, name := range []string{ns + "/New", ns, "[google mail]/new", "[Gmail]/Stuff"} {
+			if err := s.CreateFolder(ctx, name); !errors.Is(err, mailstore.ErrRefused) {
+				t.Errorf("CreateFolder(%q) = %v, want ErrRefused", name, err)
+			}
+		}
+		for _, tc := range [][2]string{
+			{ns + "/Gesendet", "Sent"},
+			{ns + "/Markiert", "Stars"},
+			{ns + "/Wichtig", "Imp"},
+			{ns, "Other"},
+			{"Work", ns + "/Work"},
+			{"INBOX", "Box"},
+		} {
+			if err := s.RenameFolder(ctx, tc[0], tc[1]); !errors.Is(err, mailstore.ErrRefused) {
+				t.Errorf("RenameFolder(%q, %q) = %v, want ErrRefused", tc[0], tc[1], err)
+			}
+		}
+		for _, name := range []string{ns + "/Papierkorb", ns + "/Spam", ns + "/Entwurfe", ns + "/Wichtig", ns, "INBOX"} {
+			if err := s.DeleteFolder(ctx, name, true); !errors.Is(err, mailstore.ErrRefused) {
+				t.Errorf("DeleteFolder(%q) = %v, want ErrRefused", name, err)
+			}
+		}
+		for _, c := range srv.received() {
+			if k := kindOf(c); k == "CREATE" || k == "RENAME" || k == "DELETE" {
+				t.Errorf("sent %q; refused changes send nothing", c)
+			}
+		}
+		if err := s.CreateFolder(ctx, "Projects"); err != nil {
+			t.Errorf("creating a label: %v", err)
+		}
+	})
+	t.Run("their views are not labels", func(t *testing.T) {
+		t.Parallel()
+		srv := startWriteServer(t, &writeServer{caps: "MOVE UIDPLUS X-GM-EXT-1 SPECIAL-USE", folders: folders()})
+		s := gmailScripted(t, srv)
+		r := gmailRef("INBOX", 7, 1)
+		if got := one(t, s.Move(t.Context(), []ref.Ref{r}, ns+"/Markiert")); !errors.Is(got.Err, mailstore.ErrUnsupported) {
+			t.Errorf("Move to Starred = %+v, want ErrUnsupported", got)
+		}
+		if got := one(t, s.StoreLabels(t.Context(), []ref.Ref{r}, []string{ns + "/Wichtig"}, nil)); !errors.Is(got.Err, mailstore.ErrUnsupported) {
+			t.Errorf("StoreLabels(Important) = %+v, want ErrUnsupported", got)
+		}
+		if n := srv.sent("UID STORE"); n != 0 {
+			t.Errorf("commands %q, want no STORE", srv.received())
+		}
+	})
 }

@@ -3,7 +3,8 @@ package imapstore
 // Folder changes: CREATE, RENAME and DELETE after the checks of spec 7.1.
 // Each lists the folders first, for the server's hierarchy delimiter, the
 // folders that exist and their roles. On Gmail, folders are labels, names
-// match without regard to case, and Gmail's own [Gmail] folders are refused.
+// match without regard to case, and Gmail's own folders, known by their
+// special-use attributes and the namespace they sit in, are refused.
 
 import (
 	"context"
@@ -145,8 +146,8 @@ type folderTree struct {
 	// delim is the hierarchy delimiter, or 0 on a server with flat names.
 	delim rune
 	gmail bool
-	// system starts the names of Gmail's own folders, such as "[Gmail]/".
-	system string
+	// system is Gmail's system namespace, found by special-use attribute.
+	system systemSpace
 }
 
 // folderTree lists every folder, with special-use attributes where the
@@ -170,13 +171,7 @@ func (c *conn) folderTree(ctx context.Context, gmail bool) (folderTree, error) {
 		}
 	}
 	if gmail {
-		t.system = "[Gmail]/"
-		for i, l := range list {
-			if j := strings.LastIndex(l.Mailbox, "/"); t.roles[i] == mailstore.RoleAll && j > 0 {
-				t.system = l.Mailbox[:j+1]
-				break
-			}
-		}
+		t.system = systemNamespace(list)
 	}
 	return t, nil
 }
@@ -215,12 +210,13 @@ func (t folderTree) children(name string) []int {
 	return out
 }
 
-// isSystem reports whether name is one of Gmail's own folders or their parent.
-func (t folderTree) isSystem(name string) bool {
+// systemParent returns, on Gmail, the system namespace name is in or is
+// the parent of.
+func (t folderTree) systemParent(name string) (string, bool) {
 	if !t.gmail {
-		return false
+		return "", false
 	}
-	return (gmailView{system: t.system}).isSystem(name)
+	return t.system.parent(name)
 }
 
 // checkName refuses a name no folder can have here: empty, with an empty
@@ -232,8 +228,8 @@ func (t folderTree) checkName(account, name string) error {
 	if !refCarries(account, name, t.gmail) {
 		return fmt.Errorf("%w: folder name %q cannot be carried by a ref", mailstore.ErrRefused, name)
 	}
-	if t.isSystem(name) {
-		return fmt.Errorf("%w: %s folders belong to Gmail", mailstore.ErrRefused, strings.TrimSuffix(t.system, "/"))
+	if parent, ok := t.systemParent(name); ok {
+		return fmt.Errorf("%w: %s folders belong to Gmail", mailstore.ErrRefused, parent)
 	}
 	return nil
 }
@@ -250,12 +246,19 @@ func refCarries(account, name string, gmail bool) bool {
 }
 
 // mutable refuses a change to INBOX, a role folder or one of Gmail's own.
-// On Gmail every role folder is one of Gmail's own, and a label whose name
-// suggests a role, such as Archive, is still the user's.
+// On Gmail a role folder is one with a special-use attribute of Gmail's
+// own folders, or anything in their namespace; a label whose name suggests
+// a role, such as Archive, is still the user's.
 func (t folderTree) mutable(i int) error {
 	name := t.list[i].Mailbox
-	role := t.roles[i] != mailstore.RoleNone && !t.gmail
-	if strings.EqualFold(name, "INBOX") || role || t.isSystem(name) {
+	var role bool
+	if t.gmail {
+		_, inSystem := t.systemParent(name)
+		role = inSystem || hasSystemAttr(t.list[i].Attrs)
+	} else {
+		role = t.roles[i] != mailstore.RoleNone
+	}
+	if strings.EqualFold(name, "INBOX") || role {
 		return fmt.Errorf("%w: %s is a system folder", mailstore.ErrRefused, name)
 	}
 	return nil

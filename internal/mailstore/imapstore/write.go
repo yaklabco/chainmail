@@ -213,7 +213,8 @@ func (s *Store) findByID(ctx context.Context, c *conn, folder, id string) ([]ref
 var errCopyUnconfirmed = fmt.Errorf("%w: copied, but the original was kept: the server did not confirm the copy", mailstore.ErrUnavailable)
 
 // transfer moves, or with keepOriginal copies, refs into dest. Refs already
-// in dest are left as they are by a move. New refs come from COPYUID only.
+// in dest are left as they are by a move, if a UID FETCH finds them there,
+// and are otherwise gone. New refs come from COPYUID only.
 // Once the server has acknowledged the MOVE or COPY, every ref in it is a
 // success: with the new ref COPYUID maps it to, or else a zero ref, since
 // its new place is unknown.
@@ -223,10 +224,7 @@ func (s *Store) transfer(ctx context.Context, refs []ref.Ref, dest string, keepO
 	}
 	return s.writeBatch(ctx, refs, func(ctx context.Context, c *conn, g *groupWrite, sent func()) error {
 		if !keepOriginal && c.Selected() == dest {
-			for _, uid := range g.uids {
-				g.keep(uid)
-			}
-			return nil
+			return keepPresent(ctx, c, g)
 		}
 		caps := c.client().Caps()
 		move := !keepOriginal && caps.Has(imap.CapMove)
@@ -255,6 +253,23 @@ func (s *Store) transfer(ctx context.Context, refs []ref.Ref, dest string, keepO
 		}
 		return nil
 	})
+}
+
+// keepPresent ends a write into the folder g's refs already name: it keeps
+// the refs whose messages a UID FETCH finds in the folder open on c, and
+// leaves the others to be reported gone.
+func keepPresent(ctx context.Context, c *conn, g *groupWrite) error {
+	var found []uint32
+	err := c.pipelined(ctx, func(cl *imapclient.Client) []func() error {
+		return []func() error{collectUIDs(cl.Fetch(uidSet(g.uids), &imap.FetchOptions{UID: true}), &found)}
+	})
+	if err != nil {
+		return err
+	}
+	for _, uid := range found {
+		g.keep(uid)
+	}
+	return nil
 }
 
 // moveByCopy moves g's messages into dest on a server with UIDPLUS but no

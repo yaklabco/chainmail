@@ -21,37 +21,46 @@ func (s *Store) ListFolders(ctx context.Context) ([]mailstore.Folder, error) {
 
 // folderList returns the cached folder list, or fetches it.
 func (s *Store) folderList(ctx context.Context, refresh bool) ([]mailstore.Folder, error) {
+	folders, _, err := s.folderListing(ctx, refresh)
+	return folders, err
+}
+
+// folderListing is folderList with the system namespace of the same list.
+func (s *Store) folderListing(ctx context.Context, refresh bool) ([]mailstore.Folder, systemSpace, error) {
 	if !refresh {
 		s.mu.Lock()
-		cached := s.folders
+		cached, system := s.folders, s.system
 		s.mu.Unlock()
 		if cached != nil {
-			return cached, nil
+			return cached, system, nil
 		}
 	}
 	var out []mailstore.Folder
+	var system systemSpace
 	err := s.withConn(ctx, "", func(c *conn) error {
 		var err error
-		out, err = c.listFolders(ctx)
+		out, system, err = c.listFolders(ctx)
 		return err
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	s.mu.Lock()
-	s.folders = out
+	s.folders, s.system = out, system
 	s.mu.Unlock()
-	return out, nil
+	return out, system, nil
 }
 
 // forgetFolders drops the cached folder list after a folder turned out missing.
 func (s *Store) forgetFolders() {
 	s.mu.Lock()
-	s.folders = nil
+	s.folders, s.system = nil, nil
 	s.mu.Unlock()
 }
 
-func (c *conn) listFolders(ctx context.Context) ([]mailstore.Folder, error) {
+// listFolders lists the folders, and the system namespace their special-use
+// attributes show.
+func (c *conn) listFolders(ctx context.Context) ([]mailstore.Folder, systemSpace, error) {
 	caps := c.client().Caps()
 	opts := &imap.ListOptions{}
 	statusOpts := &imap.StatusOptions{NumMessages: true, NumUnseen: true}
@@ -65,7 +74,7 @@ func (c *conn) listFolders(ctx context.Context) ([]mailstore.Folder, error) {
 		list, err = c.client().List("", "*", opts).Collect()
 		return err
 	}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	roles := assignRoles(list)
 	folders := make([]mailstore.Folder, len(list))
@@ -104,7 +113,7 @@ func (c *conn) listFolders(ctx context.Context) ([]mailstore.Folder, error) {
 			return nil
 		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	slices.SortStableFunc(folders, func(a, b mailstore.Folder) int {
@@ -116,7 +125,7 @@ func (c *conn) listFolders(ctx context.Context) ([]mailstore.Folder, error) {
 		}
 		return cmp.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
 	})
-	return folders, nil
+	return folders, systemNamespace(list), nil
 }
 
 func selectable(attrs []imap.MailboxAttr) bool {
