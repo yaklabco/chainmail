@@ -46,9 +46,6 @@ const (
 	settleTimeout = 3 * time.Minute
 	// cleanupTimeout bounds each cleanup.
 	cleanupTimeout = 5 * time.Minute
-	// folderSettleTimeout bounds cleanup's retries of deleting the test
-	// folder, in case the server still counts the expunged mail in it.
-	folderSettleTimeout = 30 * time.Second
 	// testFolderPrefix starts the name of the folder or label the organize
 	// test creates.
 	testFolderPrefix = "chainmail-test-"
@@ -79,8 +76,6 @@ func randomToken(n int) string {
 
 // liveKey derives the idempotency key of one send step from the run's token.
 func liveKey(token, step string) string { return "live-" + token + "-" + step }
-
-func reasonOf(err error) string { return api.Detail(err).GetReason() }
 
 func term(field, value string) *chainmailv1.Query {
 	return &chainmailv1.Query{Node: &chainmailv1.Query_Term{Term: &chainmailv1.QueryTerm{Field: field, Value: value}}}
@@ -153,16 +148,6 @@ func tokenMessages(ctx context.Context, c *client.Client, account, token, in str
 		refs = append(refs, r.GetRef())
 	}
 	return getMessages(ctx, c, refs)
-}
-
-// pause waits before repeat n of a search, or until ctx is done.
-func pause(ctx context.Context, n int) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(backoff(n)):
-		return nil
-	}
 }
 
 // findMessage waits up to within for a message with Message-ID id and
@@ -340,28 +325,6 @@ func (s *sweeper) expunge(ctx context.Context) (int, error) {
 		removed += len(refs)
 	}
 	return removed, fmt.Errorf("messages still found after %d rounds of expunging", maxSweepRounds)
-}
-
-// deleteTestFolder deletes the test's folder without force, so it never
-// takes mail the sweep did not find with it. A folder that is not there is
-// fine: the create may not have taken effect, or the test deleted it
-// already. While the server refuses, it runs resweep, which expunges only
-// the test's own token mail, and tries again, for folderSettleTimeout.
-func deleteTestFolder(ctx context.Context, c *client.Client, account, folder string, resweep func(context.Context) error) error {
-	start := time.Now()
-	var sweepErr error
-	for n := 0; ; n++ {
-		_, err := c.Organize.DeleteFolder(ctx, connect.NewRequest(&chainmailv1.DeleteFolderRequest{Account: account, Name: folder}))
-		if err == nil || reasonOf(err) == api.ReasonNotFound {
-			return nil
-		}
-		if time.Since(start) >= folderSettleTimeout || pause(ctx, n) != nil {
-			return errors.Join(fmt.Errorf("DeleteFolder %s: %w (%s)", folder, err, hint(err)), sweepErr)
-		}
-		if resweep != nil {
-			sweepErr = resweep(ctx)
-		}
-	}
 }
 
 // selfSpec is a Markdown message from the account to its own address.
@@ -584,7 +547,8 @@ func TestEveryAccountOrganizes(t *testing.T) {
 		t.Run(a.GetName(), func(t *testing.T) {
 			google := isGoogle(a)
 			name := a.GetName()
-			folder := testFolderPrefix + randomToken(12)
+			generated := testFolderPrefix + randomToken(12)
+			folder := generated
 			token := "cmlive" + randomToken(16)
 			t.Logf("folder %s, token %s", folder, token)
 
@@ -598,9 +562,15 @@ func TestEveryAccountOrganizes(t *testing.T) {
 			}
 			base := context.WithoutCancel(t.Context())
 			var sw *sweeper // set below; the folder cleanup re-sweeps with it
+			// serverName is the name CreateFolder says the server gave the
+			// folder, "" until the test learns it.
+			var serverName string
 			// Registered before CreateFolder, so a create that took effect
 			// but returned an error is still cleaned up, and before the
 			// sweeper, so it runs after the sweep has emptied the folder.
+			// Until the server's name is known, cleanup lists the folders
+			// to find what the create made, which on a server with a
+			// namespace prefix is not the generated name.
 			t.Cleanup(func() {
 				ctx, cancel := context.WithTimeout(base, cleanupTimeout)
 				defer cancel()
@@ -611,7 +581,7 @@ func TestEveryAccountOrganizes(t *testing.T) {
 					_, err := sw.expunge(ctx)
 					return err
 				}
-				if err := deleteTestFolder(ctx, c, name, folder, resweep); err != nil {
+				if err := removeTestFolder(ctx, c, name, generated, serverName, resweep); err != nil {
 					t.Errorf("cleanup on %s: %v; delete it by hand", name, err)
 				}
 			})
@@ -624,9 +594,12 @@ func TestEveryAccountOrganizes(t *testing.T) {
 			// From here on the folder goes by the name the server gave it,
 			// such as INBOX.chainmail-test-<random> on Hostinger, cleanup
 			// included.
-			if got := created.Msg.GetName(); got != "" && got != folder {
-				t.Logf("CreateFolder %s: the server named it %s", folder, got)
-				folder = got
+			if got := created.Msg.GetName(); got != "" {
+				serverName = got
+				if got != folder {
+					t.Logf("CreateFolder %s: the server named it %s", folder, got)
+					folder = got
+				}
 			}
 			if !listed(folderRoles(t, c, name), folder) {
 				t.Fatalf("%s is not listed after CreateFolder", folder)

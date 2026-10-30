@@ -11,7 +11,6 @@ import (
 	"connectrpc.com/connect"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/client"
 )
 
@@ -44,8 +43,6 @@ func liveAccounts(t *testing.T, c *client.Client) []*chainmailv1.Account {
 	}
 	return list.Msg.GetAccounts()
 }
-
-func hint(err error) string { return api.Detail(err).GetHint() }
 
 // reportPartial fails the test for every source a call could not read. The
 // rest of the response is still valid, so the test carries on.
