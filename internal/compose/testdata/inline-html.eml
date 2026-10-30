@@ -1,0 +1,33 @@
+From: "James Ainslie" <james@example.com>
+To: "Ann Smith" <ann@example.org>
+Subject: Hello
+Date: Fri, 30 Oct 2026 09:15:00 -0400
+Message-Id: <01JBX7Y8Z9.ABCDEFGHJK@example.com>
+Mime-Version: 1.0
+User-Agent: chainmail/test
+Content-Type: multipart/related; boundary=GHJKMNPQRSTVWXYZ0123456789AB;
+ type="multipart/alternative"
+
+--GHJKMNPQRSTVWXYZ0123456789AB
+Content-Type: multipart/alternative; boundary=CDEFGHJKMNPQRSTVWXYZ01234567
+
+--CDEFGHJKMNPQRSTVWXYZ01234567
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+See
+--CDEFGHJKMNPQRSTVWXYZ01234567
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<p>See <img src=3D"cid:0123456789ABCDEF@chainmail" alt=3D"chart"></p>
+--CDEFGHJKMNPQRSTVWXYZ01234567--
+
+--GHJKMNPQRSTVWXYZ0123456789AB
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-Disposition: inline; filename=chart.png
+Content-Id: <0123456789ABCDEF@chainmail>
+
+iVBORw0KGgoAAAANSUhEUg==
+--GHJKMNPQRSTVWXYZ0123456789AB--

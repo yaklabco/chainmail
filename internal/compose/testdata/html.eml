@@ -1,0 +1,20 @@
+From: "James Ainslie" <james@example.com>
+To: "Ann Smith" <ann@example.org>
+Subject: Hello
+Date: Fri, 30 Oct 2026 09:15:00 -0400
+Message-Id: <01JBX7Y8Z9.ABCDEFGHJK@example.com>
+Mime-Version: 1.0
+User-Agent: chainmail/test
+Content-Type: multipart/alternative; boundary=0123456789ABCDEFGHJKMNPQRSTV
+
+--0123456789ABCDEFGHJKMNPQRSTV
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Hello world
+--0123456789ABCDEFGHJKMNPQRSTV
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<p>Hello <b>world</b></p>
+--0123456789ABCDEFGHJKMNPQRSTV--
