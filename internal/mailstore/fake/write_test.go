@@ -411,6 +411,7 @@ func TestWriteCopy(t *testing.T) {
 		dest       string
 		wantFolder string
 		sameRef    bool
+		moved      bool // the original is gone
 		wantLabels []string
 		wantErr    error
 	}{
@@ -420,8 +421,9 @@ func TestWriteCopy(t *testing.T) {
 		{name: "Gmail copy adds the label", gmail: true, from: allMail, dest: "Receipts", wantFolder: allMail, sameRef: true, wantLabels: []string{`\Inbox`, "Receipts"}},
 		{name: "Gmail copy to INBOX adds \\Inbox", gmail: true, from: allMail, dest: "INBOX", wantFolder: allMail, sameRef: true, wantLabels: []string{`\Inbox`}},
 		{name: "Gmail copy to All Mail", gmail: true, from: allMail, dest: allMail, wantFolder: allMail, sameRef: true},
-		{name: "Gmail copy to Trash", gmail: true, from: allMail, dest: gmailTrash, wantErr: mailstore.ErrUnsupported},
-		{name: "Gmail copy to Spam", gmail: true, from: allMail, dest: gmailSpam, wantErr: mailstore.ErrUnsupported},
+		// Gmail keeps one copy of a message: a COPY into Trash or Spam moves it.
+		{name: "Gmail copy to Trash moves it", gmail: true, from: allMail, dest: gmailTrash, wantFolder: gmailTrash, moved: true},
+		{name: "Gmail copy to Spam moves it", gmail: true, from: allMail, dest: gmailSpam, wantFolder: gmailSpam, moved: true},
 		{name: "Gmail unknown folder", gmail: true, from: allMail, dest: "Nope", wantErr: mailstore.ErrNotFound},
 	}
 	for _, tt := range tests {
@@ -445,8 +447,13 @@ func TestWriteCopy(t *testing.T) {
 			if res.Ref.Folder != tt.wantFolder || tt.sameRef != (res.Ref == r) {
 				t.Fatalf("copy ref = %s, original %s, want folder %s same=%v", res.Ref, r, tt.wantFolder, tt.sameRef)
 			}
-			if fetch(t, s, r).Summary.Subject != "copied" || fetch(t, s, res.Ref).Summary.Subject != "copied" {
-				t.Error("original or copy unreadable")
+			if tt.moved {
+				gone(t, s, r)
+			} else if fetch(t, s, r).Summary.Subject != "copied" {
+				t.Error("original unreadable")
+			}
+			if fetch(t, s, res.Ref).Summary.Subject != "copied" {
+				t.Error("copy unreadable")
 			}
 			m := fetch(t, s, res.Ref)
 			for _, l := range tt.wantLabels {

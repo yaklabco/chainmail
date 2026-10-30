@@ -333,19 +333,18 @@ func (s *Store) moveLocked(m *Message, dest mailstore.Folder) (ref.Ref, error) {
 
 // Copy implements mailstore.Writer. On standard accounts the copy is a new
 // message with a new ref, even in its own folder. On Gmail copying to a
-// label folder adds the label and returns the same ref, and Trash and Spam
-// are refused with ErrUnsupported: Gmail keeps one copy of a message.
+// label folder adds the label and returns the same ref, and copying to
+// Trash or Spam moves the message there, as Gmail does: it keeps one copy
+// of a message.
 func (s *Store) Copy(ctx context.Context, refs []ref.Ref, folder string) []mailstore.RefResult {
 	var dest mailstore.Folder
 	return s.batch(ctx, opCopy, refs, func() (err error) {
-		if dest, err = s.folderLocked(folder); err != nil {
-			return err
-		}
-		if s.gmail && (dest.Role == mailstore.RoleTrash || dest.Role == mailstore.RoleSpam) {
-			return fmt.Errorf("%w: copy into %s; move or trash instead", mailstore.ErrUnsupported, folder)
-		}
-		return nil
+		dest, err = s.folderLocked(folder)
+		return err
 	}, func(m *Message) (ref.Ref, error) {
+		if s.gmail && (dest.Role == mailstore.RoleTrash || dest.Role == mailstore.RoleSpam) {
+			return s.moveLocked(m, dest)
+		}
 		if s.gmail {
 			if dest.Role != mailstore.RoleAll {
 				m.Labels = editSet(m.Labels, []string{labelOf(dest)}, nil)
