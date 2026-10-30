@@ -39,10 +39,14 @@ type storeEntry struct {
 	acct config.ResolvedAccount
 	gate rwGate
 
-	mu     sync.Mutex
-	cur    mailstore.Store // nil until first used
-	used   bool            // a call has built the store
-	closed bool            // the set was closed; no more stores are built
+	mu  sync.Mutex
+	cur mailstore.Store // nil until first used
+	// retired are stores replace closed that still held connections when
+	// last looked at, such as a stream reader's. They count toward the
+	// account's open connections until every one has closed.
+	retired []mailstore.Store
+	used    bool // a call has built the store
+	closed  bool // the set was closed; no more stores are built
 }
 
 // errStoresClosed fails calls that arrive after the daemon closed its stores.
@@ -131,10 +135,39 @@ func (s *storeSet) exclusive(ctx context.Context, acct config.ResolvedAccount, f
 		if err := e.cur.Close(); err != nil && s.logger != nil {
 			s.logger.Warn("logging out of the replaced store", "account", acct.Name, "err", err)
 		}
+		e.retired = append(e.retired, e.cur)
+		e.retiredConnsLocked()
 		e.cur = s.build(acct)
 		return e.cur
 	}
 	return f(cur, replace)
+}
+
+// retiredConnsLocked returns how many connections the retired stores hold
+// and drops those that hold none. Close has returned for every retired
+// store, so one that reached zero opens no more. e.mu must be held.
+func (e *storeEntry) retiredConnsLocked() int {
+	n := 0
+	e.retired = slices.DeleteFunc(e.retired, func(r mailstore.Store) bool {
+		c := openConns(r)
+		n += c
+		return c == 0
+	})
+	return n
+}
+
+// openConns is how many connections acct's stores hold on the server: the
+// current store's and those of every retired store not yet drained. A
+// store that cannot count its connections, such as a fake, counts 0.
+func (s *storeSet) openConns(acct config.ResolvedAccount) int {
+	e := s.entry(acct)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	n := e.retiredConnsLocked()
+	if e.cur != nil {
+		n += openConns(e.cur)
+	}
+	return n
 }
 
 // closeAll closes every store in parallel. Stores are not built again.
@@ -147,6 +180,7 @@ func (s *storeSet) closeAll() error {
 	for _, e := range entries {
 		e.mu.Lock()
 		e.closed = true
+		e.retired = nil
 		if e.cur != nil {
 			stores = append(stores, e.cur)
 			e.cur = nil

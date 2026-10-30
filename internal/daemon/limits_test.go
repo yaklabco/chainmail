@@ -534,6 +534,146 @@ func TestProbeCountsTheStoresOpenConnections(t *testing.T) {
 	}
 }
 
+// streams stands in for stream readers that hold slots on srv. The
+// account's first store opened them, and they stay open after it is
+// replaced, as a stream reader's connection does.
+type streams struct {
+	srv   *capServer
+	mu    sync.Mutex
+	conns []io.Closer
+}
+
+// open takes n of srv's slots.
+func (s *streams) open(t *testing.T, n int) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for range n {
+		c, err := s.srv.dial(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.conns = append(s.conns, c)
+	}
+}
+
+// count is how many are still open.
+func (s *streams) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.conns)
+}
+
+// closeAll frees every slot they hold.
+func (s *streams) closeAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.conns {
+		_ = c.Close()
+	}
+	s.conns = nil
+}
+
+// streamFake is the store that opened the streams: it reports them open
+// until they close.
+type streamFake struct {
+	*probeFake
+	streams *streams
+}
+
+func (f *streamFake) OpenConns() int { return f.streams.count() }
+
+// cleanupFake is a probe fake that runs onClose as it closes its first probe
+// connection, before that connection gives its slot back.
+type cleanupFake struct {
+	*probeFake
+	once    sync.Once
+	onClose func()
+}
+
+func (f *cleanupFake) ProbeDial(ctx context.Context) (io.Closer, error) {
+	c, err := f.probeFake.ProbeDial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return closerFunc(func() error {
+		f.once.Do(f.onClose)
+		return c.Close()
+	}), nil
+}
+
+// newStreamsServer builds a server whose "host" account's first store
+// opened held streams on srv, with a fresh limit so no background probe
+// runs, and uses that store once. Later stores come from later.
+func newStreamsServer(t *testing.T, srv *capServer, held *streams, later func(*probeFake) mailstore.Store) *Server {
+	t.Helper()
+	var first atomic.Bool
+	s, _ := newLimitsServer(t, func(acct config.ResolvedAccount) mailstore.Store {
+		p := &probeFake{Store: fake.New(acct.Name, acct.Provider.Gmail), srv: srv}
+		if acct.Name != "host" {
+			return p
+		}
+		if first.CompareAndSwap(false, true) {
+			return &streamFake{probeFake: p, streams: held}
+		}
+		return later(p)
+	})
+	if err := s.lim.store.Put(t.Context(), limits.Limit{Account: "host", IMAPCap: 12, ProbedAt: limitsNow.Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.stores.get(mustAccount(t, s, "host")).ListFolders(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestProbeCountsStreamsOfEveryRetiredStore(t *testing.T) {
+	t.Parallel()
+	srv := &capServer{cap: 4}
+	held := &streams{srv: srv}
+	held.open(t, 2)
+	s := newStreamsServer(t, srv, held, func(p *probeFake) mailstore.Store { return p })
+	// The streams outlive both probes: the second must still count them,
+	// though the store that opened them was retired by the first.
+	for i := range 2 {
+		got := probeLimits(t, s, "host").GetLimits()
+		if len(got) != 1 || got[0].GetImapCap() != 4 || got[0].GetPoolSize() != 2 {
+			t.Fatalf("probe %d: limits = %v, want host cap 4 pool 2", i+1, got)
+		}
+		if l, ok := storedLimit(t, s, "host"); !ok || l.IMAPCap != 4 {
+			t.Fatalf("probe %d: stored = %+v (ok %v), want cap 4", i+1, l, ok)
+		}
+	}
+	// Once they close, the retired store holds nothing and the server's
+	// whole cap is the probe's.
+	held.closeAll()
+	if got := probeLimits(t, s, "host").GetLimits(); len(got) != 1 || got[0].GetImapCap() != 4 {
+		t.Fatalf("after the streams closed: limits = %v, want host cap 4", got)
+	}
+}
+
+func TestProbeSamplesStreamsBeforeItDials(t *testing.T) {
+	t.Parallel()
+	srv := &capServer{cap: 4}
+	held := &streams{srv: srv}
+	held.open(t, 2)
+	// The streams finish while the probe logs its connections out, after
+	// the refusal that ended it.
+	s := newStreamsServer(t, srv, held, func(p *probeFake) mailstore.Store {
+		return &cleanupFake{probeFake: p, onClose: held.closeAll}
+	})
+	got := probeLimits(t, s, "host").GetLimits()
+	if len(got) != 1 || got[0].GetImapCap() != 4 || got[0].GetPoolSize() != 2 {
+		t.Fatalf("limits = %v, want host cap 4 pool 2", got)
+	}
+	if l, ok := storedLimit(t, s, "host"); !ok || l.IMAPCap != 4 {
+		t.Errorf("stored = %+v (ok %v), want cap 4", l, ok)
+	}
+	if held.count() != 0 {
+		t.Errorf("streams open = %d, want 0: the probe's cleanup did not run", held.count())
+	}
+}
+
 // gate holds every probe dial until released, counting the accounts with a
 // dial waiting at once.
 type gate struct {

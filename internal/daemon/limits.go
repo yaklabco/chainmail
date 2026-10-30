@@ -237,9 +237,10 @@ type probeResult struct {
 // probeAccount measures acct's connection limit, stores it and rebuilds the
 // store with the new pool size. It first takes one of the maxProbes probe
 // slots, then the account's write lock: calls in progress finish first, the
-// store is closed, and new calls wait until the new store is in. The closed
-// store's connections still out, such as a stream reader's, are added to
-// the count, since they held server slots while the probe dialed.
+// store is closed, and new calls wait until the new store is in. The
+// account's connections still open before the first dial, in its current
+// and retired stores, are added to the count, since they hold server slots
+// the probe cannot get.
 // With onlyIfStale, a limit that is fresh once the lock is held is kept.
 func (s *Server) probeAccount(ctx context.Context, acct config.ResolvedAccount, onlyIfStale bool) probeResult {
 	res := probeResult{acct: acct}
@@ -268,14 +269,21 @@ func (s *Server) probeAccount(ctx context.Context, acct config.ResolvedAccount, 
 		if !ok {
 			return errProbeUnsupported
 		}
+		// The account's own connections still open, such as stream readers
+		// of this or an earlier store, hold server slots the probe cannot
+		// get. They are sampled once, before the first dial, so one that
+		// closes during the probe or its cleanup is still counted. If it
+		// closes before the probe is refused, the probe takes its slot too
+		// and the cap reads high by one for each. That is accepted: the
+		// pool shrinks on the next runtime refusal. A low cap is not, so
+		// the sample is never taken after the probe.
+		inUse := s.stores.openConns(acct)
 		n, err := limits.Probe(ctx, p.ProbeDial, s.lim.probeOpts)
 		if err != nil {
 			// A cancelled probe returns no count, and a failed one no cap.
 			return err
 		}
-		// The replaced store's connections still out, such as a stream
-		// reader's, held slots on the server while the probe counted.
-		n += openConns(cur)
+		n += inUse
 		l := limits.Limit{Account: acct.Name, IMAPCap: n, ProbedAt: s.opts.Now().UTC()}
 		if err := s.lim.store.Put(ctx, l); err != nil {
 			return err
