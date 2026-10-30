@@ -29,7 +29,11 @@ type conn struct {
 	selected    string
 	writable    bool
 	uidValidity uint32
-	dead        atomic.Bool
+	// folderGen is the Store.folderGen this connection last opened a
+	// folder under. A rename or delete since then means the folder open
+	// here may no longer be the one its name now stands for.
+	folderGen uint64
+	dead      atomic.Bool
 }
 
 func newConn(sess *Session, timeout time.Duration, now func() time.Time) *conn {

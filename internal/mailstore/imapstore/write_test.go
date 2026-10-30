@@ -2,6 +2,7 @@ package imapstore
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -57,6 +58,8 @@ type writeServer struct {
 	// change the folders between two pipelined commands, as another client
 	// would.
 	after func(srv *writeServer, kind string)
+	// delim is the hierarchy delimiter LIST reports. Empty means "/".
+	delim string
 
 	mu     sync.Mutex
 	events []string // "recv UID MOVE 1:2 Archive", "sent UID MOVE"
@@ -359,12 +362,16 @@ func (srv *writeServer) reply(st *wsSession, c wsCmd) string {
 	switch c.kind {
 	case "LOGIN", "NOOP":
 		return ok
+	case "CREATE":
+		srv.folders = append(srv.folders, wsMailbox(wsUnquote(f[1]), "", 99))
+		return ok
 	case "CAPABILITY":
 		return "* " + srv.capability() + "\r\n" + ok
 	case "LIST":
+		delim := cmp.Or(srv.delim, "/")
 		var b strings.Builder
 		for _, fo := range srv.folders {
-			fmt.Fprintf(&b, "* LIST (\\HasNoChildren%s) \"/\" %q\r\n", strings.TrimRight(" "+fo.attr, " "), fo.name)
+			fmt.Fprintf(&b, "* LIST (\\HasNoChildren%s) %q %q\r\n", strings.TrimRight(" "+fo.attr, " "), delim, fo.name)
 		}
 		return b.String() + ok
 	case "STATUS":

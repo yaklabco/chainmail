@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -139,6 +140,10 @@ type Store struct {
 	// dialTimeout bounds connecting and logging in: the package's
 	// dialTimeout, unless a test shrinks it.
 	dialTimeout time.Duration
+
+	// folderGen counts renames and deletes of folders. A connection opened
+	// a folder before the latest one opens it again rather than trust it.
+	folderGen atomic.Uint64
 
 	mu      sync.Mutex
 	folders []mailstore.Folder // cached; nil until listed
@@ -413,8 +418,13 @@ func (s *Store) open(ctx context.Context, c *conn, folder string) error {
 	return s.openMode(ctx, c, folder, false)
 }
 
-// openMode is open, read-write when writable.
+// openMode is open, read-write when writable. A connection that opened its
+// folder before a rename or delete opens it again, since a server keeps the
+// old mailbox open under its new name, or none.
 func (s *Store) openMode(ctx context.Context, c *conn, folder string, writable bool) error {
+	if gen := s.folderGen.Load(); c.folderGen != gen {
+		c.selected, c.writable, c.uidValidity, c.folderGen = "", false, 0, gen
+	}
 	err := c.SelectFolder(ctx, folder, writable)
 	if errors.Is(err, mailstore.ErrNotFound) {
 		s.forgetFolders()
