@@ -23,6 +23,9 @@
 //     moves to Trash, and in a label folder it loses that label.
 //   - CREATE, RENAME (children follow) and DELETE of user labels. INBOX, the
 //     [Gmail] folders and a RENAME beneath the label itself answer NO.
+//   - CREATE, RENAME, DELETE, label STORE, X-GM-RAW and folder membership
+//     match label names ignoring case with Unicode simple case folding, as
+//     strings.EqualFold does, so Σ, σ and ς are one label and ß is not ss.
 //   - In UID sets, * is the highest UID still in the folder.
 //   - A message that leaves Trash or Spam gets a new UID in each folder it
 //     returns to, as on Gmail. Moving to Trash keeps the message's labels, so
@@ -73,6 +76,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapserver"
@@ -222,6 +227,46 @@ func StartWith(t testing.TB, ca *tlstest.CA, opts Options, username, password st
 	}
 	s.Endpoint = provider.Endpoint{Host: "127.0.0.1", Port: addr.Port, Security: provider.SecurityTLS}
 	return s
+}
+
+// foldRune maps r to the smallest rune in its Unicode simple case folding
+// orbit, so two runes share it exactly when strings.EqualFold matches them.
+func foldRune(r rune) rune {
+	low := r
+	for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+		low = min(low, f)
+	}
+	return low
+}
+
+// foldKey maps a label to a key that two labels share exactly when
+// strings.EqualFold matches them. strings.ToLower is not such a key: it
+// keeps σ and ς apart.
+func foldKey(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		b.WriteRune(foldRune(r))
+	}
+	return b.String()
+}
+
+// cutFoldPrefix reports whether s begins with prefix, matched as
+// strings.EqualFold matches, and returns the rest of s. The two can differ in
+// byte length, as k and the Kelvin sign do, so s is never sliced by
+// len(prefix).
+func cutFoldPrefix(s, prefix string) (rest string, ok bool) {
+	for _, pr := range prefix {
+		if s == "" {
+			return "", false
+		}
+		sr, n := utf8.DecodeRuneInString(s)
+		if foldRune(sr) != foldRune(pr) {
+			return "", false
+		}
+		s = s[n:]
+	}
+	return s, true
 }
 
 func hasLabel(m *Message, label string) bool {

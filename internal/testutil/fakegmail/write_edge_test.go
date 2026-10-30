@@ -3,10 +3,12 @@ package fakegmail
 import (
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapclient"
 
 	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
 )
@@ -165,9 +167,7 @@ func TestFakeGmailRenameBeneathItself(t *testing.T) {
 		}
 	}
 	// A further write refreshes membership; both messages keep their folders.
-	if _, err := c.Store(imap.UIDSetNum(101), &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagSeen}}, nil).Collect(); err != nil {
-		t.Fatal(err)
-	}
+	touch(t, c)
 	if got := where(t, s, ca, s.MsgID(0)); got["A"] == 0 || got["A/B"] != 0 {
 		t.Errorf("message 0 is in %v, want A only of the two", got)
 	}
@@ -239,5 +239,152 @@ func TestFakeGmailSeqSetBeforeExists(t *testing.T) {
 	msgs, err = watcher.Fetch(imap.SeqSet{{Start: 1, Stop: 0}}, &imap.FetchOptions{UID: true}).Collect()
 	if err != nil || len(msgs) != 3 {
 		t.Errorf("FETCH 1:* after EXISTS = %d messages, %v; want 3", len(msgs), err)
+	}
+}
+
+// startLabelled runs a fake with one message per label set, in order, so
+// message i has All Mail UID i+1.
+func startLabelled(t *testing.T, labels ...[]string) (*Server, *tlstest.CA) {
+	t.Helper()
+	ca := tlstest.New(t)
+	msgs := make([]Message, 0, len(labels))
+	for i, l := range labels {
+		raw := "From: Alex <alex@example.com>\r\nSubject: Fold\r\nMessage-ID: <fold" + string(rune('a'+i)) + "@example.com>\r\n\r\nBody.\r\n"
+		msgs = append(msgs, Message{Raw: raw, Date: time.Now(), Labels: l})
+	}
+	return Start(t, ca, "me@gmail.example", "pw", msgs...), ca
+}
+
+// touch appends a message to INBOX, a write that makes the server refresh
+// every folder's membership. A flag STORE does not.
+func touch(t *testing.T, c *imapclient.Client) {
+	t.Helper()
+	appendRaw(t, c, "INBOX", "From: Touch <touch@example.com>\r\nSubject: Touch\r\nMessage-ID: <touch@example.com>\r\n\r\nRefresh.\r\n")
+}
+
+// TestFakeGmailRenameFoldsSigma checks RENAME relabels every spelling that
+// strings.EqualFold matches, as folder lookup does: Σ, σ and ς are one label,
+// though Σ and ς lowercase differently.
+func TestFakeGmailRenameFoldsSigma(t *testing.T) {
+	t.Parallel()
+	s, ca := startLabelled(t, []string{"Σ"}, []string{"ς"}, []string{"σ"}, []string{"σ", "ς"})
+	c := dial(t, s, ca)
+	if err := c.Rename("Σ", "Z", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	touch(t, c)
+	// Message 3 carries two spellings of the one label and ends with one Z.
+	for i := range 4 {
+		if got := fetchIn(t, s, ca, "[Gmail]/All Mail", imap.UID(i+1)).GmailLabels; !reflect.DeepEqual(got, []string{"Z"}) {
+			t.Errorf("message %d labels after RENAME Σ Z = %q, want [Z]", i, got)
+		}
+		if got := where(t, s, ca, s.MsgID(i)); got["Z"] == 0 {
+			t.Errorf("message %d is in %v after RENAME Σ Z and a write, want Z", i, got)
+		}
+	}
+}
+
+// TestFakeGmailRenameFoldsKelvin checks the parent and child matching of
+// RENAME follows strings.EqualFold when the spellings differ in byte length:
+// the Kelvin sign is three bytes and folds with k.
+func TestFakeGmailRenameFoldsKelvin(t *testing.T) {
+	t.Parallel()
+	t.Run("a child under a Kelvin spelling moves with its parent", func(t *testing.T) {
+		t.Parallel()
+		s, ca := startLabelled(t, []string{"k"}, []string{"K/B"})
+		c := dial(t, s, ca)
+		if err := c.Rename("K", "Z", nil).Wait(); err != nil {
+			t.Fatal(err)
+		}
+		touch(t, c)
+		if got := fetchIn(t, s, ca, "[Gmail]/All Mail", 2).GmailLabels; !reflect.DeepEqual(got, []string{"Z/B"}) {
+			t.Errorf("child labels after RENAME K Z = %q, want [Z/B]", got)
+		}
+		if got := where(t, s, ca, s.MsgID(1)); got["Z/B"] == 0 {
+			t.Errorf("child message is in %v, want Z/B", got)
+		}
+		if names := listNames(t, c); slices.Contains(names, "K/B") {
+			t.Errorf("LIST still has the old child after RENAME K Z: %q", names)
+		}
+	})
+	t.Run("a destination beneath a Kelvin spelling is refused", func(t *testing.T) {
+		t.Parallel()
+		s, ca := startLabelled(t, []string{"k"})
+		c := dial(t, s, ca)
+		if err := c.Rename("k", "K/C", nil).Wait(); err == nil {
+			t.Error("RENAME k \"K/C\" succeeded; a label cannot go beneath itself")
+		}
+	})
+}
+
+// TestFakeGmailRenameKeepsSharpS checks ß stays distinct from ss, as
+// strings.EqualFold keeps it, so renaming one leaves the other alone.
+func TestFakeGmailRenameKeepsSharpS(t *testing.T) {
+	t.Parallel()
+	s, ca := startLabelled(t, []string{"ß"}, []string{"ss"})
+	c := dial(t, s, ca)
+	if err := c.Rename("ß", "Z", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	touch(t, c)
+	if got := fetchIn(t, s, ca, "[Gmail]/All Mail", 2).GmailLabels; !reflect.DeepEqual(got, []string{"ss"}) {
+		t.Errorf("ss labels after RENAME ß Z = %q, want [ss]", got)
+	}
+	if got := where(t, s, ca, s.MsgID(1)); got["ss"] == 0 || got["Z"] != 0 {
+		t.Errorf("ss message is in %v, want ss and not Z", got)
+	}
+}
+
+// TestFakeGmailRawInFolds checks X-GM-RAW in: matches folder names the way
+// strings.EqualFold does: the long s (ſ) folds with s.
+func TestFakeGmailRawInFolds(t *testing.T) {
+	t.Parallel()
+	s, ca := startLabelled(t, []string{`\Sent`})
+	c := dial(t, s, ca)
+	if _, err := c.Select("[Gmail]/All Mail", &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := c.UIDSearch(&imap.SearchCriteria{GmailRaw: []string{"in:ſent"}}, nil).Wait()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := data.AllUIDs(); !reflect.DeepEqual(got, []imap.UID{1}) {
+		t.Errorf("X-GM-RAW in:ſent = %v, want [1]", got)
+	}
+}
+
+// TestFoldKeyAgreesWithEqualFold checks foldKey and cutFoldPrefix match label
+// names exactly as strings.EqualFold does.
+func TestFoldKeyAgreesWithEqualFold(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		{"Σ", "σ", true},
+		{"Σ", "ς", true},
+		{"σ", "ς", true},
+		{"K", "k", true},
+		{"k", "K", true},
+		{"Receipts", "rECEIPTS", true},
+		{"ß", "ss", false},
+		{"ß", "SS", false},
+		{"ß", "ẞ", true},
+		{"ſent", "SENT", true},
+		{"a", "b", false},
+		{"ab", "a", false},
+		{"\xff", "\xfe", true},
+	}
+	for _, tt := range tests {
+		if got := strings.EqualFold(tt.a, tt.b); got != tt.want {
+			t.Fatalf("strings.EqualFold(%q, %q) = %v; the table is wrong", tt.a, tt.b, got)
+		}
+		if got := foldKey(tt.a) == foldKey(tt.b); got != tt.want {
+			t.Errorf("foldKey(%q) == foldKey(%q) is %v, want %v", tt.a, tt.b, got, tt.want)
+		}
+		rest, ok := cutFoldPrefix(tt.a+"/x", tt.b+"/")
+		if ok != tt.want || (ok && rest != "x") {
+			t.Errorf("cutFoldPrefix(%q, %q) = %q, %v; want \"x\", %v", tt.a+"/x", tt.b+"/", rest, ok, tt.want)
+		}
 	}
 }

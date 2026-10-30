@@ -629,12 +629,12 @@ func matchRaw(n *query.Node, m *Message) bool {
 	case query.FieldLabel:
 		return hasLabel(m, v)
 	case query.FieldIn:
-		switch strings.ToLower(v) {
-		case "inbox":
+		switch {
+		case strings.EqualFold(v, "inbox"):
 			return hasLabel(m, `\Inbox`)
-		case "sent":
+		case strings.EqualFold(v, "sent"):
 			return hasLabel(m, `\Sent`)
-		case "drafts":
+		case strings.EqualFold(v, "drafts"):
 			return hasLabel(m, `\Draft`)
 		default:
 			return hasLabel(m, v)
@@ -719,7 +719,8 @@ func (sess *session) Unsubscribe(string) error { return nil }
 // folders and system labels.
 func checkUserLabel(name string) error {
 	const prefix = "[Gmail]/"
-	gmail := strings.EqualFold(name, "[Gmail]") || (len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix))
+	_, under := cutFoldPrefix(name, prefix)
+	gmail := strings.EqualFold(name, "[Gmail]") || under
 	if name == "" || gmail || strings.EqualFold(name, "INBOX") || strings.HasPrefix(name, `\`) {
 		return &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeCannot, Text: "fakegmail: " + name + " is not a user label"}
 	}
@@ -754,7 +755,8 @@ func (sess *session) Create(name string, _ *imap.CreateOptions) error {
 // beneath reports whether name is below parent in the label hierarchy,
 // ignoring case as Gmail does.
 func beneath(name, parent string) bool {
-	return len(name) > len(parent) && strings.EqualFold(name[:len(parent)+1], parent+"/")
+	_, ok := cutFoldPrefix(name, parent+"/")
+	return ok
 }
 
 // Rename renames a user label and the labels under it, on every message that
@@ -785,11 +787,12 @@ func (sess *session) Rename(name, newName string, _ *imap.RenameOptions) error {
 		case g == f:
 			renames[g] = newName
 		case beneath(g.name, f.name):
-			renames[g] = newName + g.name[len(f.name):]
+			rest, _ := cutFoldPrefix(g.name, f.name)
+			renames[g] = newName + rest
 		default:
 			continue
 		}
-		byLabel[strings.ToLower(g.label)] = renames[g]
+		byLabel[foldKey(g.label)] = renames[g]
 	}
 	for _, to := range renames {
 		if other := s.folderFoldLocked(to); other != nil && renames[other] == "" {
@@ -797,13 +800,21 @@ func (sess *session) Rename(name, newName string, _ *imap.RenameOptions) error {
 		}
 	}
 	// Each label is looked up once against the old names, so no label is
-	// renamed twice whatever order the folders come in.
+	// renamed twice whatever order the folders come in. A message that carried
+	// two spellings of one label, such as σ and ς, keeps one.
 	for _, m := range s.msgs {
-		for i, l := range m.Labels {
-			if to, ok := byLabel[strings.ToLower(l)]; ok {
-				m.Labels[i] = to
+		seen := make(map[string]bool, len(m.Labels))
+		labels := m.Labels[:0]
+		for _, l := range m.Labels {
+			if to, ok := byLabel[foldKey(l)]; ok {
+				l = to
+			}
+			if k := foldKey(l); !seen[k] {
+				seen[k] = true
+				labels = append(labels, l)
 			}
 		}
+		m.Labels = labels
 	}
 	for g, to := range renames {
 		g.name, g.label = to, to
