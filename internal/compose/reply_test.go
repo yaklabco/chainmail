@@ -89,7 +89,27 @@ func TestReplyRecipients(t *testing.T) {
 			},
 			self:   []string{"me@example.com"},
 			all:    true,
-			wantTo: []string{"bob@example.com", "carol@example.com"},
+			wantTo: []string{"bob@example.com"},
+			wantCc: []string{"carol@example.com"},
+		},
+		{
+			name: "reply to own message goes to its To",
+			orig: func(o *Original) {
+				o.From = []mail.Address{replyMe}
+				o.To = []mail.Address{replyBob}
+			},
+			self:   []string{"me@example.com"},
+			wantTo: []string{"bob@example.com"},
+		},
+		{
+			name: "reply all to own message with only cc keeps cc",
+			orig: func(o *Original) {
+				o.From = []mail.Address{replyMe}
+				o.To = []mail.Address{replyMe}
+			},
+			self:   []string{"me@example.com"},
+			all:    true,
+			wantCc: []string{"carol@example.com"},
 		},
 		{
 			name: "duplicate senders collapse to the first",

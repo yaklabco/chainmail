@@ -35,9 +35,10 @@ type ReplyParts struct {
 // To is the original's Reply-To, or its From when it has none. With all, Cc
 // is the original's To and Cc. Every address in self is dropped from both,
 // as are repeats (the first is kept) and Cc addresses already in To.
-// Addresses compare without regard to case. When only Cc is left, as in a
-// reply to all on the account's own message, it becomes To. loc is the zone the quote's
-// attribution line writes the original's date in; nil means time.Local.
+// Addresses compare without regard to case. A reply to the account's own
+// message goes to that message's To, plus its Cc with all. loc is the zone
+// the quote's attribution line writes the original's date in; nil means
+// time.Local.
 func Reply(orig Original, self []string, all bool, loc *time.Location) (ReplyParts, error) {
 	seen := make(map[string]bool, len(self))
 	for _, a := range self {
@@ -48,14 +49,18 @@ func Reply(orig Original, self []string, all bool, loc *time.Location) (ReplyPar
 		to = orig.From
 	}
 	p := ReplyParts{To: keepNew(to, seen)}
-	if all {
+	switch {
+	case len(p.To) == 0 && len(to) > 0:
+		// A reply to the account's own message goes to whoever it was sent
+		// to, as Gmail does: its To stays To and, with all, its Cc stays Cc.
+		p.To = keepNew(orig.To, seen)
+		if all {
+			p.Cc = keepNew(orig.Cc, seen)
+		}
+	case all:
 		p.Cc = keepNew(slices.Concat(orig.To, orig.Cc), seen)
 	}
-	if len(p.To) == 0 {
-		// A reply to the account's own message goes to whoever it was sent to.
-		p.To, p.Cc = p.Cc, nil
-	}
-	if len(p.To) == 0 {
+	if len(p.To) == 0 && len(p.Cc) == 0 {
 		return ReplyParts{}, fmt.Errorf("%w: the reply has no recipients", ErrInvalid)
 	}
 	p.Subject = prefixSubject(orig.Subject, "Re: ", "re:")
