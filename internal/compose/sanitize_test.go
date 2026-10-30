@@ -67,6 +67,27 @@ func TestSanitizeHTML(t *testing.T) {
 			notWant: []string{"data:"},
 		},
 		{
+			name:    "image keeps its other attributes when its source is dropped",
+			in:      `<p>a <img src="http://example.com/a.png" alt="chart" width="10"> b</p>`,
+			want:    []string{`<p>a <img alt="chart" width="10"> b</p>`},
+			notWant: []string{"example.com"},
+		},
+		{
+			name: "upper-case https image kept",
+			in:   `<img src="HTTPS://example.com/a.png">`,
+			want: []string{`src="`, "example.com/a.png"},
+		},
+		{
+			name:    "relative image source dropped",
+			in:      `<img src="/a.png">`,
+			notWant: []string{"a.png"},
+		},
+		{
+			name:    "protocol-relative image source dropped",
+			in:      `<img src="//example.com/a.png">`,
+			notWant: []string{"example.com"},
+		},
+		{
 			name: "https link kept",
 			in:   `<a href="https://example.com/">x</a>`,
 			want: []string{`href="https://example.com/"`},

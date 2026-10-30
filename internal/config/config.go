@@ -218,8 +218,10 @@ func (c *Config) Account(name string) (ResolvedAccount, error) {
 		Pool:           a.Pool,
 		MaxMessageSize: p.MaxMessageSize,
 	}
-	if a.MaxMessageSize != "" {
-		r.MaxMessageSize, _ = ParseByteSize(a.MaxMessageSize) // Parse validated it
+	// Parse validated max_message_size. A Config that never went through
+	// Parse keeps the preset's limit.
+	if n, err := ParseByteSize(a.MaxMessageSize); err == nil && n > 0 {
+		r.MaxMessageSize = n
 	}
 	if a.OAuthClient != "" {
 		r.ClientID = c.OAuthClients[a.OAuthClient].ClientID

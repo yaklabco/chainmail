@@ -423,3 +423,19 @@ func TestComposeFieldsInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestMaxMessageSizeUnparsedFallsBackToPreset(t *testing.T) {
+	t.Parallel()
+	// A Config built without Parse, as tests sometimes do, still gets the
+	// preset's limit rather than zero.
+	cfg := &Config{Accounts: map[string]Account{
+		"host": {Provider: "hostinger", Address: "me@example.com", MaxMessageSize: "lots"},
+	}}
+	got, err := cfg.Account("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MaxMessageSize != 35<<20 {
+		t.Errorf("MaxMessageSize = %d, want the preset's %d", got.MaxMessageSize, 35<<20)
+	}
+}

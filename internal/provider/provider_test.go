@@ -216,3 +216,13 @@ func TestPoolAndSizeDefaults(t *testing.T) {
 		t.Errorf("Names() has %d presets, the test covers %d", got, len(tests))
 	}
 }
+
+func TestDefaultPoolFitsConnectionLimit(t *testing.T) {
+	t.Parallel()
+	for _, name := range Names() {
+		p, _ := Lookup(name)
+		if p.DefaultPool < 1 || p.DefaultPool > p.MaxConnections {
+			t.Errorf("%s: DefaultPool = %d, want 1 to MaxConnections %d", name, p.DefaultPool, p.MaxConnections)
+		}
+	}
+}
