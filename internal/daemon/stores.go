@@ -18,8 +18,8 @@ import (
 
 // storeSet holds one mail store per account, created on the account's first
 // use. Callers get a handle that stays valid when the store behind it is
-// replaced: each call holds the account's read lock, and a probe takes the
-// write lock to close the store and build a new one.
+// replaced: each call holds the account's read lock, and a probe, once it
+// has counted, takes the write lock just long enough to install a new store.
 type storeSet struct {
 	// build makes a store for an account, sized from its stored limit.
 	build func(config.ResolvedAccount) mailstore.Store
@@ -38,6 +38,10 @@ type storeEntry struct {
 	set  *storeSet
 	acct config.ResolvedAccount
 	gate rwGate
+	// probing holds one token, taken by a probe of the account for its
+	// whole run, so two probes never count each other's connections. It is
+	// a channel rather than a mutex so a waiter can give up.
+	probing chan struct{}
 
 	mu  sync.Mutex
 	cur mailstore.Store // nil until first used
@@ -67,7 +71,7 @@ func (s *storeSet) entry(acct config.ResolvedAccount) *storeEntry {
 	if s.entries == nil {
 		s.entries = map[string]*storeEntry{}
 	}
-	e := &storeEntry{set: s, acct: acct}
+	e := &storeEntry{set: s, acct: acct, probing: make(chan struct{}, 1)}
 	s.entries[acct.Name] = e
 	return e
 }
@@ -106,46 +110,58 @@ func (s *storeSet) peek(acct config.ResolvedAccount) mailstore.Store {
 	return e.cur
 }
 
-// exclusive runs f holding acct's write lock: calls in progress finish
-// first, and new ones wait until f returns. f gets the account's store and
-// replace, which closes the current store and installs a newly built one,
-// sized from the limit stored at that moment, and returns it.
-func (s *storeSet) exclusive(ctx context.Context, acct config.ResolvedAccount, f func(cur mailstore.Store, replace func() mailstore.Store) error) error {
+// lockProbe takes acct's probe lock, waiting for a probe of the account
+// already running, or for ctx to end. It holds no read or write lock, so
+// the account's calls go on. The caller runs unlock once its probe is done.
+func (s *storeSet) lockProbe(ctx context.Context, acct config.ResolvedAccount) (unlock func(), err error) {
+	e := s.entry(acct)
+	select {
+	case e.probing <- struct{}{}:
+		return func() { <-e.probing }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// replace installs a newly built store for acct, sized from the limit
+// stored at that moment, and closes the one it replaces. It holds acct's
+// write lock only to swap them: calls in progress finish first, new ones
+// wait, and none waits for the old store to log out, which happens after
+// the lock is released. No call holds the old store by then, but a stream
+// reader still may: the old store counts toward the account's open
+// connections until it holds none.
+func (s *storeSet) replace(ctx context.Context, acct config.ResolvedAccount) error {
 	e := s.entry(acct)
 	if err := e.gate.lock(ctx); err != nil {
 		return err
 	}
-	defer e.gate.unlock()
-	// The write lock keeps every call out, so cur is read and written
-	// below without e.mu except against closeAll.
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
+		e.gate.unlock()
 		return errStoresClosed
 	}
-	if e.cur == nil {
-		e.cur = s.build(acct)
+	old := e.cur
+	e.cur = s.build(acct)
+	if old != nil {
+		e.retired = append(e.retired, old)
 	}
-	cur := e.cur
 	e.mu.Unlock()
-	replace := func() mailstore.Store {
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		// Logging out is best effort: the new store opens its own connections.
-		if err := e.cur.Close(); err != nil && s.logger != nil {
-			s.logger.Warn("logging out of the replaced store", "account", acct.Name, "reason", errReason(err))
-		}
-		e.retired = append(e.retired, e.cur)
-		e.retiredConnsLocked()
-		e.cur = s.build(acct)
-		return e.cur
+	e.gate.unlock()
+	if old == nil {
+		return nil
 	}
-	return f(cur, replace)
+	// Logging out is best effort: the new store opens its own connections.
+	if err := old.Close(); err != nil && s.logger != nil {
+		s.logger.Warn("logging out of the replaced store", "account", acct.Name, "reason", errReason(err))
+	}
+	return nil
 }
 
 // retiredConnsLocked returns how many connections the retired stores hold
-// and drops those that hold none. Close has returned for every retired
-// store, so one that reached zero opens no more. e.mu must be held.
+// and drops those that hold none. No call holds a retired store, so one
+// that reached zero opens no more, even while its Close runs. e.mu must be
+// held.
 func (e *storeEntry) retiredConnsLocked() int {
 	n := 0
 	e.retired = slices.DeleteFunc(e.retired, func(r mailstore.Store) bool {
@@ -417,9 +433,10 @@ func (a *accountStore) FetchMessages(ctx context.Context, refs []ref.Ref) []mail
 // StreamPart holds the read lock only while the part is opened, not while
 // the reader is read. A caller may hold several readers and make other
 // calls meanwhile, and a lock held across them would deadlock against a
-// waiting probe. A store replaced while a reader is open waits for its
-// connection as Close does, and the reader keeps working. A probe that
-// replaced the store counts that connection as one the server accepted.
+// waiting replace. A store replaced while a reader is open waits for its
+// connection as Close does, after the write lock is released, and the
+// reader keeps working. The next probe counts that connection among the
+// account's own until it closes.
 func (a *accountStore) StreamPart(ctx context.Context, r ref.Ref, part string) (info mailstore.PartInfo, rc io.ReadCloser, err error) {
 	err = a.call(ctx, func(st mailstore.Store) error {
 		info, rc, err = st.StreamPart(ctx, r, part)

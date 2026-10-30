@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
@@ -31,10 +32,13 @@ func TestReplacedStoreLogoutLogsNoServerText(t *testing.T) {
 		logger: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	}
 	acct := config.ResolvedAccount{Name: "host"}
-	err := s.exclusive(context.Background(), acct, func(_ mailstore.Store, replace func() mailstore.Store) error {
-		replace()
-		return nil
-	})
+	// A call builds the store the replace then logs out of.
+	_, release, err := s.entry(acct).acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	err = s.replace(context.Background(), acct)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
@@ -43,5 +47,53 @@ func TestReplacedStoreLogoutLogsNoServerText(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "logging out of the replaced store") {
 		t.Errorf("log = %q, want the logout failure recorded", buf.String())
+	}
+}
+
+// slowClose is a store whose logout waits for release, as one does while a
+// stream reader holds a connection.
+type slowClose struct {
+	mailstore.Store
+	closing chan struct{} // closed once Close starts
+	release chan struct{}
+}
+
+func (s *slowClose) Close() error {
+	close(s.closing)
+	<-s.release
+	return s.Store.Close()
+}
+
+// The write lock is held only to swap stores: calls on the new store go on
+// while the old one logs out.
+func TestReplaceDoesNotHoldCallsWhileTheOldStoreLogsOut(t *testing.T) {
+	t.Parallel()
+	first := &slowClose{Store: fake.New("host", false), closing: make(chan struct{}), release: make(chan struct{})}
+	built := 0
+	s := &storeSet{build: func(acct config.ResolvedAccount) mailstore.Store {
+		built++
+		if built == 1 {
+			return first
+		}
+		return fake.New(acct.Name, false)
+	}}
+	acct := config.ResolvedAccount{Name: "host"}
+	h := s.get(acct)
+	if _, err := h.ListFolders(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.replace(t.Context(), acct) }()
+	<-first.closing
+	defer close(first.release)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if _, err := h.ListFolders(ctx); err != nil {
+		t.Fatalf("ListFolders while the old store logs out: %v", err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("replace returned %v before the old store logged out", err)
+	default:
 	}
 }

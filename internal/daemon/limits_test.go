@@ -777,7 +777,129 @@ func TestProbeLimitsBoundsConcurrentProbes(t *testing.T) {
 	}
 }
 
-func TestProbeWaitsForCallsInProgress(t *testing.T) {
+// A probe takes seconds of dials and logins, so it holds no lock while it
+// dials: the account's calls go on meanwhile.
+func TestReadsDoNotWaitForAProbeThatDials(t *testing.T) {
+	t.Parallel()
+	g := &gate{release: make(chan struct{})}
+	srv := &capServer{cap: 3}
+	s, log := newLimitsServer(t, func(acct config.ResolvedAccount) mailstore.Store {
+		return &gatedFake{probeFake: &probeFake{Store: fake.New(acct.Name, false), srv: srv}, g: g}
+	})
+	// A fresh limit, so no background probe runs first.
+	if err := s.lim.store.Put(t.Context(), limits.Limit{Account: "host", IMAPCap: 12, ProbedAt: limitsNow.Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	h := s.stores.get(mustAccount(t, s, "host"))
+	if _, err := h.ListFolders(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	type answer struct {
+		resp *connect.Response[chainmailv1.ProbeLimitsResponse]
+		err  error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		a := &accountService{s: s}
+		resp, err := a.ProbeLimits(peerContext(t.Context()), connect.NewRequest(&chainmailv1.ProbeLimitsRequest{Accounts: []string{"host"}}))
+		done <- answer{resp, err}
+	}()
+	// The probe must be released whatever happens below, or the server's
+	// cleanup waits for it forever.
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(g.release) }) }
+	defer release()
+	deadline := time.Now().Add(5 * time.Second)
+	for active, _ := g.counts(); active == 0; active, _ = g.counts() {
+		if time.Now().After(deadline) {
+			t.Fatal("the probe never dialed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// The probe is dialing and will not finish until released.
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if _, err := h.ListFolders(ctx); err != nil {
+		t.Fatalf("ListFolders while a probe dials: %v, want it to run without waiting for the probe", err)
+	}
+	if n := log.of("host")[0].store.(*gatedFake).Calls("ListFolders"); n != 2 {
+		t.Errorf("ListFolders calls on the store in use = %d, want 2", n)
+	}
+	release()
+	ans := <-done
+	if ans.err != nil {
+		t.Fatalf("ProbeLimits: %v", ans.err)
+	}
+	got := ans.resp.Msg.GetLimits()
+	if len(got) != 1 || got[0].GetImapCap() != 3 || got[0].GetPoolSize() != 1 {
+		t.Fatalf("limits = %v, want host cap 3 pool 1", got)
+	}
+	// Once the probe is done, calls reach the store sized from its result.
+	stores := log.of("host")
+	last := stores[len(stores)-1]
+	if last.params.poolSize != 1 {
+		t.Errorf("store after the probe has pool %d, want 1", last.params.poolSize)
+	}
+	if _, err := h.ListFolders(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if n := last.store.(*gatedFake).Calls("ListFolders"); n != 1 {
+		t.Errorf("ListFolders calls on the new store = %d, want 1", n)
+	}
+}
+
+// dialHookFake is a probe fake that runs onDial once, before its first
+// probe dial.
+type dialHookFake struct {
+	*probeFake
+	once   sync.Once
+	onDial func()
+}
+
+func (f *dialHookFake) ProbeDial(ctx context.Context) (io.Closer, error) {
+	f.once.Do(f.onDial)
+	return f.probeFake.ProbeDial(ctx)
+}
+
+// Calls go on while a probe dials, and the connections they open meanwhile
+// hold server slots when the probe is refused. They count toward the cap,
+// so it does not read low.
+func TestProbeCountsConnectionsOpenedWhileItDials(t *testing.T) {
+	t.Parallel()
+	srv := &capServer{cap: 4}
+	held := &streams{srv: srv}
+	s := newStreamsServer(t, srv, held, func(p *probeFake) mailstore.Store {
+		return &dialHookFake{probeFake: p, onDial: func() { held.open(t, 2) }}
+	})
+	got := probeLimits(t, s, "host").GetLimits()
+	if len(got) != 1 || got[0].GetImapCap() != 4 || got[0].GetPoolSize() != 2 {
+		t.Fatalf("limits = %v, want host cap 4 pool 2", got)
+	}
+}
+
+// Two probes of one account at once would each count the other's
+// connections as the server's limit, so they take turns.
+func TestProbesOfOneAccountTakeTurns(t *testing.T) {
+	t.Parallel()
+	srv := &capServer{cap: 5}
+	s, _ := newLimitsServer(t, probeable(srv))
+	if err := s.lim.store.Put(t.Context(), limits.Limit{Account: "host", IMAPCap: 12, ProbedAt: limitsNow.Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	results := make([]*chainmailv1.ProbeLimitsResponse, 4)
+	for i := range results {
+		wg.Go(func() { results[i] = probeLimits(t, s, "host") })
+	}
+	wg.Wait()
+	for i, r := range results {
+		if got := r.GetLimits(); len(got) != 1 || got[0].GetImapCap() != 5 {
+			t.Errorf("probe %d: limits = %v, want host cap 5", i+1, got)
+		}
+	}
+}
+
+func TestReplaceWaitsForCallsInProgress(t *testing.T) {
 	t.Parallel()
 	s, log := newLimitsServer(t, probeable(&capServer{cap: 0}))
 	// A fresh limit, so no background probe wants the write lock.
@@ -793,10 +915,7 @@ func TestProbeWaitsForCallsInProgress(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = s.stores.exclusive(t.Context(), acct, func(_ mailstore.Store, replace func() mailstore.Store) error {
-			replace()
-			return nil
-		})
+		_ = s.stores.replace(t.Context(), acct)
 	}()
 	select {
 	case <-done:

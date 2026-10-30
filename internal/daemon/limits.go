@@ -236,12 +236,23 @@ type probeResult struct {
 
 // probeAccount measures acct's connection limit, stores it and rebuilds the
 // store with the new pool size. It first takes one of the maxProbes probe
-// slots, then the account's write lock: calls in progress finish first, the
-// store is closed, and new calls wait until the new store is in. The
-// account's connections still open before the first dial, in its current
-// and retired stores, are added to the count, since they hold server slots
-// the probe cannot get.
-// With onlyIfStale, a limit that is fresh once the lock is held is kept.
+// slots, then the account's probe lock, so probes of one account take
+// turns. It dials through a store of its own and holds no lock the
+// account's calls need while it counts: they go on, on the current store.
+// Only once the limit is stored does it take the account's write lock, to
+// install a store sized from it.
+//
+// The account's own connections, in its current and retired stores, hold
+// server slots the probe cannot get, so they are added to its count. They
+// are sampled before the first dial and again when the server refuses one,
+// and the larger is added. A connection that closes before the refusal is
+// still counted, so its slot, which the probe then takes too, reads one
+// high. That is accepted: the pool shrinks on the next runtime refusal. A
+// low cap is not, and a connection a call opens while the probe dials is in
+// the second sample. Neither is taken after the probe has logged out, when
+// connections that held slots at the refusal may have closed.
+// With onlyIfStale, a limit that is fresh once the probe lock is held is
+// kept.
 func (s *Server) probeAccount(ctx context.Context, acct config.ResolvedAccount, onlyIfStale bool) probeResult {
 	res := probeResult{acct: acct}
 	release, err := s.lim.acquireSlot(ctx)
@@ -250,50 +261,66 @@ func (s *Server) probeAccount(ctx context.Context, acct config.ResolvedAccount, 
 		return res
 	}
 	defer release()
-	res.err = s.stores.exclusive(ctx, acct, func(cur mailstore.Store, replace func() mailstore.Store) error {
-		if _, ok := cur.(prober); !ok {
-			return errProbeUnsupported
-		}
-		if onlyIfStale {
-			l, ok, err := s.lim.store.Get(ctx, acct.Name)
-			if err != nil {
-				return err
-			}
-			if ok && !limits.Stale(l, s.opts.Now()) {
-				res.skipped = true
-				return nil
-			}
-		}
-		// A fresh store has no connections open, and only the probe uses it.
-		p, ok := replace().(prober)
-		if !ok {
-			return errProbeUnsupported
-		}
-		// The account's own connections still open, such as stream readers
-		// of this or an earlier store, hold server slots the probe cannot
-		// get. They are sampled once, before the first dial, so one that
-		// closes during the probe or its cleanup is still counted. If it
-		// closes before the probe is refused, the probe takes its slot too
-		// and the cap reads high by one for each. That is accepted: the
-		// pool shrinks on the next runtime refusal. A low cap is not, so
-		// the sample is never taken after the probe.
-		inUse := s.stores.openConns(acct)
-		n, err := limits.Probe(ctx, p.ProbeDial, s.lim.probeOpts)
-		if err != nil {
-			// A cancelled probe returns no count, and a failed one no cap.
-			return err
-		}
-		n += inUse
-		l := limits.Limit{Account: acct.Name, IMAPCap: n, ProbedAt: s.opts.Now().UTC()}
-		if err := s.lim.store.Put(ctx, l); err != nil {
-			return err
-		}
-		replace()
-		res.limit = l
-		res.pool = limits.PoolSize(acct.Pool, &l, acct.Provider.DefaultPool)
-		return nil
-	})
+	unlock, err := s.stores.lockProbe(ctx, acct)
+	if err != nil {
+		res.err = err
+		return res
+	}
+	defer unlock()
+	res.err = s.probeLocked(ctx, acct, onlyIfStale, &res)
 	return res
+}
+
+// probeLocked is probeAccount once it holds the account's probe lock.
+func (s *Server) probeLocked(ctx context.Context, acct config.ResolvedAccount, onlyIfStale bool, res *probeResult) error {
+	if onlyIfStale {
+		l, ok, err := s.lim.store.Get(ctx, acct.Name)
+		if err != nil {
+			return err
+		}
+		if ok && !limits.Stale(l, s.opts.Now()) {
+			res.skipped = true
+			return nil
+		}
+	}
+	// The probe's own store is never installed, so no call uses it and
+	// its connections are not among the account's. It dials outside any
+	// pool, so its pool size does not matter, and a refusal it meets is the
+	// probe's result rather than one to record.
+	st := s.newStore(acct, storeParams{poolSize: 1})
+	defer func() {
+		if err := st.Close(); err != nil {
+			s.opts.Logger.Warn("logging out of the probe's store", "account", acct.Name, "reason", errReason(err))
+		}
+	}()
+	p, ok := st.(prober)
+	if !ok {
+		return errProbeUnsupported
+	}
+	inUse := s.stores.openConns(acct)
+	dial := func(ctx context.Context) (io.Closer, error) {
+		c, err := p.ProbeDial(ctx)
+		if err != nil {
+			inUse = max(inUse, s.stores.openConns(acct))
+		}
+		return c, err
+	}
+	n, err := limits.Probe(ctx, dial, s.lim.probeOpts)
+	if err != nil {
+		// A cancelled probe returns no count, and a failed one no cap.
+		return err
+	}
+	n += inUse
+	l := limits.Limit{Account: acct.Name, IMAPCap: n, ProbedAt: s.opts.Now().UTC()}
+	if err := s.lim.store.Put(ctx, l); err != nil {
+		return err
+	}
+	if err := s.stores.replace(ctx, acct); err != nil {
+		return err
+	}
+	res.limit = l
+	res.pool = limits.PoolSize(acct.Pool, &l, acct.Provider.DefaultPool)
+	return nil
 }
 
 // auditEntry is the probe's audit row: the cap and pool on success, the

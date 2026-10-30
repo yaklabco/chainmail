@@ -615,7 +615,7 @@ On a terminal the commands print what they did, such as `created folder Projects
 
 The daemon keeps a pool of IMAP connections per account and works on several folders at once, up to the pool's size. Mail servers limit how many connections one account may have, and a pool over the limit gets connections refused. So chainmail measures each account's limit and sizes the pool from it.
 
-`accounts probe` measures one or more accounts, or every account when none is named. For each account it opens IMAP connections one at a time, 250 ms apart, logging each one in, until the server refuses one or 16 are open. Then it logs them all out. The number that worked, plus the connections the daemon already had open to the account when the probe started, is the account's cap. Up to 4 accounts are probed at once, and each probe times out after 2 minutes. The pool size is then:
+`accounts probe` measures one or more accounts, or every account when none is named. For each account it opens IMAP connections one at a time, 250 ms apart, logging each one in, until the server refuses one or 16 are open. Then it logs them all out. The number that worked, plus the connections the daemon itself holds open to the account, is the account's cap. Those are counted when the probe starts and again when the server refuses it, and the larger count is used, so a connection the daemon opens while the probe runs is not mistaken for part of the limit. Up to 4 accounts are probed at once, and each probe times out after 2 minutes. The pool size is then:
 
 1. `pool` from the config, when it is set.
 2. Otherwise the cap less 2, between 1 and 12. The 2 left over are for your other mail clients on the same account.
@@ -633,7 +633,7 @@ The daemon also probes:
 - after `auth login` for an account and after `secret set accounts/<account>`, which print the result, such as `connections: cap 10, pool 8`. A failed probe there is a warning and does not fail the command.
 - in the background, on an account's first use, when the account has no stored result or one older than 30 days.
 
-While a probe runs, the account's other calls wait, and the pool is rebuilt at the new size once it ends. If a server refuses a connection for being over its limit in normal use, the daemon lowers that account's pool by one, never below 1, and records a cap of the new pool size plus 2, unless the stored cap is already lower. The refusal counts as a fresh measurement, so it also postpones the next background probe.
+While a probe runs, the account's other calls go on as usual. Once it ends, the pool is rebuilt at the new size: calls already running finish first, and calls that start meanwhile wait only for the switch. If a server refuses a connection for being over its limit in normal use, the daemon lowers that account's pool by one, never below 1, and records a cap of the new pool size plus 2, unless the stored cap is already lower. The refusal counts as a fresh measurement, so it also postpones the next background probe.
 
 A probe ramps up slowly and stops at the first refusal, but it does open many connections at once, which some providers watch for abuse. It runs rarely. Setting `pool` in the config fixes the pool size whatever a probe finds, though the probes still run and record the cap. A refusal in normal use still lowers the pool below the configured `pool` until a probe rebuilds the pool or the daemon restarts.
 
