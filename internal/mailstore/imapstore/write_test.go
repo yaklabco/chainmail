@@ -1207,23 +1207,29 @@ func TestReadAfterAWriteSyncsAReusedFolder(t *testing.T) {
 	srv := startWriteServer(t, &writeServer{
 		caps:    "MOVE UIDPLUS",
 		folders: []*wsFolder{wsMailbox("INBOX", "", 7, 1), wsMailbox("Archive", "\\Archive", 20, 5)},
-		// Slow searches keep both reads below running at once, on two connections.
-		slowKind: "UID SEARCH", slow: 100 * time.Millisecond,
+		// A slow search holds one connection in Archive while a write opens
+		// INBOX read-write on the other.
+		slowKind: "UID SEARCH", slow: 300 * time.Millisecond,
 	})
 	s := writeStore(t, srv, Options{PoolSize: 2})
+	inbox := hostRef("INBOX", 7, 1)
 	var wg sync.WaitGroup
-	for _, folder := range []string{"INBOX", "Archive"} {
-		wg.Go(func() {
-			if _, err := s.FindByMessageID(t.Context(), folder, "1@x"); err != nil {
-				t.Error(err)
-			}
-		})
+	wg.Go(func() {
+		if _, err := s.FindByMessageID(t.Context(), "Archive", "5@x"); err != nil {
+			t.Error(err)
+		}
+	})
+	for srv.sent("UID SEARCH") == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if got := one(t, s.StoreFlags(t.Context(), []ref.Ref{inbox}, []string{`\Seen`}, nil)); got.Err != nil {
+		t.Fatal(got.Err)
 	}
 	wg.Wait()
 	if n := srv.sent("NOOP"); n != 0 || srv.conns.Load() != 2 {
-		t.Fatalf("%d NOOPs on %d connections before any write, want none on 2", n, srv.conns.Load())
+		t.Fatalf("%d NOOPs on %d connections before a read follows a write, want none on 2", n, srv.conns.Load())
 	}
-	got := one(t, s.Move(t.Context(), []ref.Ref{hostRef("INBOX", 7, 1)}, "Archive"))
+	got := one(t, s.Move(t.Context(), []ref.Ref{inbox}, "Archive"))
 	if got != (mailstore.RefResult{Ref: hostRef("Archive", 20, 101)}) {
 		t.Fatalf("Move = %+v", got)
 	}
@@ -1231,8 +1237,9 @@ func TestReadAfterAWriteSyncsAReusedFolder(t *testing.T) {
 	if err != nil || len(found) != 1 || found[0] != got.Ref {
 		t.Errorf("FindByMessageID after the move = %v, %v; want %v", found, err, got.Ref)
 	}
-	move, noop := srv.eventIndex("recv UID MOVE"), srv.eventIndex("recv NOOP")
-	if noop < move {
-		t.Errorf("commands %q, want a NOOP after the UID MOVE, before reading Archive again", srv.received())
+	cmds := srv.received()
+	after := cmds[slices.IndexFunc(cmds, func(c string) bool { return strings.HasPrefix(c, "UID MOVE") })+1:]
+	if !slices.Equal(after, []string{"NOOP", `UID SEARCH HEADER "Message-ID" "<1@x>"`}) {
+		t.Errorf("commands after the move %q, want NOOP on the connection with Archive open, then the search", after)
 	}
 }
