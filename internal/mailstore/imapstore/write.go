@@ -261,10 +261,11 @@ func (s *Store) transfer(ctx context.Context, refs []ref.Ref, dest string, keepO
 // MOVE: UID COPY, then UID STORE \Deleted and UID EXPUNGE of exactly the
 // originals the COPY's COPYUID names, so a failed COPY never loses mail.
 // Without a readable COPYUID nothing names the copies, so nothing is
-// deleted and every message fails with errCopyUnconfirmed. With one, every
-// ref is a success once the COPY is acknowledged, whatever the STORE and
-// EXPUNGE then do: a mapped ref has its copy, and one COPYUID leaves out was
-// not there to copy.
+// deleted and every message fails with errCopyUnconfirmed. With one, a
+// mapped ref succeeds with its new ref once its original is expunged, and
+// fails, naming the kept original, if the STORE or EXPUNGE does not go
+// through. A ref COPYUID leaves out was not there to copy: a success with
+// no new ref.
 func (s *Store) moveByCopy(ctx context.Context, c *conn, g *groupWrite, dest string, sent func()) error {
 	sent()
 	cu, err := c.uidCopy(ctx, uidSet(g.uids), dest)
@@ -284,7 +285,12 @@ func (s *Store) moveByCopy(ctx context.Context, c *conn, g *groupWrite, dest str
 		return nil
 	}
 	if err := c.expungeUIDs(ctx, uidSet(copied)); err != nil {
-		s.opts.Logger.Debug("expunging the originals of a move done by COPY", "account", s.acct.Name, "err", err)
+		// The copies exist, but the originals may too: that is no move.
+		kept := fmt.Errorf("%w: copied to %s, but the original may still be in its folder; search before trying again", mailstore.ErrUnavailable, dest)
+		for _, uid := range copied {
+			g.set(uid, mailstore.RefResult{Err: kept})
+		}
+		s.opts.Logger.Debug("expunging the originals of a move done by COPY failed", "account", s.acct.Name)
 		return err
 	}
 	return nil

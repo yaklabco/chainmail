@@ -1107,7 +1107,10 @@ func TestTransferWithoutCOPYUIDSucceedsWithNoNewRef(t *testing.T) {
 	}
 }
 
-func TestMoveByCopyKeepsTheCOPYUIDRefsWhateverTheExpungeDoes(t *testing.T) {
+// When the COPY worked but removing the originals did not, the messages are
+// in both folders. That is not a move, so those refs fail, naming the kept
+// original, rather than report a success that leaves a duplicate behind.
+func TestMoveByCopyReportsKeptOriginalsWhenTheExpungeFails(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name           string
@@ -1124,11 +1127,13 @@ func TestMoveByCopyKeepsTheCOPYUIDRefsWhateverTheExpungeDoes(t *testing.T) {
 			})
 			s := writeStore(t, srv, Options{})
 			res := s.Move(t.Context(), []ref.Ref{hostRef("INBOX", 7, 2), hostRef("INBOX", 7, 1), hostRef("INBOX", 7, 9)}, "Work")
-			want := []mailstore.RefResult{{Ref: hostRef("Work", 30, 102)}, {Ref: hostRef("Work", 30, 101)}, {}}
-			for i, w := range want {
-				if res[i] != w {
-					t.Errorf("ref %d: %+v, want %+v: the server acknowledged the COPY", i, res[i], w)
+			for i := range 2 {
+				if !errors.Is(res[i].Err, mailstore.ErrUnavailable) || !strings.Contains(res[i].Err.Error(), "original") {
+					t.Errorf("ref %d: %+v, want ErrUnavailable naming the kept original", i, res[i])
 				}
+			}
+			if res[2] != (mailstore.RefResult{}) {
+				t.Errorf("ref 2: %+v, want a success with no new ref: COPYUID left it out, so it was not there", res[2])
 			}
 			if n, c := srv.sent("UID COPY"), srv.conns.Load(); n != 1 || c != 1 {
 				t.Errorf("UID COPY sent %d times on %d connections, want once: nothing is retried", n, c)
