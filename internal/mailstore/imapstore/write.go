@@ -311,10 +311,11 @@ func (s *Store) moveByCopy(ctx context.Context, c *conn, g *groupWrite, dest str
 	return nil
 }
 
-// setPlaced records the new refs a COPYUID's pairs give in dest.
+// setPlaced records the new refs a COPYUID's pairs give in dest. Each keeps
+// its ref's X-GM-MSGID, which stays with a Gmail message wherever it goes.
 func (s *Store) setPlaced(g *groupWrite, dest string, validity uint32, pairs map[uint32]uint32) {
 	for src, dst := range pairs {
-		g.set(src, mailstore.RefResult{Ref: ref.Ref{Account: s.acct.Name, Folder: dest, UIDValidity: validity, UID: dst}})
+		g.place(src, ref.Ref{Account: s.acct.Name, Folder: dest, UIDValidity: validity, UID: dst})
 	}
 }
 

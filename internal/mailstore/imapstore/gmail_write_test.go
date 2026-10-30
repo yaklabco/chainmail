@@ -411,12 +411,39 @@ func TestGmailStoreLabels(t *testing.T) {
 
 func TestGmailWritesKeepGmailMsgIDOnNewRefs(t *testing.T) {
 	t.Parallel()
-	w := newGmailWrites(t)
-	r := w.ref(t, gmailTrash, 301)
-	r.GmailMsgID = w.srv.MsgID(gwTrashed)
-	got := one(t, w.store.Move(t.Context(), []ref.Ref{r}, "Work"))
-	if got.Err != nil || got.Ref.GmailMsgID != r.GmailMsgID {
-		t.Errorf("Move = %+v, want the new ref to keep X-GM-MSGID %d", got, r.GmailMsgID)
+	for _, c := range []struct {
+		name   string
+		folder string
+		uid    uint32
+		msg    int
+		write  func(s *Store, r ref.Ref) []mailstore.RefResult
+	}{
+		{"restore to a label", gmailTrash, 301, gwTrashed, func(s *Store, r ref.Ref) []mailstore.RefResult {
+			return s.Move(t.Context(), []ref.Ref{r}, "Work")
+		}},
+		{"move to Trash", allMail, 1, gwInbox, func(s *Store, r ref.Ref) []mailstore.RefResult {
+			return s.Move(t.Context(), []ref.Ref{r}, gmailTrash)
+		}},
+		{"move to Spam", allMail, 1, gwInbox, func(s *Store, r ref.Ref) []mailstore.RefResult {
+			return s.Move(t.Context(), []ref.Ref{r}, gmailSpam)
+		}},
+		{"move back to All Mail", gmailSpam, 401, gwSpammed, func(s *Store, r ref.Ref) []mailstore.RefResult {
+			return s.Move(t.Context(), []ref.Ref{r}, allMail)
+		}},
+		{"trash", allMail, 1, gwInbox, func(s *Store, r ref.Ref) []mailstore.RefResult {
+			return s.Trash(t.Context(), []ref.Ref{r})
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			w := newGmailWrites(t)
+			r := w.ref(t, c.folder, c.uid)
+			r.GmailMsgID = w.srv.MsgID(c.msg)
+			got := one(t, c.write(w.store, r))
+			if got.Err != nil || got.Ref.Folder == r.Folder || got.Ref.GmailMsgID != r.GmailMsgID {
+				t.Errorf("result = %+v, want a new ref that keeps X-GM-MSGID %d", got, r.GmailMsgID)
+			}
+		})
 	}
 }
 
