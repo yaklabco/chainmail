@@ -521,6 +521,9 @@ func (s *Store) restoreThenLabel(ctx context.Context, c *conn, g *groupWrite, al
 		g.failAll(fmt.Errorf("%w: no All Mail folder; in Gmail settings, show All Mail in IMAP", mailstore.ErrNotFound))
 		return nil
 	}
+	if err := s.readMsgIDs(ctx, c, g); err != nil {
+		return err
+	}
 	sent()
 	m, err := c.moveExisting(ctx, uidSet(g.uids), allMail)
 	if err != nil {
@@ -620,4 +623,18 @@ func (m gmailMove) unconfirmed(g *groupWrite, err error) {
 	for _, uid := range m.existed {
 		g.set(uid, mailstore.RefResult{Err: err})
 	}
+}
+
+// msgIDs fetches the X-GM-MSGIDs of uids in the folder open on c, by UID.
+// A UID the server does not answer for is left out.
+func (c *conn) msgIDs(ctx context.Context, uids []uint32) (map[uint32]uint64, error) {
+	bufs, err := c.fetch(ctx, uidSet(uids), &imap.FetchOptions{UID: true, GmailMsgID: true})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uint32]uint64, len(bufs))
+	for _, b := range bufs {
+		out[uint32(b.UID)] = b.GmailMsgID
+	}
+	return out, nil
 }

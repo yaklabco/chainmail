@@ -25,7 +25,11 @@ import (
 
 // Append implements mailstore.Writer. The new ref comes from APPENDUID
 // only. Without one, from a server lacking UIDPLUS, the APPEND still
-// succeeded and the ref is zero: the new place is unknown.
+// succeeded and the ref is zero: the new place is unknown. On Google
+// accounts the ref also carries the message's X-GM-MSGID, which APPENDUID
+// does not give, so it is fetched after the APPEND. The APPEND has happened
+// by then, so a failed fetch leaves the ref without it rather than failing
+// the call.
 func (s *Store) Append(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) (ref.Ref, error) {
 	fl, err := imapFlags(flags)
 	if err != nil {
@@ -41,10 +45,31 @@ func (s *Store) Append(ctx context.Context, folder string, flags []string, date 
 		}
 		if data.UID != 0 && data.UIDValidity != 0 {
 			out = ref.Ref{Account: s.acct.Name, Folder: folder, UIDValidity: data.UIDValidity, UID: uint32(data.UID)}
+			if s.gmail() {
+				out.GmailMsgID = s.appendedMsgID(ctx, c, out)
+			}
 		}
 		return nil
 	})
 	return out, err
+}
+
+// appendedMsgID returns the X-GM-MSGID of the message r names, which an
+// APPEND on c just stored, or 0 when it cannot be read.
+func (s *Store) appendedMsgID(ctx context.Context, c *conn, r ref.Ref) uint64 {
+	if err := s.open(ctx, c, r.Folder); err != nil {
+		s.opts.Logger.Debug("opening the folder of an appended message", logAttrs(err, "account", s.acct.Name)...)
+		return 0
+	}
+	if c.uidValidity != r.UIDValidity {
+		return 0
+	}
+	ids, err := c.msgIDs(ctx, []uint32{r.UID})
+	if err != nil {
+		s.opts.Logger.Debug("reading the X-GM-MSGID of an appended message", logAttrs(err, "account", s.acct.Name)...)
+		return 0
+	}
+	return ids[r.UID]
 }
 
 // Move implements mailstore.Writer.
@@ -188,7 +213,8 @@ func (s *Store) FindByMessageID(ctx context.Context, folder, messageID string) (
 }
 
 // findByID searches folder, opened on c, for messages whose Message-ID is
-// id, given without angle brackets.
+// id, given without angle brackets. On Google accounts the refs carry each
+// message's X-GM-MSGID, which SEARCH does not give, so it is fetched.
 func (s *Store) findByID(ctx context.Context, c *conn, folder, id string) ([]ref.Ref, error) {
 	if err := s.open(ctx, c, folder); err != nil {
 		return nil, err
@@ -200,9 +226,15 @@ func (s *Store) findByID(ctx context.Context, c *conn, folder, id string) ([]ref
 		return nil, err
 	}
 	slices.Sort(uids)
+	var ids map[uint32]uint64
+	if s.gmail() && len(uids) > 0 {
+		if ids, err = c.msgIDs(ctx, uids); err != nil {
+			return nil, err
+		}
+	}
 	out := make([]ref.Ref, len(uids))
 	for i, uid := range uids {
-		out[i] = ref.Ref{Account: s.acct.Name, Folder: folder, UIDValidity: c.uidValidity, UID: uid}
+		out[i] = ref.Ref{Account: s.acct.Name, Folder: folder, UIDValidity: c.uidValidity, UID: uid, GmailMsgID: ids[uid]}
 	}
 	return out, nil
 }
@@ -225,6 +257,9 @@ func (s *Store) transfer(ctx context.Context, refs []ref.Ref, dest string, keepO
 	return s.writeBatch(ctx, refs, func(ctx context.Context, c *conn, g *groupWrite, sent func()) error {
 		if !keepOriginal && c.Selected() == dest {
 			return keepPresent(ctx, c, g)
+		}
+		if err := s.readMsgIDs(ctx, c, g); err != nil {
+			return err
 		}
 		caps := c.client().Caps()
 		move := !keepOriginal && caps.Has(imap.CapMove)
@@ -482,6 +517,32 @@ func (s *Store) resolveGroup(ctx context.Context, c *conn, g *groupWrite) error 
 	return nil
 }
 
+// readMsgIDs, on a Google account, fetches the X-GM-MSGID of each message
+// of g some ref names without one, in the folder open on c, for the new
+// refs place gives. It runs before a write that moves messages, since the
+// new folder's UID alone is all COPYUID gives. A message the FETCH does not
+// find is left without one: the write finds it gone.
+func (s *Store) readMsgIDs(ctx context.Context, c *conn, g *groupWrite) error {
+	if !s.gmail() {
+		return nil
+	}
+	var need []uint32
+	for _, uid := range g.uids {
+		if slices.ContainsFunc(g.byUID[uid], func(j int) bool { return g.refs[j].GmailMsgID == 0 }) {
+			need = append(need, uid)
+		}
+	}
+	if len(need) == 0 {
+		return nil
+	}
+	ids, err := c.msgIDs(ctx, need)
+	if err != nil {
+		return err
+	}
+	g.msgIDs = ids
+	return nil
+}
+
 // groupWrite is one folder group's write in progress: the UIDs it changes
 // and the outcome of each of its refs.
 type groupWrite struct {
@@ -491,6 +552,9 @@ type groupWrite struct {
 	byUID    map[uint32][]int      // positions in refs naming each UID; a batch may name one message twice
 	uids     []uint32              // distinct, ascending
 	validity uint32                // the folder's UIDVALIDITY
+	// msgIDs are the X-GM-MSGIDs readMsgIDs fetched, by UID, for refs that
+	// lack one.
+	msgIDs map[uint32]uint64
 }
 
 func newGroupWrite(batch []ref.Ref, idx []int) *groupWrite {
@@ -506,7 +570,7 @@ func newGroupWrite(batch []ref.Ref, idx []int) *groupWrite {
 func (g *groupWrite) reset() {
 	clear(g.res)
 	clear(g.done)
-	g.byUID, g.uids, g.validity = map[uint32][]int{}, nil, 0
+	g.byUID, g.uids, g.validity, g.msgIDs = map[uint32][]int{}, nil, 0, nil
 }
 
 func (g *groupWrite) setAt(j int, r mailstore.RefResult) {
@@ -539,12 +603,13 @@ func (g *groupWrite) setAll(r mailstore.RefResult) {
 	}
 }
 
-// place records that the message uid names is now at r, keeping each ref's
-// X-GM-MSGID, which stays with a Gmail message wherever it goes.
+// place records that the message uid names is now at r, with the
+// X-GM-MSGID, which stays with a Gmail message wherever it goes, of each
+// ref, or the one readMsgIDs fetched for a ref without it.
 func (g *groupWrite) place(uid uint32, r ref.Ref) {
 	for _, j := range g.byUID[uid] {
 		out := r
-		out.GmailMsgID = g.refs[j].GmailMsgID
+		out.GmailMsgID = cmp.Or(g.refs[j].GmailMsgID, g.msgIDs[uid])
 		g.setAt(j, mailstore.RefResult{Ref: out})
 	}
 }

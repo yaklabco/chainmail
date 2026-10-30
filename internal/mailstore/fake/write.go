@@ -191,22 +191,6 @@ func (s *Store) relocateLocked(m *Message, folder string) ref.Ref {
 	return s.refLocked(m)
 }
 
-// placedLocked is m's ref where it now is, carrying the X-GM-MSGID r
-// carries and no other: imapstore takes a moved message's new ref from
-// COPYUID, which gives none, and keeps the one the ref it was given had.
-func (s *Store) placedLocked(m *Message, r ref.Ref) ref.Ref {
-	out := s.refLocked(m)
-	out.GmailMsgID = r.GmailMsgID
-	return out
-}
-
-// asFound is r as APPENDUID or a SEARCH gives it, without X-GM-MSGID, so
-// it is stale once its folder's UIDVALIDITY changes, as imapstore's is.
-func asFound(r ref.Ref) ref.Ref {
-	r.GmailMsgID = 0
-	return r
-}
-
 // allMailLocked is the name of Gmail's All Mail folder.
 func (s *Store) allMailLocked() (string, error) {
 	if name := s.byRoleLocked(mailstore.RoleAll); name != "" {
@@ -225,7 +209,8 @@ func (s *Store) roleFolderLocked(role mailstore.Role) (string, error) {
 
 // Append implements mailstore.Writer. On Gmail, appending to a label folder
 // stores the message in All Mail with that label and returns its ref in the
-// label folder, as APPENDUID gives it: without X-GM-MSGID. A zero date
+// label folder, as APPENDUID gives it, with the X-GM-MSGID imapstore fetches
+// after the APPEND. A zero date
 // stores the clock's time as the internal date.
 func (s *Store) Append(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) (ref.Ref, error) {
 	s.mu.Lock()
@@ -264,7 +249,7 @@ func (s *Store) Append(ctx context.Context, folder string, flags []string, date 
 	s.nextUID[m.Folder]++
 	s.msgs = append(s.msgs, &m)
 	s.appended = append(s.appended, slices.Clone(raw))
-	return asFound(s.refInLocked(&m, folder)), nil
+	return s.refInLocked(&m, folder), nil
 }
 
 // parseRaw fills a message's fields from its header, for search and
@@ -320,8 +305,8 @@ func (s *Store) Move(ctx context.Context, refs []ref.Ref, folder string) []mails
 // there under a new ref, and leaving a label folder for All Mail drops that
 // folder's label, as Gmail does. A move into a label folder is a label edit:
 // a message in Trash or Spam goes back to All Mail first, then it gains the
-// label and loses \Inbox unless dest is INBOX. A new ref carries the
-// X-GM-MSGID r carries, as imapstore's do.
+// label and loses \Inbox unless dest is INBOX. A new ref carries m's
+// X-GM-MSGID, whether or not r does, as imapstore's do.
 func (s *Store) moveLocked(m *Message, r ref.Ref, dest mailstore.Folder) (ref.Ref, error) {
 	if r.Folder == dest.Name {
 		return r, nil
@@ -340,7 +325,7 @@ func (s *Store) moveLocked(m *Message, r ref.Ref, dest mailstore.Folder) (ref.Re
 		if m.Folder != dest.Name {
 			s.relocateLocked(m, dest.Name)
 		}
-		return s.placedLocked(m, r), nil
+		return s.refLocked(m), nil
 	}
 	if s.roleLocked(m.Folder) != mailstore.RoleAll {
 		all, err := s.allMailLocked()
@@ -348,7 +333,7 @@ func (s *Store) moveLocked(m *Message, r ref.Ref, dest mailstore.Folder) (ref.Re
 			return ref.Ref{}, err
 		}
 		s.relocateLocked(m, all)
-		r = s.placedLocked(m, r)
+		r = s.refLocked(m)
 	}
 	label := labelOf(dest)
 	var remove []string
@@ -813,8 +798,8 @@ func (s *Store) DeleteFolder(ctx context.Context, name string, force bool) error
 
 // FindByMessageID implements mailstore.Writer. The result is in UID order.
 // On Gmail a label folder gives refs in that folder, as imapstore does, and
-// no ref carries X-GM-MSGID, which SEARCH does not give. An empty
-// Message-ID finds nothing.
+// every ref carries the message's X-GM-MSGID, which imapstore fetches since
+// SEARCH does not give it. An empty Message-ID finds nothing.
 func (s *Store) FindByMessageID(ctx context.Context, folder, messageID string) ([]ref.Ref, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -832,7 +817,7 @@ func (s *Store) FindByMessageID(ctx context.Context, folder, messageID string) (
 	var out []ref.Ref
 	for _, m := range s.msgs {
 		if s.inFolderLocked(f, m) && trimID(m.MessageID) == id {
-			out = append(out, asFound(s.refInLocked(m, f.Name)))
+			out = append(out, s.refInLocked(m, f.Name))
 		}
 	}
 	slices.SortFunc(out, func(a, b ref.Ref) int {

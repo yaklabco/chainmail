@@ -456,7 +456,7 @@ var cases = []testCase{
 	{"Append to a missing folder is not found", both, appendMissingFolder},
 	{"Append refuses a flag IMAP cannot store", both, appendBadFlag},
 	{"Append on Gmail gives a ref an edit can follow", gmailOnly, appendThenEditGmail},
-	{"Append and FindByMessageID refs carry only what the server gives", gmailOnly, appendIdentityGmail},
+	{"Append and FindByMessageID refs carry X-GM-MSGID", gmailOnly, appendIdentityGmail},
 	{"Move gives new refs and the originals go", standardOnly, moveStandard},
 	{"Move into the folder a ref names keeps it", both, moveIntoOwnFolder},
 	{"Move to a missing folder changes nothing", both, moveMissingFolder},
@@ -567,11 +567,11 @@ func appendThenEditGmail(e *env) {
 	e.readable(got.Ref, "CfAppendEdit")
 }
 
-// appendIdentityGmail: APPENDUID and SEARCH give no X-GM-MSGID, so the refs
-// Append and FindByMessageID return carry none, and once the UIDVALIDITY
-// they name changes they are stale, where a ref from a search, which
-// carries it, is found again. Writes keep what the ref they are given
-// carries.
+// appendIdentityGmail: on Google every ref carries the message's
+// X-GM-MSGID, the refs Append and FindByMessageID return too, though
+// APPENDUID and SEARCH do not give it. So once the UIDVALIDITY they name
+// changes they are found again, as a ref from a search is, and writes keep
+// it on the new refs they give.
 func appendIdentityGmail(e *env) {
 	m := e.in(e.msg("CfAppendID"), GmailAllMail)
 	r, err := e.s.Append(e.ctx, GmailAllMail, nil, m.Date, m.Raw())
@@ -582,20 +582,19 @@ func appendIdentityGmail(e *env) {
 	if searched.GmailMsgID == 0 {
 		e.t.Errorf("search ref %v, want it to carry X-GM-MSGID", searched)
 	}
-	want := searched
-	want.GmailMsgID = 0
-	if r != want {
-		e.t.Errorf("Append ref = %v, want %v: APPENDUID gives no X-GM-MSGID", r, want)
+	if r != searched {
+		e.t.Errorf("Append ref = %v, want %v, the ref a search gives, X-GM-MSGID included", r, searched)
 	}
 	found, err := e.s.FindByMessageID(e.ctx, GmailAllMail, m.MessageID)
-	if err != nil || len(found) != 1 || found[0] != want {
-		e.t.Errorf("FindByMessageID = %v, %v; want [%v]: SEARCH gives no X-GM-MSGID", found, err, want)
+	if err != nil || len(found) != 1 || found[0] != searched {
+		e.t.Errorf("FindByMessageID = %v, %v; want [%v], X-GM-MSGID included", found, err, searched)
 	}
-	e.stale(bumped(r))
-	wantErr(e.t, "StoreFlags of the Append ref under another UIDVALIDITY", one(e.t, e.s.StoreFlags(e.ctx, []ref.Ref{bumped(r)}, []string{`\Flagged`}, nil)).Err, mailstore.ErrStaleRef)
-	e.readable(bumped(searched), "CfAppendID")
-	if got := e.only("", "CfAppendID").Flags; hasFold(got, `\Flagged`) {
-		e.t.Errorf("flags = %q, want the stale StoreFlags to change nothing", got)
+	e.readable(bumped(r), "CfAppendID")
+	if got := one(e.t, e.s.StoreFlags(e.ctx, []ref.Ref{bumped(r)}, []string{`\Flagged`}, nil)); got.Err != nil {
+		e.t.Errorf("StoreFlags of the Append ref under another UIDVALIDITY = %v, want it found by X-GM-MSGID", got.Err)
+	}
+	if got := e.only("", "CfAppendID").Flags; !hasFold(got, `\Flagged`) {
+		e.t.Errorf(`flags = %q, want \Flagged from the StoreFlags of the bumped ref`, got)
 	}
 	trashed := one(e.t, e.s.Trash(e.ctx, []ref.Ref{r}))
 	e.checkPlaced(trashed, r, GmailTrash, "CfAppendID")
@@ -1071,10 +1070,11 @@ func deleteFolder(e *env) {
 	e.wantWhere("CfDelete")
 }
 
+// findByMessageID: the refs are those a search gives, so on Google they
+// carry the message's X-GM-MSGID, which SEARCH alone does not give.
 func findByMessageID(e *env) {
 	e.seed(e.t, e.msg("CfFind"), e.in(e.msg("CfFindTrash"), e.trash()))
 	r := e.ref("CfFind")
-	r.GmailMsgID = 0 // SEARCH gives no X-GM-MSGID
 	id := e.msg("CfFind").MessageID
 	for _, form := range []string{id, "<" + id + ">", " <" + id + "> "} {
 		got, err := e.s.FindByMessageID(e.ctx, e.home(), form)
@@ -1090,13 +1090,14 @@ func findByMessageID(e *env) {
 	if got, err := e.s.FindByMessageID(e.ctx, e.home(), e.msg("CfFindTrash").MessageID); err != nil || len(got) != 0 {
 		e.t.Errorf("FindByMessageID of a message in Trash, searching %s = %v, %v; want nothing", e.home(), got, err)
 	}
-	if got, err := e.s.FindByMessageID(e.ctx, e.trash(), e.msg("CfFindTrash").MessageID); err != nil || len(got) != 1 || got[0].Folder != e.trash() || got[0].GmailMsgID != 0 {
-		e.t.Errorf("FindByMessageID in Trash = %v, %v", got, err)
+	trashed := e.ref("CfFindTrash", "trash")
+	if got, err := e.s.FindByMessageID(e.ctx, e.trash(), e.msg("CfFindTrash").MessageID); err != nil || len(got) != 1 || got[0] != trashed {
+		e.t.Errorf("FindByMessageID in Trash = %v, %v; want [%v]", got, err, trashed)
 	}
 	if e.gmail {
 		got, err := e.s.FindByMessageID(e.ctx, "INBOX", id)
-		if err != nil || len(got) != 1 || got[0].Folder != "INBOX" || got[0].GmailMsgID != 0 {
-			e.t.Fatalf("FindByMessageID(INBOX) = %v, %v; want a ref in INBOX without X-GM-MSGID", got, err)
+		if err != nil || len(got) != 1 || got[0].Folder != "INBOX" || got[0].GmailMsgID != r.GmailMsgID || r.GmailMsgID == 0 {
+			e.t.Fatalf("FindByMessageID(INBOX) = %v, %v; want a ref in INBOX with X-GM-MSGID %d", got, err, r.GmailMsgID)
 		}
 		e.readable(got[0], "CfFind")
 	}

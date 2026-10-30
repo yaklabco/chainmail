@@ -82,6 +82,13 @@ func (w gmailWrites) ref(t *testing.T, folder string, uid uint32) ref.Ref {
 	return ref.Ref{Account: "gmail", Folder: folder, UIDValidity: data.UIDValidity, UID: uid}
 }
 
+// withID is r carrying the X-GM-MSGID of message i, as a ref a write gives
+// for a message it moved does.
+func (w gmailWrites) withID(r ref.Ref, i int) ref.Ref {
+	r.GmailMsgID = w.srv.MsgID(i)
+	return r
+}
+
 // found is the All Mail ref of message i as an X-GM-MSGID search finds it,
 // with its X-GM-MSGID.
 func (w gmailWrites) found(t *testing.T, i int) ref.Ref {
@@ -188,7 +195,7 @@ func TestGmailMove(t *testing.T) {
 			w := newGmailWrites(t)
 			got := one(t, w.store.Move(t.Context(), []ref.Ref{w.ref(t, allMail, 1)}, dest))
 			where := w.where(t, gwInbox)
-			if got.Err != nil || got.Ref != w.ref(t, dest, where[dest]) {
+			if got.Err != nil || got.Ref != w.withID(w.ref(t, dest, where[dest]), gwInbox) {
 				t.Errorf("Move = %+v, want the ref in %s (%v)", got, dest, where)
 			}
 			if !in(where, dest) {
@@ -205,7 +212,7 @@ func TestGmailMove(t *testing.T) {
 			if !in(where, allMail, "Work") {
 				t.Errorf("message %d is in %v, want All Mail and Work", msg, where)
 			}
-			if res[i].Err != nil || res[i].Ref != w.ref(t, allMail, where[allMail]) {
+			if res[i].Err != nil || res[i].Ref != w.withID(w.ref(t, allMail, where[allMail]), msg) {
 				t.Errorf("Move result %d = %+v, want its All Mail ref", i, res[i])
 			}
 		}
@@ -281,7 +288,7 @@ func TestGmailCopy(t *testing.T) {
 		from := w.ref(t, allMail, w.where(t, msg)[allMail])
 		got := one(t, w.store.Copy(t.Context(), []ref.Ref{from}, dest))
 		where := w.where(t, msg)
-		if !in(where, dest) || got.Err != nil || got.Ref != w.ref(t, dest, where[dest]) {
+		if !in(where, dest) || got.Err != nil || got.Ref != w.withID(w.ref(t, dest, where[dest]), msg) {
 			t.Errorf("Copy to %s = %+v, message in %v; want it moved there under a new ref", dest, got, where)
 		}
 	}
@@ -312,7 +319,7 @@ func TestGmailTrash(t *testing.T) {
 	trashed := w.ref(t, gmailTrash, 301)
 	res := w.store.Trash(t.Context(), []ref.Ref{w.ref(t, allMail, 1), trashed})
 	where := w.where(t, gwInbox)
-	if !in(where, gmailTrash) || res[0].Err != nil || res[0].Ref != w.ref(t, gmailTrash, where[gmailTrash]) {
+	if !in(where, gmailTrash) || res[0].Err != nil || res[0].Ref != w.withID(w.ref(t, gmailTrash, where[gmailTrash]), gwInbox) {
 		t.Errorf("Trash = %+v, message in %v; want it in Trash under its new ref", res[0], where)
 	}
 	if res[1] != (mailstore.RefResult{Ref: trashed}) {
@@ -429,24 +436,84 @@ func TestGmailWritesKeepGmailMsgIDOnNewRefs(t *testing.T) {
 		{"move to Spam", allMail, 1, gwInbox, func(s *Store, r ref.Ref) []mailstore.RefResult {
 			return s.Move(t.Context(), []ref.Ref{r}, gmailSpam)
 		}},
+		{"copy into Spam", allMail, 1, gwInbox, func(s *Store, r ref.Ref) []mailstore.RefResult {
+			return s.Copy(t.Context(), []ref.Ref{r}, gmailSpam)
+		}},
 		{"move back to All Mail", gmailSpam, 401, gwSpammed, func(s *Store, r ref.Ref) []mailstore.RefResult {
 			return s.Move(t.Context(), []ref.Ref{r}, allMail)
 		}},
 		{"trash", allMail, 1, gwInbox, func(s *Store, r ref.Ref) []mailstore.RefResult {
 			return s.Trash(t.Context(), []ref.Ref{r})
 		}},
+		{"archive out of INBOX", "INBOX", 101, gwInbox, func(s *Store, r ref.Ref) []mailstore.RefResult {
+			return s.Archive(t.Context(), []ref.Ref{r})
+		}},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			w := newGmailWrites(t)
-			r := w.ref(t, c.folder, c.uid)
-			r.GmailMsgID = w.srv.MsgID(c.msg)
-			got := one(t, c.write(w.store, r))
-			if got.Err != nil || got.Ref.Folder == r.Folder || got.Ref.GmailMsgID != r.GmailMsgID {
-				t.Errorf("result = %+v, want a new ref that keeps X-GM-MSGID %d", got, r.GmailMsgID)
-			}
-		})
+		// A ref without X-GM-MSGID, such as one written by hand or by an
+		// older chainmail, still gets a new ref that carries it.
+		for _, given := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, ref with X-GM-MSGID %v", c.name, given), func(t *testing.T) {
+				t.Parallel()
+				w := newGmailWrites(t)
+				r := w.ref(t, c.folder, c.uid)
+				if given {
+					r.GmailMsgID = w.srv.MsgID(c.msg)
+				}
+				got := one(t, c.write(w.store, r))
+				if got.Err != nil || got.Ref.Folder == r.Folder || got.Ref.GmailMsgID != w.srv.MsgID(c.msg) {
+					t.Errorf("result = %+v, want a new ref that carries X-GM-MSGID %d", got, w.srv.MsgID(c.msg))
+				}
+			})
+		}
 	}
+}
+
+// Every ref a Google account gives carries the message's X-GM-MSGID, by
+// which it is found again after its folder's UIDVALIDITY changes. APPENDUID
+// and SEARCH do not give it, so the store fetches it.
+func TestGmailFoundAndAppendedRefsCarryGmailMsgID(t *testing.T) {
+	t.Parallel()
+	t.Run("FindByMessageID", func(t *testing.T) {
+		t.Parallel()
+		w := newGmailWrites(t)
+		for _, c := range []struct {
+			folder string
+			id     string
+			msg    int
+			uid    uint32
+		}{
+			{allMail, "inbox@x", gwInbox, 1},
+			{"INBOX", "inbox2@x", gwInbox2, 102},
+			{"Work", "work@x", gwWork, 1101},
+			{gmailTrash, "trashed@x", gwTrashed, 301},
+		} {
+			got, err := w.store.FindByMessageID(t.Context(), c.folder, c.id)
+			want := w.ref(t, c.folder, c.uid)
+			want.GmailMsgID = w.srv.MsgID(c.msg)
+			if err != nil || len(got) != 1 || got[0] != want {
+				t.Errorf("FindByMessageID(%s, %s) = %v, %v; want [%v]", c.folder, c.id, got, err, want)
+			}
+		}
+	})
+	t.Run("Append", func(t *testing.T) {
+		t.Parallel()
+		w := newGmailWrites(t)
+		for i, folder := range []string{allMail, "[Gmail]/Drafts", "Work"} {
+			id := fmt.Sprintf("appended%d", i)
+			got, err := w.store.Append(t.Context(), folder, nil, gmailDay(9), []byte(gwRaw(id)))
+			if err != nil {
+				t.Fatalf("Append to %s: %v", folder, err)
+			}
+			msg := gwSpammed + 1 + i // appended messages count on from those seeded
+			if got.Folder != folder || got.UID == 0 || got.GmailMsgID == 0 || got.GmailMsgID != w.srv.MsgID(msg) {
+				t.Errorf("Append to %s = %v, want a ref that carries X-GM-MSGID %d", folder, got, w.srv.MsgID(msg))
+			}
+			found, err := w.store.FindByMessageID(t.Context(), folder, id+"@x")
+			if err != nil || len(found) != 1 || found[0] != got {
+				t.Errorf("FindByMessageID(%s) = %v, %v; want [%v]", folder, found, err, got)
+			}
+		}
+	})
 }
 
 func TestGmailMoveMixedBatch(t *testing.T) {

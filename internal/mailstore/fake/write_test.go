@@ -159,8 +159,8 @@ func TestWriteAppend(t *testing.T) {
 			if r.Folder != tt.wantFolder || r.Account != s.account || r.UID == 0 || r.UIDValidity == 0 {
 				t.Fatalf("ref = %+v, want folder %s", r, tt.wantFolder)
 			}
-			if r.GmailMsgID != 0 {
-				t.Errorf("GmailMsgID = %d, want none: APPENDUID gives no X-GM-MSGID", r.GmailMsgID)
+			if gmail := s.gmail; (r.GmailMsgID != 0) != gmail {
+				t.Errorf("GmailMsgID = %d, want one only on Gmail, where imapstore reads it after the APPEND", r.GmailMsgID)
 			}
 			m := fetch(t, s, r)
 			if m.Summary.Subject != "Appended" || m.MessageID != "<a1@example.com>" || !m.Summary.InternalDate.Equal(date) {
@@ -471,8 +471,8 @@ func TestWriteCopy(t *testing.T) {
 				if err != nil || len(refs) != 1 || refs[0].Folder != tt.dest || fetch(t, s, refs[0]).Summary.Subject != "copied" {
 					t.Errorf("FindByMessageID(%s) = %v, %v, want the message there", tt.dest, refs, err)
 				}
-			} else if err != nil || !slices.Contains(refs, asFound(res.Ref)) {
-				t.Errorf("FindByMessageID(%s) = %v, %v, want it to hold %s", tt.dest, refs, err, asFound(res.Ref))
+			} else if err != nil || !slices.Contains(refs, res.Ref) {
+				t.Errorf("FindByMessageID(%s) = %v, %v, want it to hold %s", tt.dest, refs, err, res.Ref)
 			}
 			if !tt.gmail {
 				// The copy is its own message.
@@ -1105,7 +1105,7 @@ func TestWriteFindByMessageID(t *testing.T) {
 		{name: "standard no match", s: host, folder: "INBOX", id: "other@x"},
 		{name: "standard empty id", s: host, folder: "INBOX", id: "<>"},
 		{name: "standard unknown folder", s: host, folder: "Nope", id: "same@x", wantErr: mailstore.ErrNotFound},
-		{name: "Gmail All Mail", s: gmail, folder: allMail, id: "s@x", want: []ref.Ref{asFound(sent)}},
+		{name: "Gmail All Mail", s: gmail, folder: allMail, id: "s@x", want: []ref.Ref{sent}},
 		{name: "Gmail INBOX does not have it", s: gmail, folder: "INBOX", id: "s@x"},
 		{name: "Gmail unknown folder", s: gmail, folder: "Nope", id: "s@x", wantErr: mailstore.ErrNotFound},
 	}
@@ -1373,7 +1373,7 @@ func TestWriteGmailFolderNamesIgnoreCase(t *testing.T) {
 }
 
 // TestWriteGmailLabelFolderRefs: on Gmail, Append to a label folder gives a
-// ref in that folder, from APPENDUID, and FindByMessageID in a label folder
+// ref in that folder, from APPENDUID with the X-GM-MSGID, and FindByMessageID in a label folder
 // gives refs there, as imapstore does. Reads and writes take such refs. An
 // edit that keeps the message in the folder keeps the ref, and one that
 // takes it out gives the message's All Mail ref.
@@ -1386,7 +1386,7 @@ func TestWriteGmailLabelFolderRefs(t *testing.T) {
 	if err != nil || len(found) != 1 || found[0].Folder != gmailSent {
 		t.Fatalf("FindByMessageID(Sent Mail) = %v, %v; want a ref in Sent Mail", found, err)
 	}
-	if m := fetch(t, s, found[0]); asFound(m.Summary.Ref) != found[0] || m.Summary.Subject != "sent" {
+	if m := fetch(t, s, found[0]); m.Summary.Ref != found[0] || m.Summary.Subject != "sent" {
 		t.Errorf("reading the Sent Mail ref gave %v %q", m.Summary.Ref, m.Summary.Subject)
 	}
 
@@ -1404,7 +1404,7 @@ func TestWriteGmailLabelFolderRefs(t *testing.T) {
 	if err != nil || len(all) != 1 {
 		t.Fatalf("FindByMessageID(All Mail) = %v, %v", all, err)
 	}
-	if m := fetch(t, s, r); asFound(m.Summary.Ref) != r || m.Summary.Subject != "Appended" || !slices.Contains(m.Summary.Labels, `\Inbox`) {
+	if m := fetch(t, s, r); m.Summary.Ref != r || m.Summary.Subject != "Appended" || !slices.Contains(m.Summary.Labels, `\Inbox`) {
 		t.Errorf("reading the INBOX ref gave %v %q %q", m.Summary.Ref, m.Summary.Subject, m.Summary.Labels)
 	}
 	if _, rc, err := s.StreamPart(ctx, r, ""); err != nil {
@@ -1422,7 +1422,7 @@ func TestWriteGmailLabelFolderRefs(t *testing.T) {
 			t.Errorf("%s of the INBOX ref = %+v, want it kept", name, res)
 		}
 	}
-	if got := one(t, s.Archive(ctx, []ref.Ref{r})); got.Err != nil || asFound(got.Ref) != all[0] || got.Ref.GmailMsgID == 0 {
+	if got := one(t, s.Archive(ctx, []ref.Ref{r})); got.Err != nil || got.Ref != all[0] || got.Ref.GmailMsgID == 0 {
 		t.Errorf("Archive of the INBOX ref = %+v, want its All Mail ref %v, with X-GM-MSGID: imapstore finds it by that", got, all[0])
 	}
 	gone(t, s, r)
@@ -1433,7 +1433,7 @@ func TestWriteGmailLabelFolderRefs(t *testing.T) {
 	if err != nil || len(back) != 1 || back[0].UID == r.UID {
 		t.Errorf("FindByMessageID(INBOX) after a return = %v, %v; want a new UID, as Gmail gives", back, err)
 	}
-	if got := one(t, s.Move(ctx, back, "Receipts")); got.Err != nil || asFound(got.Ref) != all[0] || got.Ref.GmailMsgID == 0 {
+	if got := one(t, s.Move(ctx, back, "Receipts")); got.Err != nil || got.Ref != all[0] || got.Ref.GmailMsgID == 0 {
 		t.Errorf("Move of the INBOX ref to a label = %+v, want its All Mail ref, with X-GM-MSGID: it left INBOX", got)
 	}
 
@@ -1486,18 +1486,18 @@ func TestWriteGmailRecoversRefsByMsgID(t *testing.T) {
 		t.Errorf("Trash with an old UIDVALIDITY = %+v, want it moved", got)
 	}
 
-	// An Append ref carries no X-GM-MSGID, as APPENDUID gives none, so it
-	// cannot be found again once the UIDVALIDITY it names changes.
+	// An Append ref carries the X-GM-MSGID, which imapstore reads after the
+	// APPEND, so it is found again once the UIDVALIDITY it names changes.
 	appended, err := s.Append(ctx, allMail, nil, time.Time{}, raw("Appended", "a@x"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.SetUIDValidity(allMail, 60)
-	if got := one(t, s.StoreFlags(ctx, []ref.Ref{appended}, []string{`\Seen`}, nil)); !errors.Is(got.Err, mailstore.ErrStaleRef) {
-		t.Errorf("StoreFlags of an Append ref with an old UIDVALIDITY = %+v, want ErrStaleRef", got)
+	if got := one(t, s.StoreFlags(ctx, []ref.Ref{appended}, []string{`\Seen`}, nil)); got.Err != nil || got.Ref.UIDValidity != 60 || got.Ref.GmailMsgID != appended.GmailMsgID {
+		t.Errorf("StoreFlags of an Append ref with an old UIDVALIDITY = %+v, want it found by X-GM-MSGID", got)
 	}
-	if res := s.FetchMessages(ctx, []ref.Ref{appended}); !errors.Is(res[0].Err, mailstore.ErrStaleRef) {
-		t.Errorf("FetchMessages of an Append ref with an old UIDVALIDITY = %+v, want ErrStaleRef", res[0])
+	if res := s.FetchMessages(ctx, []ref.Ref{appended}); res[0].Err != nil {
+		t.Errorf("FetchMessages of an Append ref with an old UIDVALIDITY = %+v, want it found by X-GM-MSGID", res[0])
 	}
 
 	std := newHost()
