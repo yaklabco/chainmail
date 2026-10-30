@@ -355,6 +355,27 @@ func TestSendErrorText(t *testing.T) {
 	}
 }
 
+// Servers echo addresses in their replies. Error shows a reply's code and
+// the step, never its text, which stays reachable through Unwrap.
+func TestSendErrorTextHidesServerReplyText(t *testing.T) {
+	t.Parallel()
+	reply := &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1}, Message: "<secret-rcpt@example.com>: no such user"}
+	se := failure(reply, false, "RCPT TO")
+	se.Refused = []string{"secret-rcpt@example.com"}
+	msg := se.Error()
+	if strings.Contains(msg, "secret-rcpt") || strings.Contains(msg, "no such user") {
+		t.Errorf("Error() = %q, shows the server's reply text", msg)
+	}
+	for _, want := range []string{"permanent", "550", "RCPT TO", "1 recipient(s) refused"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("Error() = %q, want it to mention %q", msg, want)
+		}
+	}
+	if got, ok := errors.AsType[*smtp.SMTPError](se); !ok || got.Message != reply.Message {
+		t.Errorf("errors.AsType = %v, want the server's reply in the chain", got)
+	}
+}
+
 func TestOutcomeString(t *testing.T) {
 	t.Parallel()
 	for o, want := range map[Outcome]string{

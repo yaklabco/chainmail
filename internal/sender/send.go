@@ -52,9 +52,14 @@ type SendError struct {
 	// Refused lists the addresses refused at RCPT with a 5xx, in the order given.
 	Refused []string
 	Err     error
+
+	step string // the SMTP step that failed, for Error
 }
 
-// Error describes the failure. It names no recipient: Refused is only counted.
+// Error describes the failure. It names no recipient: Refused is only
+// counted, and an SMTP reply shows only its code and the step it answered,
+// because servers echo addresses in reply text. The full reply stays in the
+// chain for errors.AsType.
 func (e *SendError) Error() string {
 	var b strings.Builder
 	b.WriteString("SMTP send: ")
@@ -63,10 +68,15 @@ func (e *SendError) Error() string {
 		b.WriteString(", ")
 		b.WriteString(strconv.Itoa(e.Code))
 	}
+	_, isReply := errors.AsType[*smtp.SMTPError](e.Err)
+	if isReply && e.step != "" {
+		b.WriteString(" at ")
+		b.WriteString(e.step)
+	}
 	if n := len(e.Refused); n > 0 {
 		fmt.Fprintf(&b, ", %d recipient(s) refused", n)
 	}
-	if e.Err != nil {
+	if e.Err != nil && !isReply {
 		b.WriteString(": ")
 		b.WriteString(e.Err.Error())
 	}
@@ -253,14 +263,14 @@ func (c *Conn) submit(from string, to []string, raw []byte) *SendError {
 // written when err happened.
 func failure(err error, afterDot bool, step string) *SendError {
 	wrapped := fmt.Errorf("%s: %w", step, err)
-	var reply *smtp.SMTPError
-	if !errors.As(err, &reply) {
+	reply, ok := errors.AsType[*smtp.SMTPError](err)
+	if !ok {
 		if afterDot {
-			return &SendError{Outcome: Unknown, Err: wrapped}
+			return &SendError{Outcome: Unknown, Err: wrapped, step: step}
 		}
-		return &SendError{Outcome: NotSentTemporary, Err: wrapped}
+		return &SendError{Outcome: NotSentTemporary, Err: wrapped, step: step}
 	}
-	se := &SendError{Code: reply.Code, Err: wrapped}
+	se := &SendError{Code: reply.Code, Err: wrapped, step: step}
 	switch {
 	case reply.Code >= 500:
 		se.Outcome = NotSentPermanent
