@@ -489,20 +489,20 @@ func TestMoveMapsCOPYUIDToNewRefs(t *testing.T) {
 	s := writeStore(t, srv, Options{})
 	refs := []ref.Ref{
 		hostRef("INBOX", 7, 1), hostRef("INBOX", 7, 2), hostRef("INBOX", 7, 1),
-		hostRef("INBOX", 7, 9), // gone
+		hostRef("INBOX", 7, 9), // gone, but in the acknowledged MOVE: success, no new ref
 		hostRef("INBOX", 6, 2), // stale UIDVALIDITY
 		{Account: "other", Folder: "INBOX", UIDValidity: 7, UID: 1},
 	}
 	res := s.Move(t.Context(), refs, "Archive")
 	want := []mailstore.RefResult{
-		{Ref: hostRef("Archive", 20, 101)}, {Ref: hostRef("Archive", 20, 102)}, {Ref: hostRef("Archive", 20, 101)},
+		{Ref: hostRef("Archive", 20, 101)}, {Ref: hostRef("Archive", 20, 102)}, {Ref: hostRef("Archive", 20, 101)}, {},
 	}
 	for i, w := range want {
 		if res[i] != w {
 			t.Errorf("ref %d: %+v, want %+v", i, res[i], w)
 		}
 	}
-	for i, wantErr := range map[int]error{3: mailstore.ErrStaleRef, 4: mailstore.ErrStaleRef, 5: mailstore.ErrNotFound} {
+	for i, wantErr := range map[int]error{4: mailstore.ErrStaleRef, 5: mailstore.ErrNotFound} {
 		if !errors.Is(res[i].Err, wantErr) || res[i].Ref != (ref.Ref{}) {
 			t.Errorf("ref %d: %+v, want %v", i, res[i], wantErr)
 		}
@@ -533,8 +533,8 @@ func TestMoveWithoutMOVECopiesThenPipelinesStoreAndExpunge(t *testing.T) {
 	if res[0] != (mailstore.RefResult{Ref: hostRef("Work", 30, 102)}) || res[1] != (mailstore.RefResult{Ref: hostRef("Work", 30, 101)}) {
 		t.Errorf("results %+v, want the COPYUID UIDs", res)
 	}
-	if !errors.Is(res[2].Err, mailstore.ErrStaleRef) {
-		t.Errorf("gone ref: %+v, want ErrStaleRef", res[2])
+	if res[2] != (mailstore.RefResult{}) {
+		t.Errorf("gone ref: %+v, want success with no new ref: it was in the acknowledged COPY", res[2])
 	}
 	copyRecv, copySent := srv.eventIndex("recv UID COPY 1,3,8 \"Work\""), srv.eventIndex("sent UID COPY")
 	store, expunge := srv.eventIndex("recv UID STORE 1,3 +FLAGS.SILENT (\\Deleted)"), srv.eventIndex("recv UID EXPUNGE 1,3")
@@ -546,22 +546,20 @@ func TestMoveWithoutMOVECopiesThenPipelinesStoreAndExpunge(t *testing.T) {
 	}
 }
 
-func TestMoveWithoutUIDPLUSFindsTheMessagesByMessageID(t *testing.T) {
+func TestMoveWithoutUIDPLUSSucceedsWithNoNewRefs(t *testing.T) {
 	t.Parallel()
 	srv := startWriteServer(t, &writeServer{caps: "MOVE", folders: []*wsFolder{
 		wsMailbox("INBOX", "", 7, 4, 5), wsMailbox("Work", "", 30),
 	}})
 	s := writeStore(t, srv, Options{})
 	res := s.Move(t.Context(), []ref.Ref{hostRef("INBOX", 7, 5), hostRef("INBOX", 7, 4), hostRef("INBOX", 7, 6)}, "Work")
-	if res[0] != (mailstore.RefResult{Ref: hostRef("Work", 30, 102)}) || res[1] != (mailstore.RefResult{Ref: hostRef("Work", 30, 101)}) {
-		t.Errorf("results %+v, want the UIDs found by Message-ID", res)
+	for i, r := range res {
+		if r != (mailstore.RefResult{}) {
+			t.Errorf("ref %d: %+v, want success with no new ref: without UIDPLUS no COPYUID names it", i, r)
+		}
 	}
-	if !errors.Is(res[2].Err, mailstore.ErrStaleRef) {
-		t.Errorf("gone ref: %+v, want ErrStaleRef", res[2])
-	}
-	fetch, move := srv.eventIndex("recv UID FETCH 4:6 (UID ENVELOPE)"), srv.eventIndex("recv UID MOVE 4:5 \"Work\"")
-	if fetch < 0 || move < 0 || fetch > move {
-		t.Errorf("commands %q: want the Message-IDs read before the move of the messages that exist", srv.received())
+	if srv.sent("UID MOVE 4:6 \"Work\"") != 1 || srv.sent("UID FETCH")+srv.sent("UID SEARCH")+srv.sent("STATUS") != 0 {
+		t.Errorf("commands %q, want the one UID MOVE and no lookups", srv.received())
 	}
 }
 
@@ -721,17 +719,18 @@ func TestAppendReturnsTheAPPENDUIDRef(t *testing.T) {
 	}
 }
 
-func TestAppendWithoutUIDPLUSFindsTheMessageByMessageID(t *testing.T) {
+func TestAppendWithoutAPPENDUIDGivesAZeroRef(t *testing.T) {
 	t.Parallel()
 	srv := startWriteServer(t, &writeServer{folders: []*wsFolder{wsMailbox("INBOX", "", 7), wsMailbox("Drafts", "", 40)}})
 	s := writeStore(t, srv, Options{})
-	got, err := s.Append(t.Context(), "Drafts", nil, time.Time{}, []byte("Message-Id:  <d2@x> \r\n\r\nbody\r\n"))
-	if err != nil || got != hostRef("Drafts", 40, 101) {
-		t.Errorf("Append = %+v, %v; want the ref found by Message-ID", got, err)
+	for _, raw := range []string{"Message-Id:  <d2@x> \r\n\r\nbody\r\n", "Subject: no id\r\n\r\nbody\r\n"} {
+		got, err := s.Append(t.Context(), "Drafts", nil, time.Time{}, []byte(raw))
+		if err != nil || got != (ref.Ref{}) {
+			t.Errorf("Append of %q = %+v, %v; want a zero ref and no error: without UIDPLUS no APPENDUID names it", raw, got, err)
+		}
 	}
-	got, err = s.Append(t.Context(), "Drafts", nil, time.Time{}, []byte("Subject: no id\r\n\r\nbody\r\n"))
-	if err != nil || got != (ref.Ref{}) {
-		t.Errorf("Append without a Message-ID = %+v, %v; want a zero ref and no error", got, err)
+	if srv.sent("APPEND") != 2 || srv.sent("STATUS")+srv.sent("UID SEARCH")+srv.sent("EXAMINE")+srv.sent("SELECT") != 0 {
+		t.Errorf("commands %q, want the two APPENDs and no lookups", srv.received())
 	}
 }
 
@@ -1008,66 +1007,6 @@ func (srv *writeServer) uidsIn(folder string) []uint32 {
 	return out
 }
 
-func TestMoveWithUIDPLUSButNoCOPYUIDFindsTheMessagesByMessageID(t *testing.T) {
-	t.Parallel()
-	srv := startWriteServer(t, &writeServer{
-		caps: "MOVE UIDPLUS", noCopyUID: true,
-		// The FETCH is answered only once the UID MOVE has arrived too.
-		holdFrom: "UID FETCH", holdCount: 2,
-		folders: []*wsFolder{
-			wsMailbox("INBOX", "", 7, 4, 5), wsMailbox("Work", "", 30),
-		},
-	})
-	s := writeStore(t, srv, Options{})
-	res := s.Move(t.Context(), []ref.Ref{hostRef("INBOX", 7, 5), hostRef("INBOX", 7, 4), hostRef("INBOX", 7, 6)}, "Work")
-	if res[0] != (mailstore.RefResult{Ref: hostRef("Work", 30, 102)}) || res[1] != (mailstore.RefResult{Ref: hostRef("Work", 30, 101)}) {
-		t.Errorf("results %+v, want the UIDs found by Message-ID", res)
-	}
-	if !errors.Is(res[2].Err, mailstore.ErrStaleRef) {
-		t.Errorf("gone ref: %+v, want ErrStaleRef", res[2])
-	}
-	fetch, move := srv.eventIndex("recv UID FETCH 4:6 (UID ENVELOPE)"), srv.eventIndex("recv UID MOVE 4:6 \"Work\"")
-	if fetch < 0 || move < 0 || fetch > move || srv.sent("UID MOVE") != 1 {
-		t.Errorf("commands %q: want the Message-IDs read with the one UID MOVE", srv.received())
-	}
-	if srv.eventIndex("sent UID FETCH") < move {
-		t.Errorf("events %q: want UID FETCH and UID MOVE pipelined", srv.events)
-	}
-}
-
-func TestMoveOfMessagesThatAreGoneWithUIDPLUSButNoCOPYUIDIsStale(t *testing.T) {
-	t.Parallel()
-	srv := startWriteServer(t, &writeServer{caps: "MOVE UIDPLUS", noCopyUID: true, folders: []*wsFolder{
-		wsMailbox("INBOX", "", 7, 4), wsMailbox("Work", "", 30),
-	}})
-	s := writeStore(t, srv, Options{})
-	res := s.Move(t.Context(), []ref.Ref{hostRef("INBOX", 7, 8)}, "Work")
-	if !errors.Is(res[0].Err, mailstore.ErrStaleRef) {
-		t.Errorf("gone ref: %+v, want ErrStaleRef", res[0])
-	}
-	if n := srv.sent("UID SEARCH"); n != 0 {
-		t.Errorf("commands %q: nothing was moved, so nothing is searched for", srv.received())
-	}
-}
-
-func TestCopyWithUIDPLUSButNoCOPYUIDFindsTheCopiesByMessageID(t *testing.T) {
-	t.Parallel()
-	srv := startWriteServer(t, &writeServer{caps: "MOVE UIDPLUS", noCopyUID: true, folders: []*wsFolder{
-		wsMailbox("INBOX", "", 7, 1, 2), wsMailbox("Work", "", 30),
-	}})
-	s := writeStore(t, srv, Options{})
-	res := s.Copy(t.Context(), []ref.Ref{hostRef("INBOX", 7, 2), hostRef("INBOX", 7, 1), hostRef("INBOX", 7, 3)}, "Work")
-	if res[0] != (mailstore.RefResult{Ref: hostRef("Work", 30, 102)}) || res[1] != (mailstore.RefResult{Ref: hostRef("Work", 30, 101)}) {
-		t.Errorf("results %+v, want the copies found by Message-ID", res)
-	}
-	if !errors.Is(res[2].Err, mailstore.ErrStaleRef) {
-		t.Errorf("gone ref: %+v, want ErrStaleRef", res[2])
-	}
-	if srv.sent("UID COPY") != 1 || srv.sent("UID STORE")+srv.sent("UID EXPUNGE")+srv.sent("UID MOVE") != 0 {
-		t.Errorf("commands %q, want one UID COPY and nothing else that changes mail", srv.received())
-	}
-}
-
 // dropMsgs removes from folder the messages drop picks, for an after hook
 // standing in for another client. srv.mu is held.
 func (srv *writeServer) dropMsgs(folder string, drop func(wsMsg) bool) {
@@ -1113,144 +1052,86 @@ func TestMoveByCopyWithoutCOPYUIDKeepsEveryOriginal(t *testing.T) {
 	}
 }
 
-func TestMoveWhoseSourceVanishedBeforeTheMOVENamesNoOlderMessage(t *testing.T) {
-	t.Parallel()
-	srv := startWriteServer(t, &writeServer{
-		caps: "MOVE UIDPLUS", noCopyUID: true,
-		folders: []*wsFolder{
-			wsMessages("INBOX", 7, wsMsg{1, "same@x"}),
-			wsMessages("Work", 30, wsMsg{50, "same@x"}),
-		},
-		// Another client expunges the source between the FETCH of its
-		// Message-ID and the MOVE, so the MOVE copies nothing.
-		after: func(srv *writeServer, kind string) {
-			if kind == "UID FETCH" {
-				srv.dropMsgs("INBOX", func(m wsMsg) bool { return m.uid == 1 })
-			}
-		},
-	})
-	s := writeStore(t, srv, Options{})
-	res := s.Move(t.Context(), []ref.Ref{hostRef("INBOX", 7, 1)}, "Work")
-	if res[0] != (mailstore.RefResult{}) {
-		t.Errorf("result %+v, want success with no new ref: Work UID 50 was there before the move", res[0])
-	}
-	if n := srv.sent("UID MOVE"); n != 1 {
-		t.Errorf("%d UID MOVE commands, want one", n)
-	}
-}
-
-func TestCopyWhoseCopyVanishedNamesNoOlderMessage(t *testing.T) {
-	t.Parallel()
-	srv := startWriteServer(t, &writeServer{
-		caps: "MOVE",
-		folders: []*wsFolder{
-			wsMessages("INBOX", 7, wsMsg{1, "same@x"}),
-			wsMessages("Work", 30, wsMsg{50, "same@x"}),
-		},
-		after: func(srv *writeServer, kind string) {
-			if kind == "UID COPY" {
-				srv.dropMsgs("Work", func(m wsMsg) bool { return m.uid == 101 })
-			}
-		},
-	})
-	s := writeStore(t, srv, Options{})
-	res := s.Copy(t.Context(), []ref.Ref{hostRef("INBOX", 7, 1)}, "Work")
-	if res[0] != (mailstore.RefResult{}) {
-		t.Errorf("result %+v, want success with no new ref: Work UID 50 was there before the copy", res[0])
-	}
-}
-
-func TestCopyAcknowledgedWithoutCOPYUIDSucceedsWhateverTheIdentityFetchDoes(t *testing.T) {
+func TestTransferWithoutCOPYUIDSucceedsWithNoNewRef(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name           string
-		refuse, dropOn string
+		name      string
+		caps      string
+		noCopyUID bool
+		copy      bool
 	}{
-		{name: "refused", refuse: "UID FETCH"},
-		{name: "connection lost", dropOn: "UID FETCH"},
+		{name: "move, UIDPLUS without COPYUID", caps: "MOVE UIDPLUS", noCopyUID: true},
+		{name: "move without UIDPLUS", caps: "MOVE"},
+		{name: "copy, UIDPLUS without COPYUID", caps: "UIDPLUS", noCopyUID: true, copy: true},
+		{name: "copy without UIDPLUS", copy: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			srv := startWriteServer(t, &writeServer{
-				caps: "MOVE UIDPLUS", noCopyUID: true, refuse: tc.refuse, dropOn: tc.dropOn,
-				folders: []*wsFolder{wsMailbox("INBOX", "", 7, 1, 2), wsMailbox("Work", "", 30)},
+				caps: tc.caps, noCopyUID: tc.noCopyUID,
+				// Two source folders hold different messages with one
+				// Message-ID, and Work already holds an older one with it.
+				folders: []*wsFolder{
+					wsMessages("INBOX", 7, wsMsg{1, "same@x"}, wsMsg{2, "solo@x"}),
+					wsMessages("Sent", 8, wsMsg{5, "same@x"}),
+					wsMessages("Work", 30, wsMsg{50, "same@x"}),
+				},
+				// Once a transfer is answered, another client expunges every
+				// original, in both folders.
+				after: func(srv *writeServer, kind string) {
+					if kind == "UID COPY" || kind == "UID MOVE" {
+						srv.dropMsgs("INBOX", func(wsMsg) bool { return true })
+						srv.dropMsgs("Sent", func(wsMsg) bool { return true })
+					}
+				},
 			})
 			s := writeStore(t, srv, Options{})
-			res := s.Copy(t.Context(), []ref.Ref{hostRef("INBOX", 7, 2), hostRef("INBOX", 7, 1)}, "Work")
+			refs := []ref.Ref{hostRef("INBOX", 7, 1), hostRef("INBOX", 7, 2), hostRef("Sent", 8, 5), hostRef("INBOX", 7, 9)}
+			transfer, verb := s.Move, "UID MOVE"
+			if tc.copy {
+				transfer, verb = s.Copy, "UID COPY"
+			}
+			res := transfer(t.Context(), refs, "Work")
 			for i, r := range res {
 				if r != (mailstore.RefResult{}) {
-					t.Errorf("ref %d: %+v, want success with no new ref: the server copied it", i, r)
+					t.Errorf("ref %d: %+v, want success with no new ref: the server acknowledged the %s", i, r, verb)
 				}
 			}
-			if srv.sent("UID COPY") != 1 || srv.sent("UID STORE")+srv.sent("UID EXPUNGE")+srv.sent("UID MOVE") != 0 {
-				t.Errorf("commands %q, want one UID COPY and nothing else that changes mail", srv.received())
+			if n := srv.sent(verb); n != 2 {
+				t.Errorf("commands %q, want one %s per source folder", srv.received(), verb)
 			}
-			if n := srv.conns.Load(); n != 1 {
-				t.Errorf("%d connections, want one: nothing is retried", n)
+			if n := srv.sent("UID FETCH") + srv.sent("UID SEARCH") + srv.sent("STATUS") + srv.sent("UID STORE") + srv.sent("UID EXPUNGE"); n != 0 {
+				t.Errorf("commands %q, want nothing but the transfer: new refs come only from COPYUID", srv.received())
 			}
 		})
 	}
 }
 
-func TestTransferFallbackNeverGuessesBetweenMatches(t *testing.T) {
-	t.Parallel()
-	srv := startWriteServer(t, &writeServer{caps: "MOVE", folders: []*wsFolder{
-		wsMessages("INBOX", 7, wsMsg{1, "dup@x"}, wsMsg{2, "dup@x"}, wsMsg{3, "old@x"}, wsMsg{4, ""}, wsMsg{5, "solo@x"}),
-		wsMessages("Work", 30, wsMsg{50, "old@x"}),
-	}})
-	s := writeStore(t, srv, Options{})
-	refs := []ref.Ref{hostRef("INBOX", 7, 1), hostRef("INBOX", 7, 2), hostRef("INBOX", 7, 3), hostRef("INBOX", 7, 4), hostRef("INBOX", 7, 5)}
-	res := s.Copy(t.Context(), refs, "Work")
-	// The copies are 101 to 105 in order. Work held old@x already, at a UID
-	// below the UIDNEXT read before the copy, so it is no candidate.
-	for _, i := range []int{0, 1, 3} {
-		if res[i] != (mailstore.RefResult{}) {
-			t.Errorf("ref %d: %+v, want success with no new ref: which copy is its own is unknown", i, res[i])
-		}
-	}
-	if res[2] != (mailstore.RefResult{Ref: hostRef("Work", 30, 103)}) {
-		t.Errorf("old@x: %+v, want Work UID 103, the only new message with its ID", res[2])
-	}
-	if res[4] != (mailstore.RefResult{Ref: hostRef("Work", 30, 105)}) {
-		t.Errorf("solo: %+v, want Work UID 105", res[4])
-	}
-	if n := srv.sent("UID COPY"); n != 1 {
-		t.Errorf("%d UID COPY commands, want one", n)
-	}
-}
-
-func TestAppendWithoutUIDPLUSNamesOnlyANewMessage(t *testing.T) {
+func TestMoveByCopyKeepsTheCOPYUIDRefsWhateverTheExpungeDoes(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name  string
-		after func(srv *writeServer, kind string)
-		want  ref.Ref
+		name           string
+		refuse, dropOn string
 	}{
-		{"an older message shares the ID", nil, hostRef("Drafts", 40, 101)},
-		{"the new message is gone", func(srv *writeServer, kind string) {
-			if kind == "APPEND" {
-				srv.dropMsgs("Drafts", func(m wsMsg) bool { return m.uid > 100 })
-			}
-		}, ref.Ref{}},
-		{"another client appended the same ID", func(srv *writeServer, kind string) {
-			if kind == "APPEND" {
-				f := srv.folder("Drafts")
-				f.next++
-				f.msgs = append(f.msgs, wsMsg{f.next, "d3@x"})
-			}
-		}, ref.Ref{}},
+		{name: "expunge refused", refuse: "UID EXPUNGE"},
+		{name: "connection lost", dropOn: "UID STORE"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := startWriteServer(t, &writeServer{after: tc.after, folders: []*wsFolder{wsMessages("Drafts", 40, wsMsg{7, "d3@x"})}})
+			srv := startWriteServer(t, &writeServer{
+				caps: "UIDPLUS", refuse: tc.refuse, dropOn: tc.dropOn,
+				folders: []*wsFolder{wsMailbox("INBOX", "", 7, 1, 2), wsMailbox("Work", "", 30)},
+			})
 			s := writeStore(t, srv, Options{})
-			got, err := s.Append(t.Context(), "Drafts", nil, time.Time{}, []byte("Message-ID: <d3@x>\r\n\r\nbody\r\n"))
-			if err != nil || got != tc.want {
-				t.Errorf("Append = %+v, %v; want %+v and no error", got, err, tc.want)
+			res := s.Move(t.Context(), []ref.Ref{hostRef("INBOX", 7, 2), hostRef("INBOX", 7, 1), hostRef("INBOX", 7, 9)}, "Work")
+			want := []mailstore.RefResult{{Ref: hostRef("Work", 30, 102)}, {Ref: hostRef("Work", 30, 101)}, {}}
+			for i, w := range want {
+				if res[i] != w {
+					t.Errorf("ref %d: %+v, want %+v: the server acknowledged the COPY", i, res[i], w)
+				}
 			}
-			status, appendAt := srv.eventIndex("recv STATUS"), srv.eventIndex("recv APPEND")
-			if status < 0 || status > appendAt {
-				t.Errorf("commands %q, want the folder's UIDNEXT read before the APPEND", srv.received())
+			if n, c := srv.sent("UID COPY"), srv.conns.Load(); n != 1 || c != 1 {
+				t.Errorf("UID COPY sent %d times on %d connections, want once: nothing is retried", n, c)
 			}
 		})
 	}
