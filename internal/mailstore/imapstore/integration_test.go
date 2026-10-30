@@ -569,7 +569,11 @@ func TestDovecotBatchAcrossFoldersStaysWithinThePool(t *testing.T) {
 	}
 	const pool = 2
 	s, dials := doveStoreWith(t, user, Options{PoolSize: pool})
+	met := meetAtDial(s, pool)
 	moved := newRefs(t, s.Move(t.Context(), refs, "Archive"))
+	if !met.Load() {
+		t.Errorf("the folders never had %d connections being opened at once; want them run concurrently", pool)
+	}
 	for i, r := range moved {
 		if r.Folder != "Archive" {
 			t.Errorf("ref %d moved to %+v, want Archive", i, r)

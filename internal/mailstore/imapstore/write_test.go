@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"regexp"
 	"slices"
@@ -47,6 +48,9 @@ type writeServer struct {
 	slow     time.Duration
 	// dropOn hangs up when a command of that kind arrives.
 	dropOn string
+	// noCopyUID leaves COPYUID out of COPY and MOVE replies, even with
+	// UIDPLUS advertised.
+	noCopyUID bool
 
 	mu     sync.Mutex
 	events []string // "recv UID MOVE 1:2 Archive", "sent UID MOVE"
@@ -397,7 +401,11 @@ func (srv *writeServer) reply(st *wsSession, c wsCmd) string {
 				continue
 			}
 			if strings.Contains(c.rest, "ENVELOPE") {
-				fmt.Fprintf(&b, "* %d FETCH (UID %d ENVELOPE (\"Mon, 26 Oct 2026 09:00:00 +0000\" \"s\" NIL NIL NIL NIL NIL NIL NIL \"<%s>\"))\r\n", i+1, m.uid, m.id)
+				id := "NIL"
+				if m.id != "" {
+					id = `"<` + m.id + `>"`
+				}
+				fmt.Fprintf(&b, "* %d FETCH (UID %d ENVELOPE (\"Mon, 26 Oct 2026 09:00:00 +0000\" \"s\" NIL NIL NIL NIL NIL NIL NIL %s))\r\n", i+1, m.uid, id)
 			} else {
 				fmt.Fprintf(&b, "* %d FETCH (UID %d)\r\n", i+1, m.uid)
 			}
@@ -433,7 +441,7 @@ func (srv *writeServer) reply(st *wsSession, c wsCmd) string {
 			}
 		}
 		code := ""
-		if srv.uidplus() && len(from) > 0 {
+		if srv.uidplus() && !srv.noCopyUID && len(from) > 0 {
 			code = fmt.Sprintf("[COPYUID %d %s %s] ", dst.validity, joinUIDs(from), joinUIDs(to))
 		}
 		if c.kind == "UID COPY" {
@@ -783,12 +791,16 @@ func TestWriteBatchesFanOutWithinThePool(t *testing.T) {
 		},
 	})
 	s := writeStore(t, srv, Options{PoolSize: 2})
+	met := meetAtDial(s, 2)
 	refs := []ref.Ref{hostRef("INBOX", 7, 1), hostRef("A", 8, 1), hostRef("B", 9, 1)}
 	res := s.Move(t.Context(), refs, "Dest")
 	for i, r := range res {
 		if r.Err != nil || r.Ref.Folder != "Dest" {
 			t.Errorf("ref %d: %+v", i, r)
 		}
+	}
+	if !met.Load() {
+		t.Error("the folders never had two connections being opened at once; want them run concurrently")
 	}
 	if n, p := srv.conns.Load(), srv.peak.Load(); n > 2 || p > 2 {
 		t.Errorf("%d connections, %d at once; want at most the pool's 2", n, p)
@@ -959,4 +971,192 @@ func TestProbeDialLeavesThePoolAloneOnALimit(t *testing.T) {
 	if !errors.Is(err, mailstore.ErrUnavailable) || called || s.PoolSize() != 3 {
 		t.Errorf("err %v, OnConnLimit called %t, PoolSize %d; want ErrUnavailable, false and 3", err, called, s.PoolSize())
 	}
+}
+
+// wsMessages makes a folder holding msgs, for tests that choose the Message-IDs.
+func wsMessages(name string, validity uint32, msgs ...wsMsg) *wsFolder {
+	return &wsFolder{name: name, validity: validity, next: 100, msgs: msgs}
+}
+
+// uidsIn returns the UIDs folder holds, in order.
+func (srv *writeServer) uidsIn(folder string) []uint32 {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	var out []uint32
+	for _, m := range srv.folder(folder).msgs {
+		out = append(out, m.uid)
+	}
+	return out
+}
+
+func TestMoveWithUIDPLUSButNoCOPYUIDFindsTheMessagesByMessageID(t *testing.T) {
+	t.Parallel()
+	srv := startWriteServer(t, &writeServer{
+		caps: "MOVE UIDPLUS", noCopyUID: true,
+		// The FETCH is answered only once the UID MOVE has arrived too.
+		holdFrom: "UID FETCH", holdCount: 2,
+		folders: []*wsFolder{
+			wsMailbox("INBOX", "", 7, 4, 5), wsMailbox("Work", "", 30),
+		},
+	})
+	s := writeStore(t, srv, Options{})
+	res := s.Move(t.Context(), []ref.Ref{hostRef("INBOX", 7, 5), hostRef("INBOX", 7, 4), hostRef("INBOX", 7, 6)}, "Work")
+	if res[0] != (mailstore.RefResult{Ref: hostRef("Work", 30, 102)}) || res[1] != (mailstore.RefResult{Ref: hostRef("Work", 30, 101)}) {
+		t.Errorf("results %+v, want the UIDs found by Message-ID", res)
+	}
+	if !errors.Is(res[2].Err, mailstore.ErrStaleRef) {
+		t.Errorf("gone ref: %+v, want ErrStaleRef", res[2])
+	}
+	fetch, move := srv.eventIndex("recv UID FETCH 4:6 (UID ENVELOPE)"), srv.eventIndex("recv UID MOVE 4:6 \"Work\"")
+	if fetch < 0 || move < 0 || fetch > move || srv.sent("UID MOVE") != 1 {
+		t.Errorf("commands %q: want the Message-IDs read with the one UID MOVE", srv.received())
+	}
+	if srv.eventIndex("sent UID FETCH") < move {
+		t.Errorf("events %q: want UID FETCH and UID MOVE pipelined", srv.events)
+	}
+}
+
+func TestMoveOfMessagesThatAreGoneWithUIDPLUSButNoCOPYUIDIsStale(t *testing.T) {
+	t.Parallel()
+	srv := startWriteServer(t, &writeServer{caps: "MOVE UIDPLUS", noCopyUID: true, folders: []*wsFolder{
+		wsMailbox("INBOX", "", 7, 4), wsMailbox("Work", "", 30),
+	}})
+	s := writeStore(t, srv, Options{})
+	res := s.Move(t.Context(), []ref.Ref{hostRef("INBOX", 7, 8)}, "Work")
+	if !errors.Is(res[0].Err, mailstore.ErrStaleRef) {
+		t.Errorf("gone ref: %+v, want ErrStaleRef", res[0])
+	}
+	if n := srv.sent("UID SEARCH"); n != 0 {
+		t.Errorf("commands %q: nothing was moved, so nothing is searched for", srv.received())
+	}
+}
+
+func TestCopyWithUIDPLUSButNoCOPYUIDFindsTheCopiesByMessageID(t *testing.T) {
+	t.Parallel()
+	srv := startWriteServer(t, &writeServer{caps: "MOVE UIDPLUS", noCopyUID: true, folders: []*wsFolder{
+		wsMailbox("INBOX", "", 7, 1, 2), wsMailbox("Work", "", 30),
+	}})
+	s := writeStore(t, srv, Options{})
+	res := s.Copy(t.Context(), []ref.Ref{hostRef("INBOX", 7, 2), hostRef("INBOX", 7, 1), hostRef("INBOX", 7, 3)}, "Work")
+	if res[0] != (mailstore.RefResult{Ref: hostRef("Work", 30, 102)}) || res[1] != (mailstore.RefResult{Ref: hostRef("Work", 30, 101)}) {
+		t.Errorf("results %+v, want the copies found by Message-ID", res)
+	}
+	if !errors.Is(res[2].Err, mailstore.ErrStaleRef) {
+		t.Errorf("gone ref: %+v, want ErrStaleRef", res[2])
+	}
+	if srv.sent("UID COPY") != 1 || srv.sent("UID STORE")+srv.sent("UID EXPUNGE")+srv.sent("UID MOVE") != 0 {
+		t.Errorf("commands %q, want one UID COPY and nothing else that changes mail", srv.received())
+	}
+}
+
+func TestMoveByCopyWithoutCOPYUIDKeepsTheOriginalsItCannotPlace(t *testing.T) {
+	t.Parallel()
+	srv := startWriteServer(t, &writeServer{caps: "UIDPLUS", noCopyUID: true, folders: []*wsFolder{
+		wsMessages("INBOX", 7, wsMsg{1, "solo@x"}, wsMsg{2, "dup@x"}, wsMsg{3, "dup@x"}, wsMsg{4, ""}),
+		wsMailbox("Work", "", 30),
+	}})
+	s := writeStore(t, srv, Options{})
+	refs := []ref.Ref{hostRef("INBOX", 7, 1), hostRef("INBOX", 7, 2), hostRef("INBOX", 7, 3), hostRef("INBOX", 7, 4)}
+	res := s.Move(t.Context(), refs, "Work")
+	if res[0] != (mailstore.RefResult{Ref: hostRef("Work", 30, 101)}) {
+		t.Errorf("solo: %+v, want the copy found by Message-ID", res[0])
+	}
+	for i := 1; i < 4; i++ {
+		if !errors.Is(res[i].Err, mailstore.ErrUnavailable) || res[i].Ref != (ref.Ref{}) {
+			t.Errorf("ref %d: %+v, want ErrUnavailable: its copy cannot be told apart, so the original stays", i, res[i])
+		}
+	}
+	if got := srv.uidsIn("INBOX"); !slices.Equal(got, []uint32{2, 3, 4}) {
+		t.Errorf("INBOX holds %v, want only the placed original removed", got)
+	}
+	if srv.sent("UID STORE 1 +FLAGS.SILENT (\\Deleted)") != 1 || srv.sent("UID EXPUNGE 1") != 1 || srv.sent("UID EXPUNGE") != 1 {
+		t.Errorf("commands %q, want only UID 1 marked and expunged", srv.received())
+	}
+}
+
+func TestTransferFallbackNeverGuessesBetweenMatches(t *testing.T) {
+	t.Parallel()
+	srv := startWriteServer(t, &writeServer{caps: "MOVE", folders: []*wsFolder{
+		wsMessages("INBOX", 7, wsMsg{1, "dup@x"}, wsMsg{2, "dup@x"}, wsMsg{3, "old@x"}, wsMsg{4, ""}, wsMsg{5, "solo@x"}),
+		wsMessages("Work", 30, wsMsg{50, "old@x"}),
+	}})
+	s := writeStore(t, srv, Options{})
+	refs := []ref.Ref{hostRef("INBOX", 7, 1), hostRef("INBOX", 7, 2), hostRef("INBOX", 7, 3), hostRef("INBOX", 7, 4), hostRef("INBOX", 7, 5)}
+	res := s.Copy(t.Context(), refs, "Work")
+	// The copies are 101 to 105 in order, and Work held old@x already.
+	for i := range 4 {
+		if res[i] != (mailstore.RefResult{}) {
+			t.Errorf("ref %d: %+v, want success with no new ref: which copy is its own is unknown", i, res[i])
+		}
+	}
+	if res[4] != (mailstore.RefResult{Ref: hostRef("Work", 30, 105)}) {
+		t.Errorf("solo: %+v, want Work UID 105", res[4])
+	}
+	if n := srv.sent("UID COPY"); n != 1 {
+		t.Errorf("%d UID COPY commands, want one", n)
+	}
+}
+
+func TestAppendWithoutUIDPLUSDoesNotGuessBetweenMatches(t *testing.T) {
+	t.Parallel()
+	srv := startWriteServer(t, &writeServer{folders: []*wsFolder{wsMessages("Drafts", 40, wsMsg{7, "d3@x"})}})
+	s := writeStore(t, srv, Options{})
+	got, err := s.Append(t.Context(), "Drafts", nil, time.Time{}, []byte("Message-ID: <d3@x>\r\n\r\nbody\r\n"))
+	if err != nil || got != (ref.Ref{}) {
+		t.Errorf("Append = %+v, %v; want a zero ref and no error: Drafts holds two with that Message-ID", got, err)
+	}
+}
+
+func TestPairsAtTheLargestUID(t *testing.T) {
+	t.Parallel()
+	const top = imap.UID(4294967295)
+	cases := []struct {
+		name     string
+		src, dst imap.UIDSet
+		want     map[uint32]uint32
+	}{
+		{"singleton", imap.UIDSet{{Start: 5, Stop: 5}}, imap.UIDSet{{Start: top, Stop: top}}, map[uint32]uint32{5: 4294967295}},
+		{"range ending there", imap.UIDSet{{Start: 5, Stop: 7}}, imap.UIDSet{{Start: top - 2, Stop: top}}, map[uint32]uint32{5: 4294967293, 6: 4294967294, 7: 4294967295}},
+		{"source there", imap.UIDSet{{Start: top, Stop: top}}, imap.UIDSet{{Start: 9, Stop: 9}}, map[uint32]uint32{4294967295: 9}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			done := make(chan struct{})
+			var got map[uint32]uint32
+			var ok bool
+			go func() {
+				defer close(done)
+				got, ok = copyUID{validity: 1, src: tc.src, dst: tc.dst}.pairs(len(tc.want))
+			}()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("pairs did not return")
+			}
+			if !ok || !maps.Equal(got, tc.want) {
+				t.Errorf("pairs = %v, %t; want %v", got, ok, tc.want)
+			}
+		})
+	}
+}
+
+// meetAtDial makes each of s's dials wait, up to a second, for n dials to
+// be under way at once, and reports whether they ever were. Batches that
+// ran their folders one after another would never get there.
+func meetAtDial(s *Store, n int32) *atomic.Bool {
+	var waiting atomic.Int32
+	var met atomic.Bool
+	inner := s.pool.dial
+	s.pool.dial = func(ctx context.Context) (*conn, error) {
+		if waiting.Add(1) >= n {
+			met.Store(true)
+		}
+		for deadline := time.Now().Add(time.Second); !met.Load() && time.Now().Before(deadline); {
+			time.Sleep(5 * time.Millisecond)
+		}
+		waiting.Add(-1)
+		return inner(ctx)
+	}
+	return &met
 }
