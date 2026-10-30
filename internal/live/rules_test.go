@@ -51,11 +51,13 @@ func deliveredCopy(m *chainmailv1.Message, google bool, roles map[string]string)
 }
 
 // deliveryScope is the in: scope where the delivered copy of a message
-// sent to self is found: the inbox, or on Google the default scope, All
-// Mail, since deliveredCopy takes the All Mail message there.
+// sent to self is found: the inbox, or on Google anywhere. Gmail keeps a
+// self-send as its one Sent message, and a message just sent can take some
+// seconds to show in a search of All Mail while in:anywhere already finds
+// it, so deliveredCopy takes the one message wherever it is.
 func deliveryScope(google bool) string {
 	if google {
-		return ""
+		return "anywhere"
 	}
 	return "inbox"
 }
@@ -200,10 +202,11 @@ func TestDeliveredCopy(t *testing.T) {
 }
 
 func TestDeliveryScope(t *testing.T) {
-	// Google: All Mail, the default scope, since a self-send never reaches
-	// the inbox there. Elsewhere: the inbox.
-	if got := deliveryScope(true); got != "" {
-		t.Errorf("deliveryScope(google) = %q, want the default scope", got)
+	// Google: anywhere, since a self-send never reaches the inbox there and
+	// a just-sent message can take a while to show in All Mail's search.
+	// Elsewhere: the inbox.
+	if got := deliveryScope(true); got != "anywhere" {
+		t.Errorf("deliveryScope(google) = %q, want anywhere", got)
 	}
 	if got := deliveryScope(false); got != "inbox" {
 		t.Errorf("deliveryScope(standard) = %q, want inbox", got)

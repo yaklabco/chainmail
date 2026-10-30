@@ -760,8 +760,11 @@ func TestEveryAccountProbes(t *testing.T) {
 			if e := l.GetError(); e != nil {
 				t.Fatalf("ProbeLimits: %s: %s (%s)", e.GetReason(), e.GetMessage(), e.GetHint())
 			}
-			if l.GetImapCap() < 1 || l.GetImapCap() > 16 {
-				t.Errorf("imap_cap %d, want 1 to 16", l.GetImapCap())
+			// The cap is the probe's connections (at most 16) plus the most
+			// the account had open meanwhile, so it can pass 16; the pool
+			// is clamped below it.
+			if l.GetImapCap() < 1 {
+				t.Errorf("imap_cap %d, want at least 1", l.GetImapCap())
 			}
 			if p := l.GetPoolSize(); p < 1 || p > 12 {
 				t.Errorf("pool_size %d, want 1 to 12", p)
