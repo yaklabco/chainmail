@@ -13,6 +13,10 @@
 //     \Deleted marks every folder the message starts in). \Flagged and the
 //     \Starred label are one state, whichever a write changes. A STORE
 //     naming no current message answers OK with no FETCH.
+//   - STORE of X-GM-LABELS, in any folder. A user label the server lacks is
+//     created, the folder names INBOX, Sent Mail and Drafts stand for their
+//     system labels, and All Mail, Trash and Spam answer NO. The answer
+//     carries UID and X-GM-LABELS unless SILENT.
 //   - COPY and APPEND to a label folder (INBOX, Sent Mail, Drafts or a user
 //     label) add that label; to Trash or Spam they move the message there; to
 //     All Mail they add nothing. MOVE does the same and also drops the
@@ -60,9 +64,6 @@
 // the last EXISTS announced, but a UID command can name a newer arrival, and
 // its FETCH answer then comes before the EXISTS: imapserver lets a session
 // write EXISTS only once the command is done.
-//
-// The go-imap fork parses STORE FLAGS only, so STORE X-GM-LABELS is not yet
-// reachable over the wire; session.storeLabels holds its behaviour.
 package fakegmail
 
 import (

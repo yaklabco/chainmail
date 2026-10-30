@@ -45,6 +45,7 @@ var (
 	_ imapserver.SessionNamespace   = (*session)(nil)
 	_ imapserver.SessionMove        = (*session)(nil)
 	_ imapserver.SessionAppendLimit = (*session)(nil)
+	_ imapserver.SessionGmail       = (*session)(nil)
 )
 
 func (sess *session) Close() error { return nil }
@@ -1065,16 +1066,30 @@ type labelUpdate struct {
 // systemLabels are Gmail's system labels in the case Gmail writes them.
 var systemLabels = []string{`\Inbox`, `\Important`, `\Starred`, `\Sent`, `\Draft`}
 
+// StoreGmailLabels answers STORE X-GM-LABELS (imapserver.SessionGmail). It
+// writes each message's UID and labels unless the STORE is SILENT.
+func (sess *session) StoreGmailLabels(w *imapserver.FetchWriter, numSet imap.NumSet, store *imap.StoreGmailLabels) error {
+	updates, err := sess.storeLabels(numSet, store.Op, store.Labels)
+	if err != nil || store.Silent {
+		return err
+	}
+	for _, u := range updates {
+		rw := w.CreateMessage(u.seq)
+		rw.WriteUID(u.uid)
+		rw.WriteGmailLabels(u.labels)
+		if err := rw.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // storeLabels runs STORE [+|-]X-GM-LABELS on the selected folder and returns
 // the FETCH answers. op Set replaces the labels. System labels are matched
 // without regard to case, a user label the server lacks is created, as Gmail
 // does, and the folder names INBOX, Sent Mail and Drafts stand for their
 // labels. \Flagged follows \Starred. A set that names no current message
 // answers OK with no FETCH.
-//
-// Nothing calls it over the wire yet: the go-imap fork's STORE parser takes
-// FLAGS only. Once it accepts X-GM-LABELS, the session hook it calls wraps
-// this and writes each update with FetchResponseWriter.WriteGmailLabels.
 func (sess *session) storeLabels(numSet imap.NumSet, op imap.StoreFlagsOp, labels []string) ([]labelUpdate, error) {
 	if err := sess.writable(); err != nil {
 		return nil, err

@@ -187,8 +187,8 @@ func TestFakeGmailRefusesWritesAfterExamine(t *testing.T) {
 	}
 }
 
-// TestFakeGmailStoreLabels drives the X-GM-LABELS store directly: the go-imap
-// fork parses STORE FLAGS only, so no client can send it yet.
+// TestFakeGmailStoreLabels drives the X-GM-LABELS store directly, to check
+// the answers it builds; TestFakeGmailStoreLabelsOverTheWire sends them.
 func TestFakeGmailStoreLabels(t *testing.T) {
 	t.Parallel()
 	s, ca := startWrites(t)
@@ -572,5 +572,47 @@ func TestFakeGmailOtherSessionsSeeChanges(t *testing.T) {
 	msgs, err := watcher.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{UID: true}).Collect()
 	if err != nil || len(msgs) != 1 || msgs[0].UID != 102 {
 		t.Errorf("FETCH 1 after the EXPUNGE = %v, %v; want UID 102", msgs, err)
+	}
+}
+
+// TestFakeGmailStoreLabelsOverTheWire sends STORE X-GM-LABELS from the
+// client: the answer carries each message's UID and labels unless SILENT,
+// and the labels change as storeLabels changes them.
+func TestFakeGmailStoreLabelsOverTheWire(t *testing.T) {
+	t.Parallel()
+	s, ca := startWrites(t)
+	c := dial(t, s, ca)
+	selectRW(t, c, "[Gmail]/All Mail")
+
+	msgs, err := c.StoreGmailLabels(imap.UIDSetNum(1, 2), &imap.StoreGmailLabels{Op: imap.StoreFlagsAdd, Labels: []string{"Work Stuff", `\Important`}}, nil).Collect()
+	if err != nil {
+		t.Fatalf("UID STORE +X-GM-LABELS: %v", err)
+	}
+	want := map[imap.UID][]string{
+		1: {`\Inbox`, "Receipts", "Work Stuff", `\Important`},
+		2: {`\Inbox`, "Work Stuff", `\Important`},
+	}
+	if len(msgs) != len(want) {
+		t.Fatalf("STORE answered %d messages, want %d", len(msgs), len(want))
+	}
+	for _, m := range msgs {
+		if !reflect.DeepEqual(m.GmailLabels, want[m.UID]) {
+			t.Errorf("UID %d labels = %q, want %q", m.UID, m.GmailLabels, want[m.UID])
+		}
+	}
+	if !slices.Contains(listNames(t, c), "Work Stuff") {
+		t.Error("LIST lacks the label the STORE created")
+	}
+
+	msgs, err = c.StoreGmailLabels(imap.UIDSetNum(1), &imap.StoreGmailLabels{Op: imap.StoreFlagsDel, Silent: true, Labels: []string{`\Inbox`}}, nil).Collect()
+	if err != nil || len(msgs) != 0 {
+		t.Fatalf("UID STORE -X-GM-LABELS.SILENT = %d messages, %v; want none", len(msgs), err)
+	}
+	if got := where(t, s, ca, s.MsgID(0)); got["INBOX"] != 0 || got["[Gmail]/All Mail"] != 1 {
+		t.Errorf("message is in %v, want All Mail 1 and not INBOX", got)
+	}
+
+	if _, err := c.StoreGmailLabels(imap.UIDSetNum(2), &imap.StoreGmailLabels{Op: imap.StoreFlagsAdd, Labels: []string{"[Gmail]/Trash"}}, nil).Collect(); err == nil {
+		t.Error("STORE +X-GM-LABELS ([Gmail]/Trash) succeeded; Trash is not a label")
 	}
 }
