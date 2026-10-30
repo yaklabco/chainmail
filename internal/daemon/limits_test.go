@@ -3,11 +3,14 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -122,7 +125,13 @@ func (b *buildLog) of(account string) []built {
 // with a probe interval short enough for tests.
 func newLimitsServer(t *testing.T, mk func(config.ResolvedAccount) mailstore.Store) (*Server, *buildLog) {
 	t.Helper()
-	cfg, err := config.Parse([]byte(limitsConfig))
+	return newLimitsServerWith(t, limitsConfig, mk)
+}
+
+// newLimitsServerWith is newLimitsServer with the config text given.
+func newLimitsServerWith(t *testing.T, cfgText string, mk func(config.ResolvedAccount) mailstore.Store) (*Server, *buildLog) {
+	t.Helper()
+	cfg, err := config.Parse([]byte(cfgText))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,42 +448,191 @@ func TestBackgroundProbeSkipsUnprobeableStores(t *testing.T) {
 	}
 }
 
-func TestConnLimitLowersStoredCap(t *testing.T) {
+func TestConnLimitRecordsEveryRefusal(t *testing.T) {
 	t.Parallel()
-	s, log := newLimitsServer(t, probeable(&capServer{cap: 0}))
-	if err := s.lim.store.Put(t.Context(), limits.Limit{Account: "host", IMAPCap: 9, ProbedAt: limitsNow.Add(-time.Hour)}); err != nil {
-		t.Fatal(err)
+	monthAgo := limitsNow.Add(-31 * 24 * time.Hour)
+	tests := []struct {
+		name    string
+		stored  *limits.Limit
+		newMax  int
+		wantCap int
+	}{
+		{name: "lowers a higher cap", stored: &limits.Limit{Account: "host", IMAPCap: 9, ProbedAt: limitsNow.Add(-time.Hour)}, newMax: 5, wantCap: 7},
+		{name: "keeps an equal cap", stored: &limits.Limit{Account: "host", IMAPCap: 7, ProbedAt: monthAgo}, newMax: 5, wantCap: 7},
+		{name: "never raises a lower cap", stored: &limits.Limit{Account: "host", IMAPCap: 3, ProbedAt: monthAgo}, newMax: 5, wantCap: 3},
+		{name: "pool at its minimum", stored: &limits.Limit{Account: "host", IMAPCap: 3, ProbedAt: monthAgo}, newMax: 1, wantCap: 3},
+		{name: "no stored limit", newMax: 2, wantCap: 4},
 	}
-	if _, err := s.stores.get(mustAccount(t, s, "host")).ListFolders(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	s.lim.wait()
-	onConnLimit := log.of("host")[0].params.onConnLimit
-	if onConnLimit == nil {
-		t.Fatal("store built without OnConnLimit")
-	}
-	onConnLimit(5)
-	l, _ := storedLimit(t, s, "host")
-	if l.IMAPCap != 7 || !l.ProbedAt.Equal(limitsNow) {
-		t.Errorf("after shrink to 5: stored = %+v, want cap 7 at %v", l, limitsNow)
-	}
-	// A refusal never raises the cap.
-	onConnLimit(8)
-	if l, _ := storedLimit(t, s, "host"); l.IMAPCap != 7 {
-		t.Errorf("after shrink to 8: cap = %d, want 7 kept", l.IMAPCap)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// Cap 0 keeps the background probe from storing anything.
+			s, log := newLimitsServer(t, probeable(&capServer{cap: 0}))
+			if tt.stored != nil {
+				if err := s.lim.store.Put(t.Context(), *tt.stored); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.stores.get(mustAccount(t, s, "host")).ListFolders(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			s.lim.wait()
+			onConnLimit := log.of("host")[0].params.onConnLimit
+			if onConnLimit == nil {
+				t.Fatal("store built without OnConnLimit")
+			}
+			onConnLimit(tt.newMax)
+			// The refusal is an observation of the limit, so probed_at moves
+			// to now and postpones the next background probe.
+			l, ok := storedLimit(t, s, "host")
+			if !ok || l.IMAPCap != tt.wantCap || !l.ProbedAt.Equal(limitsNow) {
+				t.Errorf("stored = %+v (ok %v), want cap %d at %v", l, ok, tt.wantCap, limitsNow)
+			}
+		})
 	}
 }
 
-func TestConnLimitWithoutStoredLimit(t *testing.T) {
+// heldFake is a probe fake whose pooled connections are still open, as a
+// stream reader's is after its store was replaced. They hold slots on srv.
+type heldFake struct {
+	*probeFake
+	held int
+}
+
+func (h *heldFake) OpenConns() int { return h.held }
+
+func TestProbeCountsTheStoresOpenConnections(t *testing.T) {
 	t.Parallel()
-	s, log := newLimitsServer(t, probeable(&capServer{cap: 0}))
+	srv := &capServer{cap: 4}
+	// Two stream readers hold two of the server's four slots throughout.
+	for range 2 {
+		if _, err := srv.dial(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var heldBuilt atomic.Bool
+	s, _ := newLimitsServer(t, func(acct config.ResolvedAccount) mailstore.Store {
+		p := &probeFake{Store: fake.New(acct.Name, acct.Provider.Gmail), srv: srv}
+		if acct.Name == "host" && heldBuilt.CompareAndSwap(false, true) {
+			return &heldFake{probeFake: p, held: 2}
+		}
+		return p
+	})
+	// A fresh limit, so no background probe runs first.
+	if err := s.lim.store.Put(t.Context(), limits.Limit{Account: "host", IMAPCap: 12, ProbedAt: limitsNow.Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.stores.get(mustAccount(t, s, "host")).ListFolders(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	s.lim.wait()
-	log.of("host")[0].params.onConnLimit(2)
+	got := probeLimits(t, s, "host").GetLimits()
+	if len(got) != 1 || got[0].GetImapCap() != 4 || got[0].GetPoolSize() != 2 {
+		t.Fatalf("limits = %v, want host cap 4 pool 2", got)
+	}
 	if l, ok := storedLimit(t, s, "host"); !ok || l.IMAPCap != 4 {
 		t.Errorf("stored = %+v (ok %v), want cap 4", l, ok)
+	}
+}
+
+// gate holds every probe dial until released, counting the accounts with a
+// dial waiting at once.
+type gate struct {
+	mu      sync.Mutex
+	active  int
+	most    int
+	release chan struct{}
+}
+
+func (g *gate) counts() (active, most int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.active, g.most
+}
+
+// gatedFake is a probe fake whose dials wait at a gate.
+type gatedFake struct {
+	*probeFake
+	g *gate
+}
+
+func (f *gatedFake) ProbeDial(ctx context.Context) (io.Closer, error) {
+	f.g.mu.Lock()
+	f.g.active++
+	f.g.most = max(f.g.most, f.g.active)
+	f.g.mu.Unlock()
+	defer func() {
+		f.g.mu.Lock()
+		f.g.active--
+		f.g.mu.Unlock()
+	}()
+	select {
+	case <-f.g.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return f.probeFake.ProbeDial(ctx)
+}
+
+func TestProbeLimitsBoundsConcurrentProbes(t *testing.T) {
+	t.Parallel()
+	var cfg strings.Builder
+	for i := range 2 * maxProbes {
+		fmt.Fprintf(&cfg, "[accounts.a%d]\nprovider = \"hostinger\"\naddress = \"a%d@example.com\"\n\n", i, i)
+	}
+	g := &gate{release: make(chan struct{})}
+	var srvMu sync.Mutex
+	servers := map[string]*capServer{}
+	s, _ := newLimitsServerWith(t, cfg.String(), func(acct config.ResolvedAccount) mailstore.Store {
+		srvMu.Lock()
+		defer srvMu.Unlock()
+		srv, ok := servers[acct.Name]
+		if !ok {
+			srv = &capServer{cap: 1}
+			servers[acct.Name] = srv
+		}
+		return &gatedFake{probeFake: &probeFake{Store: fake.New(acct.Name, false), srv: srv}, g: g}
+	})
+	type answer struct {
+		resp *connect.Response[chainmailv1.ProbeLimitsResponse]
+		err  error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		a := &accountService{s: s}
+		resp, err := a.ProbeLimits(peerContext(t.Context()), connect.NewRequest(&chainmailv1.ProbeLimitsRequest{}))
+		done <- answer{resp, err}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if active, _ := g.counts(); active == maxProbes {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("probes waiting = %d, want %d", func() int { a, _ := g.counts(); return a }(), maxProbes)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Give any probe beyond the bound time to start.
+	time.Sleep(50 * time.Millisecond)
+	if active, most := g.counts(); active != maxProbes || most != maxProbes {
+		t.Errorf("probes at once = %d (most %d), want %d", active, most, maxProbes)
+	}
+	close(g.release)
+	ans := <-done
+	if ans.err != nil {
+		t.Fatalf("ProbeLimits: %v", ans.err)
+	}
+	resp := ans.resp.Msg
+	if got := len(resp.GetLimits()); got != 2*maxProbes {
+		t.Fatalf("limits = %d, want %d", got, 2*maxProbes)
+	}
+	for _, l := range resp.GetLimits() {
+		if l.GetError() != nil || l.GetImapCap() != 1 {
+			t.Errorf("%s = %v, want cap 1", l.GetAccount(), l)
+		}
+	}
+	if _, most := g.counts(); most > maxProbes {
+		t.Errorf("most probes at once = %d, want at most %d", most, maxProbes)
 	}
 }
 

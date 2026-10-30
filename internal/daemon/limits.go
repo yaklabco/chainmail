@@ -17,6 +17,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/limits"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/mailstore/imapstore"
 )
 
 const (
@@ -31,6 +32,9 @@ const (
 	daemonClient = "daemon"
 	// actionProbe is the audit action of a probe.
 	actionProbe = "limits.probe"
+	// maxProbes bounds the probes running at once across accounts, explicit
+	// and background together. Each can hold up to 16 connections.
+	maxProbes = 4
 )
 
 // errProbeUnsupported is a store that cannot open connections for a probe,
@@ -41,6 +45,27 @@ var errProbeUnsupported = errors.New("probe not supported")
 // limits.Probe counts. imapstore.Store is one.
 type prober interface {
 	ProbeDial(ctx context.Context) (io.Closer, error)
+}
+
+// connCounter is a store that reports its pooled connections still open,
+// a stream reader's included. imapstore.Store is one. A probe adds them to
+// what it opened, because they hold slots on the server while it counts.
+type connCounter interface {
+	OpenConns() int
+}
+
+// The real store is probed and counted through these interfaces.
+var (
+	_ prober      = (*imapstore.Store)(nil)
+	_ connCounter = (*imapstore.Store)(nil)
+)
+
+// openConns is how many connections st holds open, or 0 when it cannot say.
+func openConns(st mailstore.Store) int {
+	if c, ok := st.(connCounter); ok {
+		return c.OpenConns()
+	}
+	return 0
 }
 
 // storeParams are what the daemon chooses for an account's store.
@@ -62,6 +87,9 @@ type limitState struct {
 	// stored cap before lowering it.
 	connMu sync.Mutex
 
+	// slots bounds the probes running at once, maxProbes of them.
+	slots chan struct{}
+
 	mu      sync.Mutex
 	ctx     context.Context // ends when the daemon stops
 	cancel  context.CancelFunc
@@ -72,7 +100,13 @@ type limitState struct {
 
 func newLimitState(db *sql.DB, now func() time.Time) *limitState {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &limitState{store: limits.NewStore(db, now), ctx: ctx, cancel: cancel, probing: map[string]bool{}}
+	return &limitState{
+		store:   limits.NewStore(db, now),
+		slots:   make(chan struct{}, maxProbes),
+		ctx:     ctx,
+		cancel:  cancel,
+		probing: map[string]bool{},
+	}
 }
 
 // start runs f in the background for account, unless one already runs for
@@ -92,6 +126,17 @@ func (l *limitState) start(account string, f func(context.Context)) {
 		}()
 		f(l.ctx)
 	})
+}
+
+// acquireSlot waits for one of the maxProbes probe slots, or for ctx to
+// end. The caller runs release once its probe is done.
+func (l *limitState) acquireSlot(ctx context.Context) (release func(), err error) {
+	select {
+	case l.slots <- struct{}{}:
+		return func() { <-l.slots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // wait returns once every background probe started so far has finished.
@@ -129,9 +174,11 @@ func (s *Server) storeParams(acct config.ResolvedAccount) storeParams {
 	}
 }
 
-// recordConnLimit stores a cap of newMax plus the reserved connections
-// after the server refused a connection and the pool shrank to newMax. A
-// refusal never raises a stored cap.
+// recordConnLimit stores a cap of newMax plus the reserved connections,
+// or the stored cap when that is lower, after the server refused a
+// connection and the pool shrank to newMax. A refusal never raises a stored
+// cap, but it always records the time: the refusal is a fresh observation
+// of the limit, so it postpones the next background probe.
 func (s *Server) recordConnLimit(account string, newMax int) {
 	ctx, cancel := context.WithTimeout(context.Background(), auditTimeout)
 	defer cancel()
@@ -143,14 +190,14 @@ func (s *Server) recordConnLimit(account string, newMax int) {
 		s.opts.Logger.Warn("reading the connection limit", "account", account, "err", err)
 		return
 	}
-	if ok && l.IMAPCap <= newCap {
-		return
+	if ok {
+		newCap = min(newCap, l.IMAPCap)
 	}
-	if err := s.lim.store.Put(ctx, limits.Limit{Account: account, IMAPCap: newCap}); err != nil {
+	if err := s.lim.store.Put(ctx, limits.Limit{Account: account, IMAPCap: newCap, ProbedAt: s.opts.Now().UTC()}); err != nil {
 		s.opts.Logger.Warn("storing the connection limit", "account", account, "err", err)
 		return
 	}
-	s.opts.Logger.Info("server refused a connection; lowered the stored connection limit", "account", account, "imap_cap", newCap)
+	s.opts.Logger.Info("server refused a connection; recorded the connection limit", "account", account, "imap_cap", newCap)
 }
 
 // probeIfStale starts a background probe of acct when it has no stored
@@ -188,12 +235,20 @@ type probeResult struct {
 }
 
 // probeAccount measures acct's connection limit, stores it and rebuilds the
-// store with the new pool size. It holds the account's write lock: calls in
-// progress finish first, the store is closed so its connections do not
-// count against the cap, and new calls wait until the new store is in.
+// store with the new pool size. It first takes one of the maxProbes probe
+// slots, then the account's write lock: calls in progress finish first, the
+// store is closed, and new calls wait until the new store is in. The closed
+// store's connections still out, such as a stream reader's, are added to
+// the count, since they held server slots while the probe dialed.
 // With onlyIfStale, a limit that is fresh once the lock is held is kept.
 func (s *Server) probeAccount(ctx context.Context, acct config.ResolvedAccount, onlyIfStale bool) probeResult {
 	res := probeResult{acct: acct}
+	release, err := s.lim.acquireSlot(ctx)
+	if err != nil {
+		res.err = err
+		return res
+	}
+	defer release()
 	res.err = s.stores.exclusive(ctx, acct, func(cur mailstore.Store, replace func() mailstore.Store) error {
 		if _, ok := cur.(prober); !ok {
 			return errProbeUnsupported
@@ -218,6 +273,9 @@ func (s *Server) probeAccount(ctx context.Context, acct config.ResolvedAccount, 
 			// A cancelled probe returns no count, and a failed one no cap.
 			return err
 		}
+		// The replaced store's connections still out, such as a stream
+		// reader's, held slots on the server while the probe counted.
+		n += openConns(cur)
 		l := limits.Limit{Account: acct.Name, IMAPCap: n, ProbedAt: s.opts.Now().UTC()}
 		if err := s.lim.store.Put(ctx, l); err != nil {
 			return err
@@ -306,8 +364,9 @@ func (s *Server) probeTargets(names []string) ([]config.ResolvedAccount, error) 
 	return out, nil
 }
 
-// probeLimits probes accts concurrently, one goroutine per account, and
-// records one audit row for each. A failed probe fails only its account.
+// probeLimits probes accts concurrently, at most maxProbes at once with
+// background probes included, and records one audit row for each. A failed
+// probe fails only its account.
 func (s *Server) probeLimits(ctx context.Context, c caller, accts []config.ResolvedAccount) (*chainmailv1.ProbeLimitsResponse, error) {
 	ctx, cancel := withDeadline(ctx, probeTimeout)
 	defer cancel()

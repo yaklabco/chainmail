@@ -384,7 +384,8 @@ func (a *accountStore) FetchMessages(ctx context.Context, refs []ref.Ref) []mail
 // the reader is read. A caller may hold several readers and make other
 // calls meanwhile, and a lock held across them would deadlock against a
 // waiting probe. A store replaced while a reader is open waits for its
-// connection as Close does, and the reader keeps working.
+// connection as Close does, and the reader keeps working. A probe that
+// replaced the store counts that connection as one the server accepted.
 func (a *accountStore) StreamPart(ctx context.Context, r ref.Ref, part string) (info mailstore.PartInfo, rc io.ReadCloser, err error) {
 	err = a.call(ctx, func(st mailstore.Store) error {
 		info, rc, err = st.StreamPart(ctx, r, part)
