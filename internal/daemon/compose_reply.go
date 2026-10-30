@@ -253,7 +253,8 @@ func hasAddress(list []mail.Address, a mail.Address) bool {
 // attachments, every attachment part streamed. A failed read fails the
 // call rather than quote part of the original. When the text can only be
 // had cut short, because the whole message is over the account's limit or
-// a part over a reading cap, the quote ends with truncatedMarker.
+// a part over a reading cap, the original is marked truncated, so the
+// quote ends with compose.TruncatedMarker.
 func (c *composeService) original(ctx context.Context, acct config.ResolvedAccount, r ref.Ref, attachments bool) (compose.Original, error) {
 	st := c.s.stores.get(acct)
 	res := st.FetchMessages(ctx, []ref.Ref{r})
@@ -293,9 +294,7 @@ func (c *composeService) original(ctx context.Context, acct config.ResolvedAccou
 		Date:       msg.Summary.Date,
 		Text:       body.Text,
 		HTML:       htm,
-	}
-	if truncated || body.Truncated || htmlCut {
-		markTruncated(&orig)
+		Truncated:  truncated || body.Truncated || htmlCut,
 	}
 	if attachments {
 		if orig.Attachments, err = c.originalAttachments(ctx, st, acct, r, msg.Attachments); err != nil {
@@ -303,22 +302,6 @@ func (c *composeService) original(ctx context.Context, acct config.ResolvedAccou
 		}
 	}
 	return orig, nil
-}
-
-// truncatedMarker is the last line of a quote whose original text is incomplete.
-const truncatedMarker = "[quoted text truncated]"
-
-// markTruncated ends the original's text, and its HTML when it has any,
-// with truncatedMarker, so the quote in both parts says it is incomplete.
-func markTruncated(orig *compose.Original) {
-	if t := strings.TrimRight(orig.Text, "\n"); t != "" {
-		orig.Text = t + "\n" + truncatedMarker + "\n"
-	} else {
-		orig.Text = truncatedMarker + "\n"
-	}
-	if orig.HTML != "" {
-		orig.HTML += "\n<p>" + truncatedMarker + "</p>\n"
-	}
 }
 
 // errOriginalTooLarge is a forward whose original attachments do not fit.

@@ -456,3 +456,36 @@ func TestReplyNoRecipientsStillFillsTheParts(t *testing.T) {
 		t.Errorf("parts = %+v, want the subject, In-Reply-To and quote filled in", p)
 	}
 }
+
+// A truncated original's quote ends with TruncatedMarker in its text and,
+// after sanitizing, in its HTML, so HTML that ends inside a comment cannot
+// swallow the marker. An original that is whole gets no marker.
+func TestQuoteMarksATruncatedOriginal(t *testing.T) {
+	t.Parallel()
+	o := replyOriginal()
+	o.Text = "first line\nsecond line\n"
+	o.HTML = "<p>visible</p><!-- cut inside a comment"
+	o.Truncated = true
+	reply, err := Reply(o, nil, false, replyZone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fwd := Forward(o, replyZone)
+	for name, q := range map[string]*Quote{"reply": reply.Quote, "forward": fwd.Quote} {
+		if want := "first line\nsecond line\n" + TruncatedMarker + "\n"; q.Text != want {
+			t.Errorf("%s: Text = %q, want %q", name, q.Text, want)
+		}
+		if want := "<p>visible</p>\n<p>" + TruncatedMarker + "</p>\n"; q.HTML != want {
+			t.Errorf("%s: HTML = %q, want %q", name, q.HTML, want)
+		}
+	}
+
+	o.Truncated = false
+	whole, err := Reply(o, nil, false, replyZone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(whole.Quote.Text, TruncatedMarker) || strings.Contains(whole.Quote.HTML, TruncatedMarker) {
+		t.Errorf("a whole original's quote = %+v, want no marker", whole.Quote)
+	}
+}

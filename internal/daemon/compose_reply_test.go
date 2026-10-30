@@ -639,3 +639,60 @@ func TestReplyExtraRecipientsAreNotRepeated(t *testing.T) {
 		t.Errorf("reply all: To %q, Cc %q, want bob only in To", h.Get("To"), h.Get("Cc"))
 	}
 }
+
+// TestTruncatedMarkerSurvivesSanitizing replies to and forwards an original
+// whose clipped HTML ends inside a comment, after a visible paragraph. The
+// whole message is over the account's limit, so only the clipped copy can
+// be quoted. Sanitizing drops the unfinished comment, and the marker still
+// ends the quote in both parts.
+func TestTruncatedMarkerSurvivesSanitizing(t *testing.T) {
+	t.Parallel()
+	hs := &hookStore{}
+	e := startSend(t, hooked("small", hs))
+	srv := e.smtp(t, smtptest.Options{})
+	clipText(hs, 2<<10)
+	raw := "From: Alice <alice@example.net>\r\n" +
+		"To: small@example.com\r\n" +
+		"Subject: Commented\r\n" +
+		"Date: Thu, 29 Oct 2026 09:30:00 +0000\r\n" +
+		"Message-ID: <commented@example.net>\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/alternative; boundary=\"b\"\r\n" +
+		"\r\n" +
+		"--b\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n" +
+		"\r\n" +
+		"visible text\r\n" +
+		"--b\r\n" +
+		"Content-Type: text/html; charset=utf-8\r\n" +
+		"\r\n" +
+		"<p>visible paragraph</p>\r\n<!-- " + strings.Repeat("hidden comment\r\n", 2000) + "-->\r\n" +
+		"--b--\r\n"
+	orig, err := e.small.Append(context.Background(), "INBOX", nil, time.Time{}, []byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.reply(t, &chainmailv1.ReplyRequest{Ref: orig.String(), Content: replyContent("short answer"), IdempotencyKey: "r"}); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if _, err := e.forward(t, &chainmailv1.ForwardRequest{Ref: orig.String(), To: []string{"dan@example.net"}, IdempotencyKey: "f"}); err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	msgs := srv.Messages()
+	if len(msgs) != 2 {
+		t.Fatalf("captured %d messages, want 2", len(msgs))
+	}
+	for i, name := range []string{"reply", "forward"} {
+		parts := leaves(t, msgs[i].Data)
+		if text := parts["text/plain"]; !strings.Contains(text, truncatedMarker) {
+			t.Errorf("%s: text part = %q, want %q", name, text, truncatedMarker)
+		}
+		htm := parts["text/html"]
+		if !strings.Contains(htm, "visible paragraph") || strings.Contains(htm, "hidden comment") {
+			t.Errorf("%s: HTML part = %q, want the paragraph without the comment", name, htm)
+		}
+		if i := strings.LastIndex(htm, truncatedMarker); i < 0 || i < strings.Index(htm, "visible paragraph") {
+			t.Errorf("%s: the HTML part does not end its quote with %q: %q", name, truncatedMarker, htm)
+		}
+	}
+}

@@ -90,6 +90,9 @@ type Original struct {
 	// HTML is the raw HTML of the original. ReplyParts sanitizes it.
 	HTML        string
 	Attachments []File
+	// Truncated is set when Text or HTML is only part of the original.
+	// The quote then ends with TruncatedMarker in both parts.
+	Truncated bool
 }
 
 // ErrInvalid wraps every spec problem the caller can fix.

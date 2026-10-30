@@ -1,6 +1,7 @@
 package compose
 
 import (
+	"html"
 	"net/mail"
 	"slices"
 	"strings"
@@ -17,6 +18,9 @@ const quoteDateLayout = "Mon, 2 Jan 2006 at 15:04"
 
 // forwardMarker opens the header block of a forwarded message.
 const forwardMarker = "---------- Forwarded message ---------"
+
+// TruncatedMarker is the last line of a quote whose original is incomplete.
+const TruncatedMarker = "[quoted text truncated]"
 
 // ReplyParts is what a reply adds to a Spec.
 type ReplyParts struct {
@@ -75,11 +79,8 @@ func Reply(orig Original, self []string, all bool, loc *time.Location) (ReplyPar
 	if !orig.Date.IsZero() {
 		header = "On " + quoteDate(orig.Date, loc) + ", " + header
 	}
-	p.Quote = &Quote{
-		Header: header,
-		Text:   orig.Text,
-		HTML:   SanitizeHTML(orig.HTML),
-	}
+	text, htm := quoteContent(orig)
+	p.Quote = &Quote{Header: header, Text: text, HTML: htm}
 	if len(p.To) == 0 && len(p.Cc) == 0 {
 		return p, ErrNoRecipients
 	}
@@ -101,6 +102,7 @@ func Forward(orig Original, loc *time.Location) ForwardParts {
 	if !orig.Date.IsZero() {
 		date = quoteDate(orig.Date, loc)
 	}
+	text, htm := quoteContent(orig)
 	header := strings.Join([]string{
 		forwardMarker,
 		"From: " + formatAddresses(orig.From),
@@ -109,13 +111,8 @@ func Forward(orig Original, loc *time.Location) ForwardParts {
 		"To: " + formatAddresses(orig.To),
 	}, "\n")
 	return ForwardParts{
-		Subject: prefixSubject(orig.Subject, "Fwd: ", "fwd:", "fw:"),
-		Quote: &Quote{
-			Header:  header,
-			Text:    orig.Text,
-			HTML:    SanitizeHTML(orig.HTML),
-			Forward: true,
-		},
+		Subject:     prefixSubject(orig.Subject, "Fwd: ", "fwd:", "fw:"),
+		Quote:       &Quote{Header: header, Text: text, HTML: htm, Forward: true},
 		Attachments: slices.Clone(orig.Attachments),
 	}
 }
@@ -175,4 +172,24 @@ func formatAddresses(as []mail.Address) string {
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+// quoteContent is the text and sanitized HTML a quote of orig shows. When
+// orig is truncated, each ends with TruncatedMarker. The HTML marker is
+// added after sanitizing, as escaped text in its own paragraph, so HTML
+// cut inside a comment, script or attribute cannot swallow it.
+func quoteContent(orig Original) (text, htm string) {
+	text, htm = orig.Text, SanitizeHTML(orig.HTML)
+	if !orig.Truncated {
+		return text, htm
+	}
+	if t := strings.TrimRight(text, "\n"); t != "" {
+		text = t + "\n" + TruncatedMarker + "\n"
+	} else {
+		text = TruncatedMarker + "\n"
+	}
+	if htm != "" {
+		htm = strings.TrimRight(htm, "\n") + "\n<p>" + html.EscapeString(TruncatedMarker) + "</p>\n"
+	}
+	return text, htm
 }
