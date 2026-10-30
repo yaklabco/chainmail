@@ -154,15 +154,19 @@ func (c *composeService) SendDraft(ctx context.Context, req *connect.Request[cha
 }
 
 // sendDraft sends a draft as SendRaw sends bytes, dated now and keeping
-// its Message-ID, then expunges the draft. The draft is read inside build,
-// after the idempotency key is claimed, so a repeat of a send that already
-// removed the draft still returns the first result.
+// its Message-ID, then expunges the draft. A key that is done, failed or
+// unknown is replayed before the draft is read or the request hashed, so
+// a repeat returns the first outcome even with another ref. The draft is
+// read inside build, after the key is claimed.
 func (c *composeService) sendDraft(ctx context.Context, cl caller, req *chainmailv1.SendDraftRequest) (*chainmailv1.ComposeResult, error) {
 	const action = "draft.send"
 	entry := audit.Entry{Action: action}
 	r, acct, err := c.draftTarget(req.GetRef(), &entry)
 	if err != nil {
 		return nil, c.record(ctx, cl, entry, err)
+	}
+	if res, ok, err := c.replaySettled(ctx, cl, acct, req.GetIdempotencyKey(), entry); ok {
+		return res, err
 	}
 	hash, err := requestHash(req, nil)
 	if err != nil {

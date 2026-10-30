@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/emersion/go-smtp"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/api"
@@ -490,5 +491,58 @@ func TestUpdateDraftWithoutAnAppendedRef(t *testing.T) {
 	}
 	if gone(t, e.host, parseRef(t, second.GetRef())) {
 		t.Error("the old version is gone though its removal failed")
+	}
+}
+
+// TestSendDraftReplaysSettledKeyWithAnotherRef repeats a SendDraft key
+// that is done, failed or unknown with the ref of another draft. The stored
+// outcome comes back as a duplicate before the draft is read, with no
+// connection, as for the other send calls.
+func TestSendDraftReplaysSettledKeyWithAnotherRef(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	reason := func(err error) string {
+		if err == nil {
+			return ""
+		}
+		return reasonOf(err)
+	}
+	cases := []struct {
+		key    string
+		opts   smtptest.Options
+		reason string
+	}{
+		{"draft-done", smtptest.Options{}, ""},
+		{"draft-failed", smtptest.Options{FailData: &smtp.SMTPError{Code: 554, EnhancedCode: smtp.EnhancedCode{5, 0, 0}, Message: "no"}}, api.ReasonInvalidArgument},
+		{"draft-unknown", smtptest.Options{DropAfterDataEnd: true}, api.ReasonSendOutcomeUnknown},
+	}
+	for _, tc := range cases {
+		e.smtp(t, tc.opts)
+		first := e.createDraft(t, hostSpec())
+		res, err := e.sendDraft(t, first.GetRef(), tc.key)
+		if reason(err) != tc.reason {
+			t.Fatalf("%s: first SendDraft: err = %v, want reason %q", tc.key, err, tc.reason)
+		}
+		if got := e.idemState(t, "host", tc.key); got == "retryable" || got == "in_progress" {
+			t.Fatalf("%s: idempotency state = %q, want it settled", tc.key, got)
+		}
+		other := e.createDraft(t, hostSpec())
+		conns := e.proxy.accepts.Load()
+		again, err := e.sendDraft(t, other.GetRef(), tc.key)
+		if reason(err) != tc.reason {
+			t.Errorf("%s: repeat with another ref: err = %v, want reason %q", tc.key, err, tc.reason)
+		}
+		if tc.reason == "" && (!again.GetSent().GetDuplicate() || again.GetSent().GetMessageId() != res.GetSent().GetMessageId()) {
+			t.Errorf("%s: repeat = %+v, want the first result as a duplicate", tc.key, again)
+		}
+		if e.proxy.accepts.Load() != conns {
+			t.Errorf("%s: the repeat connected", tc.key)
+		}
+		if gone(t, e.host, parseRef(t, other.GetRef())) {
+			t.Errorf("%s: the repeat removed the other draft", tc.key)
+		}
+		if d := e.decisions(t, "draft.send"); len(d) == 0 || d[len(d)-1] != "duplicate" {
+			t.Errorf("%s: decisions = %v, want the repeat audited as a duplicate", tc.key, d)
+		}
 	}
 }
