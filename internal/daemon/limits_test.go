@@ -938,7 +938,7 @@ func TestReplaceWaitsForCallsInProgress(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = s.stores.replace(t.Context(), acct)
+		_ = s.stores.replace(t.Context(), acct, 5)
 	}()
 	select {
 	case <-done:
@@ -1133,5 +1133,88 @@ func TestProbeCountsConnectionsThatClosedBeforeTheRefusal(t *testing.T) {
 	}
 	if held.count() != 0 {
 		t.Errorf("calls' connections open = %d, want 0 before the probe returned", held.count())
+	}
+}
+
+// writerWaiting says a replace holds or waits for e's write lock.
+func writerWaiting(e *storeEntry) bool {
+	e.gate.mu.Lock()
+	defer e.gate.mu.Unlock()
+	return e.gate.writer
+}
+
+// A call's dial can be refused because the probe's own connections fill the
+// server. Its refusal shrinks that call's pool but records no cap while the
+// probe runs, so the probe's result is the one stored, installed and
+// reported. Here the call holds the store while the probe has stored its
+// result and waits to replace it, and the call's refusal comes then.
+func TestRefusalDuringAProbeKeepsTheProbesResult(t *testing.T) {
+	t.Parallel()
+	s, log := newLimitsServer(t, probeable(&capServer{cap: 8}))
+	// A fresh limit, so no background probe runs first.
+	if err := s.lim.store.Put(t.Context(), limits.Limit{Account: "host", IMAPCap: 12, ProbedAt: limitsNow.Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	acct := mustAccount(t, s, "host")
+	e := s.stores.entry(acct)
+	_, release, err := e.acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	done := make(chan *chainmailv1.ProbeLimitsResponse, 1)
+	go func() {
+		a := &accountService{s: s}
+		resp, err := a.ProbeLimits(peerContext(t.Context()), connect.NewRequest(&chainmailv1.ProbeLimitsRequest{Accounts: []string{"host"}}))
+		if err != nil {
+			t.Errorf("ProbeLimits: %v", err)
+			done <- nil
+			return
+		}
+		done <- resp.Msg
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !writerWaiting(e) {
+		if time.Now().After(deadline) {
+			t.Fatal("the probe never waited to replace the store")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// The call still holds its read lock as its refusal is recorded, so the
+	// callback must not wait for the probe.
+	refused := make(chan struct{})
+	go func() {
+		defer close(refused)
+		log.of("host")[0].params.onConnLimit(1)
+	}()
+	select {
+	case <-refused:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the refusal callback waited for the probe")
+	}
+	release()
+	resp := <-done
+	if resp == nil {
+		t.FailNow()
+	}
+	got := resp.GetLimits()
+	if len(got) != 1 || got[0].GetImapCap() != 8 || got[0].GetPoolSize() != 6 {
+		t.Fatalf("limits = %v, want host cap 8 pool 6", got)
+	}
+	if l, ok := storedLimit(t, s, "host"); !ok || l.IMAPCap != 8 {
+		t.Errorf("stored = %+v (ok %v), want the probe's cap 8", l, ok)
+	}
+	stores := log.of("host")
+	if last := stores[len(stores)-1]; last.params.poolSize != 6 {
+		t.Errorf("installed pool = %d, want the reported 6", last.params.poolSize)
+	}
+	rows := auditRows(t, s)
+	if len(rows) != 1 || rows[0].targets != `["imap_cap=8","pool=6"]` {
+		t.Errorf("audit = %+v, want the probe's cap 8 and pool 6", rows)
+	}
+	// Once the probe is done, a refusal is recorded again.
+	stores[len(stores)-1].params.onConnLimit(2)
+	if l, ok := storedLimit(t, s, "host"); !ok || l.IMAPCap != 4 {
+		t.Errorf("stored after a later refusal = %+v (ok %v), want cap 4", l, ok)
 	}
 }

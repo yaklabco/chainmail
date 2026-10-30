@@ -125,7 +125,7 @@ func New(opts Options) (*Server, error) {
 	if opts.NewStore != nil {
 		s.newStore = func(acct config.ResolvedAccount, _ storeParams) mailstore.Store { return opts.NewStore(acct) }
 	}
-	s.stores = &storeSet{build: s.buildStore, firstUse: s.probeIfStale, logger: opts.Logger}
+	s.stores = &storeSet{build: s.buildStore, buildSized: s.buildSized, firstUse: s.probeIfStale, logger: opts.Logger}
 	if err := s.openSendState(); err != nil {
 		return nil, err
 	}

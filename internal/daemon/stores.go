@@ -23,6 +23,9 @@ import (
 type storeSet struct {
 	// build makes a store for an account, sized from its stored limit.
 	build func(config.ResolvedAccount) mailstore.Store
+	// buildSized makes a store for an account with the pool size given,
+	// which replace installs. Nil means build, whatever the size.
+	buildSized func(config.ResolvedAccount, int) mailstore.Store
 	// firstUse, when set, runs once per account, the first time a call
 	// builds its store. It must not block.
 	firstUse func(config.ResolvedAccount)
@@ -123,14 +126,14 @@ func (s *storeSet) lockProbe(ctx context.Context, acct config.ResolvedAccount) (
 	}
 }
 
-// replace installs a newly built store for acct, sized from the limit
-// stored at that moment, and closes the one it replaces. It holds acct's
+// replace installs a store for acct with a pool of poolSize and closes the
+// one it replaces. It holds acct's
 // write lock only to swap them: calls in progress finish first, new ones
 // wait, and none waits for the old store to log out, which happens after
 // the lock is released. No call holds the old store by then, but a stream
 // reader still may: the old store counts toward the account's open
 // connections until it holds none.
-func (s *storeSet) replace(ctx context.Context, acct config.ResolvedAccount) error {
+func (s *storeSet) replace(ctx context.Context, acct config.ResolvedAccount, poolSize int) error {
 	e := s.entry(acct)
 	if err := e.gate.lock(ctx); err != nil {
 		return err
@@ -142,7 +145,11 @@ func (s *storeSet) replace(ctx context.Context, acct config.ResolvedAccount) err
 		return errStoresClosed
 	}
 	old := e.cur
-	e.cur = s.build(acct)
+	if s.buildSized != nil {
+		e.cur = s.buildSized(acct, poolSize)
+	} else {
+		e.cur = s.build(acct)
+	}
 	if old != nil {
 		e.retired = append(e.retired, old)
 	}

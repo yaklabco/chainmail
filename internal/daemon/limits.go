@@ -95,8 +95,13 @@ type limitState struct {
 	probeOpts limits.ProbeOptions
 
 	// connMu serializes recording connection-limit refusals, which read the
-	// stored cap before lowering it.
+	// stored cap before lowering it, and guards counting.
 	connMu sync.Mutex
+	// counting are the accounts a probe is measuring, from before its first
+	// dial until it has installed the store sized from its result. A
+	// refusal then may come from the probe's own connections filling the
+	// server, so it is not recorded: the probe's result stands.
+	counting map[string]bool
 
 	// slots bounds the probes running at once, maxProbes of them.
 	slots chan struct{}
@@ -112,11 +117,26 @@ type limitState struct {
 func newLimitState(db *sql.DB, now func() time.Time) *limitState {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &limitState{
-		store:   limits.NewStore(db, now),
-		slots:   make(chan struct{}, maxProbes),
-		ctx:     ctx,
-		cancel:  cancel,
-		probing: map[string]bool{},
+		store:    limits.NewStore(db, now),
+		slots:    make(chan struct{}, maxProbes),
+		counting: map[string]bool{},
+		ctx:      ctx,
+		cancel:   cancel,
+		probing:  map[string]bool{},
+	}
+}
+
+// beginCount marks account as being probed, so runtime refusals are not
+// recorded, until the returned end runs. A refusal being recorded as it
+// starts finishes first, and the probe's result then replaces it.
+func (l *limitState) beginCount(account string) (end func()) {
+	l.connMu.Lock()
+	defer l.connMu.Unlock()
+	l.counting[account] = true
+	return func() {
+		l.connMu.Lock()
+		defer l.connMu.Unlock()
+		delete(l.counting, account)
 	}
 }
 
@@ -179,8 +199,19 @@ func (s *Server) storeParams(acct config.ResolvedAccount) storeParams {
 	case ok:
 		stored = &l
 	}
+	return s.paramsWithPool(acct, limits.PoolSize(acct.Pool, stored, acct.Provider.DefaultPool))
+}
+
+// buildSized builds acct's store with a pool of poolSize, which a probe
+// gives from its own result rather than from what is stored.
+func (s *Server) buildSized(acct config.ResolvedAccount, poolSize int) mailstore.Store {
+	return s.newStore(acct, s.paramsWithPool(acct, poolSize))
+}
+
+// paramsWithPool are acct's store parameters with a pool of poolSize.
+func (s *Server) paramsWithPool(acct config.ResolvedAccount, poolSize int) storeParams {
 	return storeParams{
-		poolSize:    limits.PoolSize(acct.Pool, stored, acct.Provider.DefaultPool),
+		poolSize:    poolSize,
 		onConnLimit: func(newMax int) { s.recordConnLimit(acct.Name, newMax) },
 	}
 }
@@ -189,12 +220,21 @@ func (s *Server) storeParams(acct config.ResolvedAccount) storeParams {
 // or the stored cap when that is lower, after the server refused a
 // connection and the pool shrank to newMax. A refusal never raises a stored
 // cap, but it always records the time: the refusal is a fresh observation
-// of the limit, so it postpones the next background probe.
+// of the limit, so it postpones the next background probe. While a probe
+// measures the account, nothing is recorded: the probe's own connections
+// may be what filled the server, and its result is stored instead. The pool
+// that was refused still shrank. This never waits for the probe, so a call
+// can record a refusal while it holds the read lock a probe's replace waits
+// for.
 func (s *Server) recordConnLimit(account string, newMax int) {
 	ctx, cancel := context.WithTimeout(context.Background(), auditTimeout)
 	defer cancel()
 	s.lim.connMu.Lock()
 	defer s.lim.connMu.Unlock()
+	if s.lim.counting[account] {
+		s.opts.Logger.Info("server refused a connection while a probe measures the account; the probe's result stands", "account", account, "pool", newMax)
+		return
+	}
 	newCap := newMax + connsReserved
 	l, ok, err := s.lim.store.Get(ctx, account)
 	if err != nil {
@@ -251,7 +291,9 @@ type probeResult struct {
 // turns. It dials through a store of its own and holds no lock the
 // account's calls need while it counts: they go on, on the current store.
 // Only once the limit is stored does it take the account's write lock, to
-// install a store sized from it.
+// install a store sized from it. The stored limit, the installed pool, the
+// result and its audit row all come from the one measurement: runtime
+// refusals meanwhile are not recorded (recordConnLimit).
 //
 // The account's own connections, in its current and retired stores, hold
 // server slots the probe cannot get, so they are added to its count: the
@@ -292,6 +334,7 @@ func (s *Server) probeLocked(ctx context.Context, acct config.ResolvedAccount, o
 			return nil
 		}
 	}
+	defer s.lim.beginCount(acct.Name)()
 	// The probe's own store is never installed, so no call uses it and
 	// its connections are not among the account's. It dials outside any
 	// pool, so its pool size does not matter, and a refusal it meets is the
@@ -314,14 +357,15 @@ func (s *Server) probeLocked(ctx context.Context, acct config.ResolvedAccount, o
 	}
 	n += inUse()
 	l := limits.Limit{Account: acct.Name, IMAPCap: n, ProbedAt: s.opts.Now().UTC()}
+	pool := limits.PoolSize(acct.Pool, &l, acct.Provider.DefaultPool)
 	if err := s.lim.store.Put(ctx, l); err != nil {
 		return err
 	}
-	if err := s.stores.replace(ctx, acct); err != nil {
+	if err := s.stores.replace(ctx, acct, pool); err != nil {
 		return err
 	}
 	res.limit = l
-	res.pool = limits.PoolSize(acct.Pool, &l, acct.Provider.DefaultPool)
+	res.pool = pool
 	return nil
 }
 

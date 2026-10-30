@@ -38,7 +38,7 @@ func TestReplacedStoreLogoutLogsNoServerText(t *testing.T) {
 		t.Fatal(err)
 	}
 	release()
-	err = s.replace(context.Background(), acct)
+	err = s.replace(context.Background(), acct, 1)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestReplaceDoesNotHoldCallsWhileTheOldStoreLogsOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- s.replace(t.Context(), acct) }()
+	go func() { done <- s.replace(t.Context(), acct, 1) }()
 	<-first.closing
 	defer close(first.release)
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
