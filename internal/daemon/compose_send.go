@@ -752,6 +752,7 @@ func requestHash(req proto.Message, sums map[string]string) ([32]byte, error) {
 		r.Clear(fd)
 	}
 	replaceHandles(r, sums)
+	sortRecipients(r)
 	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(m)
 	if err != nil {
 		return [32]byte{}, fmt.Errorf("encoding the request: %w", err)
@@ -760,6 +761,32 @@ func requestHash(req proto.Message, sums map[string]string) ([32]byte, error) {
 }
 
 // replaceHandles replaces the upload handles of every Content in m.
+// recipientFields are the address lists whose order does not change what a
+// send is. The CLI derives one key for any order, so the hash must agree.
+var recipientFields = map[protoreflect.Name]bool{"to": true, "cc": true, "bcc": true, "envelope_to": true}
+
+// sortRecipients sorts every recipient list in m and its messages, in place.
+// requestHash calls it on a clone.
+func sortRecipients(m protoreflect.Message) {
+	m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		switch {
+		case fd.IsList() && fd.Kind() == protoreflect.StringKind && recipientFields[fd.Name()]:
+			list := v.List()
+			addrs := make([]string, list.Len())
+			for i := range addrs {
+				addrs[i] = list.Get(i).String()
+			}
+			slices.Sort(addrs)
+			for i, a := range addrs {
+				list.Set(i, protoreflect.ValueOfString(a))
+			}
+		case fd.Kind() == protoreflect.MessageKind && !fd.IsList() && !fd.IsMap():
+			sortRecipients(v.Message())
+		}
+		return true
+	})
+}
+
 func replaceHandles(m protoreflect.Message, sums map[string]string) {
 	if content, ok := m.Interface().(*chainmailv1.Content); ok {
 		for i, h := range content.GetAttachments() {

@@ -323,3 +323,44 @@ func TestServeStoppedBeforeRecoveryIsCleanShutdown(t *testing.T) {
 		t.Errorf("Serve = %v, want nil", err)
 	}
 }
+
+// Recipient order is not part of what a send is: the CLI derives one key
+// for any order, so the request hash must not change with it either.
+func TestRequestHashIgnoresRecipientOrder(t *testing.T) {
+	t.Parallel()
+	spec := func(to, cc, bcc []string) *chainmailv1.SendRequest {
+		return &chainmailv1.SendRequest{IdempotencyKey: "k", Spec: &chainmailv1.ComposeSpec{
+			Account: "acct", To: to, Cc: cc, Bcc: bcc, Subject: "s",
+		}}
+	}
+	a, err := requestHash(spec([]string{"a@x", "b@x"}, []string{"c@x", "d@x"}, []string{"e@x", "f@x"}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := requestHash(spec([]string{"b@x", "a@x"}, []string{"d@x", "c@x"}, []string{"f@x", "e@x"}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Error("reordered recipients changed the request hash")
+	}
+	moved, err := requestHash(spec([]string{"a@x"}, []string{"b@x", "c@x", "d@x"}, []string{"e@x", "f@x"}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved == a {
+		t.Error("moving a recipient from To to Cc kept the request hash")
+	}
+	raw := func(env []string) *chainmailv1.SendRawRequest {
+		return &chainmailv1.SendRawRequest{Account: "acct", Raw: []byte("x"), EnvelopeTo: env}
+	}
+	r1, _ := requestHash(raw([]string{"a@x", "b@x"}), nil)
+	r2, _ := requestHash(raw([]string{"b@x", "a@x"}), nil)
+	if r1 != r2 {
+		t.Error("reordered envelope recipients changed the request hash")
+	}
+	req := spec([]string{"b@x", "a@x"}, nil, nil)
+	if _, err := requestHash(req, nil); err != nil || req.GetSpec().GetTo()[0] != "b@x" {
+		t.Error("requestHash reordered the caller's request")
+	}
+}

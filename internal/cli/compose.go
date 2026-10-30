@@ -48,9 +48,10 @@ Each --attach file is attached. Each --inline NAME=F shows the image F
 where the body refers to NAME, as in ![chart](chart.png) with
 --inline chart.png=./chart.png.
 
-A send is never repeated: without --idempotency-key, the key is derived
-from the account, recipients, subject, body and files, so running the same
-command again reports the first send instead of sending twice.
+Running the same send again within 7 days reports the first send instead
+of sending twice: without --idempotency-key, the key is derived from the
+account, recipients, subject, body and files. To send identical content
+again on purpose, pass a new --idempotency-key.
 
 --dry-run writes the message as MIME to stdout instead of sending it. It
 refuses a terminal unless --output json, which prints it as a JSON string.
@@ -139,7 +140,8 @@ func newSendRawCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 Its From must be the account's address and it must have a Message-ID.
 The recipients are its To, Cc and Bcc; the Bcc header is removed before
 sending. Without --idempotency-key, the key is derived from the account
-and the bytes, so sending the same file again does not send twice.`,
+and the bytes, so sending the same file again within 7 days does not send
+twice. To send it again on purpose, pass a new --idempotency-key.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if err := cobra.MaximumNArgs(1)(cmd, args); err != nil {
 				return usageError{err: err, hint: helpHint(cmd)}
