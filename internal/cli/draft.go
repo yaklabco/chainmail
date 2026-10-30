@@ -20,8 +20,9 @@ const modeDraftSend = "draft-send"
 
 const draftCreateHelp = `Save a new message to the account's Drafts folder without sending it.
 
-It takes the same options as send. The ref it prints is what draft update,
-draft send and draft delete take.
+It takes send's account, recipient, subject, body and attachment options
+(not --draft, --dry-run or --idempotency-key); --account is required. The
+ref it prints is what draft update, draft send and draft delete take.
 
 Examples:
   chainmail draft create --account work --to ann@example.com --subject "Q3" --body-file q3.md
@@ -31,8 +32,9 @@ const draftUpdateHelp = `Replace a draft with a new version: the new version is 
 one deleted. The new version has a new ref, which is printed; the old ref
 is gone.
 
-It takes the same options as send, without --account: the draft's account
-is used. The whole message is replaced, so give every recipient, the
+It takes send's recipient, subject, body and attachment options, without
+--account (the draft's account is used) and without --draft, --dry-run or
+--idempotency-key. The whole message is replaced, so give every recipient, the
 subject and the body again. A reply saved as a draft stays a reply.
 
 Example:
@@ -40,9 +42,9 @@ Example:
 
 const draftSendHelp = `Send a draft, then remove it from Drafts.
 
-A send is never repeated: without --idempotency-key, the key is derived
-from the draft's ref, so running the same command again reports the first
-send instead of sending twice.
+Running the same command again within 7 days reports the first send
+instead of sending twice: without --idempotency-key, the key is derived
+from the draft's ref.
 
 Example:
   chainmail draft send cm1:work:Drafts:7:12`
@@ -110,7 +112,7 @@ func parseRef(cmd *cobra.Command, s string) (ref.Ref, error) {
 
 // draftSaved is the text output for a saved draft.
 func draftSaved(d *chainmailv1.Draft) string {
-	return fmt.Sprintf("draft saved %s\n", d.GetRef())
+	return fmt.Sprintf("draft saved %s\n", termText(d.GetRef()))
 }
 
 // writeDraft prints a saved draft: its ref on a terminal, else resp as JSON.

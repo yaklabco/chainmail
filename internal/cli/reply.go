@@ -27,9 +27,10 @@ the original's To and Cc, less this account's own address. --to, --cc and
 --bcc add more recipients. The account is the one the message is on. The
 body options are as for send, and a body is required.
 
-A send is never repeated: without --idempotency-key, the key is derived
-from the ref, the recipients, the body and files, so running the same
-command again reports the first reply instead of sending twice.
+Running the same command again within 7 days reports the first reply
+instead of sending twice: without --idempotency-key, the key is derived
+from the ref, the recipients, the body and files, and --all. To send
+again on purpose, pass a new --idempotency-key.
 
 --draft saves the reply to Drafts instead of sending it. --dry-run writes
 it as MIME to stdout, as send --dry-run does.
@@ -45,9 +46,10 @@ The new text, if any, goes above the forwarded original. The account is
 the one the message is on. The body and attachment options are as for
 send. At least one of --to, --cc and --bcc is required.
 
-A send is never repeated: without --idempotency-key, the key is derived
-from the ref, the recipients, the body and files, so running the same
-command again reports the first forward instead of sending twice.
+Running the same command again within 7 days reports the first forward
+instead of sending twice: without --idempotency-key, the key is derived
+from the ref, the recipients, the body and files, and --no-attachments. To send
+again on purpose, pass a new --idempotency-key.
 
 --draft saves the forward to Drafts instead of sending it. --dry-run
 writes it as MIME to stdout, as send --dry-run does.

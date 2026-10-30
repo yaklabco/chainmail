@@ -545,3 +545,21 @@ func TestSendTableReportsSentCopyError(t *testing.T) {
 	id := messageID(t, e.smtp.Messages()[0].Data)
 	golden(t, "send_copy_error_table", strings.ReplaceAll(got.stdout, id, "MESSAGE-ID"))
 }
+
+// A draft sent as is keeps the Message-ID it was saved with, which any
+// program could have written, so the terminal output cleans it.
+func TestComposeResultCleansMessageIDOnTerminal(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	env := Env{Stdout: &out, StdoutTerminal: true}
+	g := &globals{output: "table"}
+	res := &chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Sent{Sent: &chainmailv1.Sent{
+		MessageId: "evil\x1b]0;pwned\x07\u202e@example.com", SentRef: "cm1:a:Sent:1:2",
+	}}}
+	if err := writeComposeResult(env, g, false, res, res); err != nil {
+		t.Fatal(err)
+	}
+	if s := out.String(); strings.ContainsAny(s, "\x1b\x07\u202e") {
+		t.Errorf("terminal output = %q, still holds control or bidi characters", s)
+	}
+}

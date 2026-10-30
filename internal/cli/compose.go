@@ -235,10 +235,10 @@ func writeComposeResult(env Env, g *globals, jsonOut bool, resp proto.Message, r
 		b.WriteString(draftSaved(res.GetDraft()))
 	case res.GetSent() != nil:
 		s := res.GetSent()
-		fmt.Fprintf(&b, "sent %s\n", s.GetMessageId())
+		fmt.Fprintf(&b, "sent %s\n", termText(s.GetMessageId()))
 		switch {
 		case s.GetSentRef() != "":
-			fmt.Fprintf(&b, "saved to Sent: %s\n", s.GetSentRef())
+			fmt.Fprintf(&b, "saved to Sent: %s\n", termText(s.GetSentRef()))
 		case s.GetSentCopyError() != "":
 			b.WriteString(s.GetSentCopyError() + "\n")
 		}
