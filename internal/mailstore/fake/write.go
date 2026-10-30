@@ -173,12 +173,38 @@ func holdsMail(role mailstore.Role) bool {
 	return role == mailstore.RoleAll || role == mailstore.RoleTrash || role == mailstore.RoleSpam
 }
 
+// isBin reports whether a Gmail folder is Trash or Spam, which hold
+// messages outside All Mail.
+func isBin(role mailstore.Role) bool {
+	return role == mailstore.RoleTrash || role == mailstore.RoleSpam
+}
+
+// errBinNotInAllMail refuses a copy into All Mail of a message in Trash or
+// Spam, as imapstore does.
+var errBinNotInAllMail = fmt.Errorf("%w: the message is in Trash or Spam, not All Mail, and Gmail keeps one copy of a message; move it to All Mail instead", mailstore.ErrUnsupported)
+
 // relocateLocked moves m to folder under a new UID and returns its new ref.
 func (s *Store) relocateLocked(m *Message, folder string) ref.Ref {
 	m.Folder = folder
 	m.uid = s.nextUID[folder]
 	s.nextUID[folder]++
 	return s.refLocked(m)
+}
+
+// placedLocked is m's ref where it now is, carrying the X-GM-MSGID r
+// carries and no other: imapstore takes a moved message's new ref from
+// COPYUID, which gives none, and keeps the one the ref it was given had.
+func (s *Store) placedLocked(m *Message, r ref.Ref) ref.Ref {
+	out := s.refLocked(m)
+	out.GmailMsgID = r.GmailMsgID
+	return out
+}
+
+// asFound is r as APPENDUID or a SEARCH gives it, without X-GM-MSGID, so
+// it is stale once its folder's UIDVALIDITY changes, as imapstore's is.
+func asFound(r ref.Ref) ref.Ref {
+	r.GmailMsgID = 0
+	return r
 }
 
 // allMailLocked is the name of Gmail's All Mail folder.
@@ -199,8 +225,8 @@ func (s *Store) roleFolderLocked(role mailstore.Role) (string, error) {
 
 // Append implements mailstore.Writer. On Gmail, appending to a label folder
 // stores the message in All Mail with that label and returns its ref in the
-// label folder, as APPENDUID gives it. A zero date stores the clock's time
-// as the internal date.
+// label folder, as APPENDUID gives it: without X-GM-MSGID. A zero date
+// stores the clock's time as the internal date.
 func (s *Store) Append(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) (ref.Ref, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -238,7 +264,7 @@ func (s *Store) Append(ctx context.Context, folder string, flags []string, date 
 	s.nextUID[m.Folder]++
 	s.msgs = append(s.msgs, &m)
 	s.appended = append(s.appended, slices.Clone(raw))
-	return s.refInLocked(&m, folder), nil
+	return asFound(s.refInLocked(&m, folder)), nil
 }
 
 // parseRaw fills a message's fields from its header, for search and
@@ -294,7 +320,8 @@ func (s *Store) Move(ctx context.Context, refs []ref.Ref, folder string) []mails
 // there under a new ref, and leaving a label folder for All Mail drops that
 // folder's label, as Gmail does. A move into a label folder is a label edit:
 // a message in Trash or Spam goes back to All Mail first, then it gains the
-// label and loses \Inbox unless dest is INBOX.
+// label and loses \Inbox unless dest is INBOX. A new ref carries the
+// X-GM-MSGID r carries, as imapstore's do.
 func (s *Store) moveLocked(m *Message, r ref.Ref, dest mailstore.Folder) (ref.Ref, error) {
 	if r.Folder == dest.Name {
 		return r, nil
@@ -313,7 +340,7 @@ func (s *Store) moveLocked(m *Message, r ref.Ref, dest mailstore.Folder) (ref.Re
 		if m.Folder != dest.Name {
 			s.relocateLocked(m, dest.Name)
 		}
-		return s.refLocked(m), nil
+		return s.placedLocked(m, r), nil
 	}
 	if s.roleLocked(m.Folder) != mailstore.RoleAll {
 		all, err := s.allMailLocked()
@@ -321,7 +348,7 @@ func (s *Store) moveLocked(m *Message, r ref.Ref, dest mailstore.Folder) (ref.Re
 			return ref.Ref{}, err
 		}
 		s.relocateLocked(m, all)
-		r = s.refLocked(m)
+		r = s.placedLocked(m, r)
 	}
 	label := labelOf(dest)
 	var remove []string
@@ -353,7 +380,8 @@ func (s *Store) srcLocked(r ref.Ref) mailstore.Folder {
 // message with a new ref, even in its own folder. On Gmail copying to a
 // label folder adds the label and keeps the ref, and copying to Trash or
 // Spam moves the message there, as Gmail does: it keeps one copy of a
-// message.
+// message. For the same reason copying a message in Trash or Spam to All
+// Mail is ErrUnsupported (spec 7.1): only a move takes it there.
 func (s *Store) Copy(ctx context.Context, refs []ref.Ref, folder string) []mailstore.RefResult {
 	var dest mailstore.Folder
 	return s.batch(ctx, opCopy, refs, func() (err error) {
@@ -368,7 +396,11 @@ func (s *Store) Copy(ctx context.Context, refs []ref.Ref, folder string) []mails
 		switch {
 		case dest.Role == mailstore.RoleTrash || dest.Role == mailstore.RoleSpam:
 			return s.moveLocked(m, r, dest)
-		case dest.Role == mailstore.RoleAll || r.Folder == dest.Name:
+		case r.Folder == dest.Name:
+			return r, nil
+		case dest.Role == mailstore.RoleAll && isBin(s.srcLocked(r).Role):
+			return ref.Ref{}, errBinNotInAllMail
+		case dest.Role == mailstore.RoleAll:
 			return r, nil
 		}
 		return s.labelLocked(m, r, s.srcLocked(r), []string{labelOf(dest)}, nil), nil
@@ -780,8 +812,9 @@ func (s *Store) DeleteFolder(ctx context.Context, name string, force bool) error
 }
 
 // FindByMessageID implements mailstore.Writer. The result is in UID order.
-// On Gmail a label folder gives refs in that folder, as imapstore does. An
-// empty Message-ID finds nothing.
+// On Gmail a label folder gives refs in that folder, as imapstore does, and
+// no ref carries X-GM-MSGID, which SEARCH does not give. An empty
+// Message-ID finds nothing.
 func (s *Store) FindByMessageID(ctx context.Context, folder, messageID string) ([]ref.Ref, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -799,7 +832,7 @@ func (s *Store) FindByMessageID(ctx context.Context, folder, messageID string) (
 	var out []ref.Ref
 	for _, m := range s.msgs {
 		if s.inFolderLocked(f, m) && trimID(m.MessageID) == id {
-			out = append(out, s.refInLocked(m, f.Name))
+			out = append(out, asFound(s.refInLocked(m, f.Name)))
 		}
 	}
 	slices.SortFunc(out, func(a, b ref.Ref) int {

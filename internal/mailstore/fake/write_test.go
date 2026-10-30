@@ -159,8 +159,8 @@ func TestWriteAppend(t *testing.T) {
 			if r.Folder != tt.wantFolder || r.Account != s.account || r.UID == 0 || r.UIDValidity == 0 {
 				t.Fatalf("ref = %+v, want folder %s", r, tt.wantFolder)
 			}
-			if tt.gmail != (r.GmailMsgID != 0) {
-				t.Errorf("GmailMsgID = %d on gmail=%v", r.GmailMsgID, tt.gmail)
+			if r.GmailMsgID != 0 {
+				t.Errorf("GmailMsgID = %d, want none: APPENDUID gives no X-GM-MSGID", r.GmailMsgID)
 			}
 			m := fetch(t, s, r)
 			if m.Summary.Subject != "Appended" || m.MessageID != "<a1@example.com>" || !m.Summary.InternalDate.Equal(date) {
@@ -425,6 +425,9 @@ func TestWriteCopy(t *testing.T) {
 		// Gmail keeps one copy of a message: a COPY into Trash or Spam moves it.
 		{name: "Gmail copy to Trash moves it", gmail: true, from: allMail, dest: gmailTrash, wantFolder: gmailTrash, moved: true},
 		{name: "Gmail copy to Spam moves it", gmail: true, from: allMail, dest: gmailSpam, wantFolder: gmailSpam, moved: true},
+		// A message in Trash or Spam is not in All Mail; only a move takes it there.
+		{name: "Gmail copy from Trash to All Mail is unsupported", gmail: true, from: gmailTrash, dest: allMail, wantErr: mailstore.ErrUnsupported},
+		{name: "Gmail copy from Spam to All Mail is unsupported", gmail: true, from: gmailSpam, dest: allMail, wantErr: mailstore.ErrUnsupported},
 		{name: "Gmail unknown folder", gmail: true, from: allMail, dest: "Nope", wantErr: mailstore.ErrNotFound},
 	}
 	for _, tt := range tests {
@@ -468,8 +471,8 @@ func TestWriteCopy(t *testing.T) {
 				if err != nil || len(refs) != 1 || refs[0].Folder != tt.dest || fetch(t, s, refs[0]).Summary.Subject != "copied" {
 					t.Errorf("FindByMessageID(%s) = %v, %v, want the message there", tt.dest, refs, err)
 				}
-			} else if err != nil || !slices.Contains(refs, res.Ref) {
-				t.Errorf("FindByMessageID(%s) = %v, %v, want it to hold %s", tt.dest, refs, err, res.Ref)
+			} else if err != nil || !slices.Contains(refs, asFound(res.Ref)) {
+				t.Errorf("FindByMessageID(%s) = %v, %v, want it to hold %s", tt.dest, refs, err, asFound(res.Ref))
 			}
 			if !tt.gmail {
 				// The copy is its own message.
@@ -1102,7 +1105,7 @@ func TestWriteFindByMessageID(t *testing.T) {
 		{name: "standard no match", s: host, folder: "INBOX", id: "other@x"},
 		{name: "standard empty id", s: host, folder: "INBOX", id: "<>"},
 		{name: "standard unknown folder", s: host, folder: "Nope", id: "same@x", wantErr: mailstore.ErrNotFound},
-		{name: "Gmail All Mail", s: gmail, folder: allMail, id: "s@x", want: []ref.Ref{sent}},
+		{name: "Gmail All Mail", s: gmail, folder: allMail, id: "s@x", want: []ref.Ref{asFound(sent)}},
 		{name: "Gmail INBOX does not have it", s: gmail, folder: "INBOX", id: "s@x"},
 		{name: "Gmail unknown folder", s: gmail, folder: "Nope", id: "s@x", wantErr: mailstore.ErrNotFound},
 	}
@@ -1383,7 +1386,7 @@ func TestWriteGmailLabelFolderRefs(t *testing.T) {
 	if err != nil || len(found) != 1 || found[0].Folder != gmailSent {
 		t.Fatalf("FindByMessageID(Sent Mail) = %v, %v; want a ref in Sent Mail", found, err)
 	}
-	if m := fetch(t, s, found[0]); m.Summary.Ref != found[0] || m.Summary.Subject != "sent" {
+	if m := fetch(t, s, found[0]); asFound(m.Summary.Ref) != found[0] || m.Summary.Subject != "sent" {
 		t.Errorf("reading the Sent Mail ref gave %v %q", m.Summary.Ref, m.Summary.Subject)
 	}
 
@@ -1401,7 +1404,7 @@ func TestWriteGmailLabelFolderRefs(t *testing.T) {
 	if err != nil || len(all) != 1 {
 		t.Fatalf("FindByMessageID(All Mail) = %v, %v", all, err)
 	}
-	if m := fetch(t, s, r); m.Summary.Ref != r || m.Summary.Subject != "Appended" || !slices.Contains(m.Summary.Labels, `\Inbox`) {
+	if m := fetch(t, s, r); asFound(m.Summary.Ref) != r || m.Summary.Subject != "Appended" || !slices.Contains(m.Summary.Labels, `\Inbox`) {
 		t.Errorf("reading the INBOX ref gave %v %q %q", m.Summary.Ref, m.Summary.Subject, m.Summary.Labels)
 	}
 	if _, rc, err := s.StreamPart(ctx, r, ""); err != nil {
@@ -1419,8 +1422,8 @@ func TestWriteGmailLabelFolderRefs(t *testing.T) {
 			t.Errorf("%s of the INBOX ref = %+v, want it kept", name, res)
 		}
 	}
-	if got := one(t, s.Archive(ctx, []ref.Ref{r})); got != (mailstore.RefResult{Ref: all[0]}) {
-		t.Errorf("Archive of the INBOX ref = %+v, want its All Mail ref %v", got, all[0])
+	if got := one(t, s.Archive(ctx, []ref.Ref{r})); got.Err != nil || asFound(got.Ref) != all[0] || got.Ref.GmailMsgID == 0 {
+		t.Errorf("Archive of the INBOX ref = %+v, want its All Mail ref %v, with X-GM-MSGID: imapstore finds it by that", got, all[0])
 	}
 	gone(t, s, r)
 	if got := one(t, s.Move(ctx, []ref.Ref{all[0]}, "INBOX")); got != (mailstore.RefResult{Ref: all[0]}) {
@@ -1430,8 +1433,8 @@ func TestWriteGmailLabelFolderRefs(t *testing.T) {
 	if err != nil || len(back) != 1 || back[0].UID == r.UID {
 		t.Errorf("FindByMessageID(INBOX) after a return = %v, %v; want a new UID, as Gmail gives", back, err)
 	}
-	if got := one(t, s.Move(ctx, back, "Receipts")); got != (mailstore.RefResult{Ref: all[0]}) {
-		t.Errorf("Move of the INBOX ref to a label = %+v, want its All Mail ref: it left INBOX", got)
+	if got := one(t, s.Move(ctx, back, "Receipts")); got.Err != nil || asFound(got.Ref) != all[0] || got.Ref.GmailMsgID == 0 {
+		t.Errorf("Move of the INBOX ref to a label = %+v, want its All Mail ref, with X-GM-MSGID: it left INBOX", got)
 	}
 
 	label, err := s.Append(ctx, "Receipts", nil, time.Time{}, raw("Receipt", "r@x"))
@@ -1481,6 +1484,20 @@ func TestWriteGmailRecoversRefsByMsgID(t *testing.T) {
 	}
 	if got := one(t, s.Trash(ctx, []ref.Ref{r})); got.Err != nil || got.Ref.Folder != gmailTrash {
 		t.Errorf("Trash with an old UIDVALIDITY = %+v, want it moved", got)
+	}
+
+	// An Append ref carries no X-GM-MSGID, as APPENDUID gives none, so it
+	// cannot be found again once the UIDVALIDITY it names changes.
+	appended, err := s.Append(ctx, allMail, nil, time.Time{}, raw("Appended", "a@x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetUIDValidity(allMail, 60)
+	if got := one(t, s.StoreFlags(ctx, []ref.Ref{appended}, []string{`\Seen`}, nil)); !errors.Is(got.Err, mailstore.ErrStaleRef) {
+		t.Errorf("StoreFlags of an Append ref with an old UIDVALIDITY = %+v, want ErrStaleRef", got)
+	}
+	if res := s.FetchMessages(ctx, []ref.Ref{appended}); !errors.Is(res[0].Err, mailstore.ErrStaleRef) {
+		t.Errorf("FetchMessages of an Append ref with an old UIDVALIDITY = %+v, want ErrStaleRef", res[0])
 	}
 
 	std := newHost()

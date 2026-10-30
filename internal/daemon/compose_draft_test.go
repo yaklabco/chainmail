@@ -309,6 +309,9 @@ func TestGmailDrafts(t *testing.T) {
 			if err == nil {
 				err = e.gmail.StoreLabels(context.Background(), []ref.Ref{r}, []string{`\Sent`}, nil)[0].Err
 			}
+			if err == nil {
+				r, err = filedRef(e.gmail, r)
+			}
 			if err != nil {
 				t.Errorf("filing the message: %v", err)
 				return
@@ -416,6 +419,16 @@ func gmailDraftsFolder(t *testing.T, h *hookStore) {
 	}
 }
 
+// filedRef is the ref a read gives for r, a ref Append returned, with the
+// X-GM-MSGID that APPENDUID, and so the Append ref, lacks.
+func filedRef(s *fake.Store, r ref.Ref) (ref.Ref, error) {
+	res := s.FetchMessages(context.Background(), []ref.Ref{r})
+	if res[0].Err != nil {
+		return ref.Ref{}, res[0].Err
+	}
+	return res[0].Message.Summary.Ref, nil
+}
+
 // TestGmailDraftInDraftsFolderIsNotTheSentCopy sends a Gmail draft whose
 // ref is in [Gmail]/Drafts. The Sent-copy lookup in All Mail finds the
 // draft too, under another folder's ref, and must tell it apart by
@@ -430,6 +443,9 @@ func TestGmailDraftInDraftsFolderIsNotTheSentCopy(t *testing.T) {
 	e.smtp(t, smtptest.Options{
 		OnMessage: func(env smtptest.Envelope) {
 			r, err := e.gmail.Append(context.Background(), "[Gmail]/Sent Mail", []string{`\Seen`}, time.Time{}, env.Data)
+			if err == nil {
+				r, err = filedRef(e.gmail, r)
+			}
 			if err != nil {
 				t.Errorf("filing the message: %v", err)
 				return
