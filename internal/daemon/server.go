@@ -162,6 +162,9 @@ func New(opts Options) (*Server, error) {
 func (s *Server) Serve(ctx context.Context) error {
 	if err := s.recoverSends(ctx); err != nil {
 		_ = s.opts.Listener.Close() // the recovery error is the one to report
+		if ctx.Err() != nil {
+			return nil // stopped before serving: a shutdown, not a failure
+		}
 		return err
 	}
 	base, cancelBase := context.WithCancel(context.WithoutCancel(ctx))

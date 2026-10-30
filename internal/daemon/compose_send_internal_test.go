@@ -311,3 +311,15 @@ func TestSendReplaysAfterRestart(t *testing.T) {
 	}
 }
 
+// TestServeStoppedBeforeRecoveryIsCleanShutdown stops the daemon before the
+// startup recovery of idempotency keys ran. That is a shutdown, not a
+// failure.
+func TestServeStoppedBeforeRecoveryIsCleanShutdown(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServer(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := s.Serve(ctx); err != nil {
+		t.Errorf("Serve = %v, want nil", err)
+	}
+}
