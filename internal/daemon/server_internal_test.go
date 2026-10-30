@@ -256,3 +256,36 @@ func TestToConnectErrorWriteHints(t *testing.T) {
 		}
 	}
 }
+
+// TestToConnectErrorWriteTextIsFixed checks that a write error's own text,
+// which can carry the mail server's words, never reaches the client, while
+// the cause stays on the error for the daemon's logs.
+func TestToConnectErrorWriteTextIsFixed(t *testing.T) {
+	t.Parallel()
+	const secret = "SERVER-SAID-zq81-do-not-leak"
+	tests := []struct {
+		sentinel error
+		msg      string
+	}{
+		{sentinel: mailstore.ErrUnsupported, msg: "the account does not support that action"},
+		{sentinel: mailstore.ErrRefused, msg: "the mail server refused the change"},
+		{sentinel: mailstore.ErrExists, msg: "the folder already exists"},
+	}
+	for _, tt := range tests {
+		err := fmt.Errorf("%w: %s", tt.sentinel, secret)
+		got := toConnectError(err)
+		if got.Message() != tt.msg {
+			t.Errorf("toConnectError(%v).Message() = %q, want %q", tt.sentinel, got.Message(), tt.msg)
+		}
+		if strings.Contains(got.Error(), secret) {
+			t.Errorf("toConnectError(%v).Error() = %q, leaks the wrapped text", tt.sentinel, got.Error())
+		}
+		d := api.Detail(got)
+		if strings.Contains(d.GetHint(), secret) || strings.Contains(d.GetReason(), secret) {
+			t.Errorf("toConnectError(%v) detail = %v, leaks the wrapped text", tt.sentinel, d)
+		}
+		if !errors.Is(got, tt.sentinel) || !errors.Is(got, err) {
+			t.Errorf("toConnectError(%v) dropped its cause", tt.sentinel)
+		}
+	}
+}
