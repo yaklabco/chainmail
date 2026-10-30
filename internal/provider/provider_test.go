@@ -186,3 +186,43 @@ func TestSupportsAuth(t *testing.T) {
 		}
 	}
 }
+
+func TestPoolAndSizeDefaults(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		pool    int
+		maxSize int64
+	}{
+		{name: "google-workspace", pool: 6, maxSize: 25 << 20},
+		{name: "gmail", pool: 6, maxSize: 25 << 20},
+		{name: "icloud", pool: 3, maxSize: 35 << 20},
+		{name: "hostinger", pool: 3, maxSize: 35 << 20},
+		{name: "custom", pool: 3, maxSize: 25 << 20},
+	}
+	for _, tt := range tests {
+		p, ok := Lookup(tt.name)
+		if !ok {
+			t.Fatalf("Lookup(%q) not found", tt.name)
+		}
+		if p.DefaultPool != tt.pool {
+			t.Errorf("%s: DefaultPool = %d, want %d", tt.name, p.DefaultPool, tt.pool)
+		}
+		if p.MaxMessageSize != tt.maxSize {
+			t.Errorf("%s: MaxMessageSize = %d, want %d", tt.name, p.MaxMessageSize, tt.maxSize)
+		}
+	}
+	if got := len(Names()); got != len(tests) {
+		t.Errorf("Names() has %d presets, the test covers %d", got, len(tests))
+	}
+}
+
+func TestDefaultPoolFitsConnectionLimit(t *testing.T) {
+	t.Parallel()
+	for _, name := range Names() {
+		p, _ := Lookup(name)
+		if p.DefaultPool < 1 || p.DefaultPool > p.MaxConnections {
+			t.Errorf("%s: DefaultPool = %d, want 1 to MaxConnections %d", name, p.DefaultPool, p.MaxConnections)
+		}
+	}
+}

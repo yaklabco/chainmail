@@ -50,7 +50,7 @@ func (s *Store) StreamPart(ctx context.Context, r ref.Ref, part string) (mailsto
 // tryOpenPart borrows a connection and opens the part on it. The reader
 // keeps the connection when that works; otherwise it goes straight back.
 func (s *Store) tryOpenPart(ctx context.Context, r ref.Ref, path []int) (mailstore.PartInfo, *partReader, error) {
-	c, err := s.borrow(ctx, r.Folder)
+	c, err := s.borrow(ctx, r.Folder, false)
 	if err != nil {
 		return mailstore.PartInfo{}, nil, err
 	}
@@ -89,7 +89,7 @@ func (s *Store) openPart(ctx context.Context, c *conn, r ref.Ref, path []int) (m
 		if sp == nil {
 			return mailstore.PartInfo{}, nil, fmt.Errorf("%w: the message has no part %s", mailstore.ErrNotFound, partString(path))
 		}
-		info = mailstore.PartInfo{Filename: decodeWord(sp.Filename()), ContentType: sp.MediaType(), Size: int64(sp.Size)}
+		info = partInfo(sp)
 		encoding = sp.Encoding
 	}
 	pr := &partReader{s: s, c: c, ctx: ctx, uid: uid, path: path, size: info.Size}

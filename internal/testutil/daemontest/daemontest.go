@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/x509"
 	"database/sql"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -34,6 +35,11 @@ type Options struct {
 	NewStore func(config.ResolvedAccount) mailstore.Store
 	// Now replaces the daemon's clock.
 	Now func() time.Time
+	// OutcomeSearchInterval replaces the wait between the tries of the
+	// Sent search for a send whose outcome is unknown.
+	OutcomeSearchInterval time.Duration
+	// Logger receives the daemon's logs. Nil discards them.
+	Logger *slog.Logger
 }
 
 // Harness is a running daemon and a client connected to it.
@@ -92,16 +98,19 @@ func Start(t testing.TB, configTOML string, opts Options) *Harness {
 		authz = daemon.NewAuthorizer(uint32(os.Getuid()), -1)
 	}
 	srv, err := daemon.New(daemon.Options{
-		Config:      cfg,
-		Vault:       v,
-		StateDB:     stateDB,
-		Listener:    ln,
-		Authorizer:  authz,
-		DevMode:     true,
-		RootCAs:     opts.RootCAs,
-		AuthOptions: opts.AuthOptions,
-		NewStore:    opts.NewStore,
-		Now:         opts.Now,
+		Config:                cfg,
+		Vault:                 v,
+		StateDB:               stateDB,
+		Listener:              ln,
+		Authorizer:            authz,
+		DevMode:               true,
+		RootCAs:               opts.RootCAs,
+		AuthOptions:           opts.AuthOptions,
+		NewStore:              opts.NewStore,
+		Now:                   opts.Now,
+		StateDir:              dir,
+		OutcomeSearchInterval: opts.OutcomeSearchInterval,
+		Logger:                opts.Logger,
 	})
 	if err != nil {
 		t.Fatal(err)

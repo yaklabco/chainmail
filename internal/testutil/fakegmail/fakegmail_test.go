@@ -376,6 +376,14 @@ func TestFakeGmailStar(t *testing.T) {
 		{"seq *", allMail, imap.SeqSet{{Start: 0, Stop: 0}}, []int{1}},
 		{"seq 1:*", inbox, imap.SeqSet{{Start: 1, Stop: 0}}, []int{0, 1}},
 	}
+	// messagesIn resolves against a session's view of the folder.
+	messagesIn := func(f *folder, numSet imap.NumSet) ([]int, error) {
+		sess := &session{s: s}
+		if _, err := sess.Select(f.name, &imap.SelectOptions{ReadOnly: true}); err != nil {
+			return nil, err
+		}
+		return sess.messagesIn(numSet)
+	}
 	for _, tt := range tests {
 		got, err := messagesIn(tt.f, tt.numSet)
 		if err != nil || !reflect.DeepEqual(got, tt.want) {

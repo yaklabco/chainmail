@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"reflect"
 	"regexp"
 	"slices"
@@ -17,11 +18,26 @@ import (
 	"github.com/jamesainslie/chainmail/internal/query"
 )
 
-var errReadOnly = &imap.Error{Type: imap.StatusResponseTypeNo, Text: "fakegmail is read-only"}
+// errExamined answers a write in a folder opened with EXAMINE.
+var errExamined = &imap.Error{Type: imap.StatusResponseTypeNo, Text: "fakegmail: the folder is open read-only"}
 
 type session struct {
 	s        *Server
 	selected *folder
+	readOnly bool
+	// view is the selected folder as this session's client knows it, in
+	// sequence-number order. Entries whose message has left the folder stay
+	// until an EXPUNGE is sent for them.
+	view []viewEntry
+	// known counts the entries the client has heard of through EXISTS.
+	known int
+	// lastUID is the highest UID in view, so new arrivals are those above it.
+	lastUID imap.UID
+}
+
+type viewEntry struct {
+	m   *Message
+	uid imap.UID
 }
 
 var (
@@ -29,6 +45,7 @@ var (
 	_ imapserver.SessionNamespace   = (*session)(nil)
 	_ imapserver.SessionMove        = (*session)(nil)
 	_ imapserver.SessionAppendLimit = (*session)(nil)
+	_ imapserver.SessionGmail       = (*session)(nil)
 )
 
 func (sess *session) Close() error { return nil }
@@ -43,22 +60,95 @@ func (sess *session) Login(username, password string) error {
 	return nil
 }
 
+// permanentFlags is what Gmail answers to SELECT.
+var permanentFlags = []imap.Flag{
+	imap.FlagAnswered, imap.FlagFlagged, imap.FlagDraft, imap.FlagDeleted, imap.FlagSeen, "$NotPhishing", "$Phishing", imap.FlagWildcard,
+}
+
 func (sess *session) Select(name string, options *imap.SelectOptions) (*imap.SelectData, error) {
 	s := sess.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	command := "SELECT"
+	if options != nil && options.ReadOnly {
+		command = "EXAMINE"
+	}
+	if err := s.faultLocked(command); err != nil {
+		// A failed SELECT or EXAMINE leaves no folder selected.
+		sess.selected, sess.view = nil, nil
+		return nil, err
+	}
 	f := s.folderLocked(name)
 	if f == nil {
-		return nil, &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeNonExistent, Text: "Unknown Mailbox: " + name}
+		return nil, noSuchFolder(name)
 	}
-	if options == nil || !options.ReadOnly {
+	sess.readOnly = options != nil && options.ReadOnly
+	var perm []imap.Flag
+	if !sess.readOnly {
 		s.writableSelects++
+		perm = permanentFlags
 	}
 	sess.selected = f
+	sess.view, sess.lastUID = nil, 0
+	sess.addNewLocked()
+	sess.known = len(sess.view)
 	return &imap.SelectData{
-		Flags:       []imap.Flag{imap.FlagSeen, imap.FlagFlagged, imap.FlagAnswered, imap.FlagDraft, imap.FlagDeleted},
-		NumMessages: uint32(len(f.order)), UIDNext: f.nextUID, UIDValidity: f.uidValidity,
+		Flags:          []imap.Flag{imap.FlagSeen, imap.FlagFlagged, imap.FlagAnswered, imap.FlagDraft, imap.FlagDeleted},
+		PermanentFlags: perm,
+		NumMessages:    uint32(len(f.order)), UIDNext: f.nextUID, UIDValidity: f.uidValidity,
 	}, nil
+}
+
+func noSuchFolder(name string) error {
+	return &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeNonExistent, Text: "Unknown Mailbox: " + name}
+}
+
+// addNewLocked appends the selected folder's new arrivals to the view. It
+// runs before every command, as Gmail and Dovecot sync before answering, so a
+// UID command can name a message another session just added. The client hears
+// of them through EXISTS when the command ends.
+func (sess *session) addNewLocked() {
+	f := sess.selected
+	for _, m := range f.order {
+		if uid := f.uids[m]; uid > sess.lastUID {
+			sess.view = append(sess.view, viewEntry{m: m, uid: uid})
+			sess.lastUID = uid
+		}
+	}
+}
+
+// present reports whether the entry's message is still in the folder under
+// the same UID.
+func (sess *session) present(e viewEntry) bool {
+	uid, ok := sess.selected.uids[e.m]
+	return ok && uid == e.uid
+}
+
+// expungeGoneLocked drops view entries whose message has left the folder,
+// writing an EXPUNGE for each the client knows of, highest first so the
+// sequence numbers stay valid.
+func (sess *session) expungeGoneLocked(write func(seqNum uint32) error) error {
+	for i := len(sess.view) - 1; i >= 0; i-- {
+		if sess.present(sess.view[i]) {
+			continue
+		}
+		if i < sess.known {
+			if err := write(uint32(i + 1)); err != nil {
+				return err
+			}
+			sess.known--
+		}
+		sess.view = slices.Delete(sess.view, i, i+1)
+	}
+	return nil
+}
+
+// writable checks the session may change the selected folder.
+func (sess *session) writable() error {
+	if sess.readOnly {
+		return errExamined
+	}
+	return nil
 }
 
 // List treats every folder as subscribed, as Gmail does, so the SUBSCRIBED,
@@ -114,7 +204,7 @@ func (sess *session) Status(name string, options *imap.StatusOptions) (*imap.Sta
 	defer s.mu.Unlock()
 	f := s.folderLocked(name)
 	if f == nil {
-		return nil, &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeNonExistent, Text: "Unknown Mailbox: " + name}
+		return nil, noSuchFolder(name)
 	}
 	return statusLocked(f, options), nil
 }
@@ -166,10 +256,8 @@ func (sess *session) Namespace() (*imap.NamespaceData, error) {
 	return &imap.NamespaceData{Personal: []imap.NamespaceDescriptor{{Prefix: "", Delim: '/'}}}, nil
 }
 
-// AppendLimit is Gmail's APPENDLIMIT. The fake is read-only all the same.
+// AppendLimit is Gmail's APPENDLIMIT.
 func (sess *session) AppendLimit() uint32 { return appendLimit }
-
-func (sess *session) Move(*imapserver.MoveWriter, imap.NumSet, string) error { return errReadOnly }
 
 func (sess *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriteria, options *imap.SearchOptions) (*imap.SearchData, error) {
 	if kind != imapserver.NumKindUID {
@@ -185,6 +273,7 @@ func (sess *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriter
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f := sess.selected
+	sess.addNewLocked()
 	criteria, err := staticCriteria(f, criteria)
 	if err != nil {
 		return nil, err
@@ -289,7 +378,7 @@ func staticCriteria(f *folder, c *imap.SearchCriteria) (*imap.SearchCriteria, er
 	return &out, nil
 }
 
-// staticUIDSet returns a copy of set with * resolved to f's highest UID, as
+// staticUIDSet returns a copy of set with * resolved to f.highestUID, as
 // imapmemserver does. Without it, Contains reads n:* as "n and above" and a
 // bare * as nothing.
 func staticUIDSet(f *folder, set imap.UIDSet) (imap.UIDSet, error) {
@@ -298,19 +387,19 @@ func staticUIDSet(f *folder, set imap.UIDSet) (imap.UIDSet, error) {
 	}
 	out := slices.Clone(set)
 	for i := range out {
-		staticRange(&out[i].Start, &out[i].Stop, f.nextUID-1)
+		staticRange(&out[i].Start, &out[i].Stop, f.highestUID())
 	}
 	return out, nil
 }
 
 // staticSeqSet is staticUIDSet for sequence numbers.
-func staticSeqSet(f *folder, set imap.SeqSet) (imap.SeqSet, error) {
+func staticSeqSet(highest uint32, set imap.SeqSet) (imap.SeqSet, error) {
 	if imap.IsSearchRes(set) {
 		return nil, errSearchRes
 	}
 	out := slices.Clone(set)
 	for i := range out {
-		staticRange(&out[i].Start, &out[i].Stop, uint32(len(f.order)))
+		staticRange(&out[i].Start, &out[i].Stop, highest)
 	}
 	return out, nil
 }
@@ -337,14 +426,18 @@ func (sess *session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, option
 	s := sess.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.faultLocked("FETCH"); err != nil {
+		return err
+	}
 	f := sess.selected
-	idx, err := messagesIn(f, numSet)
+	sess.addNewLocked()
+	idx, err := sess.messagesIn(numSet)
 	if err != nil {
 		return err
 	}
 	for _, i := range idx {
-		m := f.order[i]
-		if err := writeMessage(w.CreateMessage(uint32(i+1)), m, f.uids[m], options); err != nil {
+		e := sess.view[i]
+		if err := writeMessage(w.CreateMessage(uint32(i+1)), f, e.m, e.uid, options); err != nil {
 			return err
 		}
 	}
@@ -373,8 +466,13 @@ func unsupportedFetchItem(options *imap.FetchOptions, opts Options) (string, boo
 	return "", false
 }
 
-// messagesIn returns the positions in f.order of the messages numSet names.
-func messagesIn(f *folder, numSet imap.NumSet) ([]int, error) {
+// messagesIn returns the positions in the view of the messages numSet names
+// that are still in the folder. Sequence numbers count every entry the
+// client knows of, as IMAP requires until an EXPUNGE is sent, and reach only
+// as far as the last EXISTS: a sequence set never names an arrival the client
+// has not been told of.
+func (sess *session) messagesIn(numSet imap.NumSet) ([]int, error) {
+	f := sess.selected
 	var contains func(seq uint32, uid imap.UID) bool
 	switch set := numSet.(type) {
 	case imap.UIDSet:
@@ -384,28 +482,29 @@ func messagesIn(f *folder, numSet imap.NumSet) ([]int, error) {
 		}
 		contains = func(_ uint32, uid imap.UID) bool { return static.Contains(uid) }
 	case imap.SeqSet:
-		static, err := staticSeqSet(f, set)
+		known := uint32(sess.known)
+		static, err := staticSeqSet(known, set)
 		if err != nil {
 			return nil, err
 		}
-		contains = func(seq uint32, _ imap.UID) bool { return static.Contains(seq) }
+		contains = func(seq uint32, _ imap.UID) bool { return seq <= known && static.Contains(seq) }
 	default:
 		return nil, &imap.Error{Type: imap.StatusResponseTypeBad, Text: fmt.Sprintf("fakegmail: unexpected message set %T", numSet)}
 	}
 	var idx []int
-	for i, m := range f.order {
-		if contains(uint32(i+1), f.uids[m]) {
+	for i, e := range sess.view {
+		if sess.present(e) && contains(uint32(i+1), e.uid) {
 			idx = append(idx, i)
 		}
 	}
 	return idx, nil
 }
 
-func writeMessage(rw *imapserver.FetchResponseWriter, m *Message, uid imap.UID, options *imap.FetchOptions) error {
+func writeMessage(rw *imapserver.FetchResponseWriter, f *folder, m *Message, uid imap.UID, options *imap.FetchOptions) error {
 	raw := []byte(m.Raw)
 	rw.WriteUID(uid)
 	if options.Flags {
-		rw.WriteFlags(m.Flags)
+		rw.WriteFlags(f.flags(m))
 	}
 	if options.InternalDate {
 		rw.WriteInternalDate(m.Date)
@@ -492,12 +591,12 @@ func matchCriteria(f *folder, m *Message, c *imap.SearchCriteria) bool {
 		}
 	}
 	for _, fl := range c.Flag {
-		if !slices.Contains(m.Flags, fl) {
+		if !slices.Contains(f.flags(m), fl) {
 			return false
 		}
 	}
 	for _, fl := range c.NotFlag {
-		if slices.Contains(m.Flags, fl) {
+		if slices.Contains(f.flags(m), fl) {
 			return false
 		}
 	}
@@ -543,12 +642,12 @@ func matchRaw(n *query.Node, m *Message) bool {
 	case query.FieldLabel:
 		return hasLabel(m, v)
 	case query.FieldIn:
-		switch strings.ToLower(v) {
-		case "inbox":
+		switch {
+		case strings.EqualFold(v, "inbox"):
 			return hasLabel(m, `\Inbox`)
-		case "sent":
+		case strings.EqualFold(v, "sent"):
 			return hasLabel(m, `\Sent`)
-		case "drafts":
+		case strings.EqualFold(v, "drafts"):
 			return hasLabel(m, `\Draft`)
 		default:
 			return hasLabel(m, v)
@@ -592,32 +691,495 @@ func matchRaw(n *query.Node, m *Message) bool {
 }
 
 func (sess *session) Unselect() error {
-	sess.selected = nil
+	sess.selected, sess.readOnly, sess.view, sess.known, sess.lastUID = nil, false, nil, 0, 0
 	return nil
 }
 
-func (sess *session) Poll(*imapserver.UpdateWriter, bool) error { return nil }
+// Poll tells the client what changed in the selected folder since its last
+// command: EXPUNGE for messages that left, when allowed, and EXISTS for new
+// arrivals.
+func (sess *session) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
+	s := sess.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sess.selected == nil {
+		return nil
+	}
+	sess.addNewLocked()
+	if allowExpunge {
+		if err := sess.expungeGoneLocked(w.WriteExpunge); err != nil {
+			return err
+		}
+	}
+	if len(sess.view) == sess.known {
+		return nil
+	}
+	sess.known = len(sess.view)
+	return w.WriteNumMessages(uint32(sess.known))
+}
 
 func (sess *session) Idle(_ *imapserver.UpdateWriter, stop <-chan struct{}) error {
 	<-stop
 	return nil
 }
 
-func (sess *session) Create(string, *imap.CreateOptions) error         { return errReadOnly }
-func (sess *session) Delete(string) error                              { return errReadOnly }
-func (sess *session) Rename(string, string, *imap.RenameOptions) error { return errReadOnly }
-func (sess *session) Subscribe(string) error                           { return errReadOnly }
-func (sess *session) Unsubscribe(string) error                         { return errReadOnly }
-func (sess *session) Expunge(*imapserver.ExpungeWriter, *imap.UIDSet) error {
-	return errReadOnly
+// Subscribe and Unsubscribe succeed and change nothing: Gmail treats every
+// folder as subscribed.
+func (sess *session) Subscribe(string) error   { return nil }
+func (sess *session) Unsubscribe(string) error { return nil }
+
+// checkUserLabel refuses names that are not user labels: INBOX, the [Gmail]
+// folders and system labels.
+func checkUserLabel(name string) error {
+	const prefix = "[Gmail]/"
+	_, under := cutFoldPrefix(name, prefix)
+	gmail := strings.EqualFold(name, "[Gmail]") || under
+	if name == "" || gmail || strings.EqualFold(name, "INBOX") || strings.HasPrefix(name, `\`) {
+		return &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeCannot, Text: "fakegmail: " + name + " is not a user label"}
+	}
+	return nil
 }
 
-func (sess *session) Append(string, imap.LiteralReader, *imap.AppendOptions) (*imap.AppendData, error) {
-	return nil, errReadOnly
+func folderExists(name string) error {
+	return &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeAlreadyExists, Text: "Duplicate folder name " + name}
 }
 
-func (sess *session) Store(*imapserver.FetchWriter, imap.NumSet, *imap.StoreFlags, *imap.StoreOptions) error {
-	return errReadOnly
+func tryCreate(name string) error {
+	return &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeTryCreate, Text: "Unknown Mailbox: " + name}
 }
 
-func (sess *session) Copy(imap.NumSet, string) (*imap.CopyData, error) { return nil, errReadOnly }
+// Create makes a user label. Gmail matches label names without regard to
+// case, so Receipts and receipts are the same label.
+func (sess *session) Create(name string, _ *imap.CreateOptions) error {
+	name = strings.TrimSuffix(name, "/")
+	if err := checkUserLabel(name); err != nil {
+		return err
+	}
+	s := sess.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.folderFoldLocked(name) != nil {
+		return folderExists(name)
+	}
+	s.addUserFolderLocked(name)
+	return nil
+}
+
+// beneath reports whether name is below parent in the label hierarchy,
+// ignoring case as Gmail does.
+func beneath(name, parent string) bool {
+	_, ok := cutFoldPrefix(name, parent+"/")
+	return ok
+}
+
+// Rename renames a user label and the labels under it, on every message that
+// carries them. UIDs and UIDVALIDITY stay. A label cannot move beneath itself.
+func (sess *session) Rename(name, newName string, _ *imap.RenameOptions) error {
+	if err := checkUserLabel(name); err != nil {
+		return err
+	}
+	if err := checkUserLabel(newName); err != nil {
+		return err
+	}
+	s := sess.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f := s.folderFoldLocked(name)
+	if f == nil {
+		return noSuchFolder(name)
+	}
+	if beneath(newName, f.name) {
+		return &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeCannot, Text: "fakegmail: cannot move " + f.name + " beneath itself"}
+	}
+	renames := map[*folder]string{}
+	byLabel := map[string]string{} // old label, folded, to new label
+	for _, g := range s.folders {
+		switch {
+		case g.kind != kindLabel || strings.HasPrefix(g.label, `\`):
+			continue
+		case g == f:
+			renames[g] = newName
+		case beneath(g.name, f.name):
+			rest, _ := cutFoldPrefix(g.name, f.name)
+			renames[g] = newName + rest
+		default:
+			continue
+		}
+		byLabel[foldKey(g.label)] = renames[g]
+	}
+	for _, to := range renames {
+		if other := s.folderFoldLocked(to); other != nil && renames[other] == "" {
+			return folderExists(to)
+		}
+	}
+	// Each label is looked up once against the old names, so no label is
+	// renamed twice whatever order the folders come in. A message that carried
+	// two spellings of one label, such as σ and ς, keeps one.
+	for _, m := range s.msgs {
+		seen := make(map[string]bool, len(m.Labels))
+		labels := m.Labels[:0]
+		for _, l := range m.Labels {
+			if to, ok := byLabel[foldKey(l)]; ok {
+				l = to
+			}
+			if k := foldKey(l); !seen[k] {
+				seen[k] = true
+				labels = append(labels, l)
+			}
+		}
+		m.Labels = labels
+	}
+	for g, to := range renames {
+		g.name, g.label = to, to
+	}
+	return nil
+}
+
+// Delete removes a user label from every message and drops its folder. The
+// messages stay in All Mail.
+func (sess *session) Delete(name string) error {
+	if err := checkUserLabel(name); err != nil {
+		return err
+	}
+	s := sess.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f := s.folderFoldLocked(name)
+	if f == nil {
+		return noSuchFolder(name)
+	}
+	for _, m := range s.msgs {
+		removeLabel(m, f.label)
+	}
+	s.folders = slices.DeleteFunc(s.folders, func(g *folder) bool { return g == f })
+	return nil
+}
+
+// Append adds a message to a folder as Gmail does: to a label folder with
+// that label, so APPEND to Sent Mail or Drafts gives \Sent or \Draft. Once
+// it has stored the message it runs the AfterAppend hook.
+func (sess *session) Append(name string, r imap.LiteralReader, options *imap.AppendOptions) (*imap.AppendData, error) {
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	if options == nil {
+		options = &imap.AppendOptions{}
+	}
+	data, hook, err := sess.appendMessage(name, raw, options)
+	if err == nil && hook != nil {
+		hook()
+	}
+	return data, err
+}
+
+// appendMessage stores an APPEND's message and returns the AfterAppend hook.
+func (sess *session) appendMessage(name string, raw []byte, options *imap.AppendOptions) (*imap.AppendData, func(), error) {
+	s := sess.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f := s.folderLocked(name)
+	if f == nil {
+		return nil, nil, tryCreate(name)
+	}
+	date := options.Time
+	if date.IsZero() {
+		date = time.Now()
+	}
+	m := s.newMessageLocked(string(raw), date, nil)
+	fileLocked(m, f)
+	uid := f.ensure(m)
+	storeFlags(f, m, imap.StoreFlagsSet, options.Flags)
+	s.refreshLocked()
+	s.appends++
+	return &imap.AppendData{UID: uid, UIDValidity: f.uidValidity}, s.afterAppend, nil
+}
+
+// Store changes flags. A set that names no current message answers OK with
+// no FETCH, as Gmail does for a stale UID.
+func (sess *session) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags *imap.StoreFlags, _ *imap.StoreOptions) error {
+	if err := sess.writable(); err != nil {
+		return err
+	}
+	s := sess.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f := sess.selected
+	sess.addNewLocked()
+	idx, err := sess.messagesIn(numSet)
+	if err != nil {
+		return err
+	}
+	for _, i := range idx {
+		storeFlags(f, sess.view[i].m, flags.Op, flags.Flags)
+	}
+	if flags.Silent {
+		return nil
+	}
+	for _, i := range idx {
+		e := sess.view[i]
+		rw := w.CreateMessage(uint32(i + 1))
+		rw.WriteUID(e.uid)
+		rw.WriteFlags(f.flags(e.m))
+		if err := rw.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// storeFlags applies a flag change to m in f. \Deleted goes to the folder,
+// the rest to the message, and \Starred follows \Flagged.
+func storeFlags(f *folder, m *Message, op imap.StoreFlagsOp, flags []imap.Flag) {
+	deleted := slices.Contains(flags, imap.FlagDeleted)
+	var others []imap.Flag
+	for _, fl := range flags {
+		if fl != imap.FlagDeleted && !slices.Contains(others, fl) {
+			others = append(others, fl)
+		}
+	}
+	switch op {
+	case imap.StoreFlagsSet:
+		m.Flags = others
+		if deleted {
+			f.deleted[m] = true
+		} else {
+			delete(f.deleted, m)
+		}
+	case imap.StoreFlagsAdd:
+		for _, fl := range others {
+			if !slices.Contains(m.Flags, fl) {
+				m.Flags = append(m.Flags, fl)
+			}
+		}
+		if deleted {
+			f.deleted[m] = true
+		}
+	case imap.StoreFlagsDel:
+		m.Flags = slices.DeleteFunc(m.Flags, func(fl imap.Flag) bool { return slices.Contains(others, fl) })
+		if deleted {
+			delete(f.deleted, m)
+		}
+	}
+	starFromFlags(m)
+}
+
+// uidPair is one message's UID in the source and destination of a COPY or MOVE.
+type uidPair struct{ src, dest imap.UID }
+
+// copyData builds COPYUID for pairs in order. It does not sort: COPYUID
+// matches source and destination UIDs by position.
+func copyData(dest *folder, pairs []uidPair) *imap.CopyData {
+	if len(pairs) == 0 {
+		return nil
+	}
+	data := &imap.CopyData{UIDValidity: dest.uidValidity}
+	for _, p := range pairs {
+		data.SourceUIDs = appendUID(data.SourceUIDs, p.src)
+		data.DestUIDs = appendUID(data.DestUIDs, p.dest)
+	}
+	return data
+}
+
+// appendUID adds uid at the end of set, growing the last range when uid
+// follows it.
+func appendUID(set imap.UIDSet, uid imap.UID) imap.UIDSet {
+	if n := len(set); n > 0 && set[n-1].Stop+1 == uid {
+		set[n-1].Stop = uid
+		return set
+	}
+	return append(set, imap.UIDRange{Start: uid, Stop: uid})
+}
+
+// Copy files messages in dest as Gmail does: into a label folder it adds the
+// label, which is how Gmail copies. A set that names no current message
+// answers OK with no COPYUID.
+func (sess *session) Copy(numSet imap.NumSet, dest string) (*imap.CopyData, error) {
+	s := sess.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess.addNewLocked()
+	d := s.folderLocked(dest)
+	if d == nil {
+		return nil, tryCreate(dest)
+	}
+	idx, err := sess.messagesIn(numSet)
+	if err != nil {
+		return nil, err
+	}
+	var pairs []uidPair
+	for _, i := range idx {
+		e := sess.view[i]
+		fileLocked(e.m, d)
+		pairs = append(pairs, uidPair{e.uid, d.ensure(e.m)})
+	}
+	s.refreshLocked()
+	return copyData(d, pairs), nil
+}
+
+// Move moves messages as Gmail does (see moveLocked), then reports COPYUID
+// and an EXPUNGE for each message that left the selected folder.
+func (sess *session) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest string) error {
+	if err := sess.writable(); err != nil {
+		return err
+	}
+	s := sess.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess.addNewLocked()
+	d := s.folderLocked(dest)
+	if d == nil {
+		return tryCreate(dest)
+	}
+	idx, err := sess.messagesIn(numSet)
+	if err != nil {
+		return err
+	}
+	var pairs []uidPair
+	for _, i := range idx {
+		e := sess.view[i]
+		moveLocked(e.m, sess.selected, d)
+		pairs = append(pairs, uidPair{e.uid, d.ensure(e.m)})
+	}
+	s.refreshLocked()
+	if data := copyData(d, pairs); data != nil {
+		if err := w.WriteCopyData(data); err != nil {
+			return err
+		}
+	}
+	return sess.expungeGoneLocked(w.WriteExpunge)
+}
+
+// Expunge expunges the messages marked \Deleted in the selected folder, only
+// those in uids for UID EXPUNGE, as expungeLocked describes.
+func (sess *session) Expunge(w *imapserver.ExpungeWriter, uids *imap.UIDSet) error {
+	if err := sess.writable(); err != nil {
+		return err
+	}
+	s := sess.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f := sess.selected
+	sess.addNewLocked()
+	var in imap.UIDSet
+	if uids != nil {
+		static, err := staticUIDSet(f, *uids)
+		if err != nil {
+			return err
+		}
+		in = static
+	}
+	for _, e := range sess.view {
+		if sess.present(e) && f.deleted[e.m] && (uids == nil || in.Contains(e.uid)) {
+			expungeLocked(e.m, f)
+		}
+	}
+	s.refreshLocked()
+	return sess.expungeGoneLocked(w.WriteExpunge)
+}
+
+// labelUpdate is one message's labels after a label STORE, for its FETCH
+// response.
+type labelUpdate struct {
+	seq    uint32
+	uid    imap.UID
+	labels []string
+}
+
+// systemLabels are Gmail's system labels in the case Gmail writes them.
+var systemLabels = []string{`\Inbox`, `\Important`, `\Starred`, `\Sent`, `\Draft`}
+
+// StoreGmailLabels answers STORE X-GM-LABELS (imapserver.SessionGmail). It
+// writes each message's UID and labels unless the STORE is SILENT.
+func (sess *session) StoreGmailLabels(w *imapserver.FetchWriter, numSet imap.NumSet, store *imap.StoreGmailLabels) error {
+	updates, err := sess.storeLabels(numSet, store.Op, store.Labels)
+	if err != nil || store.Silent {
+		return err
+	}
+	for _, u := range updates {
+		rw := w.CreateMessage(u.seq)
+		rw.WriteUID(u.uid)
+		rw.WriteGmailLabels(u.labels)
+		if err := rw.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// storeLabels runs STORE [+|-]X-GM-LABELS on the selected folder and returns
+// the FETCH answers. op Set replaces the labels. System labels are matched
+// without regard to case, a user label the server lacks is created, as Gmail
+// does, and the folder names INBOX, Sent Mail and Drafts stand for their
+// labels. \Flagged follows \Starred. A set that names no current message
+// answers OK with no FETCH.
+func (sess *session) storeLabels(numSet imap.NumSet, op imap.StoreFlagsOp, labels []string) ([]labelUpdate, error) {
+	if err := sess.writable(); err != nil {
+		return nil, err
+	}
+	s := sess.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess.addNewLocked()
+	idx, err := sess.messagesIn(numSet)
+	if err != nil || len(idx) == 0 {
+		return nil, err
+	}
+	names := make([]string, 0, len(labels))
+	var create []string
+	for _, l := range labels {
+		name, isNew, err := s.labelNameLocked(l)
+		if err != nil {
+			return nil, err
+		}
+		if isNew && op != imap.StoreFlagsDel && !slices.ContainsFunc(create, func(c string) bool { return strings.EqualFold(c, name) }) {
+			create = append(create, name)
+		}
+		names = append(names, name)
+	}
+	for _, name := range create {
+		s.addUserFolderLocked(name)
+	}
+	for _, i := range idx {
+		m := sess.view[i].m
+		if op == imap.StoreFlagsSet {
+			m.Labels = nil
+		}
+		for _, name := range names {
+			if op == imap.StoreFlagsDel {
+				removeLabel(m, name)
+			} else {
+				addLabel(m, name)
+			}
+		}
+		starFromLabels(m)
+	}
+	s.refreshLocked()
+	updates := make([]labelUpdate, 0, len(idx))
+	for _, i := range idx {
+		e := sess.view[i]
+		updates = append(updates, labelUpdate{seq: uint32(i + 1), uid: e.uid, labels: slices.Clone(e.m.Labels)})
+	}
+	return updates, nil
+}
+
+// labelNameLocked resolves a label as Gmail does, saying whether it names no
+// folder yet. Trash, Spam and All Mail are not labels.
+func (s *Server) labelNameLocked(l string) (name string, isNew bool, err error) {
+	if strings.HasPrefix(l, `\`) {
+		if i := slices.IndexFunc(systemLabels, func(sys string) bool { return strings.EqualFold(sys, l) }); i >= 0 {
+			return systemLabels[i], false, nil
+		}
+		return "", false, &imap.Error{Type: imap.StatusResponseTypeNo, Text: "fakegmail: unknown system label " + l}
+	}
+	if f := s.folderFoldLocked(l); f != nil {
+		if f.kind != kindLabel {
+			return "", false, &imap.Error{Type: imap.StatusResponseTypeNo, Text: "fakegmail: " + f.name + " is not a label"}
+		}
+		return f.label, false, nil
+	}
+	if err := checkUserLabel(l); err != nil {
+		return "", false, err
+	}
+	return l, true, nil
+}

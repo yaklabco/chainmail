@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"fmt"
+	"maps"
 	"mime"
 	"regexp"
 	"slices"
@@ -93,7 +94,51 @@ func param(params map[string]string, key string) string {
 	return ""
 }
 
-// attachmentsOf lists the attachment parts in a body structure.
+// isShown reports whether sp is a part the body shows by its Content-ID,
+// such as an unnamed inline image, that is neither an attachment nor the
+// body text itself.
+func isShown(sp *imap.BodyStructureSinglePart) bool {
+	return contentID(sp) != "" && !isAttachment(sp) && !isTextLeaf(sp)
+}
+
+// contentID is sp's Content-ID without angle brackets.
+func contentID(sp *imap.BodyStructureSinglePart) string {
+	return strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(sp.ID), "<"), ">")
+}
+
+// partInfo describes sp for streaming: its filename, media type and
+// parameters, Content-ID and whether the body shows it.
+func partInfo(sp *imap.BodyStructureSinglePart) mailstore.PartInfo {
+	info := mailstore.PartInfo{Filename: decodeWord(sp.Filename()), ContentType: sp.MediaType(), ContentID: contentID(sp), Size: int64(sp.Size)}
+	if len(sp.Params) > 0 {
+		info.Params = maps.Clone(sp.Params)
+	}
+	if d := sp.Disposition(); d != nil {
+		info.Inline = strings.EqualFold(d.Value, "inline")
+	} else {
+		info.Inline = info.ContentID != ""
+	}
+	return info
+}
+
+// hasAttachment reports whether a body structure has an attachment part. A
+// part only the body shows, such as an unnamed inline image, is not one.
+func hasAttachment(bs imap.BodyStructure) bool {
+	found := false
+	if bs == nil {
+		return false
+	}
+	bs.Walk(func(_ []int, part imap.BodyStructure) bool {
+		if sp, ok := part.(*imap.BodyStructureSinglePart); ok && isAttachment(sp) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// attachmentsOf lists the attachment parts in a body structure, and the
+// parts without a filename the body shows by Content-ID.
 func attachmentsOf(bs imap.BodyStructure) []mailstore.Attachment {
 	var out []mailstore.Attachment
 	if bs == nil {
@@ -101,7 +146,7 @@ func attachmentsOf(bs imap.BodyStructure) []mailstore.Attachment {
 	}
 	bs.Walk(func(path []int, part imap.BodyStructure) bool {
 		sp, ok := part.(*imap.BodyStructureSinglePart)
-		if !ok || !isAttachment(sp) {
+		if !ok || !isAttachment(sp) && !isShown(sp) {
 			return true
 		}
 		name := decodeWord(sp.Filename())

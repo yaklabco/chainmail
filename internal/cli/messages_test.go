@@ -263,7 +263,7 @@ func TestAttachmentFailedStreamLeavesNothing(t *testing.T) {
 
 func TestOutputDefaultsFollowTheTerminal(t *testing.T) {
 	t.Parallel()
-	h := daemontest.Start(t, twoAccounts, daemontest.Options{})
+	h := daemontest.Start(t, twoAccounts, daemontest.Options{NewStore: offlineStores})
 	tests := []struct {
 		name   string
 		env    Env

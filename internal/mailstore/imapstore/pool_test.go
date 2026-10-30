@@ -12,14 +12,20 @@ import (
 type fakeConn struct {
 	id         int
 	folder     string
+	writable   bool
 	dead       bool
 	noopErr    error
 	closeDelay time.Duration
+	// loggingOut, when set, is closed as Close starts, and Close then
+	// waits for loggedOut to close.
+	loggingOut chan struct{}
+	loggedOut  chan struct{}
 	noops      atomic.Int32
 	closed     atomic.Bool
 }
 
 func (f *fakeConn) Selected() string { return f.folder }
+func (f *fakeConn) Writable() bool   { return f.writable }
 func (f *fakeConn) Dead() bool       { return f.dead }
 func (f *fakeConn) Noop(context.Context) error {
 	f.noops.Add(1)
@@ -27,6 +33,10 @@ func (f *fakeConn) Noop(context.Context) error {
 }
 
 func (f *fakeConn) Close() error {
+	if f.loggingOut != nil {
+		close(f.loggingOut)
+		<-f.loggedOut
+	}
 	time.Sleep(f.closeDelay)
 	f.closed.Store(true)
 	return nil
@@ -92,12 +102,12 @@ func TestPoolReusesIdleConnection(t *testing.T) {
 	t.Parallel()
 	d := &fakeDialer{}
 	p := newTestPool(3, d, &testClock{t: time.Unix(0, 0)}, time.Hour)
-	c1, err := p.get(t.Context(), "INBOX")
+	c1, err := p.get(t.Context(), "INBOX", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p.put(c1)
-	c2, err := p.get(t.Context(), "INBOX")
+	c2, err := p.get(t.Context(), "INBOX", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,15 +120,15 @@ func TestPoolPrefersFolder(t *testing.T) {
 	t.Parallel()
 	d := &fakeDialer{}
 	p := newTestPool(3, d, &testClock{t: time.Unix(0, 0)}, time.Hour)
-	inbox, _ := p.get(t.Context(), "")
-	sent, _ := p.get(t.Context(), "")
+	inbox, _ := p.get(t.Context(), "", false)
+	sent, _ := p.get(t.Context(), "", false)
 	inbox.folder, sent.folder = "INBOX", "Sent"
 	p.put(inbox)
 	p.put(sent)
-	if got, _ := p.get(t.Context(), "INBOX"); got != inbox {
+	if got, _ := p.get(t.Context(), "INBOX", false); got != inbox {
 		t.Errorf("get(INBOX) = conn %d, want the one on INBOX (%d)", got.id, inbox.id)
 	}
-	if got, _ := p.get(t.Context(), "Archive"); got != sent {
+	if got, _ := p.get(t.Context(), "Archive", false); got != sent {
 		t.Errorf("get(Archive) = conn %d, want the remaining idle conn %d", got.id, sent.id)
 	}
 }
@@ -127,18 +137,18 @@ func TestPoolCapsAndWaits(t *testing.T) {
 	t.Parallel()
 	d := &fakeDialer{}
 	p := newTestPool(2, d, &testClock{t: time.Unix(0, 0)}, time.Hour)
-	a, _ := p.get(t.Context(), "")
-	if _, err := p.get(t.Context(), ""); err != nil {
+	a, _ := p.get(t.Context(), "", false)
+	if _, err := p.get(t.Context(), "", false); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
 	defer cancel()
-	if _, err := p.get(ctx, ""); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := p.get(ctx, "", false); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("third get = %v, want to wait until the deadline", err)
 	}
 	got := make(chan *fakeConn, 1)
 	go func() {
-		c, err := p.get(t.Context(), "")
+		c, err := p.get(t.Context(), "", false)
 		if err != nil {
 			t.Error(err)
 		}
@@ -163,23 +173,23 @@ func TestPoolNoopAfterIdle(t *testing.T) {
 	d := &fakeDialer{}
 	clock := &testClock{t: time.Unix(0, 0)}
 	p := newTestPool(3, d, clock, time.Hour)
-	c, _ := p.get(t.Context(), "")
+	c, _ := p.get(t.Context(), "", false)
 	p.put(c)
 	clock.advance(30 * time.Second)
-	c, _ = p.get(t.Context(), "")
+	c, _ = p.get(t.Context(), "", false)
 	if n := c.noops.Load(); n != 0 {
 		t.Errorf("NOOPs after 30s idle = %d, want 0", n)
 	}
 	p.put(c)
 	clock.advance(61 * time.Second)
-	c, _ = p.get(t.Context(), "")
+	c, _ = p.get(t.Context(), "", false)
 	if n := c.noops.Load(); n != 1 {
 		t.Errorf("NOOPs after 61s idle = %d, want 1", n)
 	}
 	c.noopErr = errors.New("connection reset")
 	p.put(c)
 	clock.advance(61 * time.Second)
-	fresh, err := p.get(t.Context(), "")
+	fresh, err := p.get(t.Context(), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,10 +202,10 @@ func TestPoolLogsOutIdleConnections(t *testing.T) {
 	t.Parallel()
 	d := &fakeDialer{}
 	p := newTestPool(1, d, &testClock{t: time.Unix(0, 0)}, 20*time.Millisecond)
-	c, _ := p.get(t.Context(), "")
+	c, _ := p.get(t.Context(), "", false)
 	p.put(c)
 	eventually(t, c.closed.Load)
-	again, err := p.get(t.Context(), "")
+	again, err := p.get(t.Context(), "", false)
 	if err != nil || again == c || d.count() != 2 {
 		t.Errorf("after idle logout: conn %v, err %v, dials %d", again, err, d.count())
 	}
@@ -205,9 +215,9 @@ func TestPoolShrink(t *testing.T) {
 	t.Parallel()
 	d := &fakeDialer{}
 	p := newTestPool(3, d, &testClock{t: time.Unix(0, 0)}, time.Hour)
-	a, _ := p.get(t.Context(), "")
-	b, _ := p.get(t.Context(), "")
-	c, _ := p.get(t.Context(), "")
+	a, _ := p.get(t.Context(), "", false)
+	b, _ := p.get(t.Context(), "", false)
+	c, _ := p.get(t.Context(), "", false)
 	p.shrink()
 	p.put(c)
 	if !c.closed.Load() {
@@ -215,7 +225,7 @@ func TestPoolShrink(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
 	defer cancel()
-	if _, err := p.get(ctx, ""); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := p.get(ctx, "", false); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("get at the shrunk cap = %v, want to wait", err)
 	}
 	for range 5 {
@@ -234,18 +244,18 @@ func TestPoolDiscardAndDeadConnections(t *testing.T) {
 	t.Parallel()
 	d := &fakeDialer{}
 	p := newTestPool(1, d, &testClock{t: time.Unix(0, 0)}, time.Hour)
-	c, _ := p.get(t.Context(), "")
+	c, _ := p.get(t.Context(), "", false)
 	c.dead = true
 	p.put(c)
 	if !c.closed.Load() {
 		t.Error("put of a dead conn should close it")
 	}
-	c2, err := p.get(t.Context(), "")
+	c2, err := p.get(t.Context(), "", false)
 	if err != nil || c2 == c {
 		t.Fatalf("after a dead conn: %v, %v", c2, err)
 	}
 	p.discard(c2)
-	if _, err := p.get(t.Context(), ""); err != nil || d.count() != 3 {
+	if _, err := p.get(t.Context(), "", false); err != nil || d.count() != 3 {
 		t.Errorf("after discard: err %v, dials %d", err, d.count())
 	}
 }
@@ -254,10 +264,10 @@ func TestPoolDialErrorFreesSlot(t *testing.T) {
 	t.Parallel()
 	d := &fakeDialer{failNext: errors.New("refused")}
 	p := newTestPool(1, d, &testClock{t: time.Unix(0, 0)}, time.Hour)
-	if _, err := p.get(t.Context(), ""); err == nil {
+	if _, err := p.get(t.Context(), "", false); err == nil {
 		t.Fatal("dial error not returned")
 	}
-	if _, err := p.get(t.Context(), ""); err != nil {
+	if _, err := p.get(t.Context(), "", false); err != nil {
 		t.Errorf("slot not freed after a dial error: %v", err)
 	}
 }
@@ -268,7 +278,7 @@ func TestPoolCloseIsParallelAndFinal(t *testing.T) {
 	p := newTestPool(3, d, &testClock{t: time.Unix(0, 0)}, time.Hour)
 	var conns []*fakeConn
 	for range 3 {
-		c, _ := p.get(t.Context(), "")
+		c, _ := p.get(t.Context(), "", false)
 		conns = append(conns, c)
 	}
 	for _, c := range conns {
@@ -286,7 +296,163 @@ func TestPoolCloseIsParallelAndFinal(t *testing.T) {
 			t.Errorf("conn %d not closed", c.id)
 		}
 	}
-	if _, err := p.get(t.Context(), ""); !errors.Is(err, errPoolClosed) {
+	if _, err := p.get(t.Context(), "", false); !errors.Is(err, errPoolClosed) {
 		t.Errorf("get after close = %v, want errPoolClosed", err)
+	}
+}
+
+func TestPoolPrefersFolderInASufficientMode(t *testing.T) {
+	t.Parallel()
+	d := &fakeDialer{}
+	p := newTestPool(3, d, &testClock{t: time.Unix(0, 0)}, time.Hour)
+	ro, _ := p.get(t.Context(), "", false)
+	rw, _ := p.get(t.Context(), "", false)
+	other, _ := p.get(t.Context(), "", false)
+	ro.folder = "INBOX"
+	rw.folder, rw.writable = "INBOX", true
+	other.folder = "Sent"
+	// rw goes back first, so most-recent order alone would pick ro or other.
+	p.put(rw)
+	p.put(ro)
+	p.put(other)
+	got, _ := p.get(t.Context(), "INBOX", true)
+	if got != rw {
+		t.Errorf("get(INBOX, writable) = conn %d, want the read-write one (%d)", got.id, rw.id)
+	}
+	p.put(got)
+	// A read accepts either mode.
+	for range 2 {
+		c, _ := p.get(t.Context(), "INBOX", false)
+		if c != ro && c != rw {
+			t.Errorf("get(INBOX, read) = conn %d, want one with INBOX open", c.id)
+		}
+		defer p.put(c)
+	}
+}
+
+func TestPoolShrinkReportsTheNewCap(t *testing.T) {
+	t.Parallel()
+	p := newTestPool(3, &fakeDialer{}, &testClock{t: time.Unix(0, 0)}, time.Hour)
+	for _, want := range []int{2, 1, 1} {
+		if got := p.shrink(); got != want {
+			t.Errorf("shrink() = %d, want %d", got, want)
+		}
+		if got := p.size(); got != want {
+			t.Errorf("size() = %d, want %d", got, want)
+		}
+	}
+}
+
+func TestPoolCountsConnectionsStillLoggingOut(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// others are the connections still open once it is logged out.
+		others int
+		// logout sets up a pool with one connection to log out, which it
+		// returns, and the call that logs it out.
+		logout func(t *testing.T) (*pool[*fakeConn], *fakeConn, func())
+	}{
+		{"returned after close", 0, func(t *testing.T) (*pool[*fakeConn], *fakeConn, func()) {
+			p := newTestPool(1, &fakeDialer{}, &testClock{t: time.Unix(0, 0)}, time.Hour)
+			c, _ := p.get(t.Context(), "", false)
+			if err := p.close(); err != nil {
+				t.Fatal(err)
+			}
+			return p, c, func() { p.put(c) }
+		}},
+		{"returned over a shrunk cap", 1, func(t *testing.T) (*pool[*fakeConn], *fakeConn, func()) {
+			p := newTestPool(2, &fakeDialer{}, &testClock{t: time.Unix(0, 0)}, time.Hour)
+			_, _ = p.get(t.Context(), "", false)
+			c, _ := p.get(t.Context(), "", false)
+			p.shrink()
+			return p, c, func() { p.put(c) }
+		}},
+		{"discarded", 0, func(t *testing.T) (*pool[*fakeConn], *fakeConn, func()) {
+			p := newTestPool(1, &fakeDialer{}, &testClock{t: time.Unix(0, 0)}, time.Hour)
+			c, _ := p.get(t.Context(), "", false)
+			return p, c, func() { p.discard(c) }
+		}},
+		{"idle at close", 0, func(t *testing.T) (*pool[*fakeConn], *fakeConn, func()) {
+			p := newTestPool(1, &fakeDialer{}, &testClock{t: time.Unix(0, 0)}, time.Hour)
+			c, _ := p.get(t.Context(), "", false)
+			p.put(c)
+			return p, c, func() { _ = p.close() }
+		}},
+		{"idle too long", 0, func(t *testing.T) (*pool[*fakeConn], *fakeConn, func()) {
+			p := newTestPool(1, &fakeDialer{}, &testClock{t: time.Unix(0, 0)}, 20*time.Millisecond)
+			c, _ := p.get(t.Context(), "", false)
+			// put starts the idle timer, which logs it out.
+			return p, c, func() { p.put(c) }
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p, c, logout := tt.logout(t)
+			c.loggingOut = make(chan struct{})
+			c.loggedOut = make(chan struct{})
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				logout()
+			}()
+			<-c.loggingOut
+			// The server still holds the connection's slot until LOGOUT ends.
+			if n := p.openCount(); n != tt.others+1 {
+				t.Errorf("open while logging out = %d, want %d with the connection counted", n, tt.others+1)
+			}
+			close(c.loggedOut)
+			<-done
+			// An idle timeout logs out on its own goroutine, after logout returned.
+			eventually(t, func() bool { return p.openCount() == tt.others })
+		})
+	}
+}
+
+// The peak since a reset counts every connection that held a slot meanwhile,
+// those that closed again included, and those open at the reset.
+func TestPoolConnPeakSinceTheReset(t *testing.T) {
+	t.Parallel()
+	p := newTestPool(4, &fakeDialer{}, &testClock{t: time.Unix(0, 0)}, time.Hour)
+	held, _ := p.get(t.Context(), "", false)
+	if got := p.connPeak(); got != 1 {
+		t.Errorf("peak before any reset = %d, want 1", got)
+	}
+	p.resetConnPeak()
+	if got := p.connPeak(); got != 1 {
+		t.Errorf("peak at the reset = %d, want 1: the open connection holds a slot", got)
+	}
+	// Two more open and close again before the peak is read.
+	a, _ := p.get(t.Context(), "", false)
+	b, _ := p.get(t.Context(), "", false)
+	p.discard(a)
+	p.put(b)
+	_ = p.close()
+	p.put(held)
+	if n := p.openCount(); n != 0 {
+		t.Fatalf("open after close = %d, want 0", n)
+	}
+	if got := p.connPeak(); got != 3 {
+		t.Errorf("peak = %d, want 3: connections that closed since the reset still count", got)
+	}
+	p.resetConnPeak()
+	if got := p.connPeak(); got != 0 {
+		t.Errorf("peak after a reset with none open = %d, want 0", got)
+	}
+}
+
+// A dial in progress holds a slot, so the peak counts it even when the dial
+// then fails.
+func TestPoolConnPeakCountsDials(t *testing.T) {
+	t.Parallel()
+	d := &fakeDialer{failNext: errors.New("refused")}
+	p := newTestPool(2, d, &testClock{t: time.Unix(0, 0)}, time.Hour)
+	p.resetConnPeak()
+	if _, err := p.get(t.Context(), "", false); err == nil {
+		t.Fatal("get = nil error, want the dial's")
+	}
+	if got := p.connPeak(); got != 1 {
+		t.Errorf("peak = %d, want 1 for the dial", got)
 	}
 }

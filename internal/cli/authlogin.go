@@ -51,10 +51,9 @@ func newAuthCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			if _, err := c.Admin.FinishAuthLogin(ctx, finish); err != nil {
 				return err
 			}
-			if g.table() {
-				return writeString(env.Stdout, "logged in to "+account+"\n")
-			}
-			return writeJSON(env.Stdout, map[string]any{"account": account, "logged_in": true})
+			// New credentials: measure the account's connection limit now.
+			limit := probeAccount(ctx, c, account)
+			return reportProbe(env, g, "logged in to "+account+"\n", map[string]any{"account": account, "logged_in": true}, limit)
 		},
 	})
 	return cmd

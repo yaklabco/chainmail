@@ -3,6 +3,7 @@
 package imapstore
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -46,8 +47,16 @@ func doveUser(t *testing.T) string {
 
 func doveStore(t *testing.T, user string) *Store {
 	t.Helper()
+	return doveConfiguredStore(t, user, "")
+}
+
+// doveConfiguredStore is doveStore with the account's archive_folder set to
+// archive.
+func doveConfiguredStore(t *testing.T, user, archive string) *Store {
+	t.Helper()
 	acct := testAccount("dove", dove().Endpoint, false)
 	acct.Username = user
+	acct.ArchiveFolder = archive
 	s := New(acct, passwordCreds(user, dovecot.Password), Options{RootCAs: dove().CA.Pool, Backoff: noBackoff})
 	t.Cleanup(func() { _ = s.Close() })
 	return s
@@ -385,5 +394,228 @@ func TestDovecotExpungedRefIsStale(t *testing.T) {
 	}
 	if _, err := s.Thread(t.Context(), r); !errors.Is(err, mailstore.ErrStaleRef) {
 		t.Errorf("Thread of an expunged UID = %v, want ErrStaleRef", err)
+	}
+}
+
+// doveStoreWith is doveStore with options, and counts the connections the
+// store dials.
+func doveStoreWith(t *testing.T, user string, opts Options) (*Store, *atomic.Int32) {
+	t.Helper()
+	acct := testAccount("dove", dove().Endpoint, false)
+	acct.Username = user
+	opts.RootCAs, opts.Backoff = dove().CA.Pool, noBackoff
+	s := New(acct, passwordCreds(user, dovecot.Password), opts)
+	t.Cleanup(func() { _ = s.Close() })
+	var dials atomic.Int32
+	inner := s.pool.dial
+	s.pool.dial = func(ctx context.Context) (*conn, error) {
+		dials.Add(1)
+		return inner(ctx)
+	}
+	return s, &dials
+}
+
+// subjectsOf reads refs and returns their subjects, failing on any error.
+func subjectsOf(t *testing.T, s *Store, refs []ref.Ref) []string {
+	t.Helper()
+	var out []string
+	for i, r := range s.FetchMessages(t.Context(), refs) {
+		if r.Err != nil {
+			t.Fatalf("reading ref %d (%s): %v", i, refs[i], r.Err)
+		}
+		out = append(out, r.Message.Summary.Subject)
+	}
+	return out
+}
+
+// newRefs returns the refs of res, failing on any error.
+func newRefs(t *testing.T, res []mailstore.RefResult) []ref.Ref {
+	t.Helper()
+	out := make([]ref.Ref, len(res))
+	for i, r := range res {
+		if r.Err != nil {
+			t.Fatalf("result %d: %v", i, r.Err)
+		}
+		out[i] = r.Ref
+	}
+	return out
+}
+
+func TestDovecotAppendAndFindByMessageID(t *testing.T) {
+	user := doveUser(t)
+	s := doveStore(t, user)
+	raw := doveMail{from: "a@example.com", subject: "appended", messageID: "app@x", body: "hi"}.raw()
+	r, err := s.Append(t.Context(), "Drafts", []string{`\Draft`, `\Seen`}, oct(3), []byte(raw))
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if r.Folder != "Drafts" || r.UID == 0 || r != refFor(t, user, "Drafts", imap.UID(r.UID)) {
+		t.Errorf("Append ref = %+v, want one in Drafts from APPENDUID", r)
+	}
+	found, err := s.FindByMessageID(t.Context(), "Drafts", "<app@x>")
+	if err != nil || !slices.Equal(found, []ref.Ref{r}) {
+		t.Errorf("FindByMessageID = %+v, %v; want [%v]", found, err, r)
+	}
+	if got := subjectsOf(t, s, []ref.Ref{r}); got[0] != "appended" {
+		t.Errorf("subject = %q", got[0])
+	}
+	flags, err := dove().Flags(user, "Drafts", imap.UID(r.UID))
+	if err != nil || !slices.Contains(flags, imap.FlagDraft) || !slices.Contains(flags, imap.FlagSeen) {
+		t.Errorf("flags = %q, %v; want \\Draft and \\Seen", flags, err)
+	}
+	if _, err := s.Append(t.Context(), "Nope", nil, time.Time{}, []byte(raw)); !errors.Is(err, mailstore.ErrNotFound) {
+		t.Errorf("Append to a missing folder = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDovecotMoveReturnsNewRefs(t *testing.T) {
+	user := doveUser(t)
+	a := refFor(t, user, "INBOX", put(t, user, "INBOX", doveMail{from: "a@example.com", subject: "first", messageID: "mv1@x", body: "x"}, oct(1)))
+	b := refFor(t, user, "INBOX", put(t, user, "INBOX", doveMail{from: "a@example.com", subject: "second", messageID: "mv2@x", body: "x"}, oct(2)))
+	s := doveStore(t, user)
+	moved := newRefs(t, s.Move(t.Context(), []ref.Ref{b, a}, "Archive"))
+	for _, r := range moved {
+		if r.Folder != "Archive" || r.UIDValidity == 0 || r.UID == 0 {
+			t.Errorf("new ref %+v, want one in Archive", r)
+		}
+	}
+	if got := subjectsOf(t, s, moved); !slices.Equal(got, []string{"second", "first"}) {
+		t.Errorf("moved subjects = %q, want second, first", got)
+	}
+	for i, r := range s.FetchMessages(t.Context(), []ref.Ref{a, b}) {
+		if !errors.Is(r.Err, mailstore.ErrStaleRef) {
+			t.Errorf("old ref %d after the move: %+v, want ErrStaleRef", i, r)
+		}
+	}
+}
+
+func TestDovecotCopyKeepsTheOriginal(t *testing.T) {
+	user := doveUser(t)
+	a := refFor(t, user, "INBOX", put(t, user, "INBOX", doveMail{from: "a@example.com", subject: "copied", messageID: "cp1@x", body: "x"}, oct(1)))
+	s := doveStore(t, user)
+	copies := newRefs(t, s.Copy(t.Context(), []ref.Ref{a}, "Archive"))
+	if copies[0].Folder != "Archive" {
+		t.Errorf("copy ref %+v, want one in Archive", copies[0])
+	}
+	if got := subjectsOf(t, s, []ref.Ref{a, copies[0]}); !slices.Equal(got, []string{"copied", "copied"}) {
+		t.Errorf("subjects = %q, want the original and the copy", got)
+	}
+}
+
+func TestDovecotFlagsAddAndRemove(t *testing.T) {
+	user := doveUser(t)
+	uid := put(t, user, "INBOX", doveMail{from: "a@example.com", subject: "flags", messageID: "fl@x", body: "x"}, oct(1), imap.FlagSeen)
+	r := refFor(t, user, "INBOX", uid)
+	s := doveStore(t, user)
+	if res := s.StoreFlags(t.Context(), []ref.Ref{r}, []string{`\Flagged`, "$Work"}, []string{`\Seen`}); res[0] != (mailstore.RefResult{Ref: r}) {
+		t.Fatalf("StoreFlags = %+v, want the ref unchanged", res[0])
+	}
+	flags, err := dove().Flags(user, "INBOX", uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(flags, imap.FlagFlagged) || !slices.Contains(flags, imap.Flag("$Work")) || slices.Contains(flags, imap.FlagSeen) {
+		t.Errorf("flags = %q, want \\Flagged and $Work, without \\Seen", flags)
+	}
+	if res := s.StoreFlags(t.Context(), []ref.Ref{r}, nil, []string{`\Flagged`}); res[0].Err != nil {
+		t.Fatal(res[0].Err)
+	}
+	if flags, _ = dove().Flags(user, "INBOX", uid); slices.Contains(flags, imap.FlagFlagged) {
+		t.Errorf("flags after removing \\Flagged = %q", flags)
+	}
+}
+
+func TestDovecotExpungeRemovesOnlyTheGivenUIDs(t *testing.T) {
+	user := doveUser(t)
+	target := put(t, user, "INBOX", doveMail{from: "a@example.com", subject: "target", messageID: "ex1@x", body: "x"}, oct(1))
+	marked := put(t, user, "INBOX", doveMail{from: "a@example.com", subject: "marked", messageID: "ex2@x", body: "x"}, oct(2), imap.FlagDeleted)
+	other := put(t, user, "INBOX", doveMail{from: "a@example.com", subject: "other", messageID: "ex3@x", body: "x"}, oct(3))
+	s := doveStore(t, user)
+	res := s.Expunge(t.Context(), []ref.Ref{refFor(t, user, "INBOX", target)})
+	if res[0] != (mailstore.RefResult{}) {
+		t.Fatalf("Expunge = %+v, want a zero ref and no error", res[0])
+	}
+	if _, err := dove().Flags(user, "INBOX", target); err == nil {
+		t.Error("the expunged message is still there")
+	}
+	for name, uid := range map[string]imap.UID{"marked": marked, "other": other} {
+		if _, err := dove().Flags(user, "INBOX", uid); err != nil {
+			t.Errorf("the %s message is gone: %v", name, err)
+		}
+	}
+}
+
+func TestDovecotTrashAndArchive(t *testing.T) {
+	user := doveUser(t)
+	a := refFor(t, user, "INBOX", put(t, user, "INBOX", doveMail{from: "a@example.com", subject: "binned", messageID: "tr1@x", body: "x"}, oct(1)))
+	b := refFor(t, user, "INBOX", put(t, user, "INBOX", doveMail{from: "a@example.com", subject: "kept", messageID: "ar1@x", body: "x"}, oct(2)))
+	s := doveStore(t, user)
+	trashed := newRefs(t, s.Trash(t.Context(), []ref.Ref{a}))
+	if trashed[0].Folder != "Trash" {
+		t.Errorf("trashed ref %+v, want one in Trash", trashed[0])
+	}
+	if again := newRefs(t, s.Trash(t.Context(), trashed)); again[0] != trashed[0] {
+		t.Errorf("trashing a ref in Trash gave %+v, want it unchanged (%+v)", again[0], trashed[0])
+	}
+	archived := newRefs(t, s.Archive(t.Context(), []ref.Ref{b}))
+	if archived[0].Folder != "Archive" {
+		t.Errorf("archived ref %+v, want one in Archive", archived[0])
+	}
+	if got := subjectsOf(t, s, []ref.Ref{trashed[0], archived[0]}); !slices.Equal(got, []string{"binned", "kept"}) {
+		t.Errorf("subjects = %q", got)
+	}
+}
+
+func TestDovecotBatchAcrossFoldersStaysWithinThePool(t *testing.T) {
+	user := doveUser(t)
+	var refs []ref.Ref
+	for i, folder := range []string{"INBOX", "Sent", "Drafts"} {
+		for j := range 2 {
+			id := fmt.Sprintf("b%d-%d@x", i, j)
+			refs = append(refs, refFor(t, user, folder, put(t, user, folder, doveMail{from: "a@example.com", subject: id, messageID: id, body: "x"}, oct(1+j))))
+		}
+	}
+	const pool = 2
+	s, dials := doveStoreWith(t, user, Options{PoolSize: pool})
+	met := meetAtDial(s, pool)
+	moved := newRefs(t, s.Move(t.Context(), refs, "Archive"))
+	if !met.Load() {
+		t.Errorf("the folders never had %d connections being opened at once; want them run concurrently", pool)
+	}
+	for i, r := range moved {
+		if r.Folder != "Archive" {
+			t.Errorf("ref %d moved to %+v, want Archive", i, r)
+		}
+	}
+	if n := dials.Load(); n < 1 || n > pool {
+		t.Errorf("%d connections dialed, want between 1 and the pool's %d", n, pool)
+	}
+	got := subjectsOf(t, s, moved)
+	for i := range refs {
+		want := fmt.Sprintf("b%d-%d@x", i/2, i%2)
+		if got[i] != want {
+			t.Errorf("moved ref %d holds %q, want %q", i, got[i], want)
+		}
+	}
+}
+
+func TestDovecotStaleUIDValidityFailsPerRef(t *testing.T) {
+	user := doveUser(t)
+	inbox := refFor(t, user, "INBOX", put(t, user, "INBOX", doveMail{from: "a@example.com", subject: "stale", messageID: "st1@x", body: "x"}, oct(1)))
+	sent := refFor(t, user, "Sent", put(t, user, "Sent", doveMail{from: "a@example.com", subject: "fresh", messageID: "st2@x", body: "x"}, oct(2)))
+	if err := dove().SetUIDValidity(user, "INBOX", inbox.UIDValidity+1000); err != nil {
+		t.Fatal(err)
+	}
+	s := doveStore(t, user)
+	res := s.Move(t.Context(), []ref.Ref{inbox, sent}, "Archive")
+	if !errors.Is(res[0].Err, mailstore.ErrStaleRef) {
+		t.Errorf("stale ref: %+v, want ErrStaleRef", res[0])
+	}
+	if res[1].Err != nil || res[1].Ref.Folder != "Archive" {
+		t.Errorf("fresh ref: %+v, want it moved", res[1])
+	}
+	flagged := s.StoreFlags(t.Context(), []ref.Ref{inbox}, []string{`\Flagged`}, nil)
+	if !errors.Is(flagged[0].Err, mailstore.ErrStaleRef) {
+		t.Errorf("StoreFlags on the stale ref: %+v, want ErrStaleRef", flagged[0])
 	}
 }

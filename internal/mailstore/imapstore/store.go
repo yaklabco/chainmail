@@ -5,10 +5,12 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand/v2"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -51,6 +53,14 @@ type Options struct {
 	Now func() time.Time
 	// Logger defaults to discarding everything.
 	Logger *slog.Logger
+	// OnConnLimit, when set, hears the pool's new cap each time the server
+	// refuses a connection for being over its limit and the pool shrinks. It
+	// runs on the goroutine that dialed, so it must not block for long.
+	OnConnLimit func(newMax int)
+	// ArchiveFolder is where Archive moves mail on standard IMAP accounts.
+	// Empty means the account's archive_folder, then the folder with the
+	// \Archive role.
+	ArchiveFolder string
 }
 
 const (
@@ -106,8 +116,8 @@ func jitteredBackoff(attempt int) time.Duration {
 	return base/2 + rand.N(base)
 }
 
-// Store reads one account over IMAP. It implements mailstore.Store and is
-// the only code that talks to IMAP servers.
+// Store reads and changes one account over IMAP. It implements
+// mailstore.Store and is the only code that talks to IMAP servers.
 type Store struct {
 	acct  config.ResolvedAccount
 	creds Credentialer
@@ -131,8 +141,21 @@ type Store struct {
 	// dialTimeout, unless a test shrinks it.
 	dialTimeout time.Duration
 
+	// folderGen counts renames and deletes of folders. A connection opened
+	// a folder before the latest one opens it again rather than trust it.
+	folderGen atomic.Uint64
+	// writeGen counts writes sent through this store. A connection that has
+	// not looked at its folder since the latest one sends NOOP before it
+	// reuses it, so the server tells it of mail another connection changed.
+	writeGen atomic.Uint64
+
 	mu      sync.Mutex
 	folders []mailstore.Folder // cached; nil until listed
+	// nsPrefix is the personal namespace prefix, once nsKnown. It is kept
+	// when the folder list is dropped.
+	nsPrefix string
+	nsKnown  bool
+	system   systemSpace // the system namespace of the cached list
 	// borrowed counts connections out of the pool, a stream reader's
 	// included. drained, when set, is closed when it reaches zero.
 	borrowed int
@@ -189,10 +212,33 @@ func (s *Store) Close() error {
 	return errors.Join(errs...)
 }
 
-// borrow takes a connection from the pool, preferring one with folder open.
-// Every borrow is paired with a release.
-func (s *Store) borrow(ctx context.Context, folder string) (*conn, error) {
-	c, err := s.pool.get(ctx, folder)
+// OpenConns returns how many of the store's pooled connections hold a slot
+// on the server: dialing, borrowed, idle or still logging out. A borrowed
+// one, such as a stream reader's, counts until it comes back and has logged
+// out, after Close too. ProbeDial's connections are not pooled and do not
+// count.
+func (s *Store) OpenConns() int { return s.pool.openCount() }
+
+// ResetConnPeak starts a new ConnPeak from the pooled connections holding a
+// slot now.
+func (s *Store) ResetConnPeak() { s.pool.resetConnPeak() }
+
+// ConnPeak returns the most pooled connections that held a slot on the
+// server at once since the last ResetConnPeak, or since the store was made,
+// as OpenConns counts them. Connections that have closed since still count,
+// so a connection-limit probe that adds it to its own count cannot read the
+// limit low because the account's connections came and went while it dialed.
+func (s *Store) ConnPeak() int { return s.pool.connPeak() }
+
+// PoolSize returns the most connections the store opens at once:
+// Options.PoolSize, less one for each time the server refused a connection
+// for being over its limit.
+func (s *Store) PoolSize() int { return s.pool.size() }
+
+// borrow takes a connection from the pool, preferring one with folder open,
+// read-write when writable. Every borrow is paired with a release.
+func (s *Store) borrow(ctx context.Context, folder string, writable bool) (*conn, error) {
+	c, err := s.pool.get(ctx, folder, writable)
 	if err != nil {
 		if errors.Is(err, errPoolClosed) {
 			return nil, fmt.Errorf("%w: %w", mailstore.ErrUnavailable, err)
@@ -221,7 +267,47 @@ func (s *Store) release(c *conn) {
 	s.mu.Unlock()
 }
 
+// errConnLimit marks a server refusing a connection for being over its limit.
+var errConnLimit = errors.New("over the server's connection limit")
+
+// dial opens a pooled connection. A refusal for being over the server's
+// connection limit shrinks the pool and tells OnConnLimit.
 func (s *Store) dial(ctx context.Context) (*conn, error) {
+	c, err := s.connect(ctx)
+	if errors.Is(err, errConnLimit) {
+		n := s.pool.shrink()
+		s.opts.Logger.Warn("server refused another connection; pool shrunk", "account", s.acct.Name, "pool", n)
+		if s.opts.OnConnLimit != nil {
+			s.opts.OnConnLimit(n)
+		}
+	}
+	return c, err
+}
+
+// ProbeDial connects and logs in outside the pool, checks the connection
+// with NOOP and returns it. The caller closes it, which logs out. The
+// connection-limit probe uses it, so a refusal for being over the limit
+// leaves the pool as it is.
+func (s *Store) ProbeDial(ctx context.Context) (io.Closer, error) {
+	c, err := s.connect(ctx)
+	if err != nil {
+		if errors.Is(err, errConnLost) {
+			return nil, fmt.Errorf("%w: %w", mailstore.ErrUnavailable, err)
+		}
+		return nil, err
+	}
+	if err := c.Noop(ctx); err != nil {
+		_ = c.Close() // the NOOP failure is the one to report
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("%w: %s did not answer NOOP: %w", mailstore.ErrUnavailable, s.acct.Name, err)
+	}
+	return c, nil
+}
+
+// connect logs in on a fresh connection and sorts what went wrong.
+func (s *Store) connect(ctx context.Context) (*conn, error) {
 	select {
 	case s.loginGate <- struct{}{}:
 		defer func() { <-s.loginGate }()
@@ -240,9 +326,7 @@ func (s *Store) dial(ctx context.Context) (*conn, error) {
 		s.creds.Rejected(s.acct.Name, creds)
 		return nil, &auth.RejectedError{Hint: rejectedHint(s.acct), Err: err}
 	case isConnLimit(err):
-		s.pool.shrink()
-		s.opts.Logger.Warn("server refused another connection; pool shrunk", "account", s.acct.Name)
-		return nil, fmt.Errorf("%w: %s refused another connection: %w", mailstore.ErrUnavailable, s.acct.Name, err)
+		return nil, fmt.Errorf("%w: %w: %s refused another connection: %w", mailstore.ErrUnavailable, errConnLimit, s.acct.Name, err)
 	case ctx.Err() != nil:
 		return nil, ctx.Err()
 	case isRefusal(err):
@@ -334,7 +418,7 @@ func (s *Store) retry(ctx context.Context, try func() error) error {
 		if attempt >= s.opts.Retries || timeouts > timeoutRetries {
 			return fmt.Errorf("%w: %s after %d attempts: %w", mailstore.ErrUnavailable, s.acct.Name, attempt+1, err)
 		}
-		s.opts.Logger.Debug("retrying after a dropped connection", "account", s.acct.Name, "attempt", attempt+1, "err", err)
+		s.opts.Logger.Debug("retrying after a dropped connection", logAttrs(err, "account", s.acct.Name, "attempt", attempt+1)...)
 		if err := sleep(ctx, s.opts.Backoff(attempt)); err != nil {
 			return err
 		}
@@ -342,7 +426,11 @@ func (s *Store) retry(ctx context.Context, try func() error) error {
 }
 
 func (s *Store) tryConn(ctx context.Context, folder string, f func(*conn) error) error {
-	c, err := s.borrow(ctx, folder)
+	return s.tryConnMode(ctx, folder, false, f)
+}
+
+func (s *Store) tryConnMode(ctx context.Context, folder string, writable bool, f func(*conn) error) error {
+	c, err := s.borrow(ctx, folder, writable)
 	if err != nil {
 		return err
 	}
@@ -350,11 +438,36 @@ func (s *Store) tryConn(ctx context.Context, folder string, f func(*conn) error)
 	return f(c)
 }
 
-// open opens folder read-only on c. A folder that turns out to be missing
-// drops the cached folder list, so the next search lists folders again.
+// open opens folder on c for reading: read-only, unless it is already open
+// read-write. A folder that turns out to be missing drops the cached folder
+// list, so the next search lists folders again.
 func (s *Store) open(ctx context.Context, c *conn, folder string) error {
-	err := c.examine(ctx, folder)
-	if errors.Is(err, mailstore.ErrNotFound) {
+	return s.openMode(ctx, c, folder, false)
+}
+
+// openMode is open, read-write when writable. A connection that opened its
+// folder before a rename or delete opens it again, since a server keeps the
+// old mailbox open under its new name, or none. One that has had its folder
+// open since a write through this store sends NOOP first, so it sees the
+// change.
+func (s *Store) openMode(ctx context.Context, c *conn, folder string, writable bool) error {
+	if gen := s.folderGen.Load(); c.folderGen != gen {
+		c.selected, c.writable, c.uidValidity, c.folderGen = "", false, 0, gen
+	}
+	writes := s.writeGen.Load()
+	if folder != "" && c.selected == folder && c.writeGen != writes {
+		// Another connection may have changed mail here. A server tells a
+		// session of new mail only between commands, and Dovecot answers a
+		// UID FETCH or SEARCH only for messages it has told the session of.
+		if err := c.do(ctx, func() error { return c.client().Noop().Wait() }); err != nil {
+			return err
+		}
+	}
+	err := c.SelectFolder(ctx, folder, writable)
+	switch {
+	case err == nil:
+		c.writeGen = writes
+	case errors.Is(err, mailstore.ErrNotFound):
 		s.forgetFolders()
 	}
 	return err

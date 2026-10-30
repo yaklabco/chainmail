@@ -1,0 +1,197 @@
+syntax = "proto3";
+
+package chainmail.v1;
+
+import "chainmail/v1/message.proto";
+
+// RefOutcome is the result for one ref of a batch. A failed ref fails only itself.
+message RefOutcome {
+  // The ref as given.
+  string ref = 1;
+  // The message's ref afterwards, or for Copy the copy's ref. Empty when
+  // the ref did not change, the message is gone, or the server did not say
+  // where the message landed.
+  string new_ref = 2;
+  // Set when this ref failed.
+  ItemError error = 3;
+}
+
+// MoveRequest moves messages to a folder.
+message MoveRequest {
+  // 1 to 500 refs, from any accounts.
+  repeated string refs = 1;
+  // The destination folder, on each ref's own account.
+  string folder = 2;
+}
+
+// MoveResponse has one outcome per ref, in order.
+message MoveResponse {
+  // One per ref, in the order given.
+  repeated RefOutcome outcomes = 1;
+}
+
+// CopyRequest copies messages to a folder.
+message CopyRequest {
+  // 1 to 500 refs, from any accounts.
+  repeated string refs = 1;
+  // The destination folder, on each ref's own account.
+  string folder = 2;
+}
+
+// CopyResponse has one outcome per ref, in order. new_ref is the copy's ref.
+message CopyResponse {
+  // One per ref, in the order given.
+  repeated RefOutcome outcomes = 1;
+}
+
+// ArchiveRequest moves messages out of the inbox to the account's archive.
+message ArchiveRequest {
+  // 1 to 500 refs, from any accounts.
+  repeated string refs = 1;
+}
+
+// ArchiveResponse has one outcome per ref, in order.
+message ArchiveResponse {
+  // One per ref, in the order given.
+  repeated RefOutcome outcomes = 1;
+}
+
+// TrashRequest moves messages to the account's Trash.
+message TrashRequest {
+  // 1 to 500 refs, from any accounts.
+  repeated string refs = 1;
+}
+
+// TrashResponse has one outcome per ref, in order.
+message TrashResponse {
+  // One per ref, in the order given.
+  repeated RefOutcome outcomes = 1;
+}
+
+// ExpungeRequest deletes messages for good.
+message ExpungeRequest {
+  // 1 to 500 refs, from any accounts.
+  repeated string refs = 1;
+}
+
+// ExpungeResponse has one outcome per ref, in order. new_ref is always empty.
+message ExpungeResponse {
+  // One per ref, in the order given.
+  repeated RefOutcome outcomes = 1;
+}
+
+// SetFlagsRequest adds and removes IMAP flags and keywords. The system flags
+// allowed are \Seen, \Flagged, \Answered and \Draft. A keyword is 1 to 64
+// of A-Z, a-z, 0-9 and $ _ . -. Any other flag, \Deleted included, or a
+// request with nothing to add or remove, fails the whole call with
+// INVALID_ARGUMENT.
+message SetFlagsRequest {
+  // 1 to 500 refs, from any accounts.
+  repeated string refs = 1;
+  // Flags and keywords to add.
+  repeated string add = 2;
+  // Flags and keywords to remove.
+  repeated string remove = 3;
+}
+
+// SetFlagsResponse has one outcome per ref, in order.
+message SetFlagsResponse {
+  // One per ref, in the order given.
+  repeated RefOutcome outcomes = 1;
+}
+
+// SetLabelsRequest adds and removes Gmail labels. Other accounts refuse it.
+message SetLabelsRequest {
+  // 1 to 500 refs, from any accounts.
+  repeated string refs = 1;
+  // Labels to add. A label that does not exist is created. The system
+  // labels \Inbox, \Important, \Starred, \Sent and \Draft are accepted.
+  repeated string add = 2;
+  // Labels to remove.
+  repeated string remove = 3;
+}
+
+// SetLabelsResponse has one outcome per ref, in order.
+message SetLabelsResponse {
+  // One per ref, in the order given.
+  repeated RefOutcome outcomes = 1;
+}
+
+// CreateFolderRequest creates a folder, and its parents when missing.
+message CreateFolderRequest {
+  // The account to create it on.
+  string account = 1;
+  // The full folder name, with "/" or the server's delimiter between
+  // levels. On a server with a personal namespace prefix it may leave the
+  // prefix out: the response gives the name the server has.
+  string name = 2;
+}
+
+// CreateFolderResponse names the folder created.
+message CreateFolderResponse {
+  // The folder's name on the server, which later calls use. It differs
+  // from the name asked for on a server that keeps folders under a personal
+  // namespace prefix, such as Hostinger's "INBOX.": "Projects/2026" there is
+  // created as "INBOX.Projects.2026", with the server's delimiter between
+  // levels.
+  string name = 1;
+}
+
+// RenameFolderRequest renames a folder.
+message RenameFolderRequest {
+  // The account the folder is on.
+  string account = 1;
+  // The folder's current name.
+  string from = 2;
+  // The new name, written as CreateFolderRequest.name is.
+  string to = 3;
+}
+
+// RenameFolderResponse gives the folder's new name.
+message RenameFolderResponse {
+  // The folder's new name on the server, written as CreateFolderResponse
+  // describes: under the personal namespace prefix, if the server has one,
+  // with the server's delimiter between levels.
+  string name = 1;
+}
+
+// DeleteFolderRequest deletes a folder. INBOX, role folders and a folder
+// with folders under it are refused.
+message DeleteFolderRequest {
+  // The account the folder is on.
+  string account = 1;
+  // The folder to delete.
+  string name = 2;
+  // Delete it even when it holds mail. The mail is deleted with it, except
+  // on Google, where deleting a label leaves its messages in All Mail.
+  bool force = 3;
+}
+
+// DeleteFolderResponse is empty: the folder is gone.
+message DeleteFolderResponse {}
+
+// OrganizeService moves, copies, flags, labels and deletes messages, and
+// manages folders. Batch calls take refs from any accounts, and a failed ref
+// fails only itself.
+service OrganizeService {
+  // Move moves messages to a folder.
+  rpc Move(MoveRequest) returns (MoveResponse);
+  // Copy copies messages to a folder.
+  rpc Copy(CopyRequest) returns (CopyResponse);
+  // Archive moves messages out of the inbox to the account's archive.
+  rpc Archive(ArchiveRequest) returns (ArchiveResponse);
+  // Trash moves messages to Trash.
+  rpc Trash(TrashRequest) returns (TrashResponse);
+  // Expunge deletes messages for good.
+  rpc Expunge(ExpungeRequest) returns (ExpungeResponse);
+  // SetFlags adds and removes IMAP flags.
+  rpc SetFlags(SetFlagsRequest) returns (SetFlagsResponse);
+  // SetLabels adds and removes Gmail labels.
+  rpc SetLabels(SetLabelsRequest) returns (SetLabelsResponse);
+  // CreateFolder creates a folder.
+  rpc CreateFolder(CreateFolderRequest) returns (CreateFolderResponse);
+  // RenameFolder renames a folder.
+  rpc RenameFolder(RenameFolderRequest) returns (RenameFolderResponse);
+  // DeleteFolder deletes a folder.
+  rpc DeleteFolder(DeleteFolderRequest) returns (DeleteFolderResponse);
+}

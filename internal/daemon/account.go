@@ -89,6 +89,25 @@ func (a *accountService) TestAccount(ctx context.Context, req *connect.Request[c
 	return connect.NewResponse(resp), nil
 }
 
+// ProbeLimits measures how many IMAP connections each account allows, then
+// resizes its pool. Accounts are probed concurrently, and a failed probe
+// fails only its account.
+func (a *accountService) ProbeLimits(ctx context.Context, req *connect.Request[chainmailv1.ProbeLimitsRequest]) (*connect.Response[chainmailv1.ProbeLimitsResponse], error) {
+	c, err := callerOf(ctx, req.Header())
+	if err != nil {
+		return nil, err
+	}
+	accts, err := a.s.probeTargets(req.Msg.GetAccounts())
+	if err != nil {
+		return nil, a.s.record(ctx, c, audit.Entry{Action: actionProbe}, err)
+	}
+	resp, err := a.s.probeLimits(ctx, c, accts)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
 func (a *accountService) test(ctx context.Context, name string) (*chainmailv1.TestAccountResponse, error) {
 	acct, err := a.s.opts.Config.Account(name)
 	if err != nil {
@@ -114,7 +133,7 @@ func (a *accountService) test(ctx context.Context, name string) (*chainmailv1.Te
 		}
 		caps := sess.Capabilities()
 		if err := sess.Close(); err != nil {
-			a.s.opts.Logger.Warn("closing IMAP test session", "account", name, "err", err)
+			a.s.opts.Logger.Warn("closing IMAP test session", "account", name, "reason", apiReason(err))
 		}
 		return caps, nil
 	})

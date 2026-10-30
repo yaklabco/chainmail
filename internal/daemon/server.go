@@ -20,8 +20,10 @@ import (
 	"github.com/jamesainslie/chainmail/internal/audit"
 	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/idempotency"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/mailstore/imapstore"
+	"github.com/jamesainslie/chainmail/internal/upload"
 	"github.com/jamesainslie/chainmail/internal/vault"
 )
 
@@ -44,11 +46,26 @@ type Options struct {
 	Logger *slog.Logger
 	// Now defaults to time.Now.
 	Now func() time.Time
+	// StateDir holds the daemon's files. Uploads live in its uploads
+	// directory. Empty means uploads are refused.
+	StateDir string
+	// OutcomeSearchInterval is the wait between the tries of the Sent
+	// search for a send whose outcome is unknown. Zero means 5 seconds,
+	// which makes 3 tries over 10 seconds. Tests shorten it.
+	OutcomeSearchInterval time.Duration
 }
 
 const (
 	// maxRequestBytes caps a request message. Secrets and redirect URLs are far smaller.
 	maxRequestBytes = 1 << 20
+	// composeMaxRequestBytes caps a ComposeService request, which can hold a
+	// whole message for SendRaw or one part of an upload. The largest
+	// provider limit is 35 MiB; the rest is room for the request's other
+	// fields. The handler still enforces the account's own message size.
+	composeMaxRequestBytes = 40 << 20
+	// composeMaxResponseBytes caps a ComposeService response, which can hold
+	// a whole message built as a dry run.
+	composeMaxResponseBytes = 40 << 20
 	// auditTimeout bounds an audit write that outlives its request.
 	auditTimeout = 5 * time.Second
 	// shutdownTimeout bounds the graceful part of a shutdown, after which
@@ -69,6 +86,15 @@ type Server struct {
 	accountLocks keyedLock
 	handlers     inflight
 	stores       *storeSet
+	// idem records send-type calls by idempotency key.
+	idem *idempotency.Store
+	// uploads holds attachment bytes for later sends. Nil without a StateDir.
+	uploads *upload.Store
+	compose *composeService
+	// newStore builds an account's store with the pool the daemon chose.
+	newStore func(config.ResolvedAccount, storeParams) mailstore.Store
+	// lim keeps connection limits and runs background probes.
+	lim *limitState
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -89,18 +115,31 @@ func New(opts Options) (*Server, error) {
 		audit:   audit.NewWriter(opts.StateDB, opts.Now),
 		started: opts.Now(),
 	}
-	newStore := opts.NewStore
-	if newStore == nil {
-		newStore = func(acct config.ResolvedAccount) mailstore.Store {
-			return imapstore.New(acct, s.auth, imapstore.Options{RootCAs: opts.RootCAs, Logger: opts.Logger, Now: opts.Now})
-		}
+	s.lim = newLimitState(opts.StateDB, opts.Now)
+	s.newStore = func(acct config.ResolvedAccount, p storeParams) mailstore.Store {
+		return imapstore.New(acct, s.auth, imapstore.Options{
+			RootCAs: opts.RootCAs, Logger: opts.Logger, Now: opts.Now,
+			PoolSize: p.poolSize, OnConnLimit: p.onConnLimit,
+		})
 	}
-	s.stores = &storeSet{newStore: newStore}
+	if opts.NewStore != nil {
+		s.newStore = func(acct config.ResolvedAccount, _ storeParams) mailstore.Store { return opts.NewStore(acct) }
+	}
+	s.stores = &storeSet{build: s.buildStore, buildSized: s.buildSized, firstUse: s.probeIfStale, logger: opts.Logger}
+	if err := s.openSendState(); err != nil {
+		return nil, err
+	}
+	s.compose = newComposeService(s)
 	mux := http.NewServeMux()
 	handlerOpts := connect.WithReadMaxBytes(maxRequestBytes)
 	mux.Handle(chainmailv1connect.NewAccountServiceHandler(&accountService{s: s}, handlerOpts))
 	mux.Handle(chainmailv1connect.NewAdminServiceHandler(&adminService{s: s}, handlerOpts))
 	mux.Handle(chainmailv1connect.NewMessageServiceHandler(&messageService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
+	composePath, composeHandler := chainmailv1connect.NewComposeServiceHandler(s.compose,
+		connect.WithReadMaxBytes(composeMaxRequestBytes), connect.WithSendMaxBytes(composeMaxResponseBytes))
+	// UploadAttachment ends a stalled stream's body read itself.
+	mux.Handle(composePath, withReadAbort(composeHandler))
+	mux.Handle(chainmailv1connect.NewOrganizeServiceHandler(&organizeService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
@@ -123,8 +162,16 @@ func New(opts Options) (*Server, error) {
 // TIMEOUT while their audit rows are still written. Serve returns only once
 // every handler has returned, so the caller can close the state database.
 func (s *Server) Serve(ctx context.Context) error {
+	if err := s.recoverSends(ctx); err != nil {
+		_ = s.opts.Listener.Close() // the recovery error is the one to report
+		if ctx.Err() != nil {
+			return nil // stopped before serving: a shutdown, not a failure
+		}
+		return err
+	}
 	base, cancelBase := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelBase()
+	defer s.startBackground(base)()
 	s.httpSrv.BaseContext = func(net.Listener) context.Context { return base }
 	errc := make(chan error, 1)
 	go func() { errc <- s.httpSrv.Serve(s.opts.Listener) }()
@@ -157,12 +204,14 @@ func (s *Server) Serve(ctx context.Context) error {
 	return err
 }
 
-// drain waits for every handler to return, then logs out of the mail
-// servers. Each store logs out within 5 seconds, all in parallel.
+// drain waits for every handler to return, stops the background probes,
+// then logs out of the mail servers. Each store logs out within 5 seconds,
+// all in parallel.
 func (s *Server) drain() {
 	s.handlers.wait()
+	s.lim.stop()
 	if err := s.stores.closeAll(); err != nil {
-		s.opts.Logger.Warn("logging out of mail servers", "err", err)
+		s.opts.Logger.Warn("logging out of mail servers", "reason", apiReason(err))
 	}
 }
 

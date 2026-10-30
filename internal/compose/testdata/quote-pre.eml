@@ -1,0 +1,52 @@
+From: "James Ainslie" <james@example.com>
+To: "Ann Smith" <ann@example.org>
+Subject: Hello
+Date: Fri, 30 Oct 2026 09:15:00 -0400
+Message-Id: <01JBX7Y8Z9.ABCDEFGHJK@example.com>
+Mime-Version: 1.0
+User-Agent: chainmail/test
+Content-Type: multipart/alternative; boundary=0123456789ABCDEFGHJKMNPQRSTV
+
+--0123456789ABCDEFGHJKMNPQRSTV
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Hello **world**.
+
+On Thu, 29 Oct 2026 at 10:00, Ann Smith <ann@example.org> wrote:
+> if a < b && c > d
+
+--0123456789ABCDEFGHJKMNPQRSTV
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset=3D"utf-8">
+<meta name=3D"viewport" content=3D"width=3Ddevice-width, initial-scale=3D1"=
+>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, =
+Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.5; }
+blockquote { margin: 0 0 0 0.8ex; padding-left: 1ex; border-left: 3px solid=
+ #ccc; }
+code, pre { background: #f4f4f4; font-family: ui-monospace, SFMono-Regular,=
+ Menlo, Consolas, monospace; font-size: 90%; }
+pre { padding: 8px; }
+</style>
+</head>
+<body>
+<p>Hello <strong>world</strong>.</p>
+<div class=3D"quote">
+<div class=3D"quote-header">On Thu, 29 Oct 2026 at 10:00, Ann Smith &lt;ann=
+@example.org&gt; wrote:</div>
+<blockquote type=3D"cite">
+<pre>if a &lt; b &amp;&amp; c &gt; d
+</pre>
+</blockquote>
+</div>
+</body>
+</html>
+
+--0123456789ABCDEFGHJKMNPQRSTV--

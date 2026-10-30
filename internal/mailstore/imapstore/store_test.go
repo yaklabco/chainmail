@@ -271,7 +271,7 @@ func TestStoreLogsInOnceWhenThePasswordGoesBadLater(t *testing.T) {
 		t.Fatalf("ListFolders with the right password: %v", err)
 	}
 	// Drop the connection that worked, so every borrow below has to dial.
-	c, err := s.borrow(t.Context(), "")
+	c, err := s.borrow(t.Context(), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestStoreLogsInOnceWhenThePasswordGoesBadLater(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 3 {
 		wg.Go(func() {
-			c, err := s.borrow(t.Context(), "")
+			c, err := s.borrow(t.Context(), "", false)
 			if err == nil {
 				s.release(c)
 				t.Error("borrow dialed with a stale password and succeeded")
@@ -494,5 +494,51 @@ func TestStoreDoesNotResendALoginThatTimedOut(t *testing.T) {
 	_, err := s.ListFolders(t.Context())
 	if !errors.Is(err, mailstore.ErrUnavailable) || !errors.Is(err, errLogin) || strings.Contains(err.Error(), "attempts") {
 		t.Errorf("ListFolders = %v, want ErrUnavailable from the login, without a retry", err)
+	}
+}
+
+func TestStoreOpenConnsCountsIdleAndBorrowedConnections(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	raw := "From: a@example.com\r\nSubject: s\r\n\r\nbody\r\n"
+	ep := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{
+		Username: "host@example.test", Password: "pw", Mail: map[string][]string{"INBOX": {raw}},
+	})
+	s := New(testAccount("host", ep, false), passwordCreds("host@example.test", "pw"), Options{RootCAs: ca.Pool})
+	if n := s.OpenConns(); n != 0 {
+		t.Fatalf("OpenConns before use = %d, want 0", n)
+	}
+	res, err := s.Search(t.Context(), mailstore.SearchRequest{})
+	if err != nil || len(res) != 1 || len(res[0].UIDs) != 1 {
+		t.Fatalf("Search = %+v, %v", res, err)
+	}
+	if n := s.OpenConns(); n != 1 {
+		t.Fatalf("OpenConns with one idle connection = %d, want 1", n)
+	}
+	r := ref.Ref{Account: "host", Folder: "INBOX", UIDValidity: res[0].Source.UIDValidity, UID: res[0].UIDs[0]}
+	_, rc, err := s.StreamPart(t.Context(), r, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+	// Close logs out the idle connections at once; the stream's stays open.
+	eventually(t, func() bool { return s.OpenConns() == 1 })
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned %v while a stream still held a connection", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if n := s.OpenConns(); n != 1 {
+		t.Errorf("OpenConns while a stream is open after Close = %d, want 1", n)
+	}
+	if err := rc.Close(); err != nil {
+		t.Error(err)
+	}
+	if err := <-closed; err != nil {
+		t.Errorf("Close = %v", err)
+	}
+	if n := s.OpenConns(); n != 0 {
+		t.Errorf("OpenConns after the stream closed = %d, want 0", n)
 	}
 }

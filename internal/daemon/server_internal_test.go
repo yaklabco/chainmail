@@ -223,6 +223,9 @@ func TestToConnectError(t *testing.T) {
 		{err: fmt.Errorf("%w: x", ref.ErrInvalid), code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
 		{err: fmt.Errorf("%w: x", ref.ErrInvalidCursor), code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
 		{err: &argError{msg: "limit", hint: "h"}, code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
+		{err: fmt.Errorf("%w: labels", mailstore.ErrUnsupported), code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
+		{err: fmt.Errorf("%w: INBOX", mailstore.ErrRefused), code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
+		{err: fmt.Errorf("%w: Projects", mailstore.ErrExists), code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
 		{err: fmt.Errorf("%w: gone", mailstore.ErrStaleRef), code: connect.CodeNotFound, reason: api.ReasonStaleRef},
 		{err: fmt.Errorf("%w: part 9", mailstore.ErrNotFound), code: connect.CodeNotFound, reason: api.ReasonNotFound},
 		{err: fmt.Errorf("%w: down", mailstore.ErrUnavailable), code: connect.CodeUnavailable, reason: api.ReasonServerUnavailable},
@@ -233,6 +236,56 @@ func TestToConnectError(t *testing.T) {
 		got := toConnectError(tt.err)
 		if got.Code() != tt.code || api.Detail(got).GetReason() != tt.reason {
 			t.Errorf("toConnectError(%v) = %v %s, want %v %s", tt.err, got.Code(), api.Detail(got).GetReason(), tt.code, tt.reason)
+		}
+	}
+}
+
+func TestToConnectErrorWriteHints(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		err  error
+		hint string
+	}{
+		{err: fmt.Errorf("%w: labels", mailstore.ErrUnsupported), hint: "this account does not support that action"},
+		{err: fmt.Errorf("%w: INBOX", mailstore.ErrRefused), hint: "that folder cannot be changed that way"},
+		{err: fmt.Errorf("%w: Projects", mailstore.ErrExists), hint: "a folder with that name exists"},
+	}
+	for _, tt := range tests {
+		if got := api.Detail(toConnectError(tt.err)).GetHint(); got != tt.hint {
+			t.Errorf("toConnectError(%v) hint = %q, want %q", tt.err, got, tt.hint)
+		}
+	}
+}
+
+// TestToConnectErrorWriteTextIsFixed checks that a write error's own text,
+// which can carry the mail server's words, never reaches the client, while
+// the cause stays on the error for the daemon's logs.
+func TestToConnectErrorWriteTextIsFixed(t *testing.T) {
+	t.Parallel()
+	const secret = "SERVER-SAID-zq81-do-not-leak"
+	tests := []struct {
+		sentinel error
+		msg      string
+	}{
+		{sentinel: mailstore.ErrUnsupported, msg: "the account does not support that action"},
+		{sentinel: mailstore.ErrRefused, msg: "the mail server refused the change"},
+		{sentinel: mailstore.ErrExists, msg: "the folder already exists"},
+	}
+	for _, tt := range tests {
+		err := fmt.Errorf("%w: %s", tt.sentinel, secret)
+		got := toConnectError(err)
+		if got.Message() != tt.msg {
+			t.Errorf("toConnectError(%v).Message() = %q, want %q", tt.sentinel, got.Message(), tt.msg)
+		}
+		if strings.Contains(got.Error(), secret) {
+			t.Errorf("toConnectError(%v).Error() = %q, leaks the wrapped text", tt.sentinel, got.Error())
+		}
+		d := api.Detail(got)
+		if strings.Contains(d.GetHint(), secret) || strings.Contains(d.GetReason(), secret) {
+			t.Errorf("toConnectError(%v) detail = %v, leaks the wrapped text", tt.sentinel, d)
+		}
+		if !errors.Is(got, tt.sentinel) || !errors.Is(got, err) {
+			t.Errorf("toConnectError(%v) dropped its cause", tt.sentinel)
 		}
 	}
 }

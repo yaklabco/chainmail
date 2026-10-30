@@ -1,0 +1,1 @@
+{"limits":[{"account":"host","imap_cap":4,"pool_size":2,"probed_at":"2026-10-29T12:00:00Z","error":null},{"account":"gmail","imap_cap":0,"pool_size":0,"probed_at":null,"error":{"reason":"INTERNAL","message":"probe not supported","hint":""}}]}

@@ -1,6 +1,6 @@
 // Package mailstore is chainmail's provider-neutral view of a mail account:
-// the interface the daemon reads mail through and the types it returns.
-// internal/mailstore/imapstore implements it over IMAP, and
+// the interface the daemon reads and changes mail through and the types it
+// returns. internal/mailstore/imapstore implements it over IMAP, and
 // internal/mailstore/fake in memory for tests. Nothing here imports go-imap.
 package mailstore
 
@@ -25,6 +25,13 @@ var (
 	ErrUnavailable = errors.New("mail server unavailable")
 	// ErrUnsupportedQuery means the account cannot express an operator in the query.
 	ErrUnsupportedQuery = errors.New("query not supported on this account")
+	// ErrUnsupported means the account cannot do this action, such as labels off Google.
+	ErrUnsupported = errors.New("not supported on this account")
+	// ErrRefused means folder rules forbid the change, such as deleting INBOX,
+	// a role folder, or a folder with mail without force.
+	ErrRefused = errors.New("refused")
+	// ErrExists means a folder with that name already exists.
+	ErrExists = errors.New("already exists")
 )
 
 const (
@@ -106,7 +113,9 @@ type Summary struct {
 	Sample *TextSample
 }
 
-// Attachment is one attachment part.
+// Attachment is one attachment part, or a part the body shows by its
+// Content-ID, such as an unnamed inline image. StreamPart gives its media
+// type parameters, Content-ID and disposition.
 type Attachment struct {
 	// Part is the IMAP section number, such as "2" or "1.2".
 	Part        string
@@ -185,18 +194,82 @@ type SummaryOptions struct {
 
 // PartInfo describes a part being streamed.
 type PartInfo struct {
-	Filename    string
+	Filename string
+	// ContentType is the media type, such as "text/plain", and Params its
+	// parameters, such as charset, with lower-case names. Nil means none.
+	// StreamPart decodes the transfer encoding only, so the bytes are still
+	// in that charset.
 	ContentType string
+	Params      map[string]string
+	// ContentID is the part's Content-ID without angle brackets, or "".
+	ContentID string
+	// Inline says the body shows the part: its disposition is inline, or it
+	// has none and has a Content-ID.
+	Inline bool
 	// Size is the encoded size the server reports for the part, as in
 	// Attachment.Size, so it can differ from the decoded bytes streamed. For
 	// the whole message it is the raw size, as in Summary.Size.
 	Size int64
 }
 
-// Store reads one account. Every method is safe for concurrent use, and none
-// changes anything on the server: folders are opened read-only and bodies
-// are fetched with BODY.PEEK.
+// RefResult is one entry of a batch write: the message's ref afterwards, or an error.
+// Ref is zero when the message no longer exists (expunge) or its new place is unknown.
+type RefResult struct {
+	Ref ref.Ref
+	Err error
+}
+
+// Writer changes one account. Batch methods take refs of this account only,
+// return one result per ref in order, and fail per ref. Semantics: spec 7.1.
+// Writes open folders read-write with SELECT, and a write is never retried
+// once the server has answered it.
+type Writer interface {
+	// Append stores raw in folder with flags and returns its ref, from
+	// APPENDUID. The ref is zero, with no error, when the message was stored
+	// but its place is unknown: the server gave no APPENDUID, or, on Google,
+	// the message's X-GM-MSGID could not be read.
+	Append(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) (ref.Ref, error)
+	// Move moves refs to folder and returns their new refs.
+	Move(ctx context.Context, refs []ref.Ref, folder string) []RefResult
+	// Copy copies refs to folder and returns the copies' refs.
+	Copy(ctx context.Context, refs []ref.Ref, folder string) []RefResult
+	// Archive moves refs to the folder with the archive role, or the
+	// configured archive folder, with Gmail semantics on Google accounts.
+	Archive(ctx context.Context, refs []ref.Ref) []RefResult
+	// Trash moves refs to the folder with the trash role. A ref already in
+	// Trash succeeds unchanged.
+	Trash(ctx context.Context, refs []ref.Ref) []RefResult
+	// Expunge permanently deletes refs. RefResult.Ref is zero on success.
+	Expunge(ctx context.Context, refs []ref.Ref) []RefResult
+	// StoreFlags adds and removes IMAP flags.
+	StoreFlags(ctx context.Context, refs []ref.Ref, add, remove []string) []RefResult
+	// StoreLabels adds and removes Gmail labels. Other accounts return
+	// ErrUnsupported for every ref.
+	StoreLabels(ctx context.Context, refs []ref.Ref, add, remove []string) []RefResult
+	// CreateFolder creates name, and its missing parents first, and returns
+	// the name the server gave the folder: with "/" written as the server's
+	// hierarchy delimiter and, on a server that keeps folders under a
+	// personal namespace prefix such as "INBOX.", under that prefix unless
+	// name is INBOX or starts with it already. ErrExists when it already
+	// exists.
+	CreateFolder(ctx context.Context, name string) (string, error)
+	// RenameFolder renames the folder from and returns its new name, to
+	// written as CreateFolder writes a name.
+	RenameFolder(ctx context.Context, from, to string) (string, error)
+	// DeleteFolder refuses INBOX and role folders, and a folder with mail
+	// unless force, with ErrRefused.
+	DeleteFolder(ctx context.Context, name string, force bool) error
+	// FindByMessageID returns the refs of messages in folder whose
+	// Message-ID is messageID, which may come with or without angle brackets.
+	FindByMessageID(ctx context.Context, folder, messageID string) ([]ref.Ref, error)
+}
+
+// Store reads and changes one account. Every method is safe for concurrent
+// use. The read methods never change anything on the server: they accept a
+// folder opened read-only or read-write, and fetch bodies with BODY.PEEK so
+// nothing is marked read. The Writer methods do change the server.
 type Store interface {
+	Writer
 	// ListFolders returns every folder, INBOX first, then by name ignoring case.
 	ListFolders(ctx context.Context) ([]Folder, error)
 	// Search returns the matches in each source folder. An error means the

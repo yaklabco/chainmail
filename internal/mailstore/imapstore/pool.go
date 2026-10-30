@@ -14,6 +14,7 @@ var errPoolClosed = errors.New("the account's connections are closed")
 // pooled is what the pool needs from a connection.
 type pooled interface {
 	Selected() string
+	Writable() bool
 	Dead() bool
 	Noop(ctx context.Context) error
 	Close() error
@@ -37,9 +38,17 @@ type pool[C pooled] struct {
 	dial func(context.Context) (C, error)
 	opts poolOptions
 
-	mu     sync.Mutex
-	max    int
-	open   int // connections dialing, borrowed or idle
+	mu   sync.Mutex
+	max  int
+	open int // connections dialing, borrowed or idle
+	// closing are connections taken off open that are still logging out.
+	// They no longer count against max, but the server still holds their
+	// slots, so openCount reports them.
+	closing int
+	// peak is the most of open plus closing since the last resetConnPeak.
+	// Only a dial raises the sum: a logout moves a connection from open to
+	// closing.
+	peak   int
 	idle   []*idleConn[C]
 	wake   chan struct{}
 	closed bool
@@ -49,10 +58,11 @@ func newPool[C pooled](dial func(context.Context) (C, error), opts poolOptions) 
 	return &pool[C]{dial: dial, opts: opts, max: opts.size, wake: make(chan struct{})}
 }
 
-// get borrows a connection, preferring an idle one with folder open. It
+// get borrows a connection, preferring an idle one with folder open in a
+// mode that will do: read-write when writable, either mode otherwise. It
 // dials when the pool has room and waits otherwise. The caller hands it back
 // with put, or with discard when it broke.
-func (p *pool[C]) get(ctx context.Context, folder string) (C, error) {
+func (p *pool[C]) get(ctx context.Context, folder string, writable bool) (C, error) {
 	var zero C
 	for {
 		p.mu.Lock()
@@ -60,7 +70,7 @@ func (p *pool[C]) get(ctx context.Context, folder string) (C, error) {
 			p.mu.Unlock()
 			return zero, errPoolClosed
 		}
-		if e := p.takeIdleLocked(folder); e != nil {
+		if e := p.takeIdleLocked(folder, writable); e != nil {
 			p.mu.Unlock()
 			if p.opts.now().Sub(e.since) > p.opts.noopAfter {
 				if err := e.c.Noop(ctx); err != nil {
@@ -75,6 +85,7 @@ func (p *pool[C]) get(ctx context.Context, folder string) (C, error) {
 		}
 		if p.open < p.max {
 			p.open++
+			p.peak = max(p.peak, p.open+p.closing)
 			p.mu.Unlock()
 			c, err := p.dial(ctx)
 			if err != nil {
@@ -97,10 +108,13 @@ func (p *pool[C]) get(ctx context.Context, folder string) (C, error) {
 }
 
 // takeIdleLocked removes and returns the idle connection to reuse: one with
-// folder open if there is one, else the most recently returned.
-func (p *pool[C]) takeIdleLocked(folder string) *idleConn[C] {
+// folder open in a mode that will do if there is one, else the most
+// recently returned.
+func (p *pool[C]) takeIdleLocked(folder string, writable bool) *idleConn[C] {
 	for len(p.idle) > 0 {
-		i := slices.IndexFunc(p.idle, func(e *idleConn[C]) bool { return folder != "" && e.c.Selected() == folder })
+		i := slices.IndexFunc(p.idle, func(e *idleConn[C]) bool {
+			return folder != "" && e.c.Selected() == folder && (e.c.Writable() || !writable)
+		})
 		if i < 0 {
 			i = len(p.idle) - 1
 		}
@@ -122,10 +136,9 @@ func (p *pool[C]) put(c C) {
 	}
 	p.mu.Lock()
 	if p.closed || p.open > p.max {
-		p.open--
-		p.broadcastLocked()
+		p.startLogoutLocked()
 		p.mu.Unlock()
-		_ = c.Close() // the pool closed or shrank; the LOGOUT outcome changes nothing
+		p.logout(c) // the pool closed or shrank
 		return
 	}
 	e := &idleConn[C]{c: c, since: p.opts.now()}
@@ -138,10 +151,9 @@ func (p *pool[C]) put(c C) {
 // discard drops a borrowed connection that broke.
 func (p *pool[C]) discard(c C) {
 	p.mu.Lock()
-	p.open--
-	p.broadcastLocked()
+	p.startLogoutLocked()
 	p.mu.Unlock()
-	_ = c.Close() // a broken connection's LOGOUT fails fast and there is nothing to report
+	p.logout(c) // a broken connection's LOGOUT fails fast
 }
 
 // expire logs out a connection that sat idle for idleLogout.
@@ -150,20 +162,74 @@ func (p *pool[C]) expire(e *idleConn[C]) {
 	if i := slices.Index(p.idle, e); i >= 0 {
 		p.idle = slices.Delete(p.idle, i, i+1)
 	}
-	p.open--
-	p.broadcastLocked()
+	p.startLogoutLocked()
 	p.mu.Unlock()
-	_ = e.c.Close() // idle cleanup; a failed LOGOUT still frees the slot
+	p.logout(e.c) // idle cleanup
 }
 
-// shrink lowers the cap by one, never below one. A server that refused a
-// connection for being over its limit keeps the lower cap until the daemon restarts.
-func (p *pool[C]) shrink() {
+// shrink lowers the cap by one, never below one, and returns the new cap. A
+// server that refused a connection for being over its limit keeps the lower
+// cap until the store is rebuilt.
+func (p *pool[C]) shrink() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.max > 1 {
 		p.max--
 	}
+	return p.max
+}
+
+// openCount returns how many connections hold a slot on the server:
+// dialing, borrowed, idle or still logging out.
+func (p *pool[C]) openCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.open + p.closing
+}
+
+// resetConnPeak starts a new peak from the connections holding a slot now.
+func (p *pool[C]) resetConnPeak() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.peak = p.open + p.closing
+}
+
+// connPeak returns the most connections that held a slot at once since the
+// last resetConnPeak, or since the pool was made: dialing, borrowed, idle or
+// still logging out. Connections that have closed since still count.
+func (p *pool[C]) connPeak() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.peak
+}
+
+// startLogoutLocked moves a connection about to be logged out from open to
+// closing, which frees its place in the pool. p.mu must be held.
+func (p *pool[C]) startLogoutLocked() {
+	p.open--
+	p.closing++
+	p.broadcastLocked()
+}
+
+// logout logs c out, which startLogoutLocked counted as closing. A failed
+// LOGOUT still ends the connection, so its outcome changes nothing.
+func (p *pool[C]) logout(c C) {
+	_ = c.Close()
+	p.loggedOut()
+}
+
+// loggedOut records that a closing connection finished logging out.
+func (p *pool[C]) loggedOut() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closing--
+}
+
+// size returns the cap: the most connections open at once.
+func (p *pool[C]) size() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.max
 }
 
 // close logs out every idle connection in parallel and refuses new borrows.
@@ -180,6 +246,7 @@ func (p *pool[C]) close() error {
 		if e.timer.Stop() {
 			mine = append(mine, e.c)
 			p.open--
+			p.closing++
 		}
 	}
 	p.idle = nil
@@ -188,7 +255,10 @@ func (p *pool[C]) close() error {
 	errs := make([]error, len(mine))
 	var wg sync.WaitGroup
 	for i, c := range mine {
-		wg.Go(func() { errs[i] = c.Close() })
+		wg.Go(func() {
+			errs[i] = c.Close()
+			p.loggedOut()
+		})
 	}
 	wg.Wait()
 	return errors.Join(errs...)

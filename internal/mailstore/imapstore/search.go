@@ -284,7 +284,7 @@ func (s *Store) summary(folder string, uidValidity uint32, b *imapclient.FetchMe
 		}
 		sum.From, sum.To, sum.Subject = addresses(env.From), addresses(env.To), env.Subject
 	}
-	sum.HasAttachment = len(attachmentsOf(b.BodyStructure)) > 0
+	sum.HasAttachment = hasAttachment(b.BodyStructure)
 	if s.gmail() {
 		if b.GmailThreadID != 0 {
 			sum.ThreadID = strconv.FormatUint(b.GmailThreadID, 16)

@@ -60,10 +60,15 @@ func newSecretCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			if _, err := c.Admin.SetSecret(ctx, req); err != nil {
 				return err
 			}
-			if g.table() {
-				return writeString(env.Stdout, "stored secret "+name+"\n")
+			done, fields := "stored secret "+name+"\n", map[string]any{"name": name, "set": true}
+			// An account's new password: measure its connection limit now.
+			if account, ok := strings.CutPrefix(name, "accounts/"); ok {
+				return reportProbe(env, g, done, fields, probeAccount(ctx, c, account))
 			}
-			return writeJSON(env.Stdout, map[string]any{"name": name, "set": true})
+			if g.table() {
+				return writeString(env.Stdout, done)
+			}
+			return writeJSON(env.Stdout, fields)
 		},
 	}
 	set.Flags().StringVar(&fromPass, "from-pass", "", "read the secret from this pass entry (first line)")

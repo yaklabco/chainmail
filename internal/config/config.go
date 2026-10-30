@@ -52,6 +52,13 @@ const (
 	maxBodyLimit = 8 << 20
 )
 
+// Account limits accepted in config.
+const (
+	maxPool           = 12
+	minMaxMessageSize = 1 << 10
+	maxMaxMessageSize = 1 << 30
+)
+
 var byteSizeRE = regexp.MustCompile(`^([0-9]{1,12})(B|KiB|MiB)?$`)
 
 // ParseByteSize parses a size such as 65536, 512B, 64KiB or 2MiB.
@@ -95,6 +102,17 @@ type Account struct {
 	OAuthClient string            `toml:"oauth_client"`
 	IMAP        *EndpointOverride `toml:"imap"`
 	SMTP        *EndpointOverride `toml:"smtp"`
+	// DisplayName is the From display name. Empty means none.
+	DisplayName string `toml:"display_name"`
+	// Signature is Markdown appended to new messages. Empty means none.
+	Signature string `toml:"signature"`
+	// ArchiveFolder is where Archive moves mail on standard IMAP accounts.
+	// Empty means the folder with the \Archive attribute.
+	ArchiveFolder string `toml:"archive_folder"`
+	// Pool overrides the probed IMAP pool size: 1 to 12, or 0 for not set.
+	Pool int `toml:"pool"`
+	// MaxMessageSize overrides the preset message size limit, such as "35MiB".
+	MaxMessageSize string `toml:"max_message_size"`
 }
 
 // EndpointOverride replaces a preset's server address.
@@ -115,6 +133,18 @@ type ResolvedAccount struct {
 	ClientID    string
 	IMAP        provider.Endpoint
 	SMTP        provider.Endpoint
+	// DisplayName is the From display name. Empty means none.
+	DisplayName string
+	// Signature is Markdown. Empty means none.
+	Signature string
+	// ArchiveFolder is the configured archive folder. Empty means the
+	// \Archive folder.
+	ArchiveFolder string
+	// Pool is the configured pool size. 0 means not set.
+	Pool int
+	// MaxMessageSize is the largest message to send, in bytes: max_message_size
+	// when set, else the preset's.
+	MaxMessageSize int64
 }
 
 // ValidationError lists every problem found in a config.
@@ -174,14 +204,24 @@ func (c *Config) Account(name string) (ResolvedAccount, error) {
 	}
 	p, _ := provider.Lookup(a.Provider) // Parse rejected unknown providers
 	r := ResolvedAccount{
-		Name:        name,
-		Address:     a.Address,
-		Username:    a.Username,
-		Provider:    p,
-		Auth:        provider.AuthMethod(a.Auth),
-		OAuthClient: a.OAuthClient,
-		IMAP:        override(p.IMAP, a.IMAP),
-		SMTP:        override(p.SMTP, a.SMTP),
+		Name:           name,
+		Address:        a.Address,
+		Username:       a.Username,
+		Provider:       p,
+		Auth:           provider.AuthMethod(a.Auth),
+		OAuthClient:    a.OAuthClient,
+		IMAP:           override(p.IMAP, a.IMAP),
+		SMTP:           override(p.SMTP, a.SMTP),
+		DisplayName:    a.DisplayName,
+		Signature:      a.Signature,
+		ArchiveFolder:  a.ArchiveFolder,
+		Pool:           a.Pool,
+		MaxMessageSize: p.MaxMessageSize,
+	}
+	// Parse validated max_message_size. A Config that never went through
+	// Parse keeps the preset's limit.
+	if n, err := ParseByteSize(a.MaxMessageSize); err == nil && n > 0 {
+		r.MaxMessageSize = n
 	}
 	if a.OAuthClient != "" {
 		r.ClientID = c.OAuthClients[a.OAuthClient].ClientID
@@ -285,6 +325,16 @@ func (c *Config) validateAccount(name string, add func(string, ...any)) {
 	}
 	validateOverride(where+".imap", a.IMAP, add)
 	validateOverride(where+".smtp", a.SMTP, add)
+	if a.Pool < 0 || a.Pool > maxPool {
+		add("%s: pool must be between 1 and %d, or 0 to use the probed size", where, maxPool)
+	}
+	if a.MaxMessageSize != "" {
+		if n, err := ParseByteSize(a.MaxMessageSize); err != nil {
+			add("%s: max_message_size: %v", where, err)
+		} else if n < minMaxMessageSize || n > maxMaxMessageSize {
+			add("%s: max_message_size: %s must be between 1KiB and 1024MiB", where, a.MaxMessageSize)
+		}
+	}
 }
 
 func validateOverride(where string, o *EndpointOverride, add func(string, ...any)) {

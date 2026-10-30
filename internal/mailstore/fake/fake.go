@@ -63,6 +63,12 @@ type Message struct {
 	InternalDate time.Time
 
 	uid uint32
+	// views are the UIDs a Gmail message has in label folders, by folder,
+	// given out by refInLocked.
+	views map[string]uint32
+	// raw is the message as Append received it. When set, it is what the
+	// store streams, instead of a message built from the fields.
+	raw []byte
 }
 
 // Store is an in-memory account.
@@ -85,6 +91,17 @@ type Store struct {
 	streamAfter int
 	calls       map[string]int
 	closed      bool
+	// everValidity is the highest UIDVALIDITY each folder name has had, so a
+	// folder deleted and created again, or renamed onto an old name, gets a
+	// new one and old refs into it go stale, as on a server.
+	everValidity map[string]uint32
+	// Writer state and test hooks, in write.go.
+	writeFail     map[string]error
+	ops           []string
+	appended      [][]byte
+	archiveFolder string
+	// nsPrefix and nsDelim are the namespace SetNamespace gives.
+	nsPrefix, nsDelim string
 }
 
 var _ mailstore.Store = (*Store)(nil)
@@ -99,6 +116,7 @@ func New(account string, gmail bool) *Store {
 		uidValidity: map[string]uint32{}, nextUID: map[string]uint32{},
 		msgIDs: map[uint64]bool{}, threadIDs: map[uint64]bool{}, nextMsgID: 1000,
 		fail: map[string]error{}, folderFail: map[string]error{}, calls: map[string]int{},
+		everValidity: map[string]uint32{}, writeFail: map[string]error{},
 	}
 	if gmail {
 		s.AddFolder("INBOX", mailstore.RoleInbox)
@@ -124,7 +142,8 @@ func New(account string, gmail bool) *Store {
 	return s
 }
 
-// AddFolder adds a selectable folder with UIDVALIDITY 1. On Gmail a folder
+// AddFolder adds a selectable folder with UIDVALIDITY 1, or one more than
+// the name had before when it was deleted or renamed away. On Gmail a folder
 // other than All Mail, Trash and Spam is a label: it lists the All Mail
 // messages with that label, or \Inbox, \Sent or \Draft for those roles. It
 // panics when the folder already exists.
@@ -134,10 +153,28 @@ func (s *Store) AddFolder(name string, role mailstore.Role) {
 	if _, ok := s.uidValidity[name]; ok {
 		panic(fmt.Sprintf("fake: folder %q already exists", name))
 	}
+	s.addFolderLocked(name, role, 1, 1)
+}
+
+// addFolderLocked adds a selectable folder with UIDVALIDITY v, raised past
+// any the name had before, and next UID next.
+func (s *Store) addFolderLocked(name string, role mailstore.Role, v, next uint32) {
+	if v <= s.everValidity[name] {
+		v = s.everValidity[name] + 1
+	}
 	s.folders = append(s.folders, mailstore.Folder{Name: name, Role: role, Selectable: true})
 	slices.SortStableFunc(s.folders, func(a, b mailstore.Folder) int { return compareFolders(a.Name, b.Name) })
-	s.uidValidity[name] = 1
-	s.nextUID[name] = 1
+	s.uidValidity[name] = v
+	s.everValidity[name] = v
+	s.nextUID[name] = next
+}
+
+// removeFolderLocked forgets a folder. Its messages must already be gone.
+func (s *Store) removeFolderLocked(name string) {
+	s.folders = slices.DeleteFunc(s.folders, func(f mailstore.Folder) bool { return f.Name == name })
+	delete(s.uidValidity, name)
+	delete(s.nextUID, name)
+	delete(s.folderFail, name)
 }
 
 // compareFolders orders INBOX first, then by name ignoring case, as imapstore does.
@@ -229,6 +266,7 @@ func (s *Store) SetUIDValidity(folder string, v uint32) {
 	defer s.mu.Unlock()
 	s.mustHaveFolderLocked(folder)
 	s.uidValidity[folder] = v
+	s.everValidity[folder] = max(s.everValidity[folder], v)
 }
 
 // Fail makes method (such as "Search" or "FetchMessages") return err. A nil err clears it.
@@ -327,16 +365,21 @@ func (s *Store) inFolderLocked(f mailstore.Folder, m *Message) bool {
 	if s.roleLocked(m.Folder) != mailstore.RoleAll {
 		return false
 	}
-	label := f.Name
+	return hasLabel(m, labelOf(f))
+}
+
+// labelOf is the Gmail label a label folder lists: \Inbox, \Sent or \Draft
+// for those roles, else the folder's name.
+func labelOf(f mailstore.Folder) string {
 	switch f.Role {
 	case mailstore.RoleInbox:
-		label = `\Inbox`
+		return `\Inbox`
 	case mailstore.RoleSent:
-		label = `\Sent`
+		return `\Sent`
 	case mailstore.RoleDrafts:
-		label = `\Draft`
+		return `\Draft`
 	}
-	return hasLabel(m, label)
+	return f.Name
 }
 
 // Search implements mailstore.Store.
@@ -408,7 +451,7 @@ func (s *Store) FetchSummaries(_ context.Context, src mailstore.Source, uids []u
 	var out []mailstore.Summary
 	for _, uid := range uids {
 		if m := s.findLocked(src.Folder, uid); m != nil {
-			out = append(out, s.summaryLocked(m, opts))
+			out = append(out, s.summaryLocked(m, s.refInLocked(m, src.Folder), opts))
 		}
 	}
 	return out, nil
@@ -431,7 +474,7 @@ func (s *Store) FetchMessages(_ context.Context, refs []ref.Ref) []mailstore.Mes
 			continue
 		}
 		out[i].Message = &mailstore.Message{
-			Summary: s.summaryLocked(m, mailstore.SummaryOptions{}), Cc: slices.Clone(m.Cc), MessageID: m.MessageID,
+			Summary: s.summaryLocked(m, s.refInLocked(m, r.Folder), mailstore.SummaryOptions{}), Cc: slices.Clone(m.Cc), MessageID: m.MessageID,
 			InReplyTo: slices.Clone(m.InReplyTo), References: slices.Clone(m.References),
 			Raw: rawMessage(m, false), Attachments: attachments(m),
 		}
@@ -527,9 +570,51 @@ func (s *Store) refLocked(m *Message) ref.Ref {
 	return ref.Ref{Account: s.account, Folder: m.Folder, UIDValidity: s.uidValidity[m.Folder], UID: m.uid, GmailMsgID: m.GmailMsgID}
 }
 
+// refInLocked is m's ref in folder. On Gmail a label folder lists m under a
+// UID of its own, given the first time a ref there is needed and kept while
+// m stays in the folder, as Gmail numbers each folder's messages.
+func (s *Store) refInLocked(m *Message, folder string) ref.Ref {
+	if !s.gmail || folder == m.Folder {
+		return s.refLocked(m)
+	}
+	uid, ok := m.views[folder]
+	if !ok {
+		if m.views == nil {
+			m.views = map[string]uint32{}
+		}
+		uid = s.nextUID[folder]
+		s.nextUID[folder]++
+		m.views[folder] = uid
+	}
+	return ref.Ref{Account: s.account, Folder: folder, UIDValidity: s.uidValidity[folder], UID: uid, GmailMsgID: m.GmailMsgID}
+}
+
+// inNamedLocked reports whether m shows in the folder called name.
+func (s *Store) inNamedLocked(name string, m *Message) bool {
+	i := slices.IndexFunc(s.folders, func(f mailstore.Folder) bool { return f.Name == name })
+	return i >= 0 && s.inFolderLocked(s.folders[i], m)
+}
+
+// pruneViewsLocked forgets the label folder UIDs of messages that left
+// those folders, so a message that returns gets a new UID there, as on
+// Gmail, and an old ref into the folder goes stale.
+func (s *Store) pruneViewsLocked() {
+	for _, m := range s.msgs {
+		maps.DeleteFunc(m.views, func(name string, _ uint32) bool { return !s.inNamedLocked(name, m) })
+	}
+}
+
 func (s *Store) findLocked(folder string, uid uint32) *Message {
 	for _, m := range s.msgs {
 		if m.Folder == folder && m.uid == uid {
+			return m
+		}
+	}
+	if !s.gmail {
+		return nil
+	}
+	for _, m := range s.msgs {
+		if v, ok := m.views[folder]; ok && v == uid && s.inNamedLocked(folder, m) {
 			return m
 		}
 	}
@@ -549,7 +634,7 @@ func (s *Store) resolveLocked(r ref.Ref) (*Message, error) {
 	if v != r.UIDValidity {
 		if s.gmail && r.GmailMsgID != 0 {
 			for _, m := range s.msgs {
-				if m.Folder == r.Folder && m.GmailMsgID == r.GmailMsgID {
+				if m.GmailMsgID == r.GmailMsgID && s.inNamedLocked(r.Folder, m) {
 					return m, nil
 				}
 			}
@@ -844,9 +929,10 @@ func addMonths(t time.Time, months int) time.Time {
 	return first.AddDate(0, 0, d-1)
 }
 
-func (s *Store) summaryLocked(m *Message, opts mailstore.SummaryOptions) mailstore.Summary {
+// summaryLocked summarises m as read through r, its ref in the folder read.
+func (s *Store) summaryLocked(m *Message, r ref.Ref, opts mailstore.SummaryOptions) mailstore.Summary {
 	sum := mailstore.Summary{
-		Ref: s.refLocked(m), Date: dateOf(m), InternalDate: m.InternalDate,
+		Ref: r, Date: dateOf(m), InternalDate: m.InternalDate,
 		From: slices.Clone(m.From), To: slices.Clone(m.To), Subject: m.Subject,
 		Flags: slices.Clone(m.Flags), Size: int64(len(rawMessage(m, true))), HasAttachment: len(m.Attachments) > 0,
 		ThreadID: mailstore.ThreadKey(rootOf(m)),
@@ -897,6 +983,7 @@ func attachments(m *Message) []mailstore.Attachment {
 }
 
 func cloneMessage(m Message) Message {
+	m.views = nil // a copy is a message of its own
 	m.From, m.To, m.Cc = slices.Clone(m.From), slices.Clone(m.To), slices.Clone(m.Cc)
 	m.Flags, m.Labels = slices.Clone(m.Flags), slices.Clone(m.Labels)
 	m.InReplyTo, m.References = slices.Clone(m.InReplyTo), slices.Clone(m.References)
@@ -909,8 +996,11 @@ func cloneMessage(m Message) Message {
 
 // rawMessage builds m as MIME. withAttachments adds the attachment parts,
 // as the original message would have them. Without them it is what a
-// store hands render.Render.
+// store hands render.Render. An appended message is its raw bytes either way.
 func rawMessage(m *Message, withAttachments bool) []byte {
+	if m.raw != nil {
+		return slices.Clone(m.raw)
+	}
 	var b bytes.Buffer
 	header := func(k, v string) { fmt.Fprintf(&b, "%s: %s\r\n", k, v) }
 	addrs := func(list []mailstore.Address) string {
