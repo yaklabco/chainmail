@@ -2,9 +2,28 @@
 // Gmail's dialect for imapstore tests: X-GM-EXT-1 (X-GM-RAW, X-GM-MSGID,
 // X-GM-THRID, X-GM-LABELS), ESEARCH, LIST-STATUS, special-use folders, and
 // Gmail's folder layout, where labels are folders and All Mail holds
-// everything but Trash and Spam. It is read-only. Like Gmail, it sets \Seen
-// when a client fetches a body without PEEK, and it counts read-write
-// SELECTs, so tests can prove chainmail does neither.
+// everything but Trash and Spam. Like Gmail, it sets \Seen when a client
+// fetches a body without PEEK, and it counts read-write SELECTs, so tests can
+// prove chainmail does neither on its read paths.
+//
+// It accepts writes the way Gmail does with its default IMAP settings and
+// expunge set to move to Trash:
+//   - STORE of flags. Flags belong to the message and show in every folder,
+//     except \Deleted, which belongs to the folder it was set in. A STORE
+//     naming no current message answers OK with no FETCH.
+//   - COPY and APPEND to a label folder (INBOX, Sent Mail, Drafts or a user
+//     label) add that label; to Trash or Spam they move the message there; to
+//     All Mail they add nothing. MOVE does the same and also drops the
+//     source folder's label when the destination is a label folder or All
+//     Mail. Both answer COPYUID; APPEND answers APPENDUID.
+//   - EXPUNGE and UID EXPUNGE of messages marked \Deleted in the selected
+//     folder: in Trash or Spam the message is gone for good, in All Mail it
+//     moves to Trash, and in a label folder it loses that label.
+//   - CREATE, RENAME (children follow) and DELETE of user labels. INBOX and
+//     the [Gmail] folders answer NO.
+//   - A message that leaves Trash or Spam gets a new UID in each folder it
+//     returns to, as on Gmail. Moving to Trash keeps the message's labels, so
+//     restoring it brings them back.
 //
 // The fake is meant to be no more lenient than Gmail, so that a client bug
 // fails here rather than in production:
@@ -18,16 +37,23 @@
 //     does not happen to name a message in another. All Mail counts from 1,
 //     INBOX from 101, Sent Mail 201, Trash 301, Spam 401, Drafts 501, and user
 //     labels from 1001 in steps of 100. The bases grow tenfold when there are
-//     100 or more messages.
+//     100 or more messages at start. A folder that gains more messages than
+//     the step afterwards runs into the next folder's range.
 //   - X-GM-MSGID and X-GM-THRID are unsigned 64-bit. The fake's are above
 //     math.MaxInt64 (Gmail's are lower today), so a signed 64-bit slip fails.
 //   - FETCH and STATUS answer BAD for items of extensions it does not
 //     advertise, such as BINARY and CONDSTORE.
+//   - STORE, MOVE and EXPUNGE answer NO in a folder opened with EXAMINE.
 //
 // It is stricter than Gmail in one place: X-GM-RAW under NOT or OR is
 // refused. It is still looser in some: matching is by substring where Gmail
 // tokenises, is: values other than read and unread mean starred, any has:
-// means an attachment, and LIST patterns are case-sensitive even for INBOX.
+// means an attachment, LIST patterns are case-sensitive even for INBOX, and
+// \Starred and \Flagged are not linked. Another session learns of changes
+// at its next command, as EXISTS and EXPUNGE, but not of flag changes.
+//
+// The go-imap fork parses STORE FLAGS only, so STORE X-GM-LABELS is not yet
+// reachable over the wire; session.storeLabels holds its behaviour.
 package fakegmail
 
 import (
@@ -35,6 +61,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -65,6 +92,7 @@ type Message struct {
 
 	msgID    uint64
 	threadID uint64
+	gone     bool // expunged from Trash or Spam, so in no folder
 }
 
 // Options changes the fake's defaults, which match Gmail.
@@ -91,20 +119,34 @@ type Server struct {
 	mu              sync.Mutex
 	msgs            []*Message
 	folders         []*folder
+	step            imap.UID // the gap between folders' UID bases
+	userFolders     int      // user label folders ever made, for their UID bases
 	rawSearches     []RawSearch
 	writableSelects int
 	logins          int
 	conns           map[net.Conn]bool
 }
 
+// folderKind says which messages a folder holds.
+type folderKind int
+
+const (
+	kindLabel folderKind = iota // messages outside Trash and Spam that carry the folder's label
+	kindAll                     // every message outside Trash and Spam
+	kindTrash
+	kindSpam
+)
+
 type folder struct {
 	name        string
 	attrs       []imap.MailboxAttr
 	uidValidity uint32
+	kind        folderKind
+	label       string // for kindLabel: `\Inbox`, `\Sent`, `\Draft` or the user label
 	uids        map[*Message]imap.UID
-	order       []*Message
+	order       []*Message // in UID order
 	nextUID     imap.UID
-	member      func(*Message) bool
+	deleted     map[*Message]bool // \Deleted is per folder on Gmail
 }
 
 // firstMsgID is above math.MaxInt64, so an int64 anywhere in a client's
@@ -127,7 +169,8 @@ func StartWith(t testing.TB, ca *tlstest.CA, opts Options, username, password st
 	s := &Server{username: username, password: password, opts: opts, conns: map[net.Conn]bool{}}
 	for i := range msgs {
 		m := msgs[i]
-		m.Flags = slices.Clone(m.Flags) // a fetch appends \Seen; keep the caller's slice untouched
+		// Writes change flags and labels; keep the caller's slices untouched.
+		m.Flags, m.Labels = slices.Clone(m.Flags), slices.Clone(m.Labels)
 		m.msgID = firstMsgID + uint64(i)
 		m.threadID = m.msgID
 		if m.ThreadOf > 0 {
@@ -174,41 +217,114 @@ func hasLabel(m *Message, label string) bool {
 	return slices.ContainsFunc(m.Labels, func(l string) bool { return strings.EqualFold(l, label) })
 }
 
-func live(m *Message) bool { return !m.Trash && !m.Spam }
+func addLabel(m *Message, label string) {
+	if !hasLabel(m, label) {
+		m.Labels = append(m.Labels, label)
+	}
+}
+
+func removeLabel(m *Message, label string) {
+	m.Labels = slices.DeleteFunc(m.Labels, func(l string) bool { return strings.EqualFold(l, label) })
+}
+
+func live(m *Message) bool { return !m.Trash && !m.Spam && !m.gone }
+
+func (f *folder) member(m *Message) bool {
+	switch f.kind {
+	case kindAll:
+		return live(m)
+	case kindTrash:
+		return m.Trash && !m.gone
+	case kindSpam:
+		return m.Spam && !m.gone
+	default:
+		return live(m) && hasLabel(m, f.label)
+	}
+}
+
+// add gives m the folder's next UID.
+func (f *folder) add(m *Message) imap.UID {
+	uid := f.nextUID
+	f.uids[m] = uid
+	f.order = append(f.order, m)
+	f.nextUID++
+	return uid
+}
+
+// ensure returns m's UID in f, giving it one if it has none. A caller that
+// files several messages calls it in source order, so COPYUID's sets line up.
+func (f *folder) ensure(m *Message) imap.UID {
+	if uid, ok := f.uids[m]; ok {
+		return uid
+	}
+	return f.add(m)
+}
+
+// flags returns m's flags as seen in f.
+func (f *folder) flags(m *Message) []imap.Flag {
+	flags := slices.Clone(m.Flags)
+	if f.deleted[m] && !slices.Contains(flags, imap.FlagDeleted) {
+		flags = append(flags, imap.FlagDeleted)
+	}
+	return flags
+}
+
+func (s *Server) addFolderLocked(name string, kind folderKind, label string, base imap.UID, attrs ...imap.MailboxAttr) *folder {
+	f := &folder{
+		name: name, attrs: attrs, kind: kind, label: label, nextUID: base, uidValidity: uint32(100 + len(s.folders)),
+		uids: map[*Message]imap.UID{}, deleted: map[*Message]bool{},
+	}
+	s.folders = append(s.folders, f)
+	return f
+}
+
+// addUserFolderLocked adds a folder for a user label, after the others.
+func (s *Server) addUserFolderLocked(label string) *folder {
+	f := s.addFolderLocked(label, kindLabel, label, imap.UID(10+s.userFolders)*s.step+1)
+	s.userFolders++
+	return f
+}
 
 func (s *Server) buildFolders() {
 	// step keeps each folder's UID range clear of the next one's.
-	step := imap.UID(100)
-	for int(step) <= len(s.msgs) {
-		step *= 10
+	s.step = imap.UID(100)
+	for int(s.step) <= len(s.msgs) {
+		s.step *= 10
 	}
-	add := func(name string, base imap.UID, member func(*Message) bool, attrs ...imap.MailboxAttr) {
-		s.folders = append(s.folders, &folder{name: name, attrs: attrs, member: member, nextUID: base, uidValidity: uint32(100 + len(s.folders))})
-	}
-	add("INBOX", step+1, func(m *Message) bool { return live(m) && hasLabel(m, `\Inbox`) })
-	add("[Gmail]/All Mail", 1, live, imap.MailboxAttrAll)
-	add("[Gmail]/Sent Mail", 2*step+1, func(m *Message) bool { return live(m) && hasLabel(m, `\Sent`) }, imap.MailboxAttrSent)
-	add("[Gmail]/Drafts", 5*step+1, func(m *Message) bool { return live(m) && hasLabel(m, `\Draft`) }, imap.MailboxAttrDrafts)
-	add("[Gmail]/Trash", 3*step+1, func(m *Message) bool { return m.Trash }, imap.MailboxAttrTrash)
-	add("[Gmail]/Spam", 4*step+1, func(m *Message) bool { return m.Spam }, imap.MailboxAttrJunk)
-	var userLabels []string
+	step := s.step
+	s.addFolderLocked("INBOX", kindLabel, `\Inbox`, step+1)
+	s.addFolderLocked("[Gmail]/All Mail", kindAll, "", 1, imap.MailboxAttrAll)
+	s.addFolderLocked("[Gmail]/Sent Mail", kindLabel, `\Sent`, 2*step+1, imap.MailboxAttrSent)
+	s.addFolderLocked("[Gmail]/Drafts", kindLabel, `\Draft`, 5*step+1, imap.MailboxAttrDrafts)
+	s.addFolderLocked("[Gmail]/Trash", kindTrash, "", 3*step+1, imap.MailboxAttrTrash)
+	s.addFolderLocked("[Gmail]/Spam", kindSpam, "", 4*step+1, imap.MailboxAttrJunk)
 	for _, m := range s.msgs {
 		for _, l := range m.Labels {
-			if !strings.HasPrefix(l, `\`) && !slices.Contains(userLabels, l) {
-				userLabels = append(userLabels, l)
+			if !strings.HasPrefix(l, `\`) && s.folderFoldLocked(l) == nil {
+				s.addUserFolderLocked(l)
 			}
 		}
 	}
-	for i, l := range userLabels {
-		add(l, imap.UID(10+i)*step+1, func(m *Message) bool { return live(m) && hasLabel(m, l) })
-	}
+	s.refreshLocked()
+}
+
+// refreshLocked brings every folder's membership up to date after a change:
+// messages that left lose their UID there, and messages that arrived get the
+// next UIDs in message order. Callers that need UIDs in another order give
+// them out first with folder.ensure.
+func (s *Server) refreshLocked() {
 	for _, f := range s.folders {
-		f.uids = map[*Message]imap.UID{}
-		for _, m := range s.msgs {
+		f.order = slices.DeleteFunc(f.order, func(m *Message) bool {
 			if f.member(m) {
-				f.uids[m] = f.nextUID
-				f.order = append(f.order, m)
-				f.nextUID++
+				return false
+			}
+			delete(f.uids, m)
+			delete(f.deleted, m)
+			return true
+		})
+		for _, m := range s.msgs {
+			if _, ok := f.uids[m]; !ok && f.member(m) {
+				f.add(m)
 			}
 		}
 	}
@@ -223,11 +339,98 @@ func (s *Server) folderLocked(name string) *folder {
 	return nil
 }
 
-// MsgID returns the X-GM-MSGID of the i-th message, counting from 0.
-func (s *Server) MsgID(i int) uint64 { return s.msgs[i].msgID }
+// folderFoldLocked finds a folder ignoring case, as Gmail matches labels.
+func (s *Server) folderFoldLocked(name string) *folder {
+	for _, f := range s.folders {
+		if strings.EqualFold(f.name, name) {
+			return f
+		}
+	}
+	return nil
+}
+
+// fileLocked puts m into f the way Gmail does for COPY and APPEND.
+func fileLocked(m *Message, f *folder) {
+	switch f.kind {
+	case kindTrash:
+		m.Trash, m.Spam = true, false
+	case kindSpam:
+		m.Trash, m.Spam = false, true
+	case kindAll:
+		m.Trash, m.Spam = false, false
+	default:
+		m.Trash, m.Spam = false, false
+		addLabel(m, f.label)
+	}
+}
+
+// moveLocked moves m from src to dest the way Gmail does for MOVE: it files m
+// in dest and drops src's label when dest is a label folder or All Mail. A
+// move to Trash or Spam keeps the labels for a later restore.
+func moveLocked(m *Message, src, dest *folder) {
+	if src != dest && src.kind == kindLabel && (dest.kind == kindLabel || dest.kind == kindAll) {
+		removeLabel(m, src.label)
+	}
+	fileLocked(m, dest)
+}
+
+// expungeLocked expunges m from f the way Gmail does: for good from Trash or
+// Spam, to Trash from All Mail, and by dropping the label elsewhere.
+func expungeLocked(m *Message, f *folder) {
+	switch f.kind {
+	case kindTrash, kindSpam:
+		m.gone = true
+	case kindAll:
+		m.Trash, m.Spam = true, false
+	default:
+		removeLabel(m, f.label)
+	}
+}
+
+// messageIDRE finds the <id> tokens of Message-ID, In-Reply-To and References.
+var messageIDRE = regexp.MustCompile(`<[^<>\s]+>`)
+
+// newMessageLocked adds a message as Gmail does on delivery or APPEND. It
+// joins the thread of an earlier message that its In-Reply-To or References
+// name, as Gmail threads replies.
+func (s *Server) newMessageLocked(raw string, date time.Time, flags []imap.Flag) *Message {
+	m := &Message{Raw: raw, Date: date, Flags: flags, msgID: firstMsgID + uint64(len(s.msgs))}
+	m.threadID = m.msgID
+	refs := messageIDRE.FindAllString(header(m, "In-Reply-To")+" "+header(m, "References"), -1)
+	for _, old := range s.msgs {
+		if id := strings.TrimSpace(header(old, "Message-Id")); id != "" && slices.Contains(refs, id) {
+			m.threadID = old.threadID
+			break
+		}
+	}
+	s.msgs = append(s.msgs, m)
+	return m
+}
+
+// FileSent adds raw as Gmail files a message submitted over SMTP: read, with
+// the \Sent label, in Sent Mail and All Mail.
+func (s *Server) FileSent(raw []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.newMessageLocked(string(raw), time.Now(), []imap.Flag{imap.FlagSeen})
+	addLabel(m, `\Sent`)
+	s.refreshLocked()
+}
+
+// MsgID returns the X-GM-MSGID of the i-th message, counting from 0. Messages
+// added by APPEND and FileSent count on from those given to Start.
+func (s *Server) MsgID(i int) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.msgs[i].msgID
+}
 
 // ThreadID returns the X-GM-THRID of the i-th message.
-func (s *Server) ThreadID(i int) uint64 { return s.msgs[i].threadID }
+func (s *Server) ThreadID(i int) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.msgs[i].threadID
+}
 
 // Flags returns the i-th message's flags.
 func (s *Server) Flags(i int) []imap.Flag {
