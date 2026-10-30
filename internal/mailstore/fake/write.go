@@ -515,17 +515,18 @@ func twin(list []string, from, to string) []string {
 }
 
 // checkFlags refuses what a server refuses in STORE and APPEND: \Recent,
-// unknown system flags, and keywords that are not IMAP atoms.
+// unknown system flags, and keywords that are not IMAP atoms. Like imapstore
+// it says ErrUnsupported.
 func checkFlags(flags []string) error {
 	for _, f := range flags {
 		if strings.HasPrefix(f, `\`) {
 			if !slices.ContainsFunc(systemFlags, func(x string) bool { return strings.EqualFold(x, f) }) {
-				return fmt.Errorf("fake: %q is not a flag a client can store", f)
+				return fmt.Errorf("%w: %q is not a flag a client can store", mailstore.ErrUnsupported, f)
 			}
 			continue
 		}
 		if f == "" || strings.ContainsFunc(f, func(r rune) bool { return r <= ' ' || r >= 0x7f || strings.ContainsRune(`(){%*"]\`, r) }) {
-			return fmt.Errorf("fake: %q is not a valid keyword", f)
+			return fmt.Errorf("%w: %q is not a valid keyword", mailstore.ErrUnsupported, f)
 		}
 	}
 	return nil

@@ -216,8 +216,8 @@ func TestWriteAppendDetails(t *testing.T) {
 		t.Error("Append of an empty message succeeded")
 	}
 	for _, flag := range []string{`\Recent`, `\Bogus`, "two words", ""} {
-		if _, err := s.Append(t.Context(), "INBOX", []string{flag}, now, raw("x", "x@x")); err == nil {
-			t.Errorf("Append with flag %q succeeded", flag)
+		if _, err := s.Append(t.Context(), "INBOX", []string{flag}, now, raw("x", "x@x")); !errors.Is(err, mailstore.ErrUnsupported) {
+			t.Errorf("Append with flag %q = %v, want ErrUnsupported, as imapstore refuses it", flag, err)
 		}
 	}
 	notMIME := []byte("just some bytes with no header")
@@ -681,8 +681,8 @@ func TestWriteStoreFlags(t *testing.T) {
 			res := s.StoreFlags(t.Context(), []ref.Ref{r, r2}, tt.add, tt.remove)
 			for i, want := range []ref.Ref{r, r2} {
 				if tt.wantErr {
-					if res[i].Err == nil {
-						t.Errorf("StoreFlags succeeded for ref %d", i)
+					if !errors.Is(res[i].Err, mailstore.ErrUnsupported) {
+						t.Errorf("StoreFlags[%d] = %v, want ErrUnsupported, as imapstore refuses it", i, res[i].Err)
 					}
 					if !slices.Equal(s.Flags(want), tt.flags) {
 						t.Errorf("a refused StoreFlags changed flags to %v", s.Flags(want))
