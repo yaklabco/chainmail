@@ -125,11 +125,44 @@ func TestOrganizeMoveRefusesBadFolder(t *testing.T) {
 		t.Errorf("store called %d times for refused requests", n)
 	}
 	rows := orgRows(t, m.Harness, "move")
-	if len(rows) != 3 || rows[0].Result != "error" || rows[0].Reason != api.ReasonInvalidArgument || rows[0].Account != "" {
+	if len(rows) != 3 || rows[0].Result != "error" || rows[0].Reason != api.ReasonInvalidArgument || rows[0].Account != "host" {
 		t.Fatalf("audit = %+v", rows)
 	}
-	if got := orgTargets(t, rows[1]); !slices.Equal(got, []string{"refs=1", "(invalid)"}) {
+	if got := orgTargets(t, rows[1]); !slices.Equal(got, []string{refs[0], "(invalid)"}) {
 		t.Errorf("targets = %q", got)
+	}
+}
+
+func TestOrganizeRefusalAuditsEachAccount(t *testing.T) {
+	t.Parallel()
+	m := startFakeMail(t)
+	host := m.host.Add(fake.Message{Folder: "INBOX"}).String()
+	gm := m.gmail.Add(fake.Message{Folder: gmailAllMail}).String()
+	refs := []string{host, "cm1:bad", gm}
+	_, err := m.Client.Organize.SetFlags(t.Context(), connect.NewRequest(&chainmailv1.SetFlagsRequest{Refs: refs, Add: []string{`\Deleted`}}))
+	if reasonOf(err) != api.ReasonInvalidArgument {
+		t.Fatalf("err = %v, want INVALID_ARGUMENT", err)
+	}
+	if n := m.host.Calls("StoreFlags") + m.gmail.Calls("StoreFlags"); n != 0 {
+		t.Errorf("StoreFlags called %d times for a refused request", n)
+	}
+	rows := orgRows(t, m.Harness, "flags")
+	if len(rows) != 3 {
+		t.Fatalf("audit = %+v, want one row per account", rows)
+	}
+	want := []struct {
+		account string
+		targets []string
+	}{
+		{"", []string{"(invalid)"}},
+		{"gmail", []string{gm}},
+		{"host", []string{host}},
+	}
+	for i, w := range want {
+		r := rows[i]
+		if r.Account != w.account || r.Result != "error" || r.Reason != api.ReasonInvalidArgument || !slices.Equal(orgTargets(t, r), w.targets) {
+			t.Errorf("row %d = %+v, want account %q targets %q", i, r, w.account, w.targets)
+		}
 	}
 }
 
@@ -455,14 +488,31 @@ func TestOrganizeFolders(t *testing.T) {
 	t.Parallel()
 	m := startFakeMail(t)
 	org := m.Client.Organize
+	has := func(name string) bool {
+		t.Helper()
+		folders, err := m.host.ListFolders(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.ContainsFunc(folders, func(f mailstore.Folder) bool { return f.Name == name })
+	}
 	if _, err := org.CreateFolder(t.Context(), connect.NewRequest(&chainmailv1.CreateFolderRequest{Account: "host", Name: "Projects/2026"})); err != nil {
 		t.Fatal(err)
+	}
+	if !has("Projects/2026") {
+		t.Error("created folder is missing")
 	}
 	if _, err := org.RenameFolder(t.Context(), connect.NewRequest(&chainmailv1.RenameFolderRequest{Account: "host", From: "Projects/2026", To: "Projects/Done"})); err != nil {
 		t.Fatal(err)
 	}
+	if has("Projects/2026") || !has("Projects/Done") {
+		t.Error("rename did not move the folder")
+	}
 	if _, err := org.DeleteFolder(t.Context(), connect.NewRequest(&chainmailv1.DeleteFolderRequest{Account: "host", Name: "Projects/Done", Force: true})); err != nil {
 		t.Fatal(err)
+	}
+	if has("Projects/Done") {
+		t.Error("deleted folder is still there")
 	}
 	want := map[string][]string{
 		"folders.create": {"Projects/2026"},
@@ -544,14 +594,19 @@ func TestOrganizeFolderErrors(t *testing.T) {
 	}
 }
 
+// accountFanOut is the most accounts one organize call works on at once.
+const accountFanOut = 8
+
 // countingStore wraps a fake store and records how many Trash calls run on
-// it at once. Each call waits, up to a limit, until every account has a
-// call in flight, so overlapping accounts show up as overlap.
+// it, and across all stores, at once.
 type countingStore struct {
 	*fake.Store
 	fan *fanout
 }
 
+// fanout counts concurrent calls. Each call waits until accountFanOut calls
+// are in flight, so a bounded fan-out reaches its bound, then waits a little
+// longer for every account, so an unbounded one shows up past the bound.
 type fanout struct {
 	mu       sync.Mutex
 	inFlight map[string]int
@@ -559,8 +614,20 @@ type fanout struct {
 	maxAll   int
 	all      int
 	accounts int
-	ready    chan struct{}
-	once     sync.Once
+	full     chan struct{}
+	allIn    chan struct{}
+	fullOnce sync.Once
+	allOnce  sync.Once
+}
+
+func newFanout(accounts int) *fanout {
+	return &fanout{
+		inFlight: map[string]int{},
+		maxPer:   map[string]int{},
+		accounts: accounts,
+		full:     make(chan struct{}),
+		allIn:    make(chan struct{}),
+	}
 }
 
 func (c countingStore) Trash(ctx context.Context, refs []ref.Ref) []mailstore.RefResult {
@@ -571,13 +638,20 @@ func (c countingStore) Trash(ctx context.Context, refs []ref.Ref) []mailstore.Re
 	f.all++
 	f.maxPer[acct] = max(f.maxPer[acct], f.inFlight[acct])
 	f.maxAll = max(f.maxAll, f.all)
-	if len(f.inFlight) == f.accounts {
-		f.once.Do(func() { close(f.ready) })
+	if f.all >= accountFanOut {
+		f.fullOnce.Do(func() { close(f.full) })
+	}
+	if f.all >= f.accounts {
+		f.allOnce.Do(func() { close(f.allIn) })
 	}
 	f.mu.Unlock()
 	select {
-	case <-f.ready:
+	case <-f.full:
 	case <-time.After(5 * time.Second):
+	}
+	select {
+	case <-f.allIn:
+	case <-time.After(100 * time.Millisecond):
 	}
 	defer func() {
 		f.mu.Lock()
@@ -588,38 +662,50 @@ func (c countingStore) Trash(ctx context.Context, refs []ref.Ref) []mailstore.Re
 	return c.Store.Trash(ctx, refs)
 }
 
-func TestOrganizeFanOutIsOneCallPerAccount(t *testing.T) {
+func TestOrganizeFanOutIsBounded(t *testing.T) {
 	t.Parallel()
-	host, gmail := fake.New("host", false), fake.New("gmail", true)
-	fan := &fanout{inFlight: map[string]int{}, maxPer: map[string]int{}, accounts: 2, ready: make(chan struct{})}
-	h := daemontest.Start(t, fakeMailConfig, daemontest.Options{
+	const accounts = accountFanOut + 4
+	var cfg strings.Builder
+	stores := map[string]*fake.Store{}
+	for i := range accounts {
+		name := fmt.Sprintf("acct%d", i)
+		fmt.Fprintf(&cfg, "[accounts.%s]\nprovider = \"hostinger\"\naddress = \"%s@example.com\"\n\n", name, name)
+		stores[name] = fake.New(name, false)
+	}
+	fan := newFanout(accounts)
+	h := daemontest.Start(t, cfg.String(), daemontest.Options{
 		NewStore: func(a config.ResolvedAccount) mailstore.Store {
-			if a.Name == "gmail" {
-				return countingStore{Store: gmail, fan: fan}
-			}
-			return countingStore{Store: host, fan: fan}
+			return countingStore{Store: stores[a.Name], fan: fan}
 		},
 		Now: func() time.Time { return testNow },
 	})
 	var refs []string
-	for range 20 {
-		refs = append(refs, host.Add(fake.Message{Folder: "INBOX"}).String())
-		refs = append(refs, gmail.Add(fake.Message{Folder: gmailAllMail}).String())
+	for range 3 {
+		for i := range accounts {
+			refs = append(refs, stores[fmt.Sprintf("acct%d", i)].Add(fake.Message{Folder: "INBOX"}).String())
+		}
 	}
 	resp, err := h.Client.Organize.Trash(t.Context(), connect.NewRequest(&chainmailv1.TrashRequest{Refs: refs}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	checkOK(t, refs, resp.Msg.GetOutcomes())
-	if host.Calls("Trash") != 1 || gmail.Calls("Trash") != 1 {
-		t.Errorf("Trash calls: host %d, gmail %d, want one per account", host.Calls("Trash"), gmail.Calls("Trash"))
+	for name, s := range stores {
+		if n := s.Calls("Trash"); n != 1 {
+			t.Errorf("%s: Trash called %d times, want one per account", name, n)
+		}
 	}
 	fan.mu.Lock()
 	defer fan.mu.Unlock()
-	if fan.maxPer["host"] != 1 || fan.maxPer["gmail"] != 1 {
-		t.Errorf("most concurrent calls per account = %v, want 1", fan.maxPer)
+	for name, n := range fan.maxPer {
+		if n != 1 {
+			t.Errorf("%s: most concurrent calls = %d, want 1", name, n)
+		}
 	}
-	if fan.maxAll != 2 {
-		t.Errorf("most concurrent calls = %d, want the two accounts at once", fan.maxAll)
+	if fan.maxAll != accountFanOut {
+		t.Errorf("most concurrent calls = %d, want the bound %d", fan.maxAll, accountFanOut)
+	}
+	if rows := orgRows(t, h, "trash"); len(rows) != accounts {
+		t.Errorf("audit rows = %d, want %d", len(rows), accounts)
 	}
 }

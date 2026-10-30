@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"regexp"
 	"slices"
@@ -29,6 +30,9 @@ const (
 	organizeTimeout = 2 * time.Minute
 	// maxFolderBytes is the longest folder or label name accepted.
 	maxFolderBytes = 255
+	// maxAccountFanOut is the most accounts one organize call works on at
+	// once. Each account's store bounds its own folder groups by its pool.
+	maxAccountFanOut = 8
 )
 
 // storableFlags are the system flags a client may add or remove. \Deleted
@@ -187,8 +191,10 @@ func (o *organizeService) SetLabels(ctx context.Context, req *connect.Request[ch
 }
 
 // batch runs a batch call: it checks the call, runs each account's refs
-// through one Writer call, all accounts at once, and records one audit row
-// per account. A ref that fails, fails only its own outcome.
+// through one Writer call, at most maxAccountFanOut accounts at once, and
+// records one audit row per account. A ref that fails, fails only its own
+// outcome. A call refused for its arguments still records one row per
+// account, unless it has too few or too many refs to attribute.
 func (o *organizeService) batch(ctx context.Context, h http.Header, c batchCall) ([]*chainmailv1.RefOutcome, error) {
 	who, err := callerOf(ctx, h)
 	if err != nil {
@@ -196,37 +202,45 @@ func (o *organizeService) batch(ctx context.Context, h http.Header, c batchCall)
 	}
 	ctx, cancel := withDeadline(ctx, organizeTimeout)
 	defer cancel()
-	if err := checkBatch(c); err != nil {
+	if err := checkRefCount(c); err != nil {
 		entry := audit.Entry{Action: c.action, Targets: append([]string{tally("refs", len(c.refs))}, c.targets...)}
 		return nil, o.s.record(ctx, who, entry, err)
 	}
-	outs, errs, groups := o.runBatch(ctx, c)
+	outs, errs, groups := groupRefs(c)
+	if c.check != nil {
+		if err := c.check(); err != nil {
+			for i := range errs {
+				errs[i] = cmp.Or(errs[i], err)
+			}
+			if aerr := o.recordBatch(ctx, who, c, groups, errs); aerr != nil {
+				return nil, aerr
+			}
+			return nil, toConnectError(err)
+		}
+	}
+	o.runBatch(ctx, c, outs, errs, groups)
 	if err := o.recordBatch(ctx, who, c, groups, errs); err != nil {
 		return nil, err
 	}
 	return outs, nil
 }
 
-// checkBatch refuses a call with no refs, too many refs, or a bad argument.
-func checkBatch(c batchCall) error {
+// checkRefCount refuses a call with no refs or too many refs.
+func checkRefCount(c batchCall) error {
 	if n := len(c.refs); n == 0 || n > maxOrganizeRefs {
 		return &argError{
 			msg:  fmt.Sprintf("%s takes 1 to %d refs, got %d", c.action, maxOrganizeRefs, n),
 			hint: fmt.Sprintf("split the refs into batches of %d", maxOrganizeRefs),
 		}
 	}
-	if c.check != nil {
-		return c.check()
-	}
 	return nil
 }
 
-// runBatch groups the refs by account and runs the groups concurrently,
-// one goroutine and one Writer call per account. Each store bounds its own
-// folder groups by its pool size. It returns the outcomes in request order,
-// each ref's error, and the groups sorted by account, with refs that did not
-// parse in a group of their own under account "".
-func (o *organizeService) runBatch(ctx context.Context, c batchCall) ([]*chainmailv1.RefOutcome, []error, []*refGroup) {
+// groupRefs parses the call's refs and groups them by account. It returns
+// an outcome per ref in request order, each ref's parse error, and the
+// groups sorted by account, with refs that did not parse in a group of
+// their own under account "".
+func groupRefs(c batchCall) ([]*chainmailv1.RefOutcome, []error, []*refGroup) {
 	outs := make([]*chainmailv1.RefOutcome, len(c.refs))
 	errs := make([]error, len(c.refs))
 	byAccount := map[string]*refGroup{}
@@ -243,19 +257,31 @@ func (o *organizeService) runBatch(ctx context.Context, c batchCall) ([]*chainma
 		r, err := ref.Parse(s)
 		if err != nil {
 			errs[i] = err
-			group("").idx = append(group("").idx, i)
+			g := group("")
+			g.idx = append(g.idx, i)
 			continue
 		}
 		g := group(r.Account)
 		g.idx = append(g.idx, i)
 		g.refs = append(g.refs, r)
 	}
+	groups := slices.Collect(maps.Values(byAccount))
+	slices.SortFunc(groups, func(a, b *refGroup) int { return strings.Compare(a.account, b.account) })
+	return outs, errs, groups
+}
+
+// runBatch runs the groups concurrently, one goroutine and one Writer call
+// per account, at most maxAccountFanOut at once. Each store bounds its own
+// folder groups by its pool size. It fills in outs and errs, and sets each
+// failed outcome's error.
+func (o *organizeService) runBatch(ctx context.Context, c batchCall, outs []*chainmailv1.RefOutcome, errs []error, groups []*refGroup) {
+	sem := make(chan struct{}, maxAccountFanOut)
 	var wg sync.WaitGroup
-	for name, g := range byAccount {
-		if name == "" {
+	for _, g := range groups {
+		if g.account == "" {
 			continue
 		}
-		acct, err := o.s.opts.Config.Account(name)
+		acct, err := o.s.opts.Config.Account(g.account)
 		if err != nil {
 			for _, i := range g.idx {
 				errs[i] = err
@@ -263,8 +289,20 @@ func (o *organizeService) runBatch(ctx context.Context, c batchCall) ([]*chainma
 			continue
 		}
 		w := o.s.stores.get(acct)
+		// Taking the slot before starting the goroutine bounds the
+		// goroutines as well as the Writer calls. Once the call is
+		// canceled, no further account starts.
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			for _, i := range g.idx {
+				errs[i] = ctx.Err()
+			}
+			continue
+		}
 		// Each goroutine writes only its own group's positions.
 		wg.Go(func() {
+			defer func() { <-sem }()
 			results := c.run(ctx, w, g.refs)
 			for j, i := range g.idx {
 				if j >= len(results) {
@@ -290,12 +328,6 @@ func (o *organizeService) runBatch(ctx context.Context, c batchCall) ([]*chainma
 			outs[i].Error = itemError(err)
 		}
 	}
-	groups := make([]*refGroup, 0, len(byAccount))
-	for _, g := range byAccount {
-		groups = append(groups, g)
-	}
-	slices.SortFunc(groups, func(a, b *refGroup) int { return strings.Compare(a.account, b.account) })
-	return outs, errs, groups
 }
 
 // recordBatch writes one audit row per account: its refs, then the call's
