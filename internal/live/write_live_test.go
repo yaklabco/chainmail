@@ -5,6 +5,7 @@ package live
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -33,20 +34,28 @@ import (
 const (
 	// writesEnv opts in to the tests that send, organize and probe.
 	writesEnv = "CHAINMAIL_LIVE_WRITES"
-	// deliveryTimeout bounds the wait for a message sent to self to arrive.
-	deliveryTimeout = 3 * time.Minute
-	// settleTimeout is how long cleanup keeps looking for a message whose
-	// delivery the test never saw, after the last send.
-	settleTimeout = 90 * time.Second
+	// deliveryTimeout bounds the wait for the inbox copy of a message sent
+	// to self.
+	deliveryTimeout = 60 * time.Second
+	// searchTimeout bounds the wait for a message to show in a folder after
+	// an organize call.
+	searchTimeout = 3 * time.Minute
+	// settleTimeout is how long cleanup keeps looking for the inbox copy of
+	// a send the test never saw arrive, after the last send. It is longer
+	// than deliveryTimeout, so a send the test gave up on still gets time.
+	settleTimeout = 3 * time.Minute
 	// cleanupTimeout bounds each cleanup.
 	cleanupTimeout = 5 * time.Minute
-	// pollInterval is the pause between searches while waiting.
-	pollInterval = 5 * time.Second
+	// folderSettleTimeout bounds cleanup's retries of deleting the test
+	// folder, in case the server still counts the expunged mail in it.
+	folderSettleTimeout = 30 * time.Second
 	// testFolderPrefix starts the name of the folder or label the organize
 	// test creates.
 	testFolderPrefix = "chainmail-test-"
 	// maxSweepPages bounds how far a cleanup search pages.
 	maxSweepPages = 10
+	// maxSweepRounds bounds how often cleanup expunges and searches again.
+	maxSweepRounds = 10
 )
 
 // requireWrites skips a test that changes mail unless writesEnv is 1.
@@ -72,9 +81,6 @@ func randomToken(n int) string {
 func liveKey(token, step string) string { return "live-" + token + "-" + step }
 
 func reasonOf(err error) string { return api.Detail(err).GetReason() }
-
-// trimID drops the angle brackets around a Message-ID, if any.
-func trimID(id string) string { return strings.TrimSuffix(strings.TrimPrefix(id, "<"), ">") }
 
 func term(field, value string) *chainmailv1.Query {
 	return &chainmailv1.Query{Node: &chainmailv1.Query_Term{Term: &chainmailv1.QueryTerm{Field: field, Value: value}}}
@@ -135,23 +141,38 @@ func getMessages(ctx context.Context, c *client.Client, refs []string) ([]*chain
 	return out, nil
 }
 
-// findMessage waits up to deliveryTimeout for a message with Message-ID id
-// and token in its subject, in folder in, that accept takes. It returns the
+// tokenMessages reads every message of the account's search, in folder in,
+// whose subject holds token.
+func tokenMessages(ctx context.Context, c *client.Client, account, token, in string) ([]*chainmailv1.Message, error) {
+	rows, err := tokenRows(ctx, c, account, token, in)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]string, 0, len(rows))
+	for _, r := range rows {
+		refs = append(refs, r.GetRef())
+	}
+	return getMessages(ctx, c, refs)
+}
+
+// pause waits before repeat n of a search, or until ctx is done.
+func pause(ctx context.Context, n int) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(backoff(n)):
+		return nil
+	}
+}
+
+// findMessage waits up to within for a message with Message-ID id and
+// token in its subject, in folder in, that accept takes. It returns the
 // message's ref.
-func findMessage(t *testing.T, c *client.Client, account, token, in, id string, accept func(*chainmailv1.Message) bool) string {
+func findMessage(t *testing.T, c *client.Client, account, token, in, id string, within time.Duration, accept func(*chainmailv1.Message) bool) string {
 	t.Helper()
-	deadline := time.Now().Add(deliveryTimeout)
 	start := time.Now()
-	for {
-		rows, err := tokenRows(t.Context(), c, account, token, in)
-		if err != nil {
-			t.Fatalf("waiting for %s in %q: %v", id, in, err)
-		}
-		refs := make([]string, 0, len(rows))
-		for _, r := range rows {
-			refs = append(refs, r.GetRef())
-		}
-		msgs, err := getMessages(t.Context(), c, refs)
+	for n := 0; ; n++ {
+		msgs, err := tokenMessages(t.Context(), c, account, token, in)
 		if err != nil {
 			t.Fatalf("waiting for %s in %q: %v", id, in, err)
 		}
@@ -161,13 +182,11 @@ func findMessage(t *testing.T, c *client.Client, account, token, in, id string, 
 				return m.GetRef()
 			}
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s did not appear in %q within %v (%d candidate rows)", id, in, deliveryTimeout, len(rows))
+		if time.Since(start) >= within {
+			t.Fatalf("%s did not appear in %q within %v (%d candidates)", id, in, within, len(msgs))
 		}
-		select {
-		case <-t.Context().Done():
-			t.Fatalf("waiting for %s: %v", id, t.Context().Err())
-		case <-time.After(pollInterval):
+		if err := pause(t.Context(), n); err != nil {
+			t.Fatalf("waiting for %s: %v", id, err)
 		}
 	}
 }
@@ -189,39 +208,25 @@ func folderRoles(t *testing.T, c *client.Client, account string) map[string]stri
 	return roles
 }
 
-// received accepts the delivered copy of a message sent to self: on Google
-// the one message in All Mail, elsewhere a copy outside Sent and Drafts.
-// A draft that shares the Message-ID, as one being sent does, is not it.
-func received(a *chainmailv1.Account, roles map[string]string) func(*chainmailv1.Message) bool {
-	return func(m *chainmailv1.Message) bool {
-		if slices.Contains(m.GetFlags(), `\Draft`) {
-			return false
-		}
-		if isGoogle(a) {
-			return true
-		}
-		role := roles[m.GetFolder()]
-		return role != "sent" && role != "drafts"
-	}
-}
-
-// sweeper removes every message carrying a test's token. pending counts
-// sends whose delivery the test has not seen; while any are pending,
-// cleanup keeps looking until settleTimeout after the last send, so a
-// message that arrives late is still removed.
+// sweeper removes every message whose subject holds a test's token,
+// wherever it is: the Inbox, Sent and Drafts and every other folder, with
+// All Mail, Trash and Spam on Google. It touches nothing else. Before it
+// removes anything it waits for the inbox copy of every send, so a message
+// cannot arrive after cleanup has finished.
 type sweeper struct {
 	c       *client.Client
 	account string
 	token   string
-	pending int
-	last    time.Time
+	google  bool
+	roles   map[string]string
+	deliveries
 }
 
-// newSweeper registers a cleanup that expunges every message of the
-// account whose subject holds token.
-func newSweeper(t *testing.T, c *client.Client, account, token string) *sweeper {
+// newSweeper registers a cleanup that expunges every message of account a
+// whose subject holds token. roles are the account's folder roles.
+func newSweeper(t *testing.T, c *client.Client, a *chainmailv1.Account, roles map[string]string, token string) *sweeper {
 	t.Helper()
-	s := &sweeper{c: c, account: account, token: token}
+	s := &sweeper{c: c, account: a.GetName(), token: token, google: isGoogle(a), roles: roles}
 	// t.Context is cancelled before cleanups run, so the cleanup keeps its
 	// values but drops the cancellation.
 	base := context.WithoutCancel(t.Context())
@@ -229,23 +234,26 @@ func newSweeper(t *testing.T, c *client.Client, account, token string) *sweeper 
 		ctx, cancel := context.WithTimeout(base, cleanupTimeout)
 		defer cancel()
 		if err := s.sweep(ctx, t); err != nil {
-			t.Errorf("cleanup on %s: %v; search subject:%s in:anywhere and remove what is left", account, err, token)
+			t.Errorf("cleanup on %s: %v; search subject:%s in:anywhere and remove what is left", s.account, err, token)
 		}
 	})
 	return s
 }
 
 // sending is called before each send attempt.
-func (s *sweeper) sending() {
-	s.pending++
-	s.last = time.Now()
-}
+func (s *sweeper) sending() { s.deliveries.sending(time.Now()) }
 
-// delivered is called once the test has seen a send arrive.
-func (s *sweeper) delivered() {
-	if s.pending > 0 {
-		s.pending--
-	}
+// inInbox says m is the received copy of a message the test sent.
+func (s *sweeper) inInbox(m *chainmailv1.Message) bool { return deliveredCopy(m, s.google, s.roles) }
+
+// waitDelivered waits up to deliveryTimeout for the inbox copy of the sent
+// message id, records it, and returns its ref. A Sent copy does not count:
+// on Google it is the same All Mail message before \Inbox is added.
+func (s *sweeper) waitDelivered(t *testing.T, id string) string {
+	t.Helper()
+	ref := findMessage(t, s.c, s.account, s.token, "inbox", id, deliveryTimeout, s.inInbox)
+	s.delivered(id)
+	return ref
 }
 
 // gone says a ref no longer names a message, which cleanup takes as done.
@@ -253,40 +261,96 @@ func gone(e *chainmailv1.ItemError) bool {
 	return e.GetReason() == api.ReasonNotFound || e.GetReason() == api.ReasonStaleRef
 }
 
-// sweep expunges the token's messages until none are left and no
-// delivery is still pending.
+// sweep waits for the sends not yet seen in the inbox, then expunges the
+// token's messages until none are left. It fails when a send never
+// arrived, since that one may still arrive after cleanup.
 func (s *sweeper) sweep(ctx context.Context, t *testing.T) error {
+	missing, waitErr := s.await(ctx)
+	removed, err := s.expunge(ctx)
+	if err := errors.Join(waitErr, err); err != nil {
+		return err
+	}
+	t.Logf("cleanup on %s: expunged %d messages", s.account, removed)
+	if missing > 0 {
+		return fmt.Errorf("%d sends never reached the inbox within %v of the last send, so a message may still arrive after cleanup", missing, settleTimeout)
+	}
+	return nil
+}
+
+// await searches the inbox for the sends not yet seen there, until every
+// one is seen or settleTimeout has passed since the last send. It returns
+// how many were never seen.
+func (s *sweeper) await(ctx context.Context) (int, error) {
+	for n := 0; ; n++ {
+		switch s.next(time.Now(), settleTimeout) {
+		case settleDone:
+			return 0, nil
+		case settleUnresolved:
+			return s.outstanding(), nil
+		case settleWait:
+		}
+		msgs, err := tokenMessages(ctx, s.c, s.account, s.token, "inbox")
+		if err != nil {
+			return s.outstanding(), fmt.Errorf("waiting for %d deliveries: %w", s.outstanding(), err)
+		}
+		for _, m := range msgs {
+			if s.inInbox(m) {
+				s.delivered(m.GetMessageId().GetUntrusted())
+			}
+		}
+		if s.outstanding() == 0 {
+			return 0, nil
+		}
+		if err := pause(ctx, n); err != nil {
+			return s.outstanding(), fmt.Errorf("waiting for %d deliveries: %w", s.outstanding(), err)
+		}
+	}
+}
+
+// expunge removes every message whose subject holds the token, searching
+// again until none is left, and returns how many it removed.
+func (s *sweeper) expunge(ctx context.Context) (int, error) {
 	removed := 0
-	for {
+	for range maxSweepRounds {
 		rows, err := tokenRows(ctx, s.c, s.account, s.token, "anywhere")
 		if err != nil {
-			return err
+			return removed, err
 		}
-		if len(rows) > 0 {
-			refs := make([]string, 0, len(rows))
-			for _, r := range rows {
-				refs = append(refs, r.GetRef())
-			}
-			resp, err := s.c.Organize.Expunge(ctx, connect.NewRequest(&chainmailv1.ExpungeRequest{Refs: refs}))
-			if err != nil {
-				return fmt.Errorf("expunge: %w (%s)", err, hint(err))
-			}
-			for _, o := range resp.Msg.GetOutcomes() {
-				if e := o.GetError(); e != nil && !gone(e) {
-					return fmt.Errorf("expunge %s: %s: %s", o.GetRef(), e.GetReason(), e.GetMessage())
-				}
-			}
-			removed += len(refs)
-			continue
+		if len(rows) == 0 {
+			return removed, nil
 		}
-		if s.pending == 0 || time.Since(s.last) >= settleTimeout {
-			t.Logf("cleanup on %s: expunged %d messages", s.account, removed)
+		refs := make([]string, 0, len(rows))
+		for _, r := range rows {
+			refs = append(refs, r.GetRef())
+		}
+		resp, err := s.c.Organize.Expunge(ctx, connect.NewRequest(&chainmailv1.ExpungeRequest{Refs: refs}))
+		if err != nil {
+			return removed, fmt.Errorf("expunge: %w (%s)", err, hint(err))
+		}
+		for _, o := range resp.Msg.GetOutcomes() {
+			if e := o.GetError(); e != nil && !gone(e) {
+				return removed, fmt.Errorf("expunge %s: %s: %s", o.GetRef(), e.GetReason(), e.GetMessage())
+			}
+		}
+		removed += len(refs)
+	}
+	return removed, fmt.Errorf("messages still found after %d rounds of expunging", maxSweepRounds)
+}
+
+// deleteTestFolder deletes the test's folder without force, so it never
+// takes mail the sweep did not find with it. A folder that is not there is
+// fine: the create may not have taken effect, or the test deleted it
+// already. While the server refuses, it tries again for
+// folderSettleTimeout.
+func deleteTestFolder(ctx context.Context, c *client.Client, account, folder string) error {
+	start := time.Now()
+	for n := 0; ; n++ {
+		_, err := c.Organize.DeleteFolder(ctx, connect.NewRequest(&chainmailv1.DeleteFolderRequest{Account: account, Name: folder}))
+		if err == nil || reasonOf(err) == api.ReasonNotFound {
 			return nil
 		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("waiting for %d late deliveries: %w", s.pending, ctx.Err())
-		case <-time.After(pollInterval):
+		if time.Since(start) >= folderSettleTimeout || pause(ctx, n) != nil {
+			return fmt.Errorf("DeleteFolder %s: %w (%s)", folder, err, hint(err))
 		}
 	}
 }
@@ -339,8 +403,8 @@ func TestEveryAccountSends(t *testing.T) {
 		t.Run(a.GetName(), func(t *testing.T) {
 			token := "cmlive" + randomToken(16)
 			t.Logf("token %s", token)
-			sw := newSweeper(t, c, a.GetName(), token)
 			roles := folderRoles(t, c, a.GetName())
+			sw := newSweeper(t, c, a, roles, token)
 			subject := "chainmail live test " + token
 			spec := selfSpec(a, subject, "A **chainmail** live test. It deletes itself.")
 
@@ -378,8 +442,7 @@ func TestEveryAccountSends(t *testing.T) {
 					dup.GetDuplicate(), dup.GetMessageId(), sent.GetMessageId())
 			}
 
-			orig := findMessage(t, c, a.GetName(), token, "", sent.GetMessageId(), received(a, roles))
-			sw.delivered()
+			orig := sw.waitDelivered(t, sent.GetMessageId())
 
 			t.Run("reply", func(t *testing.T) {
 				// The original is the account's own message to itself, so
@@ -393,8 +456,7 @@ func TestEveryAccountSends(t *testing.T) {
 					t.Fatalf("Reply: %v (%s)", err, hint(err))
 				}
 				s := sentOf(t, "Reply", resp.Msg.GetResult())
-				got := findMessage(t, c, a.GetName(), token, "", s.GetMessageId(), received(a, roles))
-				sw.delivered()
+				got := sw.waitDelivered(t, s.GetMessageId())
 				m := getOne(t, c, got, false)
 				if irt := m.GetInReplyTo(); len(irt) != 1 || trimID(irt[0].GetUntrusted()) != trimID(sent.GetMessageId()) {
 					t.Errorf("the reply's In-Reply-To does not name the original %s", sent.GetMessageId())
@@ -414,8 +476,7 @@ func TestEveryAccountSends(t *testing.T) {
 					t.Fatalf("Forward: %v (%s)", err, hint(err))
 				}
 				s := sentOf(t, "Forward", resp.Msg.GetResult())
-				findMessage(t, c, a.GetName(), token, "", s.GetMessageId(), received(a, roles))
-				sw.delivered()
+				sw.waitDelivered(t, s.GetMessageId())
 				if !hasFlag(t, c, orig, "$Forwarded") {
 					t.Errorf("the original %s is not $Forwarded after the forward", orig)
 				}
@@ -451,8 +512,7 @@ func TestEveryAccountSends(t *testing.T) {
 					t.Fatalf("SendDraft %s: %v (%s)", second.GetRef(), err, hint(err))
 				}
 				s := sentOf(t, "SendDraft", sendResp.Msg.GetResult())
-				findMessage(t, c, a.GetName(), token, "", s.GetMessageId(), received(a, roles))
-				sw.delivered()
+				sw.waitDelivered(t, s.GetMessageId())
 
 				doomed, err := c.Compose.CreateDraft(t.Context(), connect.NewRequest(&chainmailv1.CreateDraftRequest{
 					Spec: selfSpec(a, "chainmail live draft to delete "+token, "Deleted unsent."),
@@ -519,24 +579,29 @@ func TestEveryAccountOrganizes(t *testing.T) {
 			token := "cmlive" + randomToken(16)
 			t.Logf("folder %s, token %s", folder, token)
 
-			if _, err := c.Organize.CreateFolder(t.Context(), connect.NewRequest(&chainmailv1.CreateFolderRequest{Account: name, Name: folder})); err != nil {
-				t.Fatalf("CreateFolder %s: %v (%s)", folder, err, hint(err))
+			// The name must be free before the test claims it, so the
+			// cleanup below can only ever delete the test's own folder.
+			roles := folderRoles(t, c, name)
+			if listed(roles, folder) {
+				t.Fatalf("%s already exists; run the test again for another name", folder)
 			}
 			base := context.WithoutCancel(t.Context())
-			// Registered before the sweeper, so it runs after it. The
-			// folder is the test's own, with a random name, so whatever is
-			// still in it was put there by the test: force is safe.
+			// Registered before CreateFolder, so a create that took effect
+			// but returned an error is still cleaned up, and before the
+			// sweeper, so it runs after the sweep has emptied the folder.
 			t.Cleanup(func() {
 				ctx, cancel := context.WithTimeout(base, cleanupTimeout)
 				defer cancel()
-				_, err := c.Organize.DeleteFolder(ctx, connect.NewRequest(&chainmailv1.DeleteFolderRequest{Account: name, Name: folder, Force: true}))
-				if err != nil && reasonOf(err) != api.ReasonNotFound {
-					t.Errorf("cleanup on %s: DeleteFolder %s: %v (%s); delete it by hand", name, folder, err, hint(err))
+				if err := deleteTestFolder(ctx, c, name, folder); err != nil {
+					t.Errorf("cleanup on %s: %v; delete it by hand", name, err)
 				}
 			})
-			sw := newSweeper(t, c, name, token)
-			roles := folderRoles(t, c, name)
-			if _, ok := roles[folder]; !ok {
+			sw := newSweeper(t, c, a, roles, token)
+
+			if _, err := c.Organize.CreateFolder(t.Context(), connect.NewRequest(&chainmailv1.CreateFolderRequest{Account: name, Name: folder})); err != nil {
+				t.Fatalf("CreateFolder %s: %v (%s)", folder, err, hint(err))
+			}
+			if !listed(folderRoles(t, c, name), folder) {
 				t.Fatalf("%s is not listed after CreateFolder", folder)
 			}
 
@@ -549,8 +614,7 @@ func TestEveryAccountOrganizes(t *testing.T) {
 				t.Fatalf("Send: %v (%s)", err, hint(err))
 			}
 			id := sentOf(t, "Send", resp.Msg.GetResult()).GetMessageId()
-			m := findMessage(t, c, name, token, "", id, received(a, roles))
-			sw.delivered()
+			m := sw.waitDelivered(t, id)
 
 			// next is the message's ref after a call: new_ref when set, the
 			// same ref on Google when the call only edits labels, or else
@@ -563,14 +627,14 @@ func TestEveryAccountOrganizes(t *testing.T) {
 				if google && in != "trash" {
 					return o.GetRef()
 				}
-				return findMessage(t, c, name, token, in, id, func(m *chainmailv1.Message) bool {
+				return findMessage(t, c, name, token, in, id, searchTimeout, func(m *chainmailv1.Message) bool {
 					return !slices.Contains(exclude, m.GetRef())
 				})
 			}
 
 			cpOuts, err := outcomesOf(c.Organize.Copy(t.Context(), connect.NewRequest(&chainmailv1.CopyRequest{Refs: []string{m}, Folder: folder})))
 			cp := next(outcome(t, "Copy", cpOuts, err), folder)
-			findMessage(t, c, name, token, folder, id, nil)
+			findMessage(t, c, name, token, folder, id, searchTimeout, nil)
 
 			for _, step := range []struct {
 				name        string
@@ -621,14 +685,20 @@ func TestEveryAccountOrganizes(t *testing.T) {
 			}
 
 			mvOuts, err := outcomesOf(c.Organize.Move(t.Context(), connect.NewRequest(&chainmailv1.MoveRequest{Refs: []string{m}, Folder: folder})))
-			moved := next(outcome(t, "Move", mvOuts, err), folder, cp)
+			mv := outcome(t, "Move", mvOuts, err)
+			moved := next(mv, folder, cp)
 			if !google {
 				msgs, err := getMessages(t.Context(), c, []string{m})
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(msgs) != 0 {
-					t.Errorf("%s can still be read after moving it", m)
+				switch {
+				case len(msgs) != 0 && originalMustBeGone(google, mv.GetNewRef()):
+					t.Errorf("%s can still be read after moving it to %s", m, mv.GetNewRef())
+				case len(msgs) != 0:
+					// No COPYUID, so a move done by COPY keeps the original
+					// (spec 7.1). The sweep removes both copies.
+					t.Logf("Move: no new ref, and the original %s is kept", m)
 				}
 			}
 
@@ -643,7 +713,7 @@ func TestEveryAccountOrganizes(t *testing.T) {
 
 			trOuts, err := outcomesOf(c.Organize.Trash(t.Context(), connect.NewRequest(&chainmailv1.TrashRequest{Refs: []string{current}})))
 			next(outcome(t, "Trash", trOuts, err), "trash")
-			findMessage(t, c, name, token, "trash", id, nil)
+			findMessage(t, c, name, token, "trash", id, searchTimeout, nil)
 
 			// Expunge every message of the test, the copy and the trashed
 			// original, then check nothing is left.
