@@ -20,13 +20,14 @@ import (
 // fresh connection.
 var errConnLost = errors.New("connection to the mail server lost")
 
-// conn is one pooled session and the folder it has open read-only. One
-// goroutine uses it at a time.
+// conn is one pooled session, the folder it has open and whether that
+// folder is open read-write. One goroutine uses it at a time.
 type conn struct {
 	sess        *Session
 	timeout     time.Duration
 	now         func() time.Time
 	selected    string
+	writable    bool
 	uidValidity uint32
 	dead        atomic.Bool
 }
@@ -39,6 +40,9 @@ func (c *conn) client() *imapclient.Client { return c.sess.client }
 
 // Selected returns the folder open on c, or "".
 func (c *conn) Selected() string { return c.selected }
+
+// Writable reports whether the folder open on c was opened read-write, with SELECT.
+func (c *conn) Writable() bool { return c.writable }
 
 // Dead reports whether c can no longer be used.
 func (c *conn) Dead() bool { return c.dead.Load() }
@@ -158,26 +162,29 @@ func (c *conn) kill() {
 	_ = c.sess.conn.Close() // shutting the socket is the point; its error says nothing new
 }
 
-// examine opens folder read-only, unless it is already open.
-func (c *conn) examine(ctx context.Context, folder string) error {
-	if folder != "" && c.selected == folder {
+// SelectFolder opens folder, read-write with SELECT when writable and
+// read-only with EXAMINE otherwise, unless it is already open in a mode
+// that will do. A read accepts either mode; a write needs read-write, so a
+// folder open read-only is opened again.
+func (c *conn) SelectFolder(ctx context.Context, folder string, writable bool) error {
+	if folder != "" && c.selected == folder && (c.writable || !writable) {
 		return nil
 	}
 	var data *imap.SelectData
 	err := c.do(ctx, func() error {
 		var err error
-		data, err = c.client().Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait()
+		data, err = c.client().Select(folder, &imap.SelectOptions{ReadOnly: !writable}).Wait()
 		return err
 	})
 	if err != nil {
-		// A failed EXAMINE leaves no folder open.
-		c.selected, c.uidValidity = "", 0
+		// A failed SELECT or EXAMINE leaves no folder open.
+		c.selected, c.writable, c.uidValidity = "", false, 0
 		if missingFolder(err) {
 			return fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, folder)
 		}
 		return err
 	}
-	c.selected, c.uidValidity = folder, data.UIDValidity
+	c.selected, c.writable, c.uidValidity = folder, writable, data.UIDValidity
 	return nil
 }
 

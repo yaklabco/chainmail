@@ -271,7 +271,7 @@ func TestStoreLogsInOnceWhenThePasswordGoesBadLater(t *testing.T) {
 		t.Fatalf("ListFolders with the right password: %v", err)
 	}
 	// Drop the connection that worked, so every borrow below has to dial.
-	c, err := s.borrow(t.Context(), "")
+	c, err := s.borrow(t.Context(), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestStoreLogsInOnceWhenThePasswordGoesBadLater(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 3 {
 		wg.Go(func() {
-			c, err := s.borrow(t.Context(), "")
+			c, err := s.borrow(t.Context(), "", false)
 			if err == nil {
 				s.release(c)
 				t.Error("borrow dialed with a stale password and succeeded")

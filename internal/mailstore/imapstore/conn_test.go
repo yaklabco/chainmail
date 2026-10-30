@@ -47,7 +47,7 @@ func TestExamineIsReadOnlyAndCached(t *testing.T) {
 	}
 	c := newTestConn(t, u)
 	for _, f := range []string{"INBOX", "INBOX", "Archive", "INBOX"} {
-		if err := c.examine(t.Context(), f); err != nil {
+		if err := c.SelectFolder(t.Context(), f, false); err != nil {
 			t.Fatalf("examine %s: %v", f, err)
 		}
 	}
@@ -66,7 +66,7 @@ func TestExamineIsReadOnlyAndCached(t *testing.T) {
 func TestExamineMissingFolder(t *testing.T) {
 	t.Parallel()
 	c := newTestConn(t, imaptest.User{Username: "missing@example.test", Password: "pw"})
-	if err := c.examine(t.Context(), "Nope"); !errors.Is(err, mailstore.ErrNotFound) {
+	if err := c.SelectFolder(t.Context(), "Nope", false); !errors.Is(err, mailstore.ErrNotFound) {
 		t.Errorf("examine Nope = %v, want ErrNotFound", err)
 	}
 	if c.Selected() != "" || c.Dead() {
@@ -138,5 +138,48 @@ func TestPipelineTimeoutBoundsEachCommand(t *testing.T) {
 	err := quiet.pipeline(t.Context(), func(func()) error { return steps(func() {}) })
 	if !errors.Is(err, errCommandTimeout) || !errors.Is(err, errConnLost) || !quiet.Dead() {
 		t.Errorf("no progress for longer than the timeout: err %v, dead %t; want a timeout", err, quiet.Dead())
+	}
+}
+
+func TestSelectFolderTracksMode(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var selects []string
+	u := imaptest.User{
+		Username: "mode@example.test", Password: "pw", Folders: []string{"Archive"},
+		OnSelect: func(name string, readOnly bool) {
+			mu.Lock()
+			defer mu.Unlock()
+			selects = append(selects, fmt.Sprintf("%s read-only=%t", name, readOnly))
+		},
+	}
+	c := newTestConn(t, u)
+	steps := []struct {
+		folder   string
+		writable bool
+	}{
+		{"INBOX", false},   // EXAMINE
+		{"INBOX", true},    // SELECT: a write needs read-write
+		{"INBOX", false},   // a read accepts the read-write folder
+		{"INBOX", true},    // already read-write
+		{"Archive", false}, // EXAMINE
+	}
+	for _, st := range steps {
+		if err := c.SelectFolder(t.Context(), st.folder, st.writable); err != nil {
+			t.Fatalf("SelectFolder(%s, %t): %v", st.folder, st.writable, err)
+		}
+	}
+	if c.Selected() != "Archive" || c.Writable() {
+		t.Errorf("after EXAMINE Archive: selected %q, writable %t", c.Selected(), c.Writable())
+	}
+	mu.Lock()
+	got := slices.Clone(selects)
+	mu.Unlock()
+	want := []string{"INBOX read-only=true", "INBOX read-only=false", "Archive read-only=true"}
+	if !slices.Equal(got, want) {
+		t.Errorf("selects = %q, want %q", got, want)
+	}
+	if err := c.SelectFolder(t.Context(), "Nope", true); !errors.Is(err, mailstore.ErrNotFound) || c.Selected() != "" || c.Writable() {
+		t.Errorf("SELECT Nope: err %v, selected %q, writable %t; want ErrNotFound and nothing open", err, c.Selected(), c.Writable())
 	}
 }

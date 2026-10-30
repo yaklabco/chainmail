@@ -14,6 +14,7 @@ var errPoolClosed = errors.New("the account's connections are closed")
 // pooled is what the pool needs from a connection.
 type pooled interface {
 	Selected() string
+	Writable() bool
 	Dead() bool
 	Noop(ctx context.Context) error
 	Close() error
@@ -49,10 +50,11 @@ func newPool[C pooled](dial func(context.Context) (C, error), opts poolOptions) 
 	return &pool[C]{dial: dial, opts: opts, max: opts.size, wake: make(chan struct{})}
 }
 
-// get borrows a connection, preferring an idle one with folder open. It
+// get borrows a connection, preferring an idle one with folder open in a
+// mode that will do: read-write when writable, either mode otherwise. It
 // dials when the pool has room and waits otherwise. The caller hands it back
 // with put, or with discard when it broke.
-func (p *pool[C]) get(ctx context.Context, folder string) (C, error) {
+func (p *pool[C]) get(ctx context.Context, folder string, writable bool) (C, error) {
 	var zero C
 	for {
 		p.mu.Lock()
@@ -60,7 +62,7 @@ func (p *pool[C]) get(ctx context.Context, folder string) (C, error) {
 			p.mu.Unlock()
 			return zero, errPoolClosed
 		}
-		if e := p.takeIdleLocked(folder); e != nil {
+		if e := p.takeIdleLocked(folder, writable); e != nil {
 			p.mu.Unlock()
 			if p.opts.now().Sub(e.since) > p.opts.noopAfter {
 				if err := e.c.Noop(ctx); err != nil {
@@ -97,10 +99,13 @@ func (p *pool[C]) get(ctx context.Context, folder string) (C, error) {
 }
 
 // takeIdleLocked removes and returns the idle connection to reuse: one with
-// folder open if there is one, else the most recently returned.
-func (p *pool[C]) takeIdleLocked(folder string) *idleConn[C] {
+// folder open in a mode that will do if there is one, else the most
+// recently returned.
+func (p *pool[C]) takeIdleLocked(folder string, writable bool) *idleConn[C] {
 	for len(p.idle) > 0 {
-		i := slices.IndexFunc(p.idle, func(e *idleConn[C]) bool { return folder != "" && e.c.Selected() == folder })
+		i := slices.IndexFunc(p.idle, func(e *idleConn[C]) bool {
+			return folder != "" && e.c.Selected() == folder && (e.c.Writable() || !writable)
+		})
 		if i < 0 {
 			i = len(p.idle) - 1
 		}
@@ -156,14 +161,23 @@ func (p *pool[C]) expire(e *idleConn[C]) {
 	_ = e.c.Close() // idle cleanup; a failed LOGOUT still frees the slot
 }
 
-// shrink lowers the cap by one, never below one. A server that refused a
-// connection for being over its limit keeps the lower cap until the daemon restarts.
-func (p *pool[C]) shrink() {
+// shrink lowers the cap by one, never below one, and returns the new cap. A
+// server that refused a connection for being over its limit keeps the lower
+// cap until the store is rebuilt.
+func (p *pool[C]) shrink() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.max > 1 {
 		p.max--
 	}
+	return p.max
+}
+
+// size returns the cap: the most connections open at once.
+func (p *pool[C]) size() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.max
 }
 
 // close logs out every idle connection in parallel and refuses new borrows.
