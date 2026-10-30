@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -58,22 +59,41 @@ func ValidKey(k string) bool {
 
 type rowKey struct{ account, key string }
 
+// attempt is one in-process send attempt on a key, from the claim that
+// started it to its Finish. Callers that wait on it receive its own outcome,
+// so a retry claimed later cannot change what they see.
+type attempt struct {
+	done chan struct{} // closed by Finish after state and result are set
+	// state and result are the outcome Finish recorded. They are written
+	// before done is closed and only read after it is.
+	state  State
+	result []byte
+	// waiting counts callers blocked on done. It is guarded by Store.mu.
+	waiting int
+}
+
 // Store claims and settles idempotency keys. It is safe for concurrent use.
 type Store struct {
+	// Logger receives failures of the hourly prune in Run. Records never hold
+	// keys, accounts or results. Set it before calling Run. A nil Logger
+	// uses slog.Default.
+	Logger *slog.Logger
+
 	db  *sql.DB
 	now func() time.Time
 
-	// mu serializes claims and settlements so a claim and its waiter entry
-	// appear together. waiters holds one channel per key this process has
-	// claimed; Finish closes it.
-	mu      sync.Mutex
-	waiters map[rowKey]chan struct{}
+	// mu serializes claims, settlements and prunes, so a claim and its
+	// attempt appear together and a prune never removes a row this process
+	// is still sending on. attempts holds the attempt for each key this
+	// process has claimed and not yet finished.
+	mu       sync.Mutex
+	attempts map[rowKey]*attempt
 }
 
 // New returns a Store over db, which must hold the state schema. now supplies
 // the time written to created_at and updated_at.
 func New(db *sql.DB, now func() time.Time) *Store {
-	return &Store{db: db, now: now, waiters: make(map[rowKey]chan struct{})}
+	return &Store{db: db, now: now, attempts: make(map[rowKey]*attempt)}
 }
 
 // Claim is the result of Begin.
@@ -82,37 +102,42 @@ type Claim struct {
 	// then call Finish.
 	Proceed bool
 	// State is InProgress when Proceed is true. Otherwise it is the stored
-	// state: Done, Failed or Unknown, or InProgress when another process holds
-	// the key.
+	// state (Done, Failed or Unknown), the outcome of the in-process attempt
+	// the caller waited for (any state Finish accepts, Retryable included),
+	// or InProgress when another process holds the key.
 	State State
-	// Result is the stored result when Proceed is false.
+	// Result is the stored or awaited result when Proceed is false.
 	Result []byte
 }
 
 // Begin claims (account, key) for hash. Proceed is true when the caller
 // must perform the send (a new key or a retryable one). Otherwise State and
 // Result are the stored outcome. A key held in_progress by this process
-// waits until Finish or ctx ends, then is read again, so a waiter may itself
-// proceed when the holder finished it as Retryable. A key held in_progress
-// with no holder in this process returns InProgress without proceeding.
+// waits until Finish or ctx ends and returns that attempt's outcome with
+// Proceed false, even when it is Retryable: a waiting duplicate never becomes
+// the next attempt, because a send is never retried automatically. A key
+// held in_progress with no holder in this process returns InProgress without
+// proceeding.
 func (s *Store) Begin(ctx context.Context, account, key string, hash [32]byte) (Claim, error) {
 	rk := rowKey{account, key}
-	for {
-		claim, wait, err := s.claim(ctx, rk, hash)
-		if err != nil || wait == nil {
-			return claim, err
-		}
-		select {
-		case <-wait:
-		case <-ctx.Done():
-			return Claim{}, fmt.Errorf("waiting for idempotency key: %w", ctx.Err())
-		}
+	claim, att, err := s.claim(ctx, rk, hash)
+	if err != nil || att == nil {
+		return claim, err
+	}
+	select {
+	case <-att.done:
+		return Claim{State: att.state, Result: bytes.Clone(att.result)}, nil
+	case <-ctx.Done():
+		s.mu.Lock()
+		att.waiting--
+		s.mu.Unlock()
+		return Claim{}, fmt.Errorf("waiting for idempotency key: %w", ctx.Err())
 	}
 }
 
-// claim runs one claim attempt. A non-nil wait channel means the key is held
-// by this process and the caller should wait on it and try again.
-func (s *Store) claim(ctx context.Context, rk rowKey, hash [32]byte) (Claim, <-chan struct{}, error) {
+// claim runs the claim transaction. A non-nil attempt means the key is held
+// by this process and the caller should wait for it to finish.
+func (s *Store) claim(ctx context.Context, rk rowKey, hash [32]byte) (Claim, *attempt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -163,8 +188,9 @@ func (s *Store) claim(ctx context.Context, rk rowKey, hash [32]byte) (Claim, <-c
 		}
 		return s.commitClaim(tx, rk)
 	case InProgress:
-		if wait, ok := s.waiters[rk]; ok {
-			return Claim{}, wait, nil
+		if att, ok := s.attempts[rk]; ok {
+			att.waiting++
+			return Claim{}, att, nil
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -177,18 +203,18 @@ func (s *Store) claim(ctx context.Context, rk rowKey, hash [32]byte) (Claim, <-c
 }
 
 // commitClaim commits a claim that leaves the row in_progress and registers
-// its waiter channel. s.mu must be held.
-func (s *Store) commitClaim(tx *sql.Tx, rk rowKey) (Claim, <-chan struct{}, error) {
+// its attempt. s.mu must be held.
+func (s *Store) commitClaim(tx *sql.Tx, rk rowKey) (Claim, *attempt, error) {
 	if err := tx.Commit(); err != nil {
 		return Claim{}, nil, fmt.Errorf("committing idempotency claim: %w", err)
 	}
-	s.waiters[rk] = make(chan struct{})
+	s.attempts[rk] = &attempt{done: make(chan struct{})}
 	return Claim{Proceed: true, State: InProgress}, nil, nil
 }
 
 // Finish settles a key claimed by Begin with state and result, and wakes any
-// callers waiting on it. state must not be InProgress. Waiters are woken even
-// when the update fails, so they read the row again instead of hanging.
+// callers waiting on it with that outcome. state must not be InProgress.
+// Waiters are woken even when the update fails, so they do not hang.
 func (s *Store) Finish(ctx context.Context, account, key string, state State, result []byte) error {
 	switch state {
 	case Done, Failed, Retryable, Unknown:
@@ -202,9 +228,13 @@ func (s *Store) Finish(ctx context.Context, account, key string, state State, re
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if wait, ok := s.waiters[rk]; ok {
-		close(wait)
-		delete(s.waiters, rk)
+	if att, ok := s.attempts[rk]; ok {
+		att.state = state
+		if len(result) > 0 {
+			att.result = bytes.Clone(result)
+		}
+		close(att.done)
+		delete(s.attempts, rk)
 	}
 
 	res, err := s.db.ExecContext(ctx,
@@ -239,10 +269,23 @@ func (s *Store) Recover(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
-// Prune deletes rows created before cutoff.
+// Prune deletes rows created before cutoff. A row this process holds
+// in_progress is kept until its attempt finishes, so its waiters still get
+// its outcome and a new Begin waits on it instead of starting another send.
+// The next prune after Finish deletes it.
 func (s *Store) Prune(ctx context.Context, cutoff time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
-		"DELETE FROM idempotency WHERE created_at < ?", cutoff.UTC().Format(timeLayout))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("pruning idempotency keys: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // a no-op after Commit; an earlier error is the one to report
+
+	before := cutoff.UTC().Format(timeLayout)
+	res, err := tx.ExecContext(ctx,
+		"DELETE FROM idempotency WHERE created_at < ? AND state != ?", before, string(InProgress))
 	if err != nil {
 		return 0, fmt.Errorf("pruning idempotency keys: %w", err)
 	}
@@ -250,18 +293,65 @@ func (s *Store) Prune(ctx context.Context, cutoff time.Time) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("pruning idempotency keys: %w", err)
 	}
+
+	stale, err := s.staleInProgress(ctx, tx, before)
+	if err != nil {
+		return 0, err
+	}
+	for _, rk := range stale {
+		if _, held := s.attempts[rk]; held {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx,
+			"DELETE FROM idempotency WHERE account = ? AND key = ? AND state = ?",
+			rk.account, rk.key, string(InProgress)); err != nil {
+			return 0, fmt.Errorf("pruning idempotency keys: %w", err)
+		}
+		n++
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("pruning idempotency keys: %w", err)
+	}
 	return n, nil
+}
+
+// staleInProgress lists in_progress rows created before the formatted cutoff.
+func (s *Store) staleInProgress(ctx context.Context, tx *sql.Tx, before string) ([]rowKey, error) {
+	rows, err := tx.QueryContext(ctx,
+		"SELECT account, key FROM idempotency WHERE created_at < ? AND state = ?", before, string(InProgress))
+	if err != nil {
+		return nil, fmt.Errorf("pruning idempotency keys: %w", err)
+	}
+	defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
+	var keys []rowKey
+	for rows.Next() {
+		var rk rowKey
+		if err := rows.Scan(&rk.account, &rk.key); err != nil {
+			return nil, fmt.Errorf("pruning idempotency keys: %w", err)
+		}
+		keys = append(keys, rk)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pruning idempotency keys: %w", err)
+	}
+	return keys, nil
 }
 
 // Run prunes rows older than 7 days every hour until ctx ends. It prunes once
 // on entry too, so a daemon that restarts often still prunes. A failed prune
-// is retried at the next tick.
+// is logged to Logger and retried at the next tick; one cut short because ctx
+// ended is not logged.
 func (s *Store) Run(ctx context.Context) {
+	logger := s.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	ticker := time.NewTicker(pruneInterval)
 	defer ticker.Stop()
 	for {
-		// A failure leaves old rows for the next tick; nothing else depends on it.
-		_, _ = s.Prune(ctx, s.now().Add(-retention))
+		if _, err := s.Prune(ctx, s.now().Add(-retention)); err != nil && ctx.Err() == nil {
+			logger.ErrorContext(ctx, "pruning idempotency keys failed", "err", err)
+		}
 		select {
 		case <-ctx.Done():
 			return
