@@ -113,7 +113,9 @@ type Summary struct {
 	Sample *TextSample
 }
 
-// Attachment is one attachment part.
+// Attachment is one attachment part, or a part the body shows by its
+// Content-ID, such as an unnamed inline image. StreamPart gives its media
+// type parameters, Content-ID and disposition.
 type Attachment struct {
 	// Part is the IMAP section number, such as "2" or "1.2".
 	Part        string
@@ -192,8 +194,18 @@ type SummaryOptions struct {
 
 // PartInfo describes a part being streamed.
 type PartInfo struct {
-	Filename    string
+	Filename string
+	// ContentType is the media type, such as "text/plain", and Params its
+	// parameters, such as charset, with lower-case names. Nil means none.
+	// StreamPart decodes the transfer encoding only, so the bytes are still
+	// in that charset.
 	ContentType string
+	Params      map[string]string
+	// ContentID is the part's Content-ID without angle brackets, or "".
+	ContentID string
+	// Inline says the body shows the part: its disposition is inline, or it
+	// has none and has a Content-ID.
+	Inline bool
 	// Size is the encoded size the server reports for the part, as in
 	// Attachment.Size, so it can differ from the decoded bytes streamed. For
 	// the whole message it is the raw size, as in Summary.Size.

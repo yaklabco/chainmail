@@ -89,7 +89,7 @@ func (s *Store) openPart(ctx context.Context, c *conn, r ref.Ref, path []int) (m
 		if sp == nil {
 			return mailstore.PartInfo{}, nil, fmt.Errorf("%w: the message has no part %s", mailstore.ErrNotFound, partString(path))
 		}
-		info = mailstore.PartInfo{Filename: decodeWord(sp.Filename()), ContentType: sp.MediaType(), Size: int64(sp.Size)}
+		info = partInfo(sp)
 		encoding = sp.Encoding
 	}
 	pr := &partReader{s: s, c: c, ctx: ctx, uid: uid, path: path, size: info.Size}

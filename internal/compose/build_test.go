@@ -1016,3 +1016,92 @@ func assertCRLF(t testing.TB, raw []byte) {
 		}
 	}
 }
+
+// TestBuildForwardedInlineParts builds a forward whose quoted HTML refers to
+// the original's inline images by their Content-IDs. Attachments with a
+// Content-ID and Inline set keep that Content-ID, go inline into the
+// multipart/related around the body, and keep their media type's
+// parameters. An attachment without them is unchanged.
+func TestBuildForwardedInlineParts(t *testing.T) {
+	t.Parallel()
+	s := baseSpec()
+	s.Quote = forwardQuote()
+	s.Quote.HTML = `<p>See <img src="cid:chart"> and <img src="cid:logo@example.net"></p>`
+	s.Attachments = []File{
+		{Filename: "chart.png", ContentType: "image/png; name=chart.png", ContentID: "chart", Inline: true, Data: pngData},
+		{ContentType: "image/gif", ContentID: "logo@example.net", Inline: true, Data: []byte("GIF89a")},
+		{Filename: "notes.txt", ContentType: "text/plain; charset=windows-1252", Data: []byte("caf\xe9")},
+	}
+	root := parse(t, mustBuild(t, s).Raw)
+	if got, want := root.shape(), "multipart/mixed[multipart/related[multipart/alternative[text/plain,text/html],image/png,image/gif],text/plain]"; got != want {
+		t.Fatalf("shape = %s, want %s", got, want)
+	}
+	related := root.parts[0]
+	for i, want := range []struct{ cid, filename, data string }{
+		{"<chart>", "chart.png", string(pngData)},
+		{"<logo@example.net>", "", "GIF89a"},
+	} {
+		p := related.parts[i+1]
+		if cid := p.header.Get("Content-Id"); cid != want.cid {
+			t.Errorf("part %d Content-ID = %q, want %q", i, cid, want.cid)
+		}
+		disp, params, err := p.header.ContentDisposition()
+		if err != nil || disp != "inline" || params["filename"] != want.filename {
+			t.Errorf("part %d disposition = %q %v %v, want inline %q", i, disp, params, err, want.filename)
+		}
+		if p.raw != want.data {
+			t.Errorf("part %d data changed", i)
+		}
+	}
+	if name := related.parts[1].params["name"]; name != "chart.png" {
+		t.Errorf("image/png params = %v, want name kept", related.parts[1].params)
+	}
+	htm := root.find("text/html").body
+	if !strings.Contains(htm, `src="cid:chart"`) || !strings.Contains(htm, `src="cid:logo@example.net"`) {
+		t.Errorf("HTML lost the Content-ID references:\n%s", htm)
+	}
+	notes := root.parts[1]
+	if notes.params["charset"] != "windows-1252" || notes.header.Get("Content-Id") != "" {
+		t.Errorf("text attachment = %v, Content-ID %q, want its charset and no Content-ID", notes.params, notes.header.Get("Content-Id"))
+	}
+	if disp, _, _ := notes.header.ContentDisposition(); disp != "attachment" {
+		t.Errorf("text attachment disposition = %q", disp)
+	}
+}
+
+// TestBuildInlinePartWithTextBody keeps a forwarded inline part in
+// multipart/mixed, inline with its Content-ID, when the body is text and so
+// has no HTML to refer to it.
+func TestBuildInlinePartWithTextBody(t *testing.T) {
+	t.Parallel()
+	s := baseSpec()
+	s.Body = Body{Kind: Text, Source: "fyi"}
+	s.Attachments = []File{{Filename: "chart.png", ContentType: "image/png", ContentID: "chart", Inline: true, Data: pngData}}
+	root := parse(t, mustBuild(t, s).Raw)
+	if got, want := root.shape(), "multipart/mixed[text/plain,image/png]"; got != want {
+		t.Fatalf("shape = %s, want %s", got, want)
+	}
+	p := root.parts[1]
+	if disp, _, _ := p.header.ContentDisposition(); disp != "inline" || p.header.Get("Content-Id") != "<chart>" {
+		t.Errorf("image = %q %q, want inline <chart>", disp, p.header.Get("Content-Id"))
+	}
+}
+
+// TestBuildRefusesBadContentID refuses an attachment Content-ID that could
+// not sit between angle brackets on one header line.
+func TestBuildRefusesBadContentID(t *testing.T) {
+	t.Parallel()
+	for _, id := range []string{"a b", "a>b", "<a>", "a\r\nBcc: x@example.org", "a\x00"} {
+		s := baseSpec()
+		s.Attachments = []File{{ContentType: "image/png", ContentID: id, Inline: true, Data: pngData}}
+		if _, err := build(s, &seqReader{}); !errors.Is(err, ErrInvalid) {
+			t.Errorf("Content-ID %q: err = %v, want ErrInvalid", id, err)
+		}
+		if ValidContentID(id) {
+			t.Errorf("ValidContentID(%q) = true", id)
+		}
+	}
+	if !ValidContentID("chart") || !ValidContentID("part1.abc@example.net") {
+		t.Error("ValidContentID refuses ordinary Content-IDs")
+	}
+}

@@ -3,10 +3,12 @@ package compose
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"html"
 	"io"
 	"mime"
+	"mime/quotedprintable"
 	"net/http"
 	"net/mail"
 	"net/textproto"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/emersion/go-message"
 	gomail "github.com/emersion/go-message/mail"
+	mimetext "github.com/emersion/go-message/textproto"
 	nethtml "golang.org/x/net/html"
 
 	"github.com/jamesainslie/chainmail/internal/render"
@@ -84,20 +87,16 @@ func build(s Spec, rnd io.Reader) (Message, error) {
 	if err != nil {
 		return Message{}, err
 	}
-	content, err := contentPart(s, rnd)
+	related, attached, err := attachmentParts(s)
 	if err != nil {
 		return Message{}, err
 	}
-	if len(s.Attachments) > 0 {
-		mixed := &part{mediaType: "multipart/mixed", children: []*part{content}}
-		for _, f := range s.Attachments {
-			p, err := filePart(f, "attachment")
-			if err != nil {
-				return Message{}, err
-			}
-			mixed.children = append(mixed.children, p)
-		}
-		content = mixed
+	content, err := contentPart(s, rnd, related)
+	if err != nil {
+		return Message{}, err
+	}
+	if len(attached) > 0 {
+		content = &part{mediaType: "multipart/mixed", children: append([]*part{content}, attached...)}
 	}
 	content.setBoundaries(rnd)
 
@@ -172,6 +171,11 @@ func validate(s Spec) error {
 	for _, r := range s.References {
 		if !validMsgID(r) {
 			return fmt.Errorf("%w: bad References", ErrInvalid)
+		}
+	}
+	for _, f := range s.Attachments {
+		if f.ContentID != "" && !ValidContentID(f.ContentID) {
+			return fmt.Errorf("%w: bad attachment Content-ID", ErrInvalid)
 		}
 	}
 	return nil
@@ -394,9 +398,46 @@ func envelopeTo(s Spec) []string {
 	return out
 }
 
+// attachmentParts are the parts of s.Attachments, in order: related holds
+// the inline ones with a Content-ID, which the HTML part can show, and
+// attached the rest, which go in multipart/mixed. A Text body has no HTML
+// part, so all of its attachments are attached.
+func attachmentParts(s Spec) (related, attached []*part, err error) {
+	for _, f := range s.Attachments {
+		disposition := "attachment"
+		if f.Inline {
+			disposition = "inline"
+		}
+		p, err := filePart(f, disposition)
+		if err != nil {
+			return nil, nil, err
+		}
+		p.contentID = f.ContentID
+		if f.Inline && f.ContentID != "" && s.Body.Kind != Text {
+			related = append(related, p)
+		} else {
+			attached = append(attached, p)
+		}
+	}
+	return related, attached, nil
+}
+
+// ValidContentID reports whether id can be written as a Content-ID between
+// angle brackets: printable ASCII without spaces or angle brackets.
+func ValidContentID(id string) bool {
+	return id != "" && len(id) <= maxContentID && !strings.ContainsFunc(id, func(r rune) bool {
+		return r <= ' ' || r >= 0x7f || r == '<' || r == '>'
+	})
+}
+
+// maxContentID caps a Content-ID, so its header line stays well under 998
+// bytes.
+const maxContentID = 900
+
 // contentPart returns the body: the text part, or multipart/alternative of
 // text and HTML, inside multipart/related with the inline images if any.
-func contentPart(s Spec, rnd io.Reader) (*part, error) {
+// related are attachment parts the HTML shows, added after the images.
+func contentPart(s Spec, rnd io.Reader, related []*part) (*part, error) {
 	if s.Body.Kind == Text {
 		if len(s.Inline) > 0 {
 			return nil, fmt.Errorf("%w: a text body cannot show inline images", ErrInvalid)
@@ -415,6 +456,7 @@ func contentPart(s Spec, rnd io.Reader) (*part, error) {
 	if err != nil {
 		return nil, err
 	}
+	images = append(images, related...)
 	used := make(map[string]bool, len(cids))
 	bodyHTML = rewriteImages(bodyHTML, cids, used)
 	sigHTML = rewriteImages(sigHTML, cids, used)
@@ -820,7 +862,9 @@ func (p *part) setBoundaries(rnd io.Reader) {
 // fields are the part's Content- header fields, in the order written.
 func (p *part) fields() [][2]string {
 	f := [][2]string{{"Content-Type", mime.FormatMediaType(p.mediaType, p.params)}}
-	if p.encoding != "" {
+	// A multipart entity gets no Content-Transfer-Encoding field, as
+	// go-message leaves it out, even an attached multipart sent as 7bit.
+	if p.encoding != "" && !strings.HasPrefix(p.mediaType, "multipart/") {
 		f = append(f, [2]string{"Content-Transfer-Encoding", p.encoding})
 	}
 	if p.disposition != "" {
@@ -844,23 +888,26 @@ func header(fields [][2]string) message.Header {
 
 // writeRoot writes p as the whole message with top above its own fields.
 func (p *part) writeRoot(w io.Writer, top [][2]string) error {
-	mw, err := message.CreateWriter(w, header(append(top, p.fields()...)))
-	if err != nil {
+	if err := mimetext.WriteHeader(w, header(append(top, p.fields()...)).Header); err != nil {
 		return err
 	}
-	return p.writeBody(mw)
+	return p.writeBody(w)
 }
 
-// writeBody writes p's body or children to w, then closes w.
-func (p *part) writeBody(w *message.Writer) error {
+// writeBody writes p's body, encoded, or its children. The parts are
+// written here rather than by go-message's Writer, which refuses a part
+// whose charset is not UTF-8, such as a forwarded windows-1252 text
+// attachment. Its bytes go as they are, under its own charset.
+func (p *part) writeBody(w io.Writer) error {
 	if len(p.children) == 0 {
-		if _, err := w.Write(p.body); err != nil {
-			return err
-		}
-		return w.Close()
+		return writeEncoded(w, p.encoding, p.body)
+	}
+	mw := mimetext.NewMultipartWriter(w)
+	if err := mw.SetBoundary(p.params["boundary"]); err != nil {
+		return err
 	}
 	for _, c := range p.children {
-		cw, err := w.CreatePart(header(c.fields()))
+		cw, err := mw.CreatePart(header(c.fields()).Header)
 		if err != nil {
 			return err
 		}
@@ -868,7 +915,37 @@ func (p *part) writeBody(w *message.Writer) error {
 			return err
 		}
 	}
-	return w.Close()
+	return mw.Close()
+}
+
+// base64Line is the length of a base64 line, as RFC 2045 allows at most 76.
+const base64Line = 76
+
+// writeEncoded writes body in encoding: quoted-printable, base64 in lines of
+// base64Line, or as it is for 7bit, whose lines are CRLF and short already.
+func writeEncoded(w io.Writer, encoding string, body []byte) error {
+	switch encoding {
+	case quotedPrintable:
+		qw := quotedprintable.NewWriter(w)
+		if _, err := qw.Write(body); err != nil {
+			return err
+		}
+		return qw.Close()
+	case base64Encoding:
+		enc := base64.StdEncoding.EncodeToString(body)
+		var b strings.Builder
+		for len(enc) > base64Line {
+			b.WriteString(enc[:base64Line])
+			b.WriteString("\r\n")
+			enc = enc[base64Line:]
+		}
+		b.WriteString(enc)
+		_, err := io.WriteString(w, b.String())
+		return err
+	default:
+		_, err := w.Write(body)
+		return err
+	}
 }
 
 // dispositionValue formats a Content-Disposition with filename per RFC 2183

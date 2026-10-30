@@ -33,7 +33,16 @@ type Body struct {
 type File struct {
 	Filename    string
 	ContentType string
-	Data        []byte
+	// ContentID, without angle brackets, is written as the part's Content-ID,
+	// so HTML can show it as cid:ContentID, as a forwarded original's quoted
+	// HTML shows its images. Empty means none. An image of Spec.Inline gets a
+	// Content-ID of its own instead.
+	ContentID string
+	// Inline marks an attachment the body shows. It is written with an
+	// inline disposition and, when it has a ContentID and the message an HTML
+	// part, inside the multipart/related around the body.
+	Inline bool
+	Data   []byte
 }
 
 // Quote is the quoted original under a reply or forward, built by ReplyParts or ForwardParts.

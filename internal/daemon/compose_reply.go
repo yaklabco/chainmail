@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"mime"
 	"net/mail"
 	"slices"
@@ -349,7 +350,13 @@ func (c *composeService) originalAttachments(ctx context.Context, st mailstore.S
 		if ct == "" {
 			ct = info.ContentType
 		}
-		out = append(out, compose.File{Filename: render.CleanHeader(name), ContentType: attachmentType(ct), Data: data})
+		f := compose.File{Filename: render.CleanHeader(name), ContentType: attachmentType(ct, info.Params), Inline: info.Inline, Data: data}
+		// The original's HTML refers to an inline part by its Content-ID, so
+		// it is kept, unless it cannot be written again.
+		if compose.ValidContentID(info.ContentID) {
+			f.ContentID = info.ContentID
+		}
+		out = append(out, f)
 	}
 	return out, nil
 }
@@ -377,17 +384,24 @@ func readPart(ctx context.Context, st mailstore.Store, r ref.Ref, part string, l
 	return info, data, nil
 }
 
-// attachmentType is ct reduced to what a re-attached part needs: the media
-// type, with its charset and boundary. A type that does not parse becomes
-// application/octet-stream, so a malformed original still forwards.
-func attachmentType(ct string) string {
-	mt, params, err := mime.ParseMediaType(ct)
+// attachmentType is the Content-Type a re-attached part needs: ct's media
+// type with its parameters and the store's params, such as the charset its
+// bytes are still in, the store's winning. A type that does not parse
+// becomes application/octet-stream, so a malformed original still forwards.
+func attachmentType(ct string, params map[string]string) string {
+	mt, all, err := mime.ParseMediaType(ct)
 	if err != nil || !strings.Contains(mt, "/") {
 		return "application/octet-stream"
 	}
+	maps.Copy(all, params)
+	if out := mime.FormatMediaType(mt, all); out != "" {
+		return out
+	}
+	// A parameter that cannot be written again is dropped, keeping the
+	// charset and boundary when they can be.
 	keep := map[string]string{}
 	for _, k := range []string{"charset", "boundary"} {
-		if v := params[k]; v != "" {
+		if v := all[k]; v != "" {
 			keep[k] = v
 		}
 	}
