@@ -303,9 +303,12 @@ func TestGmailDrafts(t *testing.T) {
 	e.gmail.AddFolder("[Gmail]/Drafts", mailstore.RoleDrafts)
 	var filed atomic.Pointer[ref.Ref]
 	srv := e.smtp(t, smtptest.Options{
-		// Gmail files sent mail itself.
+		// Gmail files sent mail itself, in All Mail with the \Sent label.
 		OnMessage: func(env smtptest.Envelope) {
-			r, err := e.gmail.Append(context.Background(), "[Gmail]/Sent Mail", []string{`\Seen`}, time.Time{}, env.Data)
+			r, err := e.gmail.Append(context.Background(), "[Gmail]/All Mail", []string{`\Seen`}, time.Time{}, env.Data)
+			if err == nil {
+				err = e.gmail.StoreLabels(context.Background(), []ref.Ref{r}, []string{`\Sent`}, nil)[0].Err
+			}
 			if err != nil {
 				t.Errorf("filing the message: %v", err)
 				return
