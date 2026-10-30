@@ -510,7 +510,11 @@ type Draft struct {
 	// The ref of the draft. Pass it to UpdateDraft, SendDraft or DeleteDraft.
 	Ref string `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
 	// The Message-ID of the draft, without angle brackets. SendDraft keeps it.
-	MessageId     string `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	MessageId string `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	// How to find the draft, set when the server stored it without naming it
+	// (no APPENDUID), so ref is empty: search the Drafts folder for
+	// message_id.
+	Hint          string `protobuf:"bytes,3,opt,name=hint,proto3" json:"hint,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -555,6 +559,13 @@ func (x *Draft) GetRef() string {
 func (x *Draft) GetMessageId() string {
 	if x != nil {
 		return x.MessageId
+	}
+	return ""
+}
+
+func (x *Draft) GetHint() string {
+	if x != nil {
+		return x.Hint
 	}
 	return ""
 }
@@ -1868,11 +1879,12 @@ const file_chainmail_v1_compose_proto_rawDesc = "" +
 	"\x03raw\x18\x01 \x01(\fR\x03raw\x12#\n" +
 	"\renvelope_from\x18\x02 \x01(\tR\fenvelopeFrom\x12\x1f\n" +
 	"\venvelope_to\x18\x03 \x03(\tR\n" +
-	"envelopeTo\"8\n" +
+	"envelopeTo\"L\n" +
 	"\x05Draft\x12\x10\n" +
 	"\x03ref\x18\x01 \x01(\tR\x03ref\x12\x1d\n" +
 	"\n" +
-	"message_id\x18\x02 \x01(\tR\tmessageId\"\xa1\x01\n" +
+	"message_id\x18\x02 \x01(\tR\tmessageId\x12\x12\n" +
+	"\x04hint\x18\x03 \x01(\tR\x04hint\"\xa1\x01\n" +
 	"\rComposeResult\x12(\n" +
 	"\x04sent\x18\x01 \x01(\v2\x12.chainmail.v1.SentH\x00R\x04sent\x12/\n" +
 	"\adry_run\x18\x02 \x01(\v2\x14.chainmail.v1.DryRunH\x00R\x06dryRun\x12+\n" +

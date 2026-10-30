@@ -582,3 +582,19 @@ func TestDraftWithoutARef(t *testing.T) {
 		t.Errorf("output = %q", got)
 	}
 }
+
+// A draft the daemon names a hint for prints that hint, cleaned for the
+// terminal.
+func TestDraftWithoutARefPrintsTheHint(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	d := &chainmailv1.Draft{MessageId: "d.1@example.com", Hint: "look in the Drafts folder\x1b]0;x\x07"}
+	res := &chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Draft{Draft: d}}
+	if err := writeComposeResult(Env{Stdout: &out}, &globals{output: "table"}, false, &chainmailv1.SendResponse{Result: res}, res); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.HasPrefix(got, "draft saved; look in the Drafts folder") || strings.ContainsAny(got, "\x1b\x07") {
+		t.Errorf("output = %q, want the hint without control characters", got)
+	}
+}

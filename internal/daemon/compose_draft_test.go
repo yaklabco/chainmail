@@ -477,6 +477,9 @@ func TestUpdateDraftWithoutAnAppendedRef(t *testing.T) {
 	if d.GetRef() != "" || d.GetMessageId() == "" {
 		t.Errorf("draft = %+v, want no ref and the Message-ID", d)
 	}
+	if want := "search the Drafts folder for Message-ID <" + d.GetMessageId() + ">"; d.GetHint() != want {
+		t.Errorf("hint = %q, want %q", d.GetHint(), want)
+	}
 	if !gone(t, e.host, parseRef(t, first.GetRef())) {
 		t.Error("the old version is still there")
 	}
@@ -543,6 +546,55 @@ func TestSendDraftReplaysSettledKeyWithAnotherRef(t *testing.T) {
 		}
 		if d := e.decisions(t, "draft.send"); len(d) == 0 || d[len(d)-1] != "duplicate" {
 			t.Errorf("%s: decisions = %v, want the repeat audited as a duplicate", tc.key, d)
+		}
+	}
+}
+
+// TestDraftHintOnlyWithoutARef saves drafts through every call that saves
+// one, on a server that stores them without saying where. Each draft has
+// no ref and a hint naming its Message-ID to search the Drafts folder for.
+// A draft with a ref has no hint.
+func TestDraftHintOnlyWithoutARef(t *testing.T) {
+	t.Parallel()
+	hs := &hookStore{}
+	var unnamed atomic.Bool
+	hs.append = func(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) (ref.Ref, error) {
+		r, err := hs.Store.Append(ctx, folder, flags, date, raw)
+		if err == nil && unnamed.Load() {
+			return ref.Ref{}, nil
+		}
+		return r, err
+	}
+	e := startSend(t, hooked("host", hs))
+	named := e.createDraft(t, hostSpec())
+	if named.GetRef() == "" || named.GetHint() != "" {
+		t.Errorf("named draft = %+v, want a ref and no hint", named)
+	}
+	orig := e.original(t)
+	unnamed.Store(true)
+	drafts := map[string]func() (*chainmailv1.Draft, error){
+		"create": func() (*chainmailv1.Draft, error) { return e.createDraft(t, hostSpec()), nil },
+		"send": func() (*chainmailv1.Draft, error) {
+			res, err := e.send(t, &chainmailv1.SendRequest{Spec: hostSpec(), Draft: true})
+			return res.GetDraft(), err
+		},
+		"reply": func() (*chainmailv1.Draft, error) {
+			res, err := e.reply(t, &chainmailv1.ReplyRequest{Ref: orig.String(), Content: replyContent("thanks"), Draft: true})
+			return res.GetDraft(), err
+		},
+		"forward": func() (*chainmailv1.Draft, error) {
+			res, err := e.forward(t, &chainmailv1.ForwardRequest{Ref: orig.String(), To: []string{"dan@example.net"}, Draft: true})
+			return res.GetDraft(), err
+		},
+	}
+	for name, save := range drafts {
+		d, err := save()
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if want := "search the Drafts folder for Message-ID <" + d.GetMessageId() + ">"; d.GetRef() != "" || d.GetMessageId() == "" || d.GetHint() != want {
+			t.Errorf("%s: draft = %+v, want no ref and hint %q", name, d, want)
 		}
 	}
 }

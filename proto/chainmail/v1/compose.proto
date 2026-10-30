@@ -89,6 +89,10 @@ message Draft {
   string ref = 1;
   // The Message-ID of the draft, without angle brackets. SendDraft keeps it.
   string message_id = 2;
+  // How to find the draft, set when the server stored it without naming it
+  // (no APPENDUID), so ref is empty: search the Drafts folder for
+  // message_id.
+  string hint = 3;
 }
 
 // ComposeResult is what a send-type call did: sent, built as a dry run, or

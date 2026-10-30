@@ -963,6 +963,8 @@ func findIn(ctx context.Context, st mailstore.Store, role mailstore.Role, messag
 }
 
 // saveDraft appends msg to the account's Drafts folder, flagged \Draft and \Seen.
+// When the server stores it without naming it, the draft has no ref and a
+// hint to search the Drafts folder for its Message-ID.
 func (c *composeService) saveDraft(ctx context.Context, acct config.ResolvedAccount, msg compose.Message) (*chainmailv1.Draft, error) {
 	st := c.s.stores.get(acct)
 	folder, err := roleFolder(ctx, st, mailstore.RoleDrafts)
@@ -973,7 +975,11 @@ func (c *composeService) saveDraft(ctx context.Context, acct config.ResolvedAcco
 	if err != nil {
 		return nil, err
 	}
-	return &chainmailv1.Draft{Ref: refString(r), MessageId: msg.MessageID}, nil
+	d := &chainmailv1.Draft{Ref: refString(r), MessageId: msg.MessageID}
+	if d.Ref == "" {
+		d.Hint = "search the Drafts folder for Message-ID <" + msg.MessageID + ">"
+	}
+	return d, nil
 }
 
 // recoverSends settles the keys an earlier daemon left in progress as of
