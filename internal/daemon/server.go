@@ -91,6 +91,10 @@ type Server struct {
 	// uploads holds attachment bytes for later sends. Nil without a StateDir.
 	uploads *upload.Store
 	compose *composeService
+	// newStore builds an account's store with the pool the daemon chose.
+	newStore func(config.ResolvedAccount, storeParams) mailstore.Store
+	// lim keeps connection limits and runs background probes.
+	lim *limitState
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -111,13 +115,17 @@ func New(opts Options) (*Server, error) {
 		audit:   audit.NewWriter(opts.StateDB, opts.Now),
 		started: opts.Now(),
 	}
-	newStore := opts.NewStore
-	if newStore == nil {
-		newStore = func(acct config.ResolvedAccount) mailstore.Store {
-			return imapstore.New(acct, s.auth, imapstore.Options{RootCAs: opts.RootCAs, Logger: opts.Logger, Now: opts.Now})
-		}
+	s.lim = newLimitState(opts.StateDB, opts.Now)
+	s.newStore = func(acct config.ResolvedAccount, p storeParams) mailstore.Store {
+		return imapstore.New(acct, s.auth, imapstore.Options{
+			RootCAs: opts.RootCAs, Logger: opts.Logger, Now: opts.Now,
+			PoolSize: p.poolSize, OnConnLimit: p.onConnLimit,
+		})
 	}
-	s.stores = &storeSet{newStore: newStore}
+	if opts.NewStore != nil {
+		s.newStore = func(acct config.ResolvedAccount, _ storeParams) mailstore.Store { return opts.NewStore(acct) }
+	}
+	s.stores = &storeSet{build: s.buildStore, firstUse: s.probeIfStale, logger: opts.Logger}
 	if err := s.openSendState(); err != nil {
 		return nil, err
 	}
@@ -191,10 +199,12 @@ func (s *Server) Serve(ctx context.Context) error {
 	return err
 }
 
-// drain waits for every handler to return, then logs out of the mail
-// servers. Each store logs out within 5 seconds, all in parallel.
+// drain waits for every handler to return, stops the background probes,
+// then logs out of the mail servers. Each store logs out within 5 seconds,
+// all in parallel.
 func (s *Server) drain() {
 	s.handlers.wait()
+	s.lim.stop()
 	if err := s.stores.closeAll(); err != nil {
 		s.opts.Logger.Warn("logging out of mail servers", "err", err)
 	}
