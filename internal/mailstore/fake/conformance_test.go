@@ -20,9 +20,10 @@ func TestConformance(t *testing.T) {
 		name := map[bool]string{false: "standard", true: "gmail"}[gmail]
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			storetest.Run(t, storetest.Harness{Gmail: gmail, New: func(_ *testing.T, cfg storetest.Config) (mailstore.Store, storetest.Seeder) {
+			storetest.Run(t, storetest.Harness{Gmail: gmail, Namespaces: true, New: func(_ *testing.T, cfg storetest.Config) (mailstore.Store, storetest.Seeder) {
 				s := fake.New("conformance", gmail)
 				s.SetArchiveFolder(cfg.ArchiveFolder)
+				s.SetNamespace(cfg.Namespace.Prefix, cfg.Namespace.Delim)
 				return s, func(t *testing.T, msgs ...storetest.Message) {
 					t.Helper()
 					for _, m := range msgs {

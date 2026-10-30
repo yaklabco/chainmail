@@ -243,11 +243,16 @@ type Writer interface {
 	// StoreLabels adds and removes Gmail labels. Other accounts return
 	// ErrUnsupported for every ref.
 	StoreLabels(ctx context.Context, refs []ref.Ref, add, remove []string) []RefResult
-	// CreateFolder creates name, and its missing parents first. ErrExists
-	// when it already exists.
-	CreateFolder(ctx context.Context, name string) error
-	// RenameFolder renames a folder.
-	RenameFolder(ctx context.Context, from, to string) error
+	// CreateFolder creates name, and its missing parents first, and returns
+	// the name the server gave the folder: with "/" written as the server's
+	// hierarchy delimiter and, on a server that keeps folders under a
+	// personal namespace prefix such as "INBOX.", under that prefix unless
+	// name is INBOX or starts with it already. ErrExists when it already
+	// exists.
+	CreateFolder(ctx context.Context, name string) (string, error)
+	// RenameFolder renames the folder from and returns its new name, to
+	// written as CreateFolder writes a name.
+	RenameFolder(ctx context.Context, from, to string) (string, error)
 	// DeleteFolder refuses INBOX and role folders, and a folder with mail
 	// unless force, with ErrRefused.
 	DeleteFolder(ctx context.Context, name string, force bool) error

@@ -297,7 +297,7 @@ Every command accepts `--socket <path>` and `--output json|table`. Without `--ou
 | `chainmail flag\|unflag\|read\|unread <ref>...` | Stars, unstars, or marks messages read or unread. | as `move` |
 | `chainmail flags <ref>... [--add <flag>]... [--remove <flag>]...` | Adds and removes `\Seen`, `\Flagged`, `\Answered`, `\Draft` and keywords. | as `move` |
 | `chainmail label <ref>... [--add <label>]... [--remove <label>]...` | Adds and removes Gmail labels. Google accounts only. | as `move` |
-| `chainmail folder create <name>\|rename <from> <to>\|delete <name> [--force] --account <account>` | Creates, renames and deletes folders, or labels on Google. | `{}` |
+| `chainmail folder create <name>\|rename <from> <to>\|delete <name> [--force] --account <account>` | Creates, renames and deletes folders, or labels on Google. | `{"name":...}` for `create` and `rename`, with the folder's name on the server, and `{}` for `delete` |
 | `chainmail accounts probe [<account>]...` | Measures how many IMAP connections accounts allow and sizes their pools from it. | `{"limits":[{"account":...,"imap_cap":...,"pool_size":...,"probed_at":...,"error":...}]}` |
 | `chainmail daemon` | Runs the daemon. Flags: `--dev`, `--config` (default `/etc/chainmail/config.toml`), `--state-dir` (default `/var/lib/chainmail`), `--vault-key-file` (default `$CREDENTIALS_DIRECTORY/vault-key`). | JSON log lines on stderr |
 | `chainmail accounts list` | Lists accounts with provider, address, auth method and auth state. `auth_detail` says what to run when `auth_state` is `AUTH_STATE_REQUIRED`. | `{"accounts":[...]}` |
@@ -605,11 +605,11 @@ chainmail folder rename Projects/Q3 Projects/Q3-2026 --account work
 chainmail folder delete Projects/Q3-2026 --account work
 ```
 
-`create` also creates any missing parent folders, and so does `rename` for the new name. The levels of a name are joined with the server's delimiter, as `folders` shows the names. Google matches folder names without regard to case. A folder that already exists fails `create` or `rename` with `INVALID_ARGUMENT`, and a missing one fails `rename` or `delete` with `NOT_FOUND`.
+`create` also creates any missing parent folders, and so does `rename` for the new name. Join the levels of a name with `/` or with the server's delimiter, as `folders` shows the names: chainmail writes `/` as the server's delimiter. Some servers, such as Hostinger's, keep every folder under a personal namespace prefix, `INBOX.` there, with `.` between levels. On those, `create` and the new name of `rename` go under the prefix unless the name is INBOX or starts with the prefix already, so `chainmail folder create Projects/Q3 --account site` makes `INBOX.Projects.Q3`. The commands print the name the server has, and later commands, such as `move --to` and `folder delete`, take that name. Google matches folder names without regard to case. A folder that already exists fails `create` or `rename` with `INVALID_ARGUMENT`, and a missing one fails `rename` or `delete` with `NOT_FOUND`.
 
 `rename` and `delete` refuse INBOX and every folder with a role, such as Sent, Trash or Google's `[Gmail]` folders, with `INVALID_ARGUMENT`. `rename` also refuses a folder with such a folder under it, or a new name under the folder itself. `delete` refuses a folder that has folders under it. It refuses a folder that holds mail unless you add `--force`. On other accounts `--force` deletes the mail with the folder. On Google it deletes only the label, and the messages stay in All Mail.
 
-On a terminal the commands print what they did, such as `created folder Projects/Q3 on work`.
+On a terminal the commands print what they did, such as `created folder Projects/Q3 on work`, or `created folder INBOX.Projects.Q3 on site` on Hostinger. With `--output json`, `create` and `rename` print `{"name":...}`, the folder's name on the server.
 
 ## Connection probing and pool sizing
 

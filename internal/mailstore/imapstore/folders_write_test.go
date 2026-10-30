@@ -48,22 +48,22 @@ func memFolders(t *testing.T) *Store {
 func TestCreateFolderMakesParentsFirst(t *testing.T) {
 	t.Parallel()
 	s := memFolders(t)
-	if err := s.CreateFolder(t.Context(), "A/B/C"); err != nil {
+	if _, err := s.CreateFolder(t.Context(), "A/B/C"); err != nil {
 		t.Fatal(err)
 	}
 	if got := folderNames(t, s); !hasAll(got, "A", "A/B", "A/B/C") {
 		t.Errorf("folders = %q, want A, A/B and A/B/C", got)
 	}
-	if err := s.CreateFolder(t.Context(), "A/B/D"); err != nil {
+	if _, err := s.CreateFolder(t.Context(), "A/B/D"); err != nil {
 		t.Errorf("creating beside an existing parent: %v", err)
 	}
 	for _, name := range []string{"Work", "inbox", "A/B"} {
-		if err := s.CreateFolder(t.Context(), name); !errors.Is(err, mailstore.ErrExists) {
+		if _, err := s.CreateFolder(t.Context(), name); !errors.Is(err, mailstore.ErrExists) {
 			t.Errorf("CreateFolder(%q) = %v, want ErrExists", name, err)
 		}
 	}
 	for _, name := range []string{"", "A//B", "/A", "A/", "bad\x01name"} {
-		if err := s.CreateFolder(t.Context(), name); !errors.Is(err, mailstore.ErrRefused) {
+		if _, err := s.CreateFolder(t.Context(), name); !errors.Is(err, mailstore.ErrRefused) {
 			t.Errorf("CreateFolder(%q) = %v, want ErrRefused", name, err)
 		}
 	}
@@ -73,7 +73,7 @@ func TestCreateFolderUsesTheServersDelimiter(t *testing.T) {
 	t.Parallel()
 	srv := startWriteServer(t, &writeServer{delim: ".", folders: []*wsFolder{wsMailbox("INBOX", "", 7), wsMailbox("A", "", 8)}})
 	s := writeStore(t, srv, Options{})
-	if err := s.CreateFolder(t.Context(), "A.B.C"); err != nil {
+	if _, err := s.CreateFolder(t.Context(), "A.B.C"); err != nil {
 		t.Fatal(err)
 	}
 	var creates []string
@@ -90,7 +90,7 @@ func TestCreateFolderUsesTheServersDelimiter(t *testing.T) {
 func TestRenameFolder(t *testing.T) {
 	t.Parallel()
 	s := memFolders(t)
-	if err := s.RenameFolder(t.Context(), "Work", "Old/Work"); err != nil {
+	if _, err := s.RenameFolder(t.Context(), "Work", "Old/Work"); err != nil {
 		t.Fatal(err)
 	}
 	got := folderNames(t, s)
@@ -108,7 +108,7 @@ func TestRenameFolder(t *testing.T) {
 		{"Empty", "Empty/Below", mailstore.ErrRefused},
 		{"Empty", "", mailstore.ErrRefused},
 	} {
-		if err := s.RenameFolder(t.Context(), tc.from, tc.to); !errors.Is(err, tc.want) {
+		if _, err := s.RenameFolder(t.Context(), tc.from, tc.to); !errors.Is(err, tc.want) {
 			t.Errorf("RenameFolder(%q, %q) = %v, want %v", tc.from, tc.to, err, tc.want)
 		}
 	}
@@ -157,10 +157,10 @@ func TestRenameMakesConnectionsOpenTheFolderAgain(t *testing.T) {
 	if got := s.mustCount(t, "in:Work"); got != 1 {
 		t.Fatalf("Work holds %d messages, want 1", got)
 	}
-	if err := s.RenameFolder(t.Context(), "Work", "Play"); err != nil {
+	if _, err := s.RenameFolder(t.Context(), "Work", "Play"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateFolder(t.Context(), "Work"); err != nil {
+	if _, err := s.CreateFolder(t.Context(), "Work"); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.mustCount(t, "in:Work"); got != 0 {
@@ -191,7 +191,7 @@ func TestGmailFolders(t *testing.T) {
 	s := w.store
 	ctx := t.Context()
 
-	if err := s.CreateFolder(ctx, "Projects/2026"); err != nil {
+	if _, err := s.CreateFolder(ctx, "Projects/2026"); err != nil {
 		t.Fatal(err)
 	}
 	if got := folderNames(t, s); !hasAll(got, "Projects", "Projects/2026") {
@@ -206,12 +206,12 @@ func TestGmailFolders(t *testing.T) {
 		{"[Gmail]/Stuff", mailstore.ErrRefused},
 		{"[Gmail]", mailstore.ErrRefused},
 	} {
-		if err := s.CreateFolder(ctx, tc.name); !errors.Is(err, tc.want) {
+		if _, err := s.CreateFolder(ctx, tc.name); !errors.Is(err, tc.want) {
 			t.Errorf("CreateFolder(%q) = %v, want %v", tc.name, err, tc.want)
 		}
 	}
 
-	if err := s.RenameFolder(ctx, "Work", "Jobs/Work"); err != nil {
+	if _, err := s.RenameFolder(ctx, "Work", "Jobs/Work"); err != nil {
 		t.Fatal(err)
 	}
 	if got := w.labels(t, gwWork, allMail); !slices.Equal(got, []string{"Jobs/Work"}) {
@@ -231,7 +231,7 @@ func TestGmailFolders(t *testing.T) {
 		{"Receipts", "jobs/work", mailstore.ErrExists},
 		{"Nope", "Other", mailstore.ErrNotFound},
 	} {
-		if err := s.RenameFolder(ctx, tc.from, tc.to); !errors.Is(err, tc.want) {
+		if _, err := s.RenameFolder(ctx, tc.from, tc.to); !errors.Is(err, tc.want) {
 			t.Errorf("RenameFolder(%q, %q) = %v, want %v", tc.from, tc.to, err, tc.want)
 		}
 	}
@@ -259,5 +259,78 @@ func TestGmailFolders(t *testing.T) {
 	}
 	if got := w.where(t, gwInbox); !in(got, allMail, "INBOX") {
 		t.Errorf("message is in %v; deleting its label must leave it in All Mail and INBOX", got)
+	}
+}
+
+// A server such as Hostinger's Dovecot keeps every folder under the
+// personal namespace prefix "INBOX.", with "." between levels. A name the
+// caller gives with "/" and without the prefix is written the server's way.
+func TestFolderNamesFollowThePersonalNamespace(t *testing.T) {
+	t.Parallel()
+	srv := startWriteServer(t, &writeServer{caps: "NAMESPACE", delim: ".", namespace: "INBOX.", folders: []*wsFolder{
+		wsMailbox("INBOX", "", 7), wsMailbox("INBOX.Sent", `\Sent`, 8), wsMailbox("INBOX.Archive", `\Archive`, 9),
+	}})
+	s := writeStore(t, srv, Options{})
+	for _, tc := range []struct {
+		name string
+		want []string // the CREATEs it sends
+	}{
+		{"chainmail-test-x", []string{`CREATE "INBOX.chainmail-test-x"`}},
+		{"Projects/2026", []string{`CREATE "INBOX.Projects"`, `CREATE "INBOX.Projects.2026"`}},
+		{"INBOX.Kept", []string{`CREATE "INBOX.Kept"`}},
+		{"inbox.Lower", []string{`CREATE "inbox.Lower"`}},
+	} {
+		before := srv.sent("CREATE")
+		if _, err := s.CreateFolder(t.Context(), tc.name); err != nil {
+			t.Fatalf("CreateFolder(%q): %v", tc.name, err)
+		}
+		var creates []string
+		for _, c := range srv.received() {
+			if strings.HasPrefix(c, "CREATE") {
+				creates = append(creates, c)
+			}
+		}
+		if got := creates[before:]; !slices.Equal(got, tc.want) {
+			t.Errorf("CreateFolder(%q) sent %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	if _, err := s.CreateFolder(t.Context(), "chainmail-test-x"); !errors.Is(err, mailstore.ErrExists) {
+		t.Errorf("CreateFolder of a name the server has under the prefix = %v, want ErrExists", err)
+	}
+	if _, err := s.RenameFolder(t.Context(), "INBOX.Kept", "Moved/Here"); err != nil {
+		t.Fatalf("RenameFolder: %v", err)
+	}
+	if n := srv.sent(`RENAME "INBOX.Kept" "INBOX.Moved.Here"`); n != 1 {
+		t.Errorf("commands = %q, want the target renamed under the prefix with the server's delimiter", srv.received())
+	}
+	if n := srv.sent("NAMESPACE"); n != 1 {
+		t.Errorf("NAMESPACE sent %d times, want once: the store keeps the answer", n)
+	}
+}
+
+// Without NAMESPACE, or with an empty prefix, names are the caller's, with
+// "/" written as the server's delimiter.
+func TestFolderNamesWithoutANamespacePrefix(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		srv  *writeServer
+		want string
+	}{
+		{"no NAMESPACE", &writeServer{delim: "."}, `CREATE "A.B"`},
+		{"empty prefix", &writeServer{caps: "NAMESPACE", delim: "/"}, `CREATE "A/B"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.srv.folders = []*wsFolder{wsMailbox("INBOX", "", 7), wsMailbox("A", "", 8)}
+			srv := startWriteServer(t, tc.srv)
+			s := writeStore(t, srv, Options{})
+			if _, err := s.CreateFolder(t.Context(), "A/B"); err != nil {
+				t.Fatal(err)
+			}
+			if srv.sent(tc.want) != 1 {
+				t.Errorf("commands = %q, want %s", srv.received(), tc.want)
+			}
+		})
 	}
 }

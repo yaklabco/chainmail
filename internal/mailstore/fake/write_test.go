@@ -858,7 +858,7 @@ func TestWriteCreateFolder(t *testing.T) {
 				s = newGmail()
 			}
 			before := folderNames(t, s)
-			err := s.CreateFolder(t.Context(), tt.create)
+			_, err := s.CreateFolder(t.Context(), tt.create)
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("CreateFolder(%q) = %v, want %v", tt.create, err, tt.wantErr)
@@ -901,7 +901,7 @@ func TestWriteRecreatedFolderIsStale(t *testing.T) {
 	if err := s.DeleteFolder(t.Context(), "Projects", true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateFolder(t.Context(), "Projects"); err != nil {
+	if _, err := s.CreateFolder(t.Context(), "Projects"); err != nil {
 		t.Fatal(err)
 	}
 	s.Add(Message{Folder: "Projects", Subject: "new"})
@@ -956,7 +956,7 @@ func TestWriteRenameFolder(t *testing.T) {
 			}
 			r := s.Add(Message{Folder: home, Subject: "kept", MessageID: "k@x", Labels: []string{"Receipts"}})
 			before := folderNames(t, s)
-			err := s.RenameFolder(t.Context(), tt.from, tt.to)
+			_, err := s.RenameFolder(t.Context(), tt.from, tt.to)
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("RenameFolder = %v, want %v", err, tt.wantErr)
@@ -1143,7 +1143,7 @@ func TestWriteHooks(t *testing.T) {
 	}
 	s.FailWrite("CreateFolder", errBoom)
 	s.FailWrite("CreateFolder", nil)
-	if err := s.CreateFolder(t.Context(), "Cleared"); err != nil {
+	if _, err := s.CreateFolder(t.Context(), "Cleared"); err != nil {
 		t.Errorf("FailWrite(nil) did not clear: %v", err)
 	}
 	s.FailWrite("DeleteFolder", errBoom)
@@ -1172,7 +1172,7 @@ func TestWriteHooks(t *testing.T) {
 	s.Trash(t.Context(), moved2)
 	s.StoreFlags(t.Context(), moved2, []string{`\Seen`}, nil)
 	s.StoreLabels(t.Context(), moved2, []string{"x"}, nil)
-	_ = s.RenameFolder(t.Context(), "Projects", "Work")
+	_, _ = s.RenameFolder(t.Context(), "Projects", "Work")
 	s.Expunge(t.Context(), moved2)
 
 	want := []string{
@@ -1209,7 +1209,7 @@ func TestWriteCanceledContext(t *testing.T) {
 	if res := one(t, s.Move(ctx, []ref.Ref{r}, "Projects")); !errors.Is(res.Err, context.Canceled) {
 		t.Errorf("Move with a canceled context = %v", res.Err)
 	}
-	if err := s.CreateFolder(ctx, "New"); !errors.Is(err, context.Canceled) {
+	if _, err := s.CreateFolder(ctx, "New"); !errors.Is(err, context.Canceled) {
 		t.Errorf("CreateFolder with a canceled context = %v", err)
 	}
 	fetch(t, s, r)
@@ -1324,10 +1324,10 @@ func TestWriteGmailFolderNamesIgnoreCase(t *testing.T) {
 	s := newGmail()
 	s.AddFolder("Receipts/2026", mailstore.RoleNone)
 	r := s.Add(Message{Folder: allMail, Subject: "labelled", Labels: []string{"Receipts", "Receipts/2026"}})
-	if err := s.CreateFolder(ctx, "RECEIPTS"); !errors.Is(err, mailstore.ErrExists) {
+	if _, err := s.CreateFolder(ctx, "RECEIPTS"); !errors.Is(err, mailstore.ErrExists) {
 		t.Errorf("CreateFolder in another case = %v, want ErrExists", err)
 	}
-	if err := s.CreateFolder(ctx, "receipts/2027"); err != nil {
+	if _, err := s.CreateFolder(ctx, "receipts/2027"); err != nil {
 		t.Fatal(err)
 	}
 	if got := folderNames(t, s); slices.Contains(got, "receipts") || !slices.Contains(got, "receipts/2027") {
@@ -1339,16 +1339,16 @@ func TestWriteGmailFolderNamesIgnoreCase(t *testing.T) {
 	if err := s.DeleteFolder(ctx, "receipts", true); !errors.Is(err, mailstore.ErrRefused) {
 		t.Errorf("DeleteFolder of a label with a child, in another case = %v, want ErrRefused", err)
 	}
-	if err := s.RenameFolder(ctx, "receipts", "Bills"); err != nil {
+	if _, err := s.RenameFolder(ctx, "receipts", "Bills"); err != nil {
 		t.Fatalf("RenameFolder in another case: %v", err)
 	}
 	if got := folderNames(t, s); !slices.Contains(got, "Bills") || !slices.Contains(got, "Bills/2026") || slices.Contains(got, "Receipts") {
 		t.Errorf("folders = %q, want Receipts and its child renamed to Bills", got)
 	}
-	if err := s.RenameFolder(ctx, "Bills", "BILLS"); err != nil {
+	if _, err := s.RenameFolder(ctx, "Bills", "BILLS"); err != nil {
 		t.Fatalf("RenameFolder to a change of case: %v", err)
 	}
-	if err := s.RenameFolder(ctx, "bills", "BILLS/Old"); !errors.Is(err, mailstore.ErrRefused) {
+	if _, err := s.RenameFolder(ctx, "bills", "BILLS/Old"); !errors.Is(err, mailstore.ErrRefused) {
 		t.Errorf("RenameFolder under itself in another case = %v, want ErrRefused", err)
 	}
 	labels := fetch(t, s, r).Summary.Labels
@@ -1364,7 +1364,7 @@ func TestWriteGmailFolderNamesIgnoreCase(t *testing.T) {
 	}
 
 	std := newHost()
-	if err := std.CreateFolder(ctx, "projects"); err != nil {
+	if _, err := std.CreateFolder(ctx, "projects"); err != nil {
 		t.Errorf("standard CreateFolder of another case = %v, want a new folder", err)
 	}
 	if err := std.DeleteFolder(ctx, "PROJECTS", false); !errors.Is(err, mailstore.ErrNotFound) {

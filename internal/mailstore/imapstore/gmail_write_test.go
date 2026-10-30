@@ -722,7 +722,7 @@ func TestGmailSystemFoldersByAttribute(t *testing.T) {
 		s := gmailScripted(t, srv)
 		ctx := t.Context()
 		for _, name := range []string{ns + "/New", ns, "[google mail]/new", "[Gmail]/Stuff"} {
-			if err := s.CreateFolder(ctx, name); !errors.Is(err, mailstore.ErrRefused) {
+			if _, err := s.CreateFolder(ctx, name); !errors.Is(err, mailstore.ErrRefused) {
 				t.Errorf("CreateFolder(%q) = %v, want ErrRefused", name, err)
 			}
 		}
@@ -734,7 +734,7 @@ func TestGmailSystemFoldersByAttribute(t *testing.T) {
 			{"Work", ns + "/Work"},
 			{"INBOX", "Box"},
 		} {
-			if err := s.RenameFolder(ctx, tc[0], tc[1]); !errors.Is(err, mailstore.ErrRefused) {
+			if _, err := s.RenameFolder(ctx, tc[0], tc[1]); !errors.Is(err, mailstore.ErrRefused) {
 				t.Errorf("RenameFolder(%q, %q) = %v, want ErrRefused", tc[0], tc[1], err)
 			}
 		}
@@ -748,7 +748,7 @@ func TestGmailSystemFoldersByAttribute(t *testing.T) {
 				t.Errorf("sent %q; refused changes send nothing", c)
 			}
 		}
-		if err := s.CreateFolder(ctx, "Projects"); err != nil {
+		if _, err := s.CreateFolder(ctx, "Projects"); err != nil {
 			t.Errorf("creating a label: %v", err)
 		}
 	})

@@ -496,8 +496,8 @@ func TestOrganizeFolders(t *testing.T) {
 		}
 		return slices.ContainsFunc(folders, func(f mailstore.Folder) bool { return f.Name == name })
 	}
-	if _, err := org.CreateFolder(t.Context(), connect.NewRequest(&chainmailv1.CreateFolderRequest{Account: "host", Name: "Projects/2026"})); err != nil {
-		t.Fatal(err)
+	if resp, err := org.CreateFolder(t.Context(), connect.NewRequest(&chainmailv1.CreateFolderRequest{Account: "host", Name: "Projects/2026"})); err != nil || resp.Msg.GetName() != "Projects/2026" {
+		t.Fatalf("CreateFolder = %v, %v; want the folder named Projects/2026", resp, err)
 	}
 	if !has("Projects/2026") {
 		t.Error("created folder is missing")
@@ -707,5 +707,32 @@ func TestOrganizeFanOutIsBounded(t *testing.T) {
 	}
 	if rows := orgRows(t, h, "trash"); len(rows) != accounts {
 		t.Errorf("audit rows = %d, want %d", len(rows), accounts)
+	}
+}
+
+// The responses name the folder as the server has it, which is how later
+// calls must name it: under Hostinger's "INBOX." prefix, with "." between
+// levels.
+func TestOrganizeFoldersReturnTheServersName(t *testing.T) {
+	t.Parallel()
+	m := startFakeMail(t)
+	m.host.SetNamespace("INBOX.", ".")
+	org := m.Client.Organize
+	created, err := org.CreateFolder(t.Context(), connect.NewRequest(&chainmailv1.CreateFolderRequest{Account: "host", Name: "Projects/2026"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := created.Msg.GetName(); got != "INBOX.Projects.2026" {
+		t.Errorf("CreateFolder name = %q, want INBOX.Projects.2026", got)
+	}
+	renamed, err := org.RenameFolder(t.Context(), connect.NewRequest(&chainmailv1.RenameFolderRequest{Account: "host", From: "INBOX.Projects.2026", To: "Done"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := renamed.Msg.GetName(); got != "INBOX.Done" {
+		t.Errorf("RenameFolder name = %q, want INBOX.Done", got)
+	}
+	if _, err := org.DeleteFolder(t.Context(), connect.NewRequest(&chainmailv1.DeleteFolderRequest{Account: "host", Name: renamed.Msg.GetName()})); err != nil {
+		t.Errorf("DeleteFolder by the name RenameFolder gave: %v", err)
 	}
 }

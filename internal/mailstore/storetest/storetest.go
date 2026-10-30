@@ -131,6 +131,32 @@ type Config struct {
 	// \Archive role. Google accounts archive by label and ignore it. The
 	// case creates the folder before it archives.
 	ArchiveFolder string
+	// Namespace, when its Prefix is set, is the personal namespace the
+	// account keeps every folder under, as a Dovecot server such as
+	// Hostinger's keeps them under "INBOX." with "." between levels. Only a
+	// harness with Namespaces set is asked for one.
+	Namespace Namespace
+}
+
+// Namespace is an account's personal namespace: the prefix its folders sit
+// under and the delimiter between levels. The zero Namespace is the one the
+// package comment describes, no prefix and "/".
+type Namespace struct {
+	Prefix string
+	Delim  string
+}
+
+// serverName is the name CreateFolder gives a folder asked for as name in
+// the namespace: "/" written as its delimiter, and under its prefix unless
+// name is INBOX or starts with the prefix already.
+func (n Namespace) serverName(name string) string {
+	if n.Delim != "" {
+		name = strings.ReplaceAll(name, "/", n.Delim)
+	}
+	if n.Prefix == "" || strings.EqualFold(name, "INBOX") || strings.HasPrefix(name, n.Prefix) {
+		return name
+	}
+	return n.Prefix + name
 }
 
 // Harness makes a fresh account for each case.
@@ -141,6 +167,10 @@ type Harness struct {
 	New func(t *testing.T, cfg Config) (mailstore.Store, Seeder)
 	// Gmail says the account is a Google account.
 	Gmail bool
+	// Namespaces says New makes an account under Config.Namespace when it
+	// is set. Other harnesses run the namespace case on their own account
+	// only.
+	Namespaces bool
 }
 
 // Run runs every case for the harness's mode, each on a fresh account.
@@ -151,7 +181,7 @@ func Run(t *testing.T, h Harness) {
 			continue
 		}
 		t.Run(c.name, func(t *testing.T) {
-			e := &env{t: t, ctx: t.Context(), gmail: h.Gmail}
+			e := &env{t: t, ctx: t.Context(), gmail: h.Gmail, namespaces: h.Namespaces}
 			e.open = func(cfg Config) { e.s, e.seed = h.New(t, cfg) }
 			e.open(Config{})
 			c.run(e)
@@ -180,6 +210,8 @@ type env struct {
 	s     mailstore.Store
 	seed  Seeder
 	gmail bool
+	// namespaces says open can make an account under a namespace prefix.
+	namespaces bool
 	// open replaces s and seed with a fresh account configured as cfg says.
 	open func(cfg Config)
 }
@@ -357,12 +389,20 @@ func (e *env) folders() []string {
 	return out
 }
 
+// mustCreate creates name, which the account keeps as it is.
 func (e *env) mustCreate(name string) {
 	e.t.Helper()
-	if err := e.s.CreateFolder(e.ctx, name); err != nil {
+	got, err := e.s.CreateFolder(e.ctx, name)
+	if err != nil {
 		e.t.Fatalf("CreateFolder(%q): %v", name, err)
 	}
+	if got != name {
+		e.t.Errorf("CreateFolder(%q) = %q, want the name as given", name, got)
+	}
 }
+
+// errOf is the error of a call that also returns a name.
+func errOf(_ string, err error) error { return err }
 
 // foreign is r as a ref of another account.
 func foreign(r ref.Ref) ref.Ref {
@@ -484,6 +524,7 @@ var cases = []testCase{
 	{"RenameFolder moves children and mail", both, renameFolder},
 	{"RenameFolder refuses system folders and bad targets", both, renameRefused},
 	{"DeleteFolder follows the folder rules", both, deleteFolder},
+	{"CreateFolder and RenameFolder name folders as the server does", both, folderNamespace},
 	{"FindByMessageID", both, findByMessageID},
 	{"ListFolders order, roles and counts", both, listFolders},
 	{"Search sources and counts", both, searchBasics},
@@ -960,14 +1001,14 @@ func createFolder(e *env) {
 		}
 	}
 	for _, name := range []string{"Cf/Sub/Leaf", "Cf/Sub", "inbox", pick(e.gmail, "cf/sub", "Trash")} {
-		wantErr(e.t, fmt.Sprintf("CreateFolder(%q)", name), e.s.CreateFolder(e.ctx, name), mailstore.ErrExists)
+		wantErr(e.t, fmt.Sprintf("CreateFolder(%q)", name), errOf(e.s.CreateFolder(e.ctx, name)), mailstore.ErrExists)
 	}
 	for _, name := range []string{"", "Cf//Gap", "/Cf"} {
-		wantErr(e.t, fmt.Sprintf("CreateFolder(%q)", name), e.s.CreateFolder(e.ctx, name), mailstore.ErrRefused)
+		wantErr(e.t, fmt.Sprintf("CreateFolder(%q)", name), errOf(e.s.CreateFolder(e.ctx, name)), mailstore.ErrRefused)
 	}
 	if e.gmail {
-		wantErr(e.t, "CreateFolder of a Gmail folder", e.s.CreateFolder(e.ctx, "[Gmail]/Conformance"), mailstore.ErrRefused)
-		wantErr(e.t, "CreateFolder of a label in another case", e.s.CreateFolder(e.ctx, "CF/sub"), mailstore.ErrExists)
+		wantErr(e.t, "CreateFolder of a Gmail folder", errOf(e.s.CreateFolder(e.ctx, "[Gmail]/Conformance")), mailstore.ErrRefused)
+		wantErr(e.t, "CreateFolder of a label in another case", errOf(e.s.CreateFolder(e.ctx, "CF/sub")), mailstore.ErrExists)
 	}
 	if got := e.folders(); slices.Contains(got, "Cf/Gap") || slices.Contains(got, "[Gmail]/Conformance") {
 		e.t.Errorf("folders = %q after refused creates", got)
@@ -978,8 +1019,8 @@ func renameFolder(e *env) {
 	e.mustCreate("Cf/Sub")
 	e.seed(e.t, e.in(e.msg("CfRename"), "Cf/Sub"))
 	before := e.ref("CfRename", pick(e.gmail, "", "Cf/Sub"))
-	if err := e.s.RenameFolder(e.ctx, "Cf", "Moved/Cf"); err != nil {
-		e.t.Fatalf("RenameFolder: %v", err)
+	if got, err := e.s.RenameFolder(e.ctx, "Cf", "Moved/Cf"); err != nil || got != "Moved/Cf" {
+		e.t.Fatalf("RenameFolder = %q, %v; want Moved/Cf", got, err)
 	}
 	got := e.folders()
 	for _, f := range []string{"Moved", "Moved/Cf", "Moved/Cf/Sub"} {
@@ -1015,10 +1056,10 @@ func renameRefused(e *env) {
 		{"Cf", "Cf/Sub/Cf", mailstore.ErrRefused},
 		{"Cf", "Bad//Name", mailstore.ErrRefused},
 	} {
-		wantErr(e.t, fmt.Sprintf("RenameFolder(%q, %q)", c.from, c.to), e.s.RenameFolder(e.ctx, c.from, c.to), c.want)
+		wantErr(e.t, fmt.Sprintf("RenameFolder(%q, %q)", c.from, c.to), errOf(e.s.RenameFolder(e.ctx, c.from, c.to)), c.want)
 	}
 	if e.gmail {
-		wantErr(e.t, "RenameFolder into Gmail's folders", e.s.RenameFolder(e.ctx, "Other", "[Gmail]/Other"), mailstore.ErrRefused)
+		wantErr(e.t, "RenameFolder into Gmail's folders", errOf(e.s.RenameFolder(e.ctx, "Other", "[Gmail]/Other")), mailstore.ErrRefused)
 	}
 	got := e.folders()
 	for _, f := range []string{"Cf", "Cf/Sub", "Other", "INBOX", e.trash()} {
@@ -1072,6 +1113,44 @@ func deleteFolder(e *env) {
 
 // findByMessageID: the refs are those a search gives, so on Google they
 // carry the message's X-GM-MSGID, which SEARCH alone does not give.
+// folderNamespace: CreateFolder and RenameFolder return the name the server
+// gave the folder, which is how the account lists it and how later calls
+// name it. On the harness's own account that is the name as given. Under a
+// namespace prefix such as "INBOX.", with "." between levels, it is written
+// the server's way, as Hostinger needs.
+func folderNamespace(e *env) {
+	check := func(ns Namespace) {
+		e.t.Helper()
+		for _, name := range []string{"CfNs/Sub", ns.serverName("CfNsKept")} {
+			want := ns.serverName(name)
+			got, err := e.s.CreateFolder(e.ctx, name)
+			if err != nil || got != want {
+				e.t.Fatalf("CreateFolder(%q) = %q, %v; want %q", name, got, err, want)
+			}
+			if !slices.Contains(e.folders(), want) {
+				e.t.Errorf("folders = %q, want %q", e.folders(), want)
+			}
+		}
+		wantErr(e.t, "CreateFolder of a name the account has under the prefix", errOf(e.s.CreateFolder(e.ctx, "CfNsKept")), mailstore.ErrExists)
+		from, to := ns.serverName("CfNsKept"), ns.serverName("CfNsMoved/Here")
+		got, err := e.s.RenameFolder(e.ctx, from, "CfNsMoved/Here")
+		if err != nil || got != to {
+			e.t.Fatalf("RenameFolder(%q, CfNsMoved/Here) = %q, %v; want %q", from, got, err, to)
+		}
+		if list := e.folders(); !slices.Contains(list, to) || slices.Contains(list, from) {
+			e.t.Errorf("folders = %q, want %q renamed to %q", list, from, to)
+		}
+		if err := e.s.DeleteFolder(e.ctx, got, false); err != nil {
+			e.t.Errorf("DeleteFolder(%q), the name RenameFolder gave: %v", got, err)
+		}
+	}
+	check(Namespace{})
+	if e.namespaces && !e.gmail {
+		e.open(Config{Namespace: Namespace{Prefix: "INBOX.", Delim: "."}})
+		check(Namespace{Prefix: "INBOX.", Delim: "."})
+	}
+}
+
 func findByMessageID(e *env) {
 	e.seed(e.t, e.msg("CfFind"), e.in(e.msg("CfFindTrash"), e.trash()))
 	r := e.ref("CfFind")

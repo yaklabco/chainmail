@@ -151,7 +151,11 @@ type Store struct {
 
 	mu      sync.Mutex
 	folders []mailstore.Folder // cached; nil until listed
-	system  systemSpace        // the system namespace of the cached list
+	// nsPrefix is the personal namespace prefix, once nsKnown. It is kept
+	// when the folder list is dropped.
+	nsPrefix string
+	nsKnown  bool
+	system   systemSpace // the system namespace of the cached list
 	// borrowed counts connections out of the pool, a stream reader's
 	// included. drained, when set, is closed when it reaches zero.
 	borrowed int

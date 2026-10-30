@@ -359,23 +359,31 @@ func (o *organizeService) recordBatch(ctx context.Context, who caller, c batchCa
 // CreateFolder implements chainmailv1connect.OrganizeServiceHandler.
 func (o *organizeService) CreateFolder(ctx context.Context, req *connect.Request[chainmailv1.CreateFolderRequest]) (*connect.Response[chainmailv1.CreateFolderResponse], error) {
 	name := req.Msg.GetName()
+	var created string
 	err := o.folderCall(ctx, req.Header(), "folders.create", req.Msg.GetAccount(), []string{name}, nil,
-		func(ctx context.Context, w mailstore.Writer) error { return w.CreateFolder(ctx, name) })
+		func(ctx context.Context, w mailstore.Writer) (err error) {
+			created, err = w.CreateFolder(ctx, name)
+			return err
+		})
 	if err != nil {
 		return nil, err
 	}
-	return connect.NewResponse(&chainmailv1.CreateFolderResponse{}), nil
+	return connect.NewResponse(&chainmailv1.CreateFolderResponse{Name: created}), nil
 }
 
 // RenameFolder implements chainmailv1connect.OrganizeServiceHandler.
 func (o *organizeService) RenameFolder(ctx context.Context, req *connect.Request[chainmailv1.RenameFolderRequest]) (*connect.Response[chainmailv1.RenameFolderResponse], error) {
 	from, to := req.Msg.GetFrom(), req.Msg.GetTo()
+	var renamed string
 	err := o.folderCall(ctx, req.Header(), "folders.rename", req.Msg.GetAccount(), []string{from, to}, nil,
-		func(ctx context.Context, w mailstore.Writer) error { return w.RenameFolder(ctx, from, to) })
+		func(ctx context.Context, w mailstore.Writer) (err error) {
+			renamed, err = w.RenameFolder(ctx, from, to)
+			return err
+		})
 	if err != nil {
 		return nil, err
 	}
-	return connect.NewResponse(&chainmailv1.RenameFolderResponse{}), nil
+	return connect.NewResponse(&chainmailv1.RenameFolderResponse{Name: renamed}), nil
 }
 
 // DeleteFolder implements chainmailv1connect.OrganizeServiceHandler.

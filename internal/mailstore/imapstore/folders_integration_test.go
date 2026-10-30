@@ -15,23 +15,23 @@ func TestDovecotCreateRenameDeleteFolders(t *testing.T) {
 	s := doveStore(t, user)
 	ctx := t.Context()
 
-	if err := s.CreateFolder(ctx, "Projects/2026/Q4"); err != nil {
+	if _, err := s.CreateFolder(ctx, "Projects/2026/Q4"); err != nil {
 		t.Fatal(err)
 	}
 	if got := folderNames(t, s); !hasAll(got, "Projects", "Projects/2026", "Projects/2026/Q4") {
 		t.Errorf("folders = %q, want each level created", got)
 	}
 	for _, name := range []string{"Projects/2026", "inbox", "Trash"} {
-		if err := s.CreateFolder(ctx, name); !errors.Is(err, mailstore.ErrExists) {
+		if _, err := s.CreateFolder(ctx, name); !errors.Is(err, mailstore.ErrExists) {
 			t.Errorf("CreateFolder(%q) = %v, want ErrExists", name, err)
 		}
 	}
-	if err := s.CreateFolder(ctx, "A//B"); !errors.Is(err, mailstore.ErrRefused) {
+	if _, err := s.CreateFolder(ctx, "A//B"); !errors.Is(err, mailstore.ErrRefused) {
 		t.Errorf("CreateFolder with an empty level = %v, want ErrRefused", err)
 	}
 
 	put(t, user, "Projects/2026/Q4", doveMail{from: "a@example.com", subject: "plan", messageID: "plan@x", body: "x"}, oct(1))
-	if err := s.RenameFolder(ctx, "Projects", "Old/Projects"); err != nil {
+	if _, err := s.RenameFolder(ctx, "Projects", "Old/Projects"); err != nil {
 		t.Fatal(err)
 	}
 	got := folderNames(t, s)
@@ -51,7 +51,7 @@ func TestDovecotCreateRenameDeleteFolders(t *testing.T) {
 		{"Old/Projects", "Archive", mailstore.ErrExists},
 		{"Nope", "Other", mailstore.ErrNotFound},
 	} {
-		if err := s.RenameFolder(ctx, tc.from, tc.to); !errors.Is(err, tc.want) {
+		if _, err := s.RenameFolder(ctx, tc.from, tc.to); !errors.Is(err, tc.want) {
 			t.Errorf("RenameFolder(%q, %q) = %v, want %v", tc.from, tc.to, err, tc.want)
 		}
 	}

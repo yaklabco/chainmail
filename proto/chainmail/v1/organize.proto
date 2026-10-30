@@ -121,12 +121,21 @@ message SetLabelsResponse {
 message CreateFolderRequest {
   // The account to create it on.
   string account = 1;
-  // The full folder name, with the server's delimiter between levels.
+  // The full folder name, with "/" or the server's delimiter between
+  // levels. On a server with a personal namespace prefix it may leave the
+  // prefix out: the response gives the name the server has.
   string name = 2;
 }
 
-// CreateFolderResponse is empty: the folder exists.
-message CreateFolderResponse {}
+// CreateFolderResponse names the folder created.
+message CreateFolderResponse {
+  // The folder's name on the server, which later calls use. It differs
+  // from the name asked for on a server that keeps folders under a personal
+  // namespace prefix, such as Hostinger's "INBOX.": "Projects/2026" there is
+  // created as "INBOX.Projects.2026", with the server's delimiter between
+  // levels.
+  string name = 1;
+}
 
 // RenameFolderRequest renames a folder.
 message RenameFolderRequest {
@@ -134,12 +143,17 @@ message RenameFolderRequest {
   string account = 1;
   // The folder's current name.
   string from = 2;
-  // The new name.
+  // The new name, written as CreateFolderRequest.name is.
   string to = 3;
 }
 
-// RenameFolderResponse is empty: the folder has its new name.
-message RenameFolderResponse {}
+// RenameFolderResponse gives the folder's new name.
+message RenameFolderResponse {
+  // The folder's new name on the server, written as CreateFolderResponse
+  // describes: under the personal namespace prefix, if the server has one,
+  // with the server's delimiter between levels.
+  string name = 1;
+}
 
 // DeleteFolderRequest deletes a folder. INBOX, role folders and a folder
 // with folders under it are refused.

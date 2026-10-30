@@ -587,3 +587,29 @@ func TestProbeOutputCleansUntrustedText(t *testing.T) {
 		t.Errorf("warning = %q, want %q", errOut.String(), want)
 	}
 }
+
+// folder create and rename print the name the server gave the folder,
+// which later commands take: under Hostinger's "INBOX." prefix there.
+func TestFolderCommandsPrintTheServersName(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		output, create, rename string
+	}{
+		{"table", "created folder INBOX.chainmail-test-x on host\n", "renamed folder INBOX.chainmail-test-x to INBOX.Done.Here on host\n"},
+		{"json", `{"name":"INBOX.chainmail-test-x"}` + "\n", `{"name":"INBOX.Done.Here"}` + "\n"},
+	} {
+		t.Run(tc.output, func(t *testing.T) {
+			t.Parallel()
+			m := startCLIMail(t)
+			m.host.SetNamespace("INBOX.", ".")
+			got := m.run(t, Env{}, "--output", tc.output, "folder", "create", "--account", "host", "chainmail-test-x")
+			if got.code != 0 || got.stdout != tc.create {
+				t.Errorf("folder create: exit %d, stdout %q, want %q; stderr %s", got.code, got.stdout, tc.create, got.stderr)
+			}
+			got = m.run(t, Env{}, "--output", tc.output, "folder", "rename", "--account", "host", "INBOX.chainmail-test-x", "Done/Here")
+			if got.code != 0 || got.stdout != tc.rename {
+				t.Errorf("folder rename: exit %d, stdout %q, want %q; stderr %s", got.code, got.stdout, tc.rename, got.stderr)
+			}
+		})
+	}
+}

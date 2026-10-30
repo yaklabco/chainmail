@@ -795,7 +795,9 @@ type CreateFolderRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The account to create it on.
 	Account string `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
-	// The full folder name, with the server's delimiter between levels.
+	// The full folder name, with "/" or the server's delimiter between
+	// levels. On a server with a personal namespace prefix it may leave the
+	// prefix out: the response gives the name the server has.
 	Name          string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -845,9 +847,15 @@ func (x *CreateFolderRequest) GetName() string {
 	return ""
 }
 
-// CreateFolderResponse is empty: the folder exists.
+// CreateFolderResponse names the folder created.
 type CreateFolderResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The folder's name on the server, which later calls use. It differs
+	// from the name asked for on a server that keeps folders under a personal
+	// namespace prefix, such as Hostinger's "INBOX.": "Projects/2026" there is
+	// created as "INBOX.Projects.2026", with the server's delimiter between
+	// levels.
+	Name          string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -882,6 +890,13 @@ func (*CreateFolderResponse) Descriptor() ([]byte, []int) {
 	return file_chainmail_v1_organize_proto_rawDescGZIP(), []int{16}
 }
 
+func (x *CreateFolderResponse) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
 // RenameFolderRequest renames a folder.
 type RenameFolderRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -889,7 +904,7 @@ type RenameFolderRequest struct {
 	Account string `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
 	// The folder's current name.
 	From string `protobuf:"bytes,2,opt,name=from,proto3" json:"from,omitempty"`
-	// The new name.
+	// The new name, written as CreateFolderRequest.name is.
 	To            string `protobuf:"bytes,3,opt,name=to,proto3" json:"to,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -946,9 +961,13 @@ func (x *RenameFolderRequest) GetTo() string {
 	return ""
 }
 
-// RenameFolderResponse is empty: the folder has its new name.
+// RenameFolderResponse gives the folder's new name.
 type RenameFolderResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The folder's new name on the server, written as CreateFolderResponse
+	// describes: under the personal namespace prefix, if the server has one,
+	// with the server's delimiter between levels.
+	Name          string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -981,6 +1000,13 @@ func (x *RenameFolderResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use RenameFolderResponse.ProtoReflect.Descriptor instead.
 func (*RenameFolderResponse) Descriptor() ([]byte, []int) {
 	return file_chainmail_v1_organize_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *RenameFolderResponse) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
 }
 
 // DeleteFolderRequest deletes a folder. INBOX, role folders and a folder
@@ -1132,13 +1158,15 @@ const file_chainmail_v1_organize_proto_rawDesc = "" +
 	"\boutcomes\x18\x01 \x03(\v2\x18.chainmail.v1.RefOutcomeR\boutcomes\"C\n" +
 	"\x13CreateFolderRequest\x12\x18\n" +
 	"\aaccount\x18\x01 \x01(\tR\aaccount\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"\x16\n" +
-	"\x14CreateFolderResponse\"S\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"*\n" +
+	"\x14CreateFolderResponse\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"S\n" +
 	"\x13RenameFolderRequest\x12\x18\n" +
 	"\aaccount\x18\x01 \x01(\tR\aaccount\x12\x12\n" +
 	"\x04from\x18\x02 \x01(\tR\x04from\x12\x0e\n" +
-	"\x02to\x18\x03 \x01(\tR\x02to\"\x16\n" +
-	"\x14RenameFolderResponse\"Y\n" +
+	"\x02to\x18\x03 \x01(\tR\x02to\"*\n" +
+	"\x14RenameFolderResponse\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"Y\n" +
 	"\x13DeleteFolderRequest\x12\x18\n" +
 	"\aaccount\x18\x01 \x01(\tR\aaccount\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +

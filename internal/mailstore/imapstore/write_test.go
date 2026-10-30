@@ -60,6 +60,9 @@ type writeServer struct {
 	after func(srv *writeServer, kind string)
 	// delim is the hierarchy delimiter LIST reports. Empty means "/".
 	delim string
+	// namespace is the personal namespace prefix NAMESPACE reports, with
+	// delim. Advertise NAMESPACE in caps for the client to ask.
+	namespace string
 
 	mu     sync.Mutex
 	events []string // "recv UID MOVE 1:2 Archive", "sent UID MOVE"
@@ -365,6 +368,15 @@ func (srv *writeServer) reply(st *wsSession, c wsCmd) string {
 	case "CREATE":
 		srv.folders = append(srv.folders, wsMailbox(wsUnquote(f[1]), "", 99))
 		return ok
+	case "RENAME":
+		fo := srv.folder(wsUnquote(f[1]))
+		if fo == nil {
+			return c.tag + " NO [NONEXISTENT] no such mailbox\r\n"
+		}
+		fo.name = wsUnquote(f[2])
+		return ok
+	case "NAMESPACE":
+		return fmt.Sprintf("* NAMESPACE ((%q %q)) NIL NIL\r\n%s", srv.namespace, cmp.Or(srv.delim, "/"), ok)
 	case "CAPABILITY":
 		return "* " + srv.capability() + "\r\n" + ok
 	case "LIST":

@@ -20,10 +20,13 @@ import (
 	"github.com/jamesainslie/chainmail/internal/ref"
 )
 
-// CreateFolder implements mailstore.Writer. Missing parents are created
-// first, split on the server's hierarchy delimiter.
-func (s *Store) CreateFolder(ctx context.Context, name string) error {
-	return s.changeFolders(ctx, false, func(c *conn, t folderTree, sent func()) error {
+// CreateFolder implements mailstore.Writer. The name is written as the
+// server has it (serverName), and missing parents are created first, split
+// on the server's hierarchy delimiter.
+func (s *Store) CreateFolder(ctx context.Context, name string) (string, error) {
+	var created string
+	err := s.changeFolders(ctx, false, func(c *conn, t folderTree, sent func()) error {
+		name := t.serverName(name)
 		if err := t.checkName(s.acct.Name, name); err != nil {
 			return err
 		}
@@ -34,16 +37,24 @@ func (s *Store) CreateFolder(ctx context.Context, name string) error {
 		if err := t.createParents(ctx, c, name); err != nil {
 			return err
 		}
-		return c.folderCommand(ctx, name, func() error { return c.client().Create(name, nil).Wait() })
+		if err := c.folderCommand(ctx, name, func() error { return c.client().Create(name, nil).Wait() }); err != nil {
+			return err
+		}
+		created = name
+		return nil
 	})
+	return created, err
 }
 
 // RenameFolder implements mailstore.Writer. It refuses INBOX, role folders
 // and Gmail's own folders, as the source or among its children, and a
-// folder moving under itself. Missing parents of to are created first. The
-// server renames the children with the folder.
-func (s *Store) RenameFolder(ctx context.Context, from, to string) error {
-	return s.changeFolders(ctx, true, func(c *conn, t folderTree, sent func()) error {
+// folder moving under itself. to is written as the server has it
+// (serverName), and its missing parents are created first. The server
+// renames the children with the folder.
+func (s *Store) RenameFolder(ctx context.Context, from, to string) (string, error) {
+	var renamed string
+	err := s.changeFolders(ctx, true, func(c *conn, t folderTree, sent func()) error {
+		to := t.serverName(to)
 		i := t.find(from)
 		if i < 0 {
 			return fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, from)
@@ -79,8 +90,13 @@ func (s *Store) RenameFolder(ctx context.Context, from, to string) error {
 		if err := t.createParents(ctx, c, to); err != nil {
 			return err
 		}
-		return c.folderCommand(ctx, src, func() error { return c.client().Rename(src, to, nil).Wait() })
+		if err := c.folderCommand(ctx, src, func() error { return c.client().Rename(src, to, nil).Wait() }); err != nil {
+			return err
+		}
+		renamed = to
+		return nil
 	})
+	return renamed, err
 }
 
 // DeleteFolder implements mailstore.Writer. It refuses INBOX, role folders,
@@ -125,6 +141,12 @@ func (s *Store) changeFolders(ctx context.Context, moves bool, f func(c *conn, t
 		if err != nil {
 			return err
 		}
+		// Gmail keeps its labels at the top level.
+		if !s.gmail() {
+			if t.prefix, err = s.personalPrefix(ctx, c); err != nil {
+				return err
+			}
+		}
 		return f(c, t, func() {
 			changed = true
 			sent()
@@ -148,6 +170,73 @@ type folderTree struct {
 	gmail bool
 	// system is Gmail's system namespace, found by special-use attribute.
 	system systemSpace
+	// prefix is the personal namespace prefix, such as "INBOX.", that the
+	// server keeps every folder under, or "" when it keeps them at the top.
+	prefix string
+}
+
+// personalPrefix returns the prefix of the account's personal namespace.
+// The first call asks the server with NAMESPACE on c, and the store keeps
+// the answer with its folder list, for its whole life, since a server does
+// not move its namespaces. A server without NAMESPACE, or that refuses it,
+// has none.
+func (s *Store) personalPrefix(ctx context.Context, c *conn) (string, error) {
+	s.mu.Lock()
+	prefix, known := s.nsPrefix, s.nsKnown
+	s.mu.Unlock()
+	if known {
+		return prefix, nil
+	}
+	if c.client().Caps().Has(imap.CapNamespace) {
+		var data *imap.NamespaceData
+		err := c.do(ctx, func() error {
+			var err error
+			data, err = c.client().Namespace().Wait()
+			return err
+		})
+		var refusal *imap.Error
+		switch {
+		case errors.As(err, &refusal):
+		case err != nil:
+			return "", err
+		case len(data.Personal) > 0:
+			prefix = data.Personal[0].Prefix
+		}
+	}
+	s.mu.Lock()
+	s.nsPrefix, s.nsKnown = prefix, true
+	s.mu.Unlock()
+	return prefix, nil
+}
+
+// serverName is name as the server has it: "/" written as the server's
+// hierarchy delimiter, and, unless name is INBOX or starts with the
+// personal namespace prefix already, under that prefix, as Dovecot servers
+// such as Hostinger's keep every folder under "INBOX.".
+func (t folderTree) serverName(name string) string {
+	if t.delim != 0 && t.delim != '/' {
+		name = strings.ReplaceAll(name, "/", string(t.delim))
+	}
+	if t.prefix == "" || strings.EqualFold(name, "INBOX") || t.inNamespace(name) {
+		return name
+	}
+	return t.prefix + name
+}
+
+// inNamespace reports whether name starts with the personal namespace
+// prefix, INBOX in it matched in any case, as IMAP matches INBOX.
+func (t folderTree) inNamespace(name string) bool {
+	n := len(t.prefix)
+	if len(name) < n {
+		return false
+	}
+	head := name[:n]
+	if head == t.prefix {
+		return true
+	}
+	const inbox = "INBOX"
+	return n > len(inbox) && strings.EqualFold(t.prefix[:len(inbox)], inbox) &&
+		strings.EqualFold(head[:len(inbox)], inbox) && head[len(inbox):] == t.prefix[len(inbox):]
 }
 
 // folderTree lists every folder, with special-use attributes where the

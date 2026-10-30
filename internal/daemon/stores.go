@@ -373,12 +373,20 @@ func (a *accountStore) StoreLabels(ctx context.Context, refs []ref.Ref, add, rem
 	return a.batch(ctx, refs, func(st mailstore.Store) []mailstore.RefResult { return st.StoreLabels(ctx, refs, add, remove) })
 }
 
-func (a *accountStore) CreateFolder(ctx context.Context, name string) error {
-	return a.call(ctx, func(st mailstore.Store) error { return st.CreateFolder(ctx, name) })
+func (a *accountStore) CreateFolder(ctx context.Context, name string) (created string, err error) {
+	err = a.call(ctx, func(st mailstore.Store) error {
+		created, err = st.CreateFolder(ctx, name)
+		return err
+	})
+	return created, err
 }
 
-func (a *accountStore) RenameFolder(ctx context.Context, from, to string) error {
-	return a.call(ctx, func(st mailstore.Store) error { return st.RenameFolder(ctx, from, to) })
+func (a *accountStore) RenameFolder(ctx context.Context, from, to string) (renamed string, err error) {
+	err = a.call(ctx, func(st mailstore.Store) error {
+		renamed, err = st.RenameFolder(ctx, from, to)
+		return err
+	})
+	return renamed, err
 }
 
 func (a *accountStore) DeleteFolder(ctx context.Context, name string, force bool) error {

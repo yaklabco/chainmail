@@ -100,6 +100,8 @@ type Store struct {
 	ops           []string
 	appended      [][]byte
 	archiveFolder string
+	// nsPrefix and nsDelim are the namespace SetNamespace gives.
+	nsPrefix, nsDelim string
 }
 
 var _ mailstore.Store = (*Store)(nil)

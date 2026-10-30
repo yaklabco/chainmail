@@ -328,9 +328,9 @@ func newFolderCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	var account string
 	var force bool
 	cmd.PersistentFlags().StringVar(&account, "account", "", "the account the folder is on (required)")
-	// run checks --account, makes the call and prints done on a terminal,
-	// or the call's response as JSON.
-	run := func(cmd *cobra.Command, done string, call func(*client.Client) (proto.Message, error)) error {
+	// run checks --account, makes the call and prints what done says of its
+	// response on a terminal, or the response as JSON.
+	run := func(cmd *cobra.Command, done func(proto.Message) string, call func(*client.Client) (proto.Message, error)) error {
 		if account == "" {
 			return usageError{err: errors.New("--account is required"), hint: helpHint(cmd)}
 		}
@@ -341,7 +341,7 @@ func newFolderCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			return err
 		}
 		if g.table() {
-			return writeString(env.Stdout, done+" on "+account+"\n")
+			return writeString(env.Stdout, done(resp)+" on "+account+"\n")
 		}
 		return writeProto(env.Stdout, resp)
 	}
@@ -350,7 +350,8 @@ func newFolderCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		Short: "Delete a folder; INBOX and role folders are refused",
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return run(cmd, "deleted folder "+args[0], func(c *client.Client) (proto.Message, error) {
+			done := func(proto.Message) string { return "deleted folder " + args[0] }
+			return run(cmd, done, func(c *client.Client) (proto.Message, error) {
 				req := &chainmailv1.DeleteFolderRequest{Account: account, Name: args[0], Force: force}
 				resp, err := c.Organize.DeleteFolder(ctx, connect.NewRequest(req))
 				if err != nil {
@@ -367,7 +368,12 @@ func newFolderCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			Short: "Create a folder, and its parents when missing",
 			Args:  exactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				return run(cmd, "created folder "+args[0], func(c *client.Client) (proto.Message, error) {
+				// The server may have written the name its own way, such as
+				// under Hostinger's "INBOX." prefix.
+				done := func(resp proto.Message) string {
+					return "created folder " + folderName(resp, args[0])
+				}
+				return run(cmd, done, func(c *client.Client) (proto.Message, error) {
 					req := &chainmailv1.CreateFolderRequest{Account: account, Name: args[0]}
 					resp, err := c.Organize.CreateFolder(ctx, connect.NewRequest(req))
 					if err != nil {
@@ -382,7 +388,10 @@ func newFolderCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			Short: "Rename a folder",
 			Args:  exactArgs(2),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				return run(cmd, "renamed folder "+args[0]+" to "+args[1], func(c *client.Client) (proto.Message, error) {
+				done := func(resp proto.Message) string {
+					return "renamed folder " + args[0] + " to " + folderName(resp, args[1])
+				}
+				return run(cmd, done, func(c *client.Client) (proto.Message, error) {
 					req := &chainmailv1.RenameFolderRequest{Account: account, From: args[0], To: args[1]}
 					resp, err := c.Organize.RenameFolder(ctx, connect.NewRequest(req))
 					if err != nil {
@@ -395,6 +404,16 @@ func newFolderCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		del,
 	)
 	return cmd
+}
+
+// folderName is the folder name a create or rename response gives. A
+// daemon from before the name was returned gives none, and then it is
+// asked, the name the command was given.
+func folderName(resp proto.Message, asked string) string {
+	if r, ok := resp.(interface{ GetName() string }); ok && r.GetName() != "" {
+		return r.GetName()
+	}
+	return asked
 }
 
 // outcomesMsg is a batch organize response.

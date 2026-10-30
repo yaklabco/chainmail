@@ -46,7 +46,8 @@ const (
 	opFindByMessageID = "FindByMessageID"
 )
 
-// delimiter separates folder levels, as on Gmail and the fake's folders.
+// delimiter separates folder levels on Gmail, and on other accounts
+// unless SetNamespace gives another.
 const delimiter = "/"
 
 // gmailPrefix starts the names of Gmail's own folders, which cannot be
@@ -100,6 +101,46 @@ func (s *Store) SetArchiveFolder(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.archiveFolder = name
+}
+
+// SetNamespace makes a standard account keep the folders it creates under
+// the personal namespace prefix, such as "INBOX.", with delim between
+// levels, as a Dovecot server such as Hostinger's does. CreateFolder and
+// the target of RenameFolder then write a name as imapstore does: "/" as
+// delim, and under prefix unless the name is INBOX or starts with prefix.
+// The account's folders are left as they are. Gmail accounts ignore it.
+func (s *Store) SetNamespace(prefix, delim string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nsPrefix, s.nsDelim = prefix, delim
+}
+
+// delimLocked is the account's hierarchy delimiter.
+func (s *Store) delimLocked() string {
+	if s.gmail || s.nsDelim == "" {
+		return delimiter
+	}
+	return s.nsDelim
+}
+
+// serverNameLocked is name as the account has it once created: "/" written
+// as its delimiter and under its namespace prefix, as imapstore writes it.
+func (s *Store) serverNameLocked(name string) string {
+	if s.gmail {
+		return name
+	}
+	name = strings.ReplaceAll(name, "/", s.delimLocked())
+	p := s.nsPrefix
+	if p == "" || strings.EqualFold(name, "INBOX") || strings.HasPrefix(name, p) {
+		return name
+	}
+	// INBOX is matched in any case, as IMAP matches it.
+	const inbox = "INBOX"
+	if len(p) > len(inbox) && strings.EqualFold(p[:len(inbox)], inbox) && len(name) >= len(p) &&
+		strings.EqualFold(name[:len(inbox)], inbox) && name[len(inbox):len(p)] == p[len(inbox):] {
+		return name
+	}
+	return p + name
 }
 
 // beginWrite records a Writer call and returns the error it must fail
@@ -599,29 +640,31 @@ func editSet(list, add, remove []string) []string {
 	return out
 }
 
-// CreateFolder implements mailstore.Writer. It creates missing parents
-// first, splitting on "/". On Gmail it creates labels and refuses names
-// under [Gmail]/.
-func (s *Store) CreateFolder(ctx context.Context, name string) error {
+// CreateFolder implements mailstore.Writer. It writes the name as the
+// account has it (SetNamespace), creates missing parents first, splitting
+// on the delimiter, and returns the name. On Gmail it creates labels and
+// refuses names under [Gmail]/.
+func (s *Store) CreateFolder(ctx context.Context, name string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.beginWrite(ctx, opCreateFolder); err != nil {
-		return err
+		return "", err
 	}
+	name = s.serverNameLocked(name)
 	if err := s.checkNameLocked(name); err != nil {
-		return err
+		return "", err
 	}
 	if s.existsLocked(name) {
-		return fmt.Errorf("%w: folder %q", mailstore.ErrExists, name)
+		return "", fmt.Errorf("%w: folder %q", mailstore.ErrExists, name)
 	}
 	s.createWithParentsLocked(name)
-	return nil
+	return name, nil
 }
 
 // checkNameLocked refuses an empty name, one with an empty level, one a ref
 // cannot carry, and on Gmail any name under [Gmail].
 func (s *Store) checkNameLocked(name string) error {
-	if name == "" || slices.Contains(strings.Split(name, delimiter), "") {
+	if name == "" || slices.Contains(strings.Split(name, s.delimLocked()), "") {
 		return fmt.Errorf("%w: folder name %q", mailstore.ErrRefused, name)
 	}
 	if !s.refCarriesLocked(name) {
@@ -639,9 +682,10 @@ func isGmailFolder(name string) bool {
 
 // createWithParentsLocked adds name and each missing parent, parents first.
 func (s *Store) createWithParentsLocked(name string) {
-	levels := strings.Split(name, delimiter)
+	d := s.delimLocked()
+	levels := strings.Split(name, d)
 	for i := range levels {
-		if p := strings.Join(levels[:i+1], delimiter); !s.existsLocked(p) {
+		if p := strings.Join(levels[:i+1], d); !s.existsLocked(p) {
 			s.addFolderLocked(p, mailstore.RoleNone, 1, 1)
 		}
 	}
@@ -667,7 +711,7 @@ func (s *Store) sameName(a, b string) bool {
 
 // underLocked reports whether name is below parent, matched as sameName matches.
 func (s *Store) underLocked(name, parent string) bool {
-	prefix := parent + delimiter
+	prefix := parent + s.delimLocked()
 	return len(name) > len(prefix) && s.sameName(name[:len(prefix)], prefix)
 }
 
@@ -694,13 +738,23 @@ func (s *Store) checkMutableLocked(f mailstore.Folder) error {
 // folders, Gmail's own folders, and a folder moving under itself. A renamed
 // folder keeps its messages under new refs, and on Gmail the label is
 // renamed on every message, whose refs stay. On Gmail names match
-// ignoring case, and a change of case alone renames the label.
-func (s *Store) RenameFolder(ctx context.Context, from, to string) error {
+// ignoring case, and a change of case alone renames the label. to is
+// written as CreateFolder writes a name, and returned.
+func (s *Store) RenameFolder(ctx context.Context, from, to string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.beginWrite(ctx, opRenameFolder); err != nil {
-		return err
+		return "", err
 	}
+	to = s.serverNameLocked(to)
+	if err := s.renameLocked(from, to); err != nil {
+		return "", err
+	}
+	return to, nil
+}
+
+// renameLocked is RenameFolder once to is written as the account has it.
+func (s *Store) renameLocked(from, to string) error {
 	f, err := s.namedLocked(from)
 	if err != nil {
 		return err
@@ -736,7 +790,7 @@ func (s *Store) RenameFolder(ctx context.Context, from, to string) error {
 			return fmt.Errorf("%w: folder %q", mailstore.ErrExists, next)
 		}
 	}
-	if i := strings.LastIndex(to, delimiter); i > 0 {
+	if i := strings.LastIndex(to, s.delimLocked()); i > 0 {
 		s.createWithParentsLocked(to[:i])
 	}
 	for _, c := range moving {
