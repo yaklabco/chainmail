@@ -447,8 +447,14 @@ func TestGmailDraftInDraftsFolderIsNotTheSentCopy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendDraft: %v", err)
 	}
-	if r := filed.Load(); r == nil || res.GetSent().GetSentRef() != r.String() {
-		t.Errorf("sent_ref = %q, want the filed message %v", res.GetSent().GetSentRef(), r)
+	// Google refs point into All Mail, so the Sent copy is the filed
+	// message by its X-GM-MSGID, whichever folder its ref names.
+	r := filed.Load()
+	if r == nil {
+		t.Fatal("nothing was filed in Sent Mail")
+	}
+	if got := parseRef(t, res.GetSent().GetSentRef()); got.GmailMsgID != r.GmailMsgID {
+		t.Errorf("sent_ref = %v, want the filed message %v (same X-GM-MSGID)", got, r)
 	}
 }
 

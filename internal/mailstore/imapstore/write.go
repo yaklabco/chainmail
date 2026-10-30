@@ -311,9 +311,21 @@ func (s *Store) moveByCopy(ctx context.Context, c *conn, g *groupWrite, dest str
 	return nil
 }
 
+// errNotTransferred is the outcome of a ref a readable COPYUID leaves out:
+// the server moved or copied the rest, so that message was no longer there.
+var errNotTransferred = fmt.Errorf("%w: the message is gone; search again", mailstore.ErrStaleRef)
+
 // setPlaced records the new refs a COPYUID's pairs give in dest. Each keeps
 // its ref's X-GM-MSGID, which stays with a Gmail message wherever it goes.
+// A UID of the group the pairs leave out was not there to transfer, so its
+// ref is stale. Without a readable COPYUID setPlaced is not called, and the
+// refs stay successes with no new ref.
 func (s *Store) setPlaced(g *groupWrite, dest string, validity uint32, pairs map[uint32]uint32) {
+	for _, uid := range g.uids {
+		if _, ok := pairs[uid]; !ok {
+			g.set(uid, mailstore.RefResult{Err: errNotTransferred})
+		}
+	}
 	for src, dst := range pairs {
 		g.place(src, ref.Ref{Account: s.acct.Name, Folder: dest, UIDValidity: validity, UID: dst})
 	}

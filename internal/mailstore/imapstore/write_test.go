@@ -489,20 +489,20 @@ func TestMoveMapsCOPYUIDToNewRefs(t *testing.T) {
 	s := writeStore(t, srv, Options{})
 	refs := []ref.Ref{
 		hostRef("INBOX", 7, 1), hostRef("INBOX", 7, 2), hostRef("INBOX", 7, 1),
-		hostRef("INBOX", 7, 9), // gone, but in the acknowledged MOVE: success, no new ref
+		hostRef("INBOX", 7, 9), // gone: the MOVE's COPYUID leaves it out, so it is stale
 		hostRef("INBOX", 6, 2), // stale UIDVALIDITY
 		{Account: "other", Folder: "INBOX", UIDValidity: 7, UID: 1},
 	}
 	res := s.Move(t.Context(), refs, "Archive")
 	want := []mailstore.RefResult{
-		{Ref: hostRef("Archive", 20, 101)}, {Ref: hostRef("Archive", 20, 102)}, {Ref: hostRef("Archive", 20, 101)}, {},
+		{Ref: hostRef("Archive", 20, 101)}, {Ref: hostRef("Archive", 20, 102)}, {Ref: hostRef("Archive", 20, 101)},
 	}
 	for i, w := range want {
 		if res[i] != w {
 			t.Errorf("ref %d: %+v, want %+v", i, res[i], w)
 		}
 	}
-	for i, wantErr := range map[int]error{4: mailstore.ErrStaleRef, 5: mailstore.ErrNotFound} {
+	for i, wantErr := range map[int]error{3: mailstore.ErrStaleRef, 4: mailstore.ErrStaleRef, 5: mailstore.ErrNotFound} {
 		if !errors.Is(res[i].Err, wantErr) || res[i].Ref != (ref.Ref{}) {
 			t.Errorf("ref %d: %+v, want %v", i, res[i], wantErr)
 		}
@@ -533,8 +533,8 @@ func TestMoveWithoutMOVECopiesThenPipelinesStoreAndExpunge(t *testing.T) {
 	if res[0] != (mailstore.RefResult{Ref: hostRef("Work", 30, 102)}) || res[1] != (mailstore.RefResult{Ref: hostRef("Work", 30, 101)}) {
 		t.Errorf("results %+v, want the COPYUID UIDs", res)
 	}
-	if res[2] != (mailstore.RefResult{}) {
-		t.Errorf("gone ref: %+v, want success with no new ref: it was in the acknowledged COPY", res[2])
+	if !errors.Is(res[2].Err, mailstore.ErrStaleRef) {
+		t.Errorf("gone ref: %+v, want ErrStaleRef: the COPY's COPYUID leaves it out", res[2])
 	}
 	copyRecv, copySent := srv.eventIndex("recv UID COPY 1,3,8 \"Work\""), srv.eventIndex("sent UID COPY")
 	store, expunge := srv.eventIndex("recv UID STORE 1,3 +FLAGS.SILENT (\\Deleted)"), srv.eventIndex("recv UID EXPUNGE 1,3")
@@ -1132,8 +1132,8 @@ func TestMoveByCopyReportsKeptOriginalsWhenTheExpungeFails(t *testing.T) {
 					t.Errorf("ref %d: %+v, want ErrUnavailable naming the kept original", i, res[i])
 				}
 			}
-			if res[2] != (mailstore.RefResult{}) {
-				t.Errorf("ref 2: %+v, want a success with no new ref: COPYUID left it out, so it was not there", res[2])
+			if !errors.Is(res[2].Err, mailstore.ErrStaleRef) {
+				t.Errorf("ref 2: %+v, want ErrStaleRef: COPYUID left it out, so it was not there", res[2])
 			}
 			if n, c := srv.sent("UID COPY"), srv.conns.Load(); n != 1 || c != 1 {
 				t.Errorf("UID COPY sent %d times on %d connections, want once: nothing is retried", n, c)
