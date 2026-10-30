@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -402,27 +402,65 @@ func TestFailure(t *testing.T) {
 	}
 }
 
-func TestTrackedConnRecordsWriteFailure(t *testing.T) {
+// Only a write that fails between startMessage and the next read counts as
+// a failed message write.
+func TestTrackedConnRecordsMessageWriteFailure(t *testing.T) {
 	t.Parallel()
-	a, b := net.Pipe()
-	tc := &trackedConn{Conn: a}
-	go func() { _, _ = io.Copy(io.Discard, b) }() // drains until b closes
-	if _, err := tc.Write([]byte("ok")); err != nil {
-		t.Fatalf("Write: %v", err)
+	tests := []struct {
+		name string
+		// before runs on a working pipe, then the far end closes and a write fails.
+		before func(*trackedConn)
+		want   bool
+	}{
+		{name: "before startMessage", before: func(*trackedConn) {}, want: false},
+		{name: "after startMessage", before: func(tc *trackedConn) { tc.startMessage() }, want: true},
+		{name: "after a good message write", before: func(tc *trackedConn) {
+			tc.startMessage()
+			if _, err := tc.Write([]byte("body")); err != nil {
+				t.Errorf("Write: %v", err)
+			}
+		}, want: true},
+		{name: "after the read that follows the message", before: func(tc *trackedConn) {
+			tc.startMessage()
+			if _, err := tc.Write([]byte("body\r\n.\r\n")); err != nil {
+				t.Errorf("Write: %v", err)
+			}
+			if _, err := tc.Read(make([]byte, 8)); err != nil {
+				t.Errorf("Read: %v", err)
+			}
+		}, want: false},
 	}
-	if tc.writeFailed.Load() {
-		t.Fatal("writeFailed after a good write")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			a, b := net.Pipe()
+			tc := &trackedConn{Conn: a}
+			go func() { // the far end: drain writes, answer once
+				buf := make([]byte, 64)
+				for {
+					if _, err := b.Read(buf); err != nil {
+						return
+					}
+					_, _ = b.Write([]byte("250 ok\r\n")) // only read in one case; the others leave it unread
+				}
+			}()
+			_ = a.SetDeadline(time.Now().Add(5 * time.Second)) // a pipe always accepts a deadline
+			tt.before(tc)
+			if tc.messageWriteFailed() {
+				t.Fatal("messageWriteFailed before any write failed")
+			}
+			if err := b.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tc.Write([]byte("lost")); err == nil {
+				t.Fatal("Write to a closed pipe succeeded")
+			}
+			if got := tc.messageWriteFailed(); got != tt.want {
+				t.Errorf("messageWriteFailed() = %v, want %v", got, tt.want)
+			}
+			_ = a.Close() // nothing to do about a close error at test end
+		})
 	}
-	if err := b.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tc.Write([]byte("lost")); err == nil {
-		t.Fatal("Write to a closed pipe succeeded")
-	}
-	if !tc.writeFailed.Load() {
-		t.Error("writeFailed not set after a failed write")
-	}
-	_ = a.Close() // nothing to do about a close error at test end
 }
 
 // Envelopes the client can tell are unsendable fail permanently, before
@@ -446,6 +484,150 @@ func TestSendRefusesBadEnvelopeLocally(t *testing.T) {
 			se := asSendError(t, conn.Send(t.Context(), tt.from, tt.to, msg))
 			if se.Outcome != NotSentPermanent || se.Code != 0 {
 				t.Errorf("Outcome = %v code %d, want NotSentPermanent code 0 (err %v)", se.Outcome, se.Code, se)
+			}
+			if n := len(srv.Messages()); n != 0 {
+				t.Errorf("captured %d messages, want none", n)
+			}
+		})
+	}
+}
+
+// bigMsg is large enough that only the message body takes the client's
+// writes past len(bigMsg) bytes: the handshake and commands before DATA come
+// to a few kilobytes.
+var bigMsg = []byte("From: me@example.com\r\nTo: a@example.com\r\nSubject: big\r\n\r\n" +
+	strings.Repeat("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd\r\n", 1024))
+
+// badRecord is a TLS application-data record that cannot decrypt. A TLS
+// client that reads it answers with an alert, which is a write.
+var badRecord = append([]byte{0x17, 0x03, 0x03, 0x00, 0x20}, make([]byte, 0x20)...)
+
+var errInjected = errors.New("injected write failure")
+
+// faultyTCP is the client's TCP connection, under TLS. Once the client has
+// written at least failWritesFrom bytes, every later write fails. Once it has
+// written at least garbleReadFrom bytes, its next read returns badRecord and
+// every later write fails. Zero turns a fault off.
+type faultyTCP struct {
+	net.Conn
+	failWritesFrom int
+	garbleReadFrom int
+
+	mu      sync.Mutex
+	written int
+	garbled bool
+	failed  int    // writes refused
+	pending []byte // the rest of badRecord, for reads with small buffers
+}
+
+func (c *faultyTCP) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	fail := c.garbled || (c.failWritesFrom > 0 && c.written >= c.failWritesFrom)
+	c.mu.Unlock()
+	if fail {
+		c.mu.Lock()
+		c.failed++
+		c.mu.Unlock()
+		return 0, errInjected
+	}
+	n, err := c.Conn.Write(b)
+	c.mu.Lock()
+	c.written += n
+	c.mu.Unlock()
+	return n, err
+}
+
+func (c *faultyTCP) Read(b []byte) (int, error) {
+	c.mu.Lock()
+	if !c.garbled && c.garbleReadFrom > 0 && c.written >= c.garbleReadFrom {
+		c.garbled = true
+		c.pending = slices.Clone(badRecord)
+	}
+	if len(c.pending) > 0 {
+		n := copy(b, c.pending)
+		c.pending = c.pending[n:]
+		c.mu.Unlock()
+		return n, nil
+	}
+	c.mu.Unlock()
+	return c.Conn.Read(b)
+}
+
+// dialFaulty dials srv with the client's TCP connection wrapped by wrap.
+func dialFaulty(t *testing.T, srv *smtptest.Server, ca *tlstest.CA, wrap func(net.Conn) net.Conn) *Conn {
+	t.Helper()
+	tcp := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var d net.Dialer
+		nc, err := d.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return wrap(nc), nil
+	}
+	c, err := dial(t.Context(), srv.Endpoint(), creds(provider.AuthPassword, "pw"), DialOptions{RootCAs: ca.Pool}, tcp)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() }) // Send has already closed it
+	return c
+}
+
+// The whole message and the final dot go out, then the TLS layer fails a
+// write of its own while the client waits for the reply: here an alert
+// answering a record it cannot decrypt, as it would a KeyUpdate. The server
+// has the message, so the outcome is unknown, not "not sent".
+func TestSendTLSWriteFailureWhileAwaitingDataReplyIsUnknown(t *testing.T) {
+	t.Parallel()
+	for _, sec := range []provider.Security{provider.SecurityTLS, provider.SecurityStartTLS} {
+		t.Run(sec.String(), func(t *testing.T) {
+			t.Parallel()
+			got := make(chan smtptest.Envelope, 1)
+			srv, ca := startSMTP(t, sec, smtptest.Options{OnMessage: func(e smtptest.Envelope) { got <- e }})
+			var tcp *faultyTCP
+			conn := dialFaulty(t, srv, ca, func(nc net.Conn) net.Conn {
+				tcp = &faultyTCP{Conn: nc, garbleReadFrom: len(bigMsg)}
+				return tcp
+			})
+			err := conn.Send(t.Context(), user.Username, rcpts, bigMsg)
+			se := asSendError(t, err)
+			if se.Outcome != Unknown {
+				t.Errorf("Outcome = %v, want Unknown (err %v)", se.Outcome, err)
+			}
+			tcp.mu.Lock()
+			failed := tcp.failed
+			tcp.mu.Unlock()
+			if failed == 0 {
+				t.Error("no write failed after the garbled read, so the fault did not happen")
+			}
+			select {
+			case e := <-got:
+				if !bytes.Equal(e.Data, bigMsg) {
+					t.Errorf("server captured %d bytes, want the %d-byte message", len(e.Data), len(bigMsg))
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("the server never got the message")
+			}
+		})
+	}
+}
+
+// A write that fails partway through the message means the final dot never
+// went out: not sent.
+func TestSendWriteFailureMidMessageIsNotSent(t *testing.T) {
+	t.Parallel()
+	for _, sec := range []provider.Security{provider.SecurityTLS, provider.SecurityStartTLS} {
+		t.Run(sec.String(), func(t *testing.T) {
+			t.Parallel()
+			srv, ca := startSMTP(t, sec, smtptest.Options{})
+			conn := dialFaulty(t, srv, ca, func(nc net.Conn) net.Conn {
+				return &faultyTCP{Conn: nc, failWritesFrom: len(bigMsg) / 2}
+			})
+			err := conn.Send(t.Context(), user.Username, rcpts, bigMsg)
+			if se := asSendError(t, err); se.Outcome != NotSentTemporary {
+				t.Errorf("Outcome = %v, want NotSentTemporary (err %v)", se.Outcome, err)
+			}
+			if !errors.Is(err, errInjected) {
+				t.Errorf("err = %v, want the failed write in the chain", err)
 			}
 			if n := len(srv.Messages()); n != 0 {
 				t.Errorf("captured %d messages, want none", n)

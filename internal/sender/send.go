@@ -93,12 +93,19 @@ type Conn struct {
 // Dial connects, negotiates TLS and authenticates, within opts.Timeout.
 // Auth refusals match auth.ErrRejected as Probe's do.
 func Dial(ctx context.Context, ep provider.Endpoint, creds auth.Credentials, opts DialOptions) (*Conn, error) {
+	var dialer net.Dialer
+	return dial(ctx, ep, creds, opts, dialer.DialContext)
+}
+
+// dialFunc opens the TCP connection. Tests swap it to put faults under TLS.
+type dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
+func dial(ctx context.Context, ep provider.Endpoint, creds auth.Credentials, opts DialOptions, dialTCP dialFunc) (*Conn, error) {
 	timeout := opts.timeout()
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var dialer net.Dialer
-	nc, err := dialer.DialContext(ctx, "tcp", ep.Addr())
+	nc, err := dialTCP(ctx, "tcp", ep.Addr())
 	if err != nil {
 		return nil, fmt.Errorf("connecting to %s: %w", ep.Addr(), err)
 	}
@@ -223,13 +230,16 @@ func (c *Conn) submit(from string, to []string, raw []byte) *SendError {
 		c.quit()
 		return failure(err, false, "DATA")
 	}
+	// From here until the reply is read, every write carries the message.
+	c.raw.startMessage()
 	if _, err := w.Write(raw); err != nil {
 		return failure(err, false, "writing the message")
 	}
 	if err := w.Close(); err != nil {
 		// Close writes the final dot and then reads the reply. If no write
-		// failed, the dot went out and it was the reply that was lost.
-		afterDot := !c.raw.writeFailed.Load()
+		// of the message failed, the dot went out and it was the reply that
+		// was lost. Writes TLS makes while reading the reply do not count.
+		afterDot := !c.raw.messageWriteFailed()
 		if afterDot {
 			c.quit()
 		}
@@ -312,18 +322,39 @@ func allASCII(ss []string) bool {
 	return true
 }
 
-// trackedConn is the TCP connection under TLS. It records whether any write
-// failed, which tells a lost reply apart from a message that never fully
-// went out.
+// trackedConn is the TCP connection under TLS. It records whether a write
+// of the message failed, which tells a lost reply apart from a message that
+// never fully went out.
+//
+// startMessage marks the start of the message. The client writes the body
+// and the final dot without reading, so every write from then until the
+// first read is the message. A write after that read is not: TLS writes while
+// reading, to answer a KeyUpdate or to send an alert, and such a write can
+// fail after the dot is out. Such a failure leaves the flag clear, so the
+// outcome is Unknown: once the dot may be out, the message may have been sent.
 type trackedConn struct {
 	net.Conn
-	writeFailed atomic.Bool
+	sending    atomic.Bool // startMessage ran and no read has begun since
+	sendFailed atomic.Bool // a write failed while sending was set
+}
+
+func (t *trackedConn) startMessage() {
+	t.sendFailed.Store(false)
+	t.sending.Store(true)
+}
+
+// messageWriteFailed reports whether a write of the message failed.
+func (t *trackedConn) messageWriteFailed() bool { return t.sendFailed.Load() }
+
+func (t *trackedConn) Read(b []byte) (int, error) {
+	t.sending.Store(false)
+	return t.Conn.Read(b)
 }
 
 func (t *trackedConn) Write(b []byte) (int, error) {
 	n, err := t.Conn.Write(b)
-	if err != nil {
-		t.writeFailed.Store(true)
+	if err != nil && t.sending.Load() {
+		t.sendFailed.Store(true)
 	}
 	return n, err
 }
