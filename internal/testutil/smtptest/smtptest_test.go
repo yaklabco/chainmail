@@ -164,6 +164,7 @@ func TestFaults(t *testing.T) {
 		{name: "FailMail", opts: Options{FailMail: mailErr}, wantStep: "MAIL", wantCode: 553},
 		{name: "FailRcpt", opts: Options{FailRcpt: map[string]*smtp.SMTPError{"b@example.com": rcptErr}}, wantStep: "RCPT", wantCode: 550},
 		{name: "FailData", opts: Options{FailData: dataErr}, wantStep: "end of data", wantCode: 554},
+		{name: "DropAtRcpt", opts: Options{DropAtRcpt: "b@example.com"}, wantStep: "RCPT"},
 		{name: "DropBeforeDataEnd", opts: Options{DropBeforeDataEnd: true}, wantStep: "DATA"},
 		{name: "DropAfterDataEnd", opts: Options{DropAfterDataEnd: true}, wantStep: "end of data", wantCaptured: true},
 	}
@@ -239,5 +240,31 @@ func TestDropBeforeDataEndClosesInsteadOf354(t *testing.T) {
 	var smtpErr *smtp.SMTPError
 	if errors.As(err, &smtpErr) {
 		t.Errorf("DATA: %v, want a lost connection", err)
+	}
+}
+
+// DropAtRcpt answers the recipients before it, then loses the connection in
+// place of the reply for its address.
+func TestDropAtRcptAnswersEarlierRecipients(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	rcptErr := &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1}, Message: "no such user"}
+	srv := StartWith(t, ca, provider.SecurityTLS, Options{
+		FailRcpt:   map[string]*smtp.SMTPError{"a@example.com": rcptErr},
+		DropAtRcpt: "b@example.com",
+	}, tester)
+	c := dial(t, ca, srv.Endpoint(), true)
+	if err := c.Mail(tester.Username, nil); err != nil {
+		t.Fatalf("MAIL: %v", err)
+	}
+	if smtpErr, ok := errors.AsType[*smtp.SMTPError](c.Rcpt("a@example.com", nil)); !ok || smtpErr.Code != 550 {
+		t.Fatalf("RCPT a: %v, want 550", smtpErr)
+	}
+	err := c.Rcpt("b@example.com", nil)
+	if err == nil {
+		t.Fatal("RCPT b got a reply")
+	}
+	if _, ok := errors.AsType[*smtp.SMTPError](err); ok {
+		t.Errorf("RCPT b: %v, want a lost connection", err)
 	}
 }

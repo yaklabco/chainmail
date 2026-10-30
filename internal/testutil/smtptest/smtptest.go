@@ -58,6 +58,10 @@ type Options struct {
 	// FailRcpt answers RCPT TO for the addresses it holds. Other recipients
 	// are accepted.
 	FailRcpt map[string]*smtp.SMTPError
+	// DropAtRcpt closes the connection in place of the reply to RCPT TO for
+	// this address. Recipients before it get their replies. Nothing is
+	// captured.
+	DropAtRcpt string
 	// FailData answers the end of DATA once the whole message has been read.
 	// The message is not captured.
 	FailData *smtp.SMTPError
@@ -220,6 +224,10 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 }
 
 func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
+	if d := s.srv.opts.DropAtRcpt; d != "" && to == d && s.conn != nil {
+		s.conn.drop()
+		return errDropped // never reaches the client; the connection is gone
+	}
 	if s.srv.opts.DropBeforeDataEnd && s.conn != nil {
 		// Let this RCPT's reply through, then drop whatever comes next,
 		// which is the 354 once the client sends DATA.
