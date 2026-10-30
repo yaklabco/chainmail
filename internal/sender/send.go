@@ -185,8 +185,16 @@ func (c *Conn) submit(from string, to []string, raw []byte) *SendError {
 		if err == nil {
 			continue
 		}
-		var reply *smtp.SMTPError
-		if !errors.As(err, &reply) {
+		reply, ok := errors.AsType[*smtp.SMTPError](err)
+		if !ok {
+			// The connection is unusable. A refusal already received still
+			// decides the outcome: the message cannot go to that address.
+			if permanent != nil {
+				se := failure(permanent, false, "RCPT TO")
+				se.Refused = refused
+				se.Err = errors.Join(se.Err, fmt.Errorf("RCPT TO after a refusal: %w", err))
+				return se
+			}
 			return failure(err, false, "RCPT TO")
 		}
 		switch {

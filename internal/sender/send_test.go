@@ -138,6 +138,27 @@ func TestSendOutcomes(t *testing.T) {
 			wantOutcome: NotSentPermanent, wantCode: 550, wantRefused: []string{"b@example.com"},
 		},
 		{
+			name: "5xx RCPT then a lost connection keeps the refusal",
+			opts: smtptest.Options{
+				FailRcpt:   map[string]*smtp.SMTPError{"a@example.com": smtpErr(550, smtp.EnhancedCode{5, 1, 1})},
+				DropAtRcpt: "b@example.com",
+			},
+			wantOutcome: NotSentPermanent, wantCode: 550, wantRefused: []string{"a@example.com"},
+		},
+		{
+			name:        "lost connection at RCPT",
+			opts:        smtptest.Options{DropAtRcpt: "b@example.com"},
+			wantOutcome: NotSentTemporary,
+		},
+		{
+			name: "4xx RCPT then a lost connection",
+			opts: smtptest.Options{
+				FailRcpt:   map[string]*smtp.SMTPError{"a@example.com": smtpErr(450, smtp.EnhancedCode{4, 2, 1})},
+				DropAtRcpt: "b@example.com",
+			},
+			wantOutcome: NotSentTemporary,
+		},
+		{
 			name:        "554 after DATA",
 			opts:        smtptest.Options{FailData: smtpErr(554, smtp.EnhancedCode{5, 6, 0})},
 			wantOutcome: NotSentPermanent, wantCode: 554,
