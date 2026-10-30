@@ -283,13 +283,14 @@ func (c *composeService) original(ctx context.Context, acct config.ResolvedAccou
 		return compose.Original{}, fmt.Errorf("rendering the original: %w", err)
 	}
 	htm, htmlCut := htmlPart(raw)
+	h := rawHeader(raw)
 	orig := compose.Original{
 		MessageID:  validMsgID(mailstore.MessageIDs([]string{msg.MessageID})),
 		References: validMsgIDs(mailstore.MessageIDs(msg.References)),
-		From:       mailAddresses(msg.Summary.From),
-		ReplyTo:    replyTo(raw),
-		To:         mailAddresses(msg.Summary.To),
-		Cc:         mailAddresses(msg.Cc),
+		From:       headerAddresses(h, "From", msg.Summary.From),
+		ReplyTo:    replyTo(h),
+		To:         headerAddresses(h, "To", msg.Summary.To),
+		Cc:         headerAddresses(h, "Cc", msg.Cc),
 		Subject:    msg.Summary.Subject,
 		Date:       msg.Summary.Date,
 		Text:       body.Text,
@@ -397,23 +398,51 @@ func mailAddresses(list []mailstore.Address) []mail.Address {
 	return out
 }
 
-// replyTo reads the Reply-To addresses from raw's header. A missing or
-// malformed field gives none, so the reply goes to From.
-func replyTo(raw []byte) []mail.Address {
+// rawHeader is raw's header, or nil when it does not parse.
+func rawHeader(raw []byte) *gomail.Header {
 	th, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(raw)))
 	if err != nil {
 		return nil
 	}
-	h := gomail.Header{Header: message.Header{Header: th}}
-	list, err := h.AddressList("Reply-To")
+	return &gomail.Header{Header: message.Header{Header: th}}
+}
+
+// headerAddresses is the addresses of every key field of h, in order, then
+// any of envelope's not among them. A repeated field counts in full, which
+// the server's envelope may not. Without a header, or with a field that
+// does not parse, it is envelope's.
+func headerAddresses(h *gomail.Header, key string, envelope []mailstore.Address) []mail.Address {
+	if h == nil {
+		return mailAddresses(envelope)
+	}
+	list, err := addressFields(*h, key)
+	if err != nil {
+		return mailAddresses(envelope)
+	}
+	return mergeAddresses(mailAddresses(storeAddresses(list)), mailAddresses(envelope))
+}
+
+// replyTo reads the addresses of every Reply-To field of h. No header, no
+// field, or a field that does not parse gives none, so the reply goes to
+// From.
+func replyTo(h *gomail.Header) []mail.Address {
+	if h == nil {
+		return nil
+	}
+	list, err := addressFields(*h, "Reply-To")
 	if err != nil {
 		return nil
 	}
-	conv := make([]mailstore.Address, 0, len(list))
+	return mailAddresses(storeAddresses(list))
+}
+
+// storeAddresses converts parsed header addresses.
+func storeAddresses(list []*gomail.Address) []mailstore.Address {
+	out := make([]mailstore.Address, 0, len(list))
 	for _, a := range list {
-		conv = append(conv, mailstore.Address{Name: a.Name, Email: a.Address})
+		out = append(out, mailstore.Address{Name: a.Name, Email: a.Address})
 	}
-	return mailAddresses(conv)
+	return out
 }
 
 // validMsgID returns the first of ids a header can carry, or "".

@@ -221,9 +221,9 @@ var errRawUnparsable = &argError{
 }
 
 // prepareRaw checks a SendRaw message and returns it ready to send: it must
-// parse, have a Message-ID and be From the account's address. Bcc is
-// removed from the bytes. The envelope is envelopeTo, or else the To, Cc
-// and Bcc of the message.
+// parse, have a Message-ID and one From field, the account's address. Bcc
+// is removed from the bytes. The envelope is envelopeTo, or else the To, Cc
+// and Bcc of the message, every field of each read when one is repeated.
 func prepareRaw(acct config.ResolvedAccount, raw []byte, envelopeTo []string) (compose.Message, error) {
 	br := bufio.NewReader(bytes.NewReader(raw))
 	th, err := textproto.ReadHeader(br)
@@ -239,7 +239,13 @@ func prepareRaw(acct config.ResolvedAccount, raw []byte, envelopeTo []string) (c
 	if err != nil || id == "" {
 		return compose.Message{}, &argError{msg: "the message has no usable Message-ID", hint: "add a Message-ID header, as <unique@domain>"}
 	}
-	from, err := h.AddressList("From")
+	if len(h.Values("From")) > 1 {
+		return compose.Message{}, &argError{
+			msg:  "the message has more than one From field",
+			hint: "keep one From field, the address of the account you send from",
+		}
+	}
+	from, err := addressFields(h, "From")
 	if err != nil || len(from) != 1 || !strings.EqualFold(from[0].Address, acct.Address) {
 		return compose.Message{}, &argError{
 			msg:  "From must be the account's address, " + acct.Address,
@@ -257,7 +263,7 @@ func prepareRaw(acct config.ResolvedAccount, raw []byte, envelopeTo []string) (c
 		}
 	} else {
 		for _, key := range []string{"To", "Cc", "Bcc"} {
-			list, err := h.AddressList(key)
+			list, err := addressFields(h, key)
 			if err != nil {
 				return compose.Message{}, &argError{
 					msg:  "the " + key + " header is not a list of addresses",
@@ -280,6 +286,24 @@ func prepareRaw(acct config.ResolvedAccount, raw []byte, envelopeTo []string) (c
 	}
 	buf.Write(body)
 	return compose.Message{Raw: buf.Bytes(), MessageID: id, EnvelopeFrom: acct.Address, EnvelopeTo: to}, nil
+}
+
+// addressFields parses every key field of h, in order, into one list: a
+// header with the field repeated means the addresses of all of them. A
+// field that does not parse is an error.
+func addressFields(h gomail.Header, key string) ([]*gomail.Address, error) {
+	var out []*gomail.Address
+	for _, v := range h.Values(key) {
+		if strings.TrimSpace(v) == "" {
+			continue
+		}
+		list, err := gomail.ParseAddressList(v)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, list...)
+	}
+	return out, nil
 }
 
 // uniqueFold keeps the first of addresses that differ only in case.

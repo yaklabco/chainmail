@@ -1304,3 +1304,50 @@ func TestSendSizeBoundCountsAttachmentsRaw(t *testing.T) {
 		t.Errorf("captured %d messages, want 1", n)
 	}
 }
+
+// TestSendRawReadsRepeatedAddressFields sends a raw message whose To, Cc
+// and Bcc each appear twice. Every field's recipients are in the envelope,
+// in order, and no Bcc field is sent.
+func TestSendRawReadsRepeatedAddressFields(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	raw := []byte("From: me@example.com\r\n" +
+		"To: you@example.net\r\n" +
+		"Cc: cc1@example.net\r\n" +
+		"Bcc: first@example.net\r\n" +
+		"To: Two <two@example.net>, you@example.net\r\n" +
+		"Cc: cc2@example.net\r\n" +
+		"Bcc: second@example.net\r\n" +
+		"Subject: repeated\r\n" +
+		"Message-ID: <repeat.1@example.com>\r\n" +
+		"\r\n" + "hi\r\n")
+	if _, err := e.sendRaw(t, &chainmailv1.SendRawRequest{Account: "host", Raw: raw, IdempotencyKey: "repeat"}); err != nil {
+		t.Fatalf("SendRaw: %v", err)
+	}
+	m := srv.Messages()[0]
+	want := []string{"you@example.net", "two@example.net", "cc1@example.net", "cc2@example.net", "first@example.net", "second@example.net"}
+	if !slices.Equal(m.To, want) {
+		t.Errorf("RCPT TO = %v, want %v", m.To, want)
+	}
+	if bytes.Contains(m.Data, []byte("Bcc")) || bytes.Contains(m.Data, []byte("first@")) || bytes.Contains(m.Data, []byte("second@")) {
+		t.Errorf("a Bcc field was sent:\n%s", m.Data)
+	}
+}
+
+// TestSendRawRefusesRepeatedFrom refuses a raw message with two From
+// fields, whether the second names another address or the account's own.
+func TestSendRawRefusesRepeatedFrom(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	for name, second := range map[string]string{"conflicting": "someone@example.org", "same": "me@example.com"} {
+		raw := []byte("From: me@example.com\r\nFrom: " + second + "\r\nTo: you@example.net\r\nMessage-ID: <from.1@example.com>\r\n\r\nhi\r\n")
+		if _, err := e.sendRaw(t, &chainmailv1.SendRawRequest{Account: "host", Raw: raw, IdempotencyKey: "from-" + name}); reasonOf(err) != api.ReasonInvalidArgument {
+			t.Errorf("%s second From: err = %v, want INVALID_ARGUMENT", name, err)
+		}
+	}
+	if len(srv.Messages()) != 0 {
+		t.Error("a message with two From fields was sent")
+	}
+}

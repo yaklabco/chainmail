@@ -741,3 +741,40 @@ func TestPostSendFailuresKeepServerTextOutOfLogs(t *testing.T) {
 		t.Errorf("the logs hold the server's text:\n%s", out)
 	}
 }
+
+// TestReplyReadsRepeatedAddressFields replies to an original whose From,
+// To, Cc and Reply-To each appear twice. A reply goes to both Reply-To
+// fields' addresses, and a reply to all adds both To and both Cc fields'.
+func TestReplyReadsRepeatedAddressFields(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	raw := "From: alice@example.net\r\n" +
+		"To: me@example.com\r\n" +
+		"Cc: cc1@example.net\r\n" +
+		"Reply-To: list1@example.net\r\n" +
+		"To: bob@example.net\r\n" +
+		"Cc: cc2@example.net\r\n" +
+		"Reply-To: list2@example.net\r\n" +
+		"Subject: Repeated\r\n" +
+		"Message-ID: <repeated@example.net>\r\n" +
+		"\r\n" + "body\r\n"
+	orig, err := e.host.Append(context.Background(), "INBOX", nil, time.Time{}, []byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.reply(t, &chainmailv1.ReplyRequest{Ref: orig.String(), Content: replyContent("one"), IdempotencyKey: "rep-1"}); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if want := []string{"list1@example.net", "list2@example.net"}; !slices.Equal(srv.Messages()[0].To, want) {
+		t.Errorf("reply RCPT TO = %v, want %v", srv.Messages()[0].To, want)
+	}
+	if _, err := e.reply(t, &chainmailv1.ReplyRequest{Ref: orig.String(), All: true, Content: replyContent("all"), IdempotencyKey: "rep-all"}); err != nil {
+		t.Fatalf("Reply all: %v", err)
+	}
+	got := slices.Sorted(slices.Values(srv.Messages()[1].To))
+	want := []string{"bob@example.net", "cc1@example.net", "cc2@example.net", "list1@example.net", "list2@example.net"}
+	if !slices.Equal(got, want) {
+		t.Errorf("reply-all RCPT TO = %v, want %v", got, want)
+	}
+}
