@@ -144,6 +144,10 @@ type Store struct {
 	// folderGen counts renames and deletes of folders. A connection opened
 	// a folder before the latest one opens it again rather than trust it.
 	folderGen atomic.Uint64
+	// writeGen counts writes sent through this store. A connection that has
+	// not looked at its folder since the latest one sends NOOP before it
+	// reuses it, so the server tells it of mail another connection changed.
+	writeGen atomic.Uint64
 
 	mu      sync.Mutex
 	folders []mailstore.Folder // cached; nil until listed
@@ -428,13 +432,27 @@ func (s *Store) open(ctx context.Context, c *conn, folder string) error {
 
 // openMode is open, read-write when writable. A connection that opened its
 // folder before a rename or delete opens it again, since a server keeps the
-// old mailbox open under its new name, or none.
+// old mailbox open under its new name, or none. One that has had its folder
+// open since a write through this store sends NOOP first, so it sees the
+// change.
 func (s *Store) openMode(ctx context.Context, c *conn, folder string, writable bool) error {
 	if gen := s.folderGen.Load(); c.folderGen != gen {
 		c.selected, c.writable, c.uidValidity, c.folderGen = "", false, 0, gen
 	}
+	writes := s.writeGen.Load()
+	if folder != "" && c.selected == folder && c.writeGen != writes {
+		// Another connection may have changed mail here. A server tells a
+		// session of new mail only between commands, and Dovecot answers a
+		// UID FETCH or SEARCH only for messages it has told the session of.
+		if err := c.do(ctx, func() error { return c.client().Noop().Wait() }); err != nil {
+			return err
+		}
+	}
 	err := c.SelectFolder(ctx, folder, writable)
-	if errors.Is(err, mailstore.ErrNotFound) {
+	switch {
+	case err == nil:
+		c.writeGen = writes
+	case errors.Is(err, mailstore.ErrNotFound):
 		s.forgetFolders()
 	}
 	return err

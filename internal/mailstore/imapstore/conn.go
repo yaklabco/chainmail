@@ -33,7 +33,10 @@ type conn struct {
 	// folder under. A rename or delete since then means the folder open
 	// here may no longer be the one its name now stands for.
 	folderGen uint64
-	dead      atomic.Bool
+	// writeGen is the Store.writeGen as of this connection's last SELECT,
+	// EXAMINE or NOOP.
+	writeGen uint64
+	dead     atomic.Bool
 }
 
 func newConn(sess *Session, timeout time.Duration, now func() time.Time) *conn {

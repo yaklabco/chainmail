@@ -1195,3 +1195,44 @@ func meetAtDial(s *Store, n int32) *atomic.Bool {
 	}
 	return &met
 }
+
+// TestReadAfterAWriteSyncsAReusedFolder: a connection that had the
+// destination open before another connection moved mail into it sends NOOP
+// before it reads, so the server tells it of the new message. Dovecot
+// answers a UID FETCH or SEARCH only for messages the session has been told
+// of, so without it a ref a move just gave reads as gone. Reads with no
+// write since pay nothing.
+func TestReadAfterAWriteSyncsAReusedFolder(t *testing.T) {
+	t.Parallel()
+	srv := startWriteServer(t, &writeServer{
+		caps:    "MOVE UIDPLUS",
+		folders: []*wsFolder{wsMailbox("INBOX", "", 7, 1), wsMailbox("Archive", "\\Archive", 20, 5)},
+		// Slow searches keep both reads below running at once, on two connections.
+		slowKind: "UID SEARCH", slow: 100 * time.Millisecond,
+	})
+	s := writeStore(t, srv, Options{PoolSize: 2})
+	var wg sync.WaitGroup
+	for _, folder := range []string{"INBOX", "Archive"} {
+		wg.Go(func() {
+			if _, err := s.FindByMessageID(t.Context(), folder, "1@x"); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	if n := srv.sent("NOOP"); n != 0 || srv.conns.Load() != 2 {
+		t.Fatalf("%d NOOPs on %d connections before any write, want none on 2", n, srv.conns.Load())
+	}
+	got := one(t, s.Move(t.Context(), []ref.Ref{hostRef("INBOX", 7, 1)}, "Archive"))
+	if got != (mailstore.RefResult{Ref: hostRef("Archive", 20, 101)}) {
+		t.Fatalf("Move = %+v", got)
+	}
+	found, err := s.FindByMessageID(t.Context(), "Archive", "1@x")
+	if err != nil || len(found) != 1 || found[0] != got.Ref {
+		t.Errorf("FindByMessageID after the move = %v, %v; want %v", found, err, got.Ref)
+	}
+	move, noop := srv.eventIndex("recv UID MOVE"), srv.eventIndex("recv NOOP")
+	if noop < move {
+		t.Errorf("commands %q, want a NOOP after the UID MOVE, before reading Archive again", srv.received())
+	}
+}
