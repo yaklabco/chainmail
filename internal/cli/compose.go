@@ -63,8 +63,7 @@ Examples:
 
 func newSendCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	var (
-		spec          chainmailv1.ComposeSpec
-		content       contentFlags
+		m             messageFlags
 		dryRun, draft bool
 		key           string
 	)
@@ -74,20 +73,10 @@ func newSendCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		Long:  sendHelp,
 		Args:  exactArgs(0),
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			usage := func(msg string) error { return usageError{err: errors.New(msg), hint: helpHint(cmd)} }
-			switch {
-			case spec.Account == "":
-				return usage("--account is required")
-			case len(spec.To)+len(spec.Cc)+len(spec.Bcc) == 0:
-				return usage("give at least one recipient: --to, --cc or --bcc")
-			case !cmd.Flags().Changed("subject"):
-				return usage("--subject is required")
-			case dryRun && draft:
-				return usage("--dry-run and --draft cannot be used together")
-			case !content.hasBody():
-				return usage("give a body: --body, --body-file or --html-file")
+			if dryRun && draft {
+				return usageError{err: errors.New("--dry-run and --draft cannot be used together"), hint: helpHint(cmd)}
 			}
-			if err := content.check(); err != nil {
+			if err := m.check(); err != nil {
 				return err
 			}
 			jsonOut := explicitJSON(cmd, g)
@@ -98,17 +87,15 @@ func newSendCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			}
 			c := g.client(env)
 			defer c.Close()
-			content.account, content.stdin = spec.Account, env.Stdin
-			body, err := content.build(ctx, c)
+			spec, err := m.build(ctx, c, env.Stdin)
 			if err != nil {
 				return err
 			}
-			spec.Content = body
-			req := &chainmailv1.SendRequest{Spec: &spec, DryRun: dryRun, Draft: draft, IdempotencyKey: key}
+			req := &chainmailv1.SendRequest{Spec: spec, DryRun: dryRun, Draft: draft, IdempotencyKey: key}
 			if key == "" && !dryRun && !draft {
 				req.IdempotencyKey = deriveKey(keyInput{
 					account: spec.Account, to: spec.To, cc: spec.Cc, bcc: spec.Bcc,
-					subject: spec.Subject, content: content.digest,
+					subject: spec.Subject, content: m.content.digest,
 				})
 			}
 			resp, err := c.Compose.Send(ctx, connect.NewRequest(req))
@@ -118,13 +105,8 @@ func newSendCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			return writeComposeResult(env, g, jsonOut, resp.Msg, resp.Msg.GetResult())
 		},
 	}
+	addMessageFlags(cmd, &m, "the account to send from (required)")
 	f := cmd.Flags()
-	f.StringVar(&spec.Account, "account", "", "the account to send from (required)")
-	f.StringArrayVar(&spec.To, "to", nil, `a recipient, "Name <a@b>" or "a@b" (repeatable)`)
-	f.StringArrayVar(&spec.Cc, "cc", nil, "a copied recipient (repeatable)")
-	f.StringArrayVar(&spec.Bcc, "bcc", nil, "a blind-copied recipient, kept out of the message itself (repeatable)")
-	f.StringVar(&spec.Subject, "subject", "", "the subject line (required)")
-	addContentFlags(cmd, &content)
 	f.BoolVar(&dryRun, "dry-run", false, "write the message as MIME to stdout instead of sending it")
 	f.BoolVar(&draft, "draft", false, "save the message to Drafts instead of sending it")
 	f.StringVar(&key, "idempotency-key", "", "the key that stops a repeat from sending again (default: derived from the message)")
@@ -250,7 +232,7 @@ func writeComposeResult(env Env, g *globals, jsonOut bool, resp proto.Message, r
 	var b strings.Builder
 	switch {
 	case res.GetDraft() != nil:
-		fmt.Fprintf(&b, "saved draft %s\n", res.GetDraft().GetRef())
+		b.WriteString(draftSaved(res.GetDraft()))
 	case res.GetSent() != nil:
 		s := res.GetSent()
 		fmt.Fprintf(&b, "sent %s\n", s.GetMessageId())
@@ -593,8 +575,11 @@ type keyInput struct {
 	// content is contentFlags.digest.
 	content [32]byte
 	raw     []byte
-	// ref is the message replied to or forwarded.
+	// ref is the message replied to or forwarded, or the draft sent.
 	ref string
+	// mode tells apart calls on the same ref: "reply", "reply-all",
+	// "forward", "forward-no-attachments" or "draft-send".
+	mode string
 }
 
 // deriveKey returns "cli-" and the unpadded base32 SHA-256 of in. Each
@@ -616,6 +601,7 @@ func deriveKey(in keyInput) string {
 	h.bytes("content", in.content[:])
 	h.bytes("raw", in.raw)
 	h.str("ref", in.ref)
+	h.str("mode", in.mode)
 	sum := h.sum()
 	return keyPrefix + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:])
 }

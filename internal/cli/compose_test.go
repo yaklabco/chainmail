@@ -339,7 +339,7 @@ func TestSendDraft(t *testing.T) {
 	t.Parallel()
 	e := startCLISend(t, smtptest.Options{})
 	got := e.run(t, Env{}, append([]string{"--output", "table"}, sendArgs("--body", "Later", "--draft")...)...)
-	if got.code != 0 || !strings.HasPrefix(got.stdout, "saved draft cm1:host:Drafts:") {
+	if got.code != 0 || !strings.HasPrefix(got.stdout, "draft saved cm1:host:Drafts:") {
 		t.Fatalf("draft: %+v", got)
 	}
 	if n := len(e.smtp.Messages()); n != 0 {
@@ -463,6 +463,7 @@ func TestDeriveKey(t *testing.T) {
 		"content": func(k *keyInput) { k.content = [32]byte{2} },
 		"raw":     func(k *keyInput) { k.raw = []byte("x") },
 		"ref":     func(k *keyInput) { k.ref = "host:INBOX:1:1" },
+		"mode":    func(k *keyInput) { k.mode = "reply-all" },
 		"split":   func(k *keyInput) { k.subject, k.ref = "", "s" },
 	} {
 		in := base
