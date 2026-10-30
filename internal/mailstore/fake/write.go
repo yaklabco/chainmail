@@ -290,9 +290,8 @@ func parseRaw(raw []byte) Message {
 	return m
 }
 
-// Move implements mailstore.Writer. On standard accounts every move gives a
-// new UID, even into the folder the message is in, as UID MOVE does on
-// Dovecot (RFC 6851 section 3.3).
+// Move implements mailstore.Writer. A message already in the folder keeps
+// its ref, as imapstore sends no MOVE for it.
 func (s *Store) Move(ctx context.Context, refs []ref.Ref, folder string) []mailstore.RefResult {
 	var dest mailstore.Folder
 	return s.batch(ctx, opMove, refs, func() (err error) {
@@ -303,16 +302,16 @@ func (s *Store) Move(ctx context.Context, refs []ref.Ref, folder string) []mails
 	})
 }
 
-// moveLocked moves m to dest. A standard move always gives a new UID. On
-// Gmail a message already in dest keeps its ref, and a label folder is a
-// label edit: a message in Trash or Spam goes back to All Mail first, then
-// gains the label, and loses \Inbox unless dest is INBOX.
+// moveLocked moves m to dest. A message already in dest keeps its ref. On
+// Gmail a label folder is a label edit: a message in Trash or Spam goes
+// back to All Mail first, then gains the label, and loses \Inbox unless
+// dest is INBOX.
 func (s *Store) moveLocked(m *Message, dest mailstore.Folder) (ref.Ref, error) {
-	if !s.gmail {
-		return s.relocateLocked(m, dest.Name), nil
-	}
 	if m.Folder == dest.Name {
 		return s.refLocked(m), nil
+	}
+	if !s.gmail {
+		return s.relocateLocked(m, dest.Name), nil
 	}
 	if holdsMail(dest.Role) {
 		return s.relocateLocked(m, dest.Name), nil

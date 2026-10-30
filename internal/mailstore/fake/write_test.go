@@ -252,9 +252,9 @@ func TestWriteMove(t *testing.T) {
 		// Spec 7.1, standard.
 		{name: "standard move gives a new ref", from: "INBOX", dest: "Projects", wantFolder: "Projects"},
 		{name: "standard move to Trash", from: "INBOX", dest: "Trash", wantFolder: "Trash"},
-		// UID MOVE into the same mailbox makes a new message, as Dovecot does
-		// (RFC 6851 section 3.3).
-		{name: "standard move to its own folder gives a new ref", from: "INBOX", dest: "INBOX", wantFolder: "INBOX"},
+		// imapstore sends no MOVE for messages already in the folder: they
+		// keep their refs, on Dovecot as on Gmail.
+		{name: "standard move to its own folder keeps the ref", from: "INBOX", dest: "INBOX", wantFolder: "INBOX", sameRef: true},
 		{name: "standard unknown folder", from: "INBOX", dest: "Nope", wantErr: mailstore.ErrNotFound},
 		// Spec 7.1, Google.
 		{
@@ -489,7 +489,7 @@ func TestWriteArchive(t *testing.T) {
 		},
 		{name: "standard archive_folder missing", from: "INBOX", setup: func(s *Store) { s.SetArchiveFolder("Gone") }, wantErr: mailstore.ErrNotFound},
 		{name: "standard neither", from: "INBOX", setup: func(s *Store) { dropRole(s, mailstore.RoleArchive) }, wantErr: mailstore.ErrNotFound},
-		{name: "standard already archived moves again", from: "Archive", wantFolder: "Archive"},
+		{name: "standard already archived keeps the ref", from: "Archive", wantFolder: "Archive", sameRef: true},
 		{name: "Gmail drops \\Inbox", gmail: true, from: allMail, wantFolder: allMail, sameRef: true},
 		{name: "Gmail ignores archive_folder", gmail: true, from: allMail, setup: func(s *Store) { s.SetArchiveFolder("Receipts") }, wantFolder: allMail, sameRef: true},
 	}
