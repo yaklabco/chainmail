@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -32,6 +33,10 @@ import (
 // maxFilenameBytes caps an upload's filename.
 const maxFilenameBytes = 255
 
+// uploadIdleTimeout is how long an upload may send nothing before it is
+// ended.
+const uploadIdleTimeout = time.Minute
+
 // composeService sends mail and manages drafts. Calls not yet implemented
 // answer CodeUnimplemented through the embedded handler.
 type composeService struct {
@@ -43,6 +48,10 @@ type composeService struct {
 	// whose outcome is unknown.
 	outcomeTries    int
 	outcomeInterval time.Duration
+	// uploadTimeout bounds a whole upload, and uploadIdle the wait for each
+	// of its messages. Tests shorten them.
+	uploadTimeout time.Duration
+	uploadIdle    time.Duration
 
 	// mu guards owners, the account of each live upload.
 	mu     sync.Mutex
@@ -59,6 +68,8 @@ func newComposeService(s *Server) *composeService {
 		dial:            sender.Dial,
 		outcomeTries:    outcomeTries,
 		outcomeInterval: interval,
+		uploadTimeout:   streamTimeout,
+		uploadIdle:      uploadIdleTimeout,
 		owners:          map[string]uploadOwner{},
 	}
 }
@@ -335,10 +346,12 @@ func (c *composeService) UploadAttachment(ctx context.Context, stream *connect.C
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := withDeadline(ctx, streamTimeout)
+	// The whole upload has uploadTimeout, whatever deadline the client set.
+	ctx, cancel := context.WithTimeout(ctx, c.uploadTimeout)
 	defer cancel()
 	entry := audit.Entry{Action: "upload"}
-	info, upErr := c.upload(ctx, stream, &entry)
+	in := &uploadStream{stream: stream, ctx: ctx, idle: c.uploadIdle, abort: readAborter(ctx)}
+	info, upErr := c.upload(ctx, in, &entry)
 	if err := c.record(ctx, cl, entry, upErr); err != nil {
 		return nil, err
 	}
@@ -350,14 +363,12 @@ func (c *composeService) UploadAttachment(ctx context.Context, stream *connect.C
 }
 
 // upload stores one upload stream. Its cap is the account's message size limit.
-func (c *composeService) upload(ctx context.Context, stream *connect.ClientStream[chainmailv1.UploadAttachmentRequest], entry *audit.Entry) (upload.Info, error) {
-	if !stream.Receive() {
-		if err := stream.Err(); err != nil {
-			return upload.Info{}, err
-		}
-		return upload.Info{}, errNoUploadHeader
+func (c *composeService) upload(ctx context.Context, in *uploadStream, entry *audit.Entry) (upload.Info, error) {
+	first, err := in.receive()
+	if err != nil {
+		return upload.Info{}, err
 	}
-	h := stream.Msg().GetHeader()
+	h := first.GetHeader()
 	if h == nil {
 		return upload.Info{}, errNoUploadHeader
 	}
@@ -376,7 +387,7 @@ func (c *composeService) upload(ctx context.Context, stream *connect.ClientStrea
 	if c.s.uploads == nil {
 		return upload.Info{}, errors.New("the daemon has no state directory for uploads")
 	}
-	info, err := c.s.uploads.Put(ctx, h.GetFilename(), h.GetContentType(), &uploadReader{stream: stream}, acct.MaxMessageSize)
+	info, err := c.s.uploads.Put(ctx, h.GetFilename(), h.GetContentType(), &uploadReader{in: in}, acct.MaxMessageSize)
 	if err != nil {
 		return upload.Info{}, err
 	}
@@ -403,21 +414,74 @@ func checkUploadHeader(h *chainmailv1.UploadHeader) error {
 	return nil
 }
 
+// uploadStream receives an upload's messages one at a time on a goroutine,
+// so that a client that stops sending cannot hold the handler: a receive
+// waits at most idle for its message, and never past ctx. A Receive blocked
+// on the request body ignores the context, so on either the receive's read
+// is ended through abort and its goroutine joined.
+type uploadStream struct {
+	stream *connect.ClientStream[chainmailv1.UploadAttachmentRequest]
+	ctx    context.Context
+	idle   time.Duration
+	// abort ends a read of the request body in progress, or reports that it
+	// cannot.
+	abort func() bool
+}
+
+// received is the outcome of one Receive.
+type received struct {
+	msg *chainmailv1.UploadAttachmentRequest
+	err error
+}
+
+// receive returns the next message, or nil at the end of the stream. When
+// idle passes without one it fails with an error wrapping
+// context.DeadlineExceeded, and when ctx ends with ctx's error.
+func (u *uploadStream) receive() (*chainmailv1.UploadAttachmentRequest, error) {
+	done := make(chan received, 1)
+	go func() {
+		if u.stream.Receive() {
+			done <- received{msg: u.stream.Msg()}
+			return
+		}
+		done <- received{err: u.stream.Err()}
+	}()
+	idle := time.NewTimer(u.idle)
+	defer idle.Stop()
+	var cause error
+	select {
+	case r := <-done:
+		return r.msg, r.err
+	case <-idle.C:
+		cause = fmt.Errorf("the upload sent nothing for %v: %w", u.idle, context.DeadlineExceeded)
+	case <-u.ctx.Done():
+		cause = u.ctx.Err()
+	}
+	// Once the read is ended the goroutine returns at once. A server that
+	// cannot end it closes the body when the handler returns, which ends
+	// the goroutine then.
+	if u.abort() {
+		<-done
+	}
+	return nil, cause
+}
+
 // uploadReader reads the data parts of an upload stream after its header.
 type uploadReader struct {
-	stream *connect.ClientStream[chainmailv1.UploadAttachmentRequest]
-	buf    []byte
+	in  *uploadStream
+	buf []byte
 }
 
 func (r *uploadReader) Read(p []byte) (int, error) {
 	for len(r.buf) == 0 {
-		if !r.stream.Receive() {
-			if err := r.stream.Err(); err != nil {
-				return 0, err
-			}
+		msg, err := r.in.receive()
+		if err != nil {
+			return 0, err
+		}
+		if msg == nil {
 			return 0, io.EOF
 		}
-		data, ok := r.stream.Msg().GetPart().(*chainmailv1.UploadAttachmentRequest_Data)
+		data, ok := msg.GetPart().(*chainmailv1.UploadAttachmentRequest_Data)
 		if !ok {
 			return 0, errSecondHeader
 		}
@@ -426,4 +490,28 @@ func (r *uploadReader) Read(p []byte) (int, error) {
 	n := copy(p, r.buf)
 	r.buf = r.buf[n:]
 	return n, nil
+}
+
+// readAbortKey holds, in a request's context, the function that ends a
+// read of the request body in progress.
+type readAbortKey struct{}
+
+// withReadAbort gives the handlers of next a way to end a read of the
+// request body in progress, which cancelling the request's context does
+// not: setting the body's read deadline to now, over HTTP/1.1 and HTTP/2.
+func withReadAbort(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rc := http.NewResponseController(w)
+		abort := func() bool { return rc.SetReadDeadline(time.Now()) == nil }
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), readAbortKey{}, abort)))
+	})
+}
+
+// readAborter is the read abort withReadAbort put in ctx, or one that
+// cannot end a read.
+func readAborter(ctx context.Context) func() bool {
+	if abort, ok := ctx.Value(readAbortKey{}).(func() bool); ok {
+		return abort
+	}
+	return func() bool { return false }
 }

@@ -135,8 +135,10 @@ func New(opts Options) (*Server, error) {
 	mux.Handle(chainmailv1connect.NewAccountServiceHandler(&accountService{s: s}, handlerOpts))
 	mux.Handle(chainmailv1connect.NewAdminServiceHandler(&adminService{s: s}, handlerOpts))
 	mux.Handle(chainmailv1connect.NewMessageServiceHandler(&messageService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
-	mux.Handle(chainmailv1connect.NewComposeServiceHandler(s.compose,
-		connect.WithReadMaxBytes(composeMaxRequestBytes), connect.WithSendMaxBytes(composeMaxResponseBytes)))
+	composePath, composeHandler := chainmailv1connect.NewComposeServiceHandler(s.compose,
+		connect.WithReadMaxBytes(composeMaxRequestBytes), connect.WithSendMaxBytes(composeMaxResponseBytes))
+	// UploadAttachment ends a stalled stream's body read itself.
+	mux.Handle(composePath, withReadAbort(composeHandler))
 	mux.Handle(chainmailv1connect.NewOrganizeServiceHandler(&organizeService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
