@@ -34,18 +34,30 @@ func backoff(n int) time.Duration {
 	return d
 }
 
-// deliveredCopy says m is the received copy of a message sent to self, in
-// the inbox: on Google the All Mail message with the \Inbox label, which a
-// Sent copy alone does not have, elsewhere a copy in an inbox-role folder.
-// A draft that shares the Message-ID, as one being sent does, is not it.
+// deliveredCopy says m is the delivered copy of a message sent to self.
+// Elsewhere that is the received copy, in an inbox-role folder. Gmail files
+// a message an account sends to its own address once, in Sent, and adds no
+// inbox copy, so on Google it is the one All Mail message, which is the
+// Sent copy too. A draft that shares the Message-ID, as one being sent
+// does, is not it.
 func deliveredCopy(m *chainmailv1.Message, google bool, roles map[string]string) bool {
 	if slices.Contains(m.GetFlags(), `\Draft`) {
 		return false
 	}
 	if google {
-		return slices.ContainsFunc(m.GetLabels(), func(l string) bool { return strings.EqualFold(l, `\Inbox`) })
+		return roles[m.GetFolder()] == "all"
 	}
 	return roles[m.GetFolder()] == "inbox"
+}
+
+// deliveryScope is the in: scope where the delivered copy of a message
+// sent to self is found: the inbox, or on Google the default scope, All
+// Mail, since deliveredCopy takes the All Mail message there.
+func deliveryScope(google bool) string {
+	if google {
+		return ""
+	}
+	return "inbox"
 }
 
 // trimID drops the angle brackets around a Message-ID, if any.
@@ -112,6 +124,19 @@ func originalMustBeGone(google bool, newRef string) bool {
 	return !google && newRef != ""
 }
 
+// nameTaken says a folder called name, or name under a personal namespace
+// prefix such as "INBOX.", is among the account's folders, without regard
+// to case. The organize test checks its folder name is free with it before
+// it creates the folder, whose name the server may prefix.
+func nameTaken(roles map[string]string, name string) bool {
+	for f := range roles {
+		if strings.HasSuffix(strings.ToLower(f), strings.ToLower(name)) {
+			return true
+		}
+	}
+	return false
+}
+
 // listed says a folder called name is among the account's folders, without
 // regard to case, as Gmail matches labels. On a server that tells case
 // apart this is stricter than it needs to be, which is the safe side.
@@ -136,7 +161,10 @@ func TestBackoff(t *testing.T) {
 }
 
 func TestDeliveredCopy(t *testing.T) {
-	roles := map[string]string{"INBOX": "inbox", "Sent": "sent", "Drafts": "drafts", "Archive": "archive", "chainmail-test-x": ""}
+	roles := map[string]string{
+		"INBOX": "inbox", "Sent": "sent", "Drafts": "drafts", "Archive": "archive", "chainmail-test-x": "",
+		"[Gmail]/All Mail": "all", "[Gmail]/Trash": "trash",
+	}
 	msg := func(folder string, flags, labels []string) *chainmailv1.Message {
 		return &chainmailv1.Message{Folder: folder, Flags: flags, Labels: labels}
 	}
@@ -146,12 +174,16 @@ func TestDeliveredCopy(t *testing.T) {
 		google bool
 		want   bool
 	}{
-		{"google sent copy only", msg("[Gmail]/All Mail", []string{`\Seen`}, []string{`\Sent`}), true, false},
-		{"google no labels", msg("[Gmail]/All Mail", nil, nil), true, false},
+		// Gmail files a message an account sends to its own address once,
+		// in Sent, and adds no inbox copy: live, none of three Google
+		// accounts gave one \Inbox within 3 minutes. So the one All Mail
+		// message, though it is only the Sent copy, is the delivered copy.
+		{"google sent copy only", msg("[Gmail]/All Mail", []string{`\Seen`}, []string{`\Sent`}), true, true},
+		{"google no labels", msg("[Gmail]/All Mail", nil, nil), true, true},
 		{"google received", msg("[Gmail]/All Mail", nil, []string{`\Inbox`, `\Sent`}), true, true},
-		{"google received, label case", msg("[Gmail]/All Mail", nil, []string{`\inbox`}), true, true},
+		{"google draft", msg("[Gmail]/All Mail", []string{`\Draft`}, []string{`\Draft`}), true, false},
 		{"google draft in inbox", msg("[Gmail]/All Mail", []string{`\Draft`}, []string{`\Inbox`}), true, false},
-		{"google user label named Inbox-like", msg("[Gmail]/All Mail", nil, []string{"Inbox"}), true, false},
+		{"google in Trash", msg("[Gmail]/Trash", []string{`\Seen`}, nil), true, false},
 		{"standard inbox", msg("INBOX", []string{`\Seen`}, nil), false, true},
 		{"standard sent", msg("Sent", []string{`\Seen`}, nil), false, false},
 		{"standard drafts", msg("Drafts", nil, nil), false, false},
@@ -164,6 +196,35 @@ func TestDeliveredCopy(t *testing.T) {
 				t.Errorf("deliveredCopy = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDeliveryScope(t *testing.T) {
+	// Google: All Mail, the default scope, since a self-send never reaches
+	// the inbox there. Elsewhere: the inbox.
+	if got := deliveryScope(true); got != "" {
+		t.Errorf("deliveryScope(google) = %q, want the default scope", got)
+	}
+	if got := deliveryScope(false); got != "inbox" {
+		t.Errorf("deliveryScope(standard) = %q, want inbox", got)
+	}
+}
+
+func TestNameTaken(t *testing.T) {
+	roles := map[string]string{"INBOX": "inbox", "INBOX.Chainmail-Test-abc": "", "Chainmail-Test-def": ""}
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"chainmail-test-def", true},
+		// A server with a personal namespace prefix such as "INBOX." keeps
+		// the folder under it, so a name taken there is taken.
+		{"chainmail-test-abc", true},
+		{"chainmail-test-xyz", false},
+	} {
+		if got := nameTaken(roles, tc.name); got != tc.want {
+			t.Errorf("nameTaken(%q) = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 

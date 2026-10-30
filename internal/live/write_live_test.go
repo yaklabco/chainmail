@@ -34,14 +34,14 @@ import (
 const (
 	// writesEnv opts in to the tests that send, organize and probe.
 	writesEnv = "CHAINMAIL_LIVE_WRITES"
-	// deliveryTimeout bounds the wait for the inbox copy of a message sent
-	// to self.
+	// deliveryTimeout bounds the wait for the delivered copy of a message
+	// sent to self: the inbox copy, or on Google the All Mail message.
 	deliveryTimeout = 60 * time.Second
 	// searchTimeout bounds the wait for a message to show in a folder after
 	// an organize call.
 	searchTimeout = 3 * time.Minute
-	// settleTimeout is how long cleanup keeps looking for the inbox copy of
-	// a send the test never saw arrive, after the last send. It is longer
+	// settleTimeout is how long cleanup keeps looking for the delivered copy
+	// of a send the test never saw arrive, after the last send. It is longer
 	// than deliveryTimeout, so a send the test gave up on still gets time.
 	settleTimeout = 3 * time.Minute
 	// cleanupTimeout bounds each cleanup.
@@ -211,8 +211,8 @@ func folderRoles(t *testing.T, c *client.Client, account string) map[string]stri
 // sweeper removes every message whose subject holds a test's token,
 // wherever it is: the Inbox, Sent and Drafts and every other folder, with
 // All Mail, Trash and Spam on Google. It touches nothing else. Before it
-// removes anything it waits for the inbox copy of every send, so a message
-// cannot arrive after cleanup has finished.
+// removes anything it waits for the delivered copy of every send, so a
+// message cannot arrive after cleanup has finished.
 type sweeper struct {
 	c       *client.Client
 	account string
@@ -243,15 +243,20 @@ func newSweeper(t *testing.T, c *client.Client, a *chainmailv1.Account, roles ma
 // sending is called before each send attempt.
 func (s *sweeper) sending() { s.deliveries.sending(time.Now()) }
 
-// inInbox says m is the received copy of a message the test sent.
-func (s *sweeper) inInbox(m *chainmailv1.Message) bool { return deliveredCopy(m, s.google, s.roles) }
+// isDelivered says m is the delivered copy of a message the test sent.
+func (s *sweeper) isDelivered(m *chainmailv1.Message) bool {
+	return deliveredCopy(m, s.google, s.roles)
+}
 
-// waitDelivered waits up to deliveryTimeout for the inbox copy of the sent
-// message id, records it, and returns its ref. A Sent copy does not count:
-// on Google it is the same All Mail message before \Inbox is added.
+// waitDelivered waits up to deliveryTimeout for the delivered copy of the
+// sent message id, records it, and returns its ref. Elsewhere that is the
+// inbox copy, and a Sent copy does not count. Gmail files a message sent to
+// the account's own address once, in Sent, with no inbox copy, so on Google
+// it is the one All Mail message, and the reply, forward and draft steps
+// run against it.
 func (s *sweeper) waitDelivered(t *testing.T, id string) string {
 	t.Helper()
-	ref := findMessage(t, s.c, s.account, s.token, "inbox", id, deliveryTimeout, s.inInbox)
+	ref := findMessage(t, s.c, s.account, s.token, deliveryScope(s.google), id, deliveryTimeout, s.isDelivered)
 	s.delivered(id)
 	return ref
 }
@@ -261,7 +266,7 @@ func gone(e *chainmailv1.ItemError) bool {
 	return e.GetReason() == api.ReasonNotFound || e.GetReason() == api.ReasonStaleRef
 }
 
-// sweep waits for the sends not yet seen in the inbox, then expunges the
+// sweep waits for the sends not yet seen delivered, then expunges the
 // token's messages until none are left. It fails when a send never
 // arrived, since that one may still arrive after cleanup.
 func (s *sweeper) sweep(ctx context.Context, t *testing.T) error {
@@ -272,14 +277,14 @@ func (s *sweeper) sweep(ctx context.Context, t *testing.T) error {
 	}
 	t.Logf("cleanup on %s: expunged %d messages", s.account, removed)
 	if missing > 0 {
-		return fmt.Errorf("%d sends never reached the inbox within %v of the last send, so a message may still arrive after cleanup", missing, settleTimeout)
+		return fmt.Errorf("%d sends were never seen delivered within %v of the last send, so a message may still arrive after cleanup", missing, settleTimeout)
 	}
 	return nil
 }
 
-// await searches the inbox for the sends not yet seen there, until every
-// one is seen or settleTimeout has passed since the last send. It returns
-// how many were never seen.
+// await searches for the delivered copies of the sends not yet seen, in the
+// inbox or on Google in All Mail, until every one is seen or settleTimeout
+// has passed since the last send. It returns how many were never seen.
 func (s *sweeper) await(ctx context.Context) (int, error) {
 	for n := 0; ; n++ {
 		switch s.next(time.Now(), settleTimeout) {
@@ -289,12 +294,12 @@ func (s *sweeper) await(ctx context.Context) (int, error) {
 			return s.outstanding(), nil
 		case settleWait:
 		}
-		msgs, err := tokenMessages(ctx, s.c, s.account, s.token, "inbox")
+		msgs, err := tokenMessages(ctx, s.c, s.account, s.token, deliveryScope(s.google))
 		if err != nil {
 			return s.outstanding(), fmt.Errorf("waiting for %d deliveries: %w", s.outstanding(), err)
 		}
 		for _, m := range msgs {
-			if s.inInbox(m) {
+			if s.isDelivered(m) {
 				s.delivered(m.GetMessageId().GetUntrusted())
 			}
 		}
@@ -584,9 +589,11 @@ func TestEveryAccountOrganizes(t *testing.T) {
 			t.Logf("folder %s, token %s", folder, token)
 
 			// The name must be free before the test claims it, so the
-			// cleanup below can only ever delete the test's own folder.
+			// cleanup below can only ever delete the test's own folder. A
+			// server with a personal namespace prefix, such as Hostinger's
+			// "INBOX.", keeps it under the prefix, so that counts too.
 			roles := folderRoles(t, c, name)
-			if listed(roles, folder) {
+			if nameTaken(roles, folder) {
 				t.Fatalf("%s already exists; run the test again for another name", folder)
 			}
 			base := context.WithoutCancel(t.Context())
@@ -610,8 +617,16 @@ func TestEveryAccountOrganizes(t *testing.T) {
 			})
 			sw = newSweeper(t, c, a, roles, token)
 
-			if _, err := c.Organize.CreateFolder(t.Context(), connect.NewRequest(&chainmailv1.CreateFolderRequest{Account: name, Name: folder})); err != nil {
+			created, err := c.Organize.CreateFolder(t.Context(), connect.NewRequest(&chainmailv1.CreateFolderRequest{Account: name, Name: folder}))
+			if err != nil {
 				t.Fatalf("CreateFolder %s: %v (%s)", folder, err, hint(err))
+			}
+			// From here on the folder goes by the name the server gave it,
+			// such as INBOX.chainmail-test-<random> on Hostinger, cleanup
+			// included.
+			if got := created.Msg.GetName(); got != "" && got != folder {
+				t.Logf("CreateFolder %s: the server named it %s", folder, got)
+				folder = got
 			}
 			if !listed(folderRoles(t, c, name), folder) {
 				t.Fatalf("%s is not listed after CreateFolder", folder)
