@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -1264,5 +1265,39 @@ func TestSendSizeBoundIsALowerBound(t *testing.T) {
 	}
 	if n := len(srv.Messages()); n != 2 {
 		t.Errorf("captured %d messages, want 2", n)
+	}
+}
+
+// TestSendSizeBoundCountsAttachmentsRaw sends a short message with a 7-bit
+// email attached. The builder sends that attachment as it is, so the
+// finished message fits the account's limit, though the attachment's base64
+// size alone would not. The bound before dialing counts it at its raw size.
+func TestSendSizeBoundCountsAttachmentsRaw(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	eml := "Subject: attached\r\nMessage-ID: <inner.1@example.org>\r\n\r\n" + strings.Repeat("a short line of an attached email\r\n", (13<<10)/35)
+	if base64.StdEncoding.EncodedLen(len(eml)) <= 16<<10 {
+		t.Fatalf("the attachment's base64 size fits the limit; the test proves nothing")
+	}
+	up, err := e.upload(t, &chainmailv1.UploadHeader{Account: "small", Filename: "note.eml", ContentType: "message/rfc822"}, []byte(eml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := hostSpec()
+	spec.Account = "small"
+	spec.Content.Attachments = []string{up.GetHandle()}
+	dry, err := e.send(t, &chainmailv1.SendRequest{Spec: spec, DryRun: true})
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if n := len(dry.GetDryRun().GetRaw()); n > 16<<10 {
+		t.Fatalf("the finished message is %d bytes, over the limit; the test proves nothing", n)
+	}
+	if _, err := e.send(t, &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: "eml"}); err != nil {
+		t.Errorf("Send: %v", err)
+	}
+	if n := len(srv.Messages()); n != 1 {
+		t.Errorf("captured %d messages, want 1", n)
 	}
 }

@@ -662,8 +662,9 @@ func checkSize(acct config.ResolvedAccount, n int64) error {
 
 // inputSize is a lower bound, from spec alone, on the size of the message
 // it builds, so a message certainly too large is refused before dialing.
-// Attachments and inline images count at their exact base64 size with line
-// breaks, as they are always sent base64. Text counts at its length with
+// Attachments and inline images count at their raw size: base64 only grows
+// a part, and a 7-bit email or multipart attachment goes as it is, with LF
+// line endings only growing to CRLF. Text counts at its length with
 // trailing white space dropped from each line, which is all quoted-printable
 // and format=flowed can save. Header fields count at the length of the
 // values the builder writes, each address once. Bcc counts for nothing: it
@@ -693,10 +694,10 @@ func inputSize(spec compose.Spec) int64 {
 		n += int64(len(r))
 	}
 	for _, f := range spec.Attachments {
-		n += base64Len(len(f.Data))
+		n += int64(len(f.Data))
 	}
 	for _, f := range spec.Inline {
-		n += base64Len(len(f.Data))
+		n += int64(len(f.Data))
 	}
 	return n
 }
@@ -714,12 +715,6 @@ func textLen(s string) int64 {
 // headerLen is the length of a header value without its line breaks.
 func headerLen(s string) int64 {
 	return int64(len(s) - strings.Count(s, "\r") - strings.Count(s, "\n"))
-}
-
-// base64Len is the base64 size of n bytes in lines of 76 characters.
-func base64Len(n int) int64 {
-	enc := int64((n + 2) / 3 * 4)
-	return enc + (enc+75)/76*2
 }
 
 // specFromProto validates a ComposeSpec and resolves uploads into a

@@ -328,7 +328,8 @@ var errOriginalTooLarge = &argError{
 }
 
 // originalAttachments streams each attachment of r. Together they must fit
-// the account's message size limit, base64-encoded.
+// the account's message size limit at their raw size, a lower bound on how
+// they are sent.
 func (c *composeService) originalAttachments(ctx context.Context, st mailstore.Store, acct config.ResolvedAccount, r ref.Ref, list []mailstore.Attachment) ([]compose.File, error) {
 	var (
 		out   []compose.File
@@ -342,7 +343,7 @@ func (c *composeService) originalAttachments(ctx context.Context, st mailstore.S
 		if err != nil {
 			return nil, err
 		}
-		if total += base64Len(len(data)); total > acct.MaxMessageSize {
+		if total += int64(len(data)); total > acct.MaxMessageSize {
 			return nil, errOriginalTooLarge
 		}
 		name := a.Filename
