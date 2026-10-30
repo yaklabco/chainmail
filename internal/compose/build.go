@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/emersion/go-message"
 	gomail "github.com/emersion/go-message/mail"
@@ -44,11 +45,13 @@ pre { padding: 8px; }
 
 const htmlTail = "</body>\n</html>\n"
 
-// Transfer encodings: quoted-printable for text, base64 for binary, so no
-// line exceeds 998 bytes.
+// Transfer encodings: quoted-printable for text and base64 for binary, so
+// no line exceeds 998 bytes, and 7bit for composite attachments that are
+// already 7-bit data, as RFC 2046 requires of them.
 const (
-	quotedPrintable = "quoted-printable"
-	base64Encoding  = "base64"
+	quotedPrintable  = "quoted-printable"
+	base64Encoding   = "base64"
+	sevenBitEncoding = "7bit"
 )
 
 // Build builds s into MIME bytes and the SMTP envelope, as spec 5.2 sets out:
@@ -204,7 +207,7 @@ func topHeader(s Spec, date time.Time, id string) ([][2]string, error) {
 	h.SetAddressList("From", []*mail.Address{&s.From})
 	h.SetAddressList("To", pointers(s.To))
 	h.SetAddressList("Cc", pointers(s.Cc))
-	h.SetSubject(s.Subject)
+	setText(&h, "Subject", s.Subject)
 	h.SetDate(date)
 	h.SetMessageID(id)
 	if s.InReplyTo != "" {
@@ -213,7 +216,7 @@ func topHeader(s Spec, date time.Time, id string) ([][2]string, error) {
 	h.SetMsgIDList("References", s.References)
 	h.Set("MIME-Version", "1.0")
 	if s.UserAgent != "" {
-		h.SetText("User-Agent", s.UserAgent)
+		setText(&h, "User-Agent", s.UserAgent)
 	}
 	extra, err := extraHeaders(&h, s.Headers)
 	if err != nil {
@@ -251,6 +254,9 @@ func extraHeaders(h *gomail.Header, headers map[string]string) ([]string, error)
 		if strings.ContainsAny(v, "\r\n") {
 			return nil, fmt.Errorf("%w: header %s has a line break", ErrInvalid, ck)
 		}
+		if len(ck) > maxFieldName {
+			return nil, fmt.Errorf("%w: header name longer than %d bytes", ErrInvalid, maxFieldName)
+		}
 		switch {
 		case ck == "Reply-To":
 			addrs, err := mail.ParseAddressList(v)
@@ -259,7 +265,7 @@ func extraHeaders(h *gomail.Header, headers map[string]string) ([]string, error)
 			}
 			h.SetAddressList("Reply-To", addrs)
 		case strings.HasPrefix(ck, "X-") && len(ck) > 2 && validFieldName(ck):
-			h.SetText(ck, v)
+			setText(h, ck, v)
 			extra = append(extra, ck)
 		default:
 			return nil, fmt.Errorf("%w: header %q is not allowed", ErrInvalid, k)
@@ -267,6 +273,11 @@ func extraHeaders(h *gomail.Header, headers map[string]string) ([]string, error)
 	}
 	return extra, nil
 }
+
+// maxFieldName is the longest header name Spec.Headers may use. go-message
+// folds a field's first line at 76 bytes counting the name and ": ", and
+// panics when a name leaves no room for any of the value.
+const maxFieldName = 64
 
 // validFieldName reports whether k is printable ASCII without a colon, as
 // RFC 5322 requires of a field name.
@@ -277,6 +288,85 @@ func validFieldName(k string) bool {
 		}
 	}
 	return true
+}
+
+// maxWord is the longest run without whitespace that header folding keeps
+// whole. go-message folds at whitespace, and a run longer than a line, about
+// 998 bytes less the field name, gets a space forced into it.
+const maxWord = 900
+
+// setText sets the unstructured field k to v so it decodes back to v. Most
+// values go through go-message, which uses RFC 2047 only for text that is
+// not ASCII. A value with a run too long to fold, or with "=?" that a reader
+// would decode as an encoded word, is written as encoded words instead.
+func setText(h *gomail.Header, k, v string) {
+	if !strings.Contains(v, "=?") && !hasLongWord(v) {
+		h.SetText(k, v)
+		return
+	}
+	h.Set(k, encodeWords(v))
+}
+
+// hasLongWord reports whether s has a run of more than maxWord bytes
+// without a space or tab.
+func hasLongWord(s string) bool {
+	run := 0
+	for i := range len(s) {
+		if s[i] == ' ' || s[i] == '\t' {
+			run = 0
+			continue
+		}
+		if run++; run > maxWord {
+			return true
+		}
+	}
+	return false
+}
+
+// encodeWords encodes all of s as RFC 2047 Q encoded words of at most 75
+// bytes, separated by spaces, which decoders drop between encoded words.
+// A word never splits a UTF-8 sequence.
+func encodeWords(s string) string {
+	const prefix, suffix = "=?utf-8?q?", "?="
+	const room = 75 - len(prefix) - len(suffix)
+	var b, word strings.Builder
+	flush := func() {
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(prefix + word.String() + suffix)
+		word.Reset()
+	}
+	for s != "" {
+		_, n := utf8.DecodeRuneInString(s)
+		enc := qEncode(s[:n])
+		if word.Len()+len(enc) > room {
+			flush()
+		}
+		word.WriteString(enc)
+		s = s[n:]
+	}
+	if word.Len() > 0 {
+		flush()
+	}
+	return b.String()
+}
+
+// qEncode is RFC 2047 Q encoding of s: a space as "_", printable ASCII but
+// "=", "?" and "_" as itself, and every other byte as =XX.
+func qEncode(s string) string {
+	var b strings.Builder
+	for i := range len(s) {
+		switch c := s[i]; {
+		case c == ' ':
+			b.WriteByte('_')
+		case c > ' ' && c <= '~' && c != '=' && c != '?' && c != '_':
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, "=%02X", c)
+		}
+	}
+	return b.String()
 }
 
 func pointers(l []mail.Address) []*mail.Address {
@@ -528,16 +618,30 @@ func quoteHTML(q *Quote) string {
 	return "<div class=\"quote\">\n<div class=\"quote-header\">" + header + "</div>\n" + content + "\n</div>\n"
 }
 
-// insertBeforeBodyEnd puts extra before the last </body> of doc, matched
-// without regard to ASCII case, or at the end when there is none.
+// insertBeforeBodyEnd puts extra before the last </body> end tag of doc, or
+// at the end when there is none. The HTML tokenizer finds the tag, so a
+// "</body>" in a comment, script, attribute or other raw text is not one.
+// doc is otherwise left byte for byte as given.
 func insertBeforeBodyEnd(doc, extra string) string {
-	const end = "</body>"
-	for i := len(doc) - len(end); i >= 0; i-- {
-		if strings.EqualFold(doc[i:i+len(end)], end) {
-			return doc[:i] + extra + doc[i:]
+	z := nethtml.NewTokenizer(strings.NewReader(doc))
+	at, offset := -1, 0
+	for {
+		tt := z.Next()
+		if tt == nethtml.ErrorToken {
+			// io.EOF: the tokenizer reads from a string, so nothing else can fail.
+			break
 		}
+		if tt == nethtml.EndTagToken {
+			if name, _ := z.TagName(); string(name) == "body" {
+				at = offset
+			}
+		}
+		offset += len(z.Raw())
 	}
-	return doc + extra
+	if at < 0 {
+		return doc + extra
+	}
+	return doc[:at] + extra + doc[at:]
 }
 
 // inlineImages gives each inline image a Content-ID, in sorted name order,
@@ -627,8 +731,9 @@ func sortedKeys(m map[string]File) []string {
 	return keys
 }
 
-// filePart is an attachment or inline image, base64 encoded. Its media
-// type is the declared one, or sniffed from the data when none is declared.
+// filePart is an attachment or inline image. Its media type is the declared
+// one, or sniffed from the data when none is declared. It is base64 encoded,
+// except for the composite types compositePart handles.
 func filePart(f File, disposition string) (*part, error) {
 	ct := f.ContentType
 	if ct == "" {
@@ -638,21 +743,52 @@ func filePart(f File, disposition string) (*part, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: bad content type %q", ErrInvalid, ct)
 	}
-	if strings.HasPrefix(mt, "multipart/") || strings.HasPrefix(mt, "message/") {
-		// A composite type cannot be base64 encoded (RFC 2046) and a
-		// multipart one would be read as structure, so the file goes as
-		// opaque data under its filename. A forward re-attaching an attached
-		// email is the usual case.
-		mt, params = "application/octet-stream", nil
-	}
-	return &part{
+	p := &part{
 		mediaType:   mt,
 		params:      params,
 		encoding:    base64Encoding,
 		disposition: disposition,
 		filename:    f.Filename,
 		body:        f.Data,
-	}, nil
+	}
+	if strings.HasPrefix(mt, "multipart/") || strings.HasPrefix(mt, "message/") && mt != "message/global" {
+		return compositePart(p)
+	}
+	return p, nil
+}
+
+// compositePart sets the encoding of a multipart or message attachment.
+// RFC 2046 allows only 7bit, 8bit or binary for these, and the sender does
+// not ask for 8BITMIME, so data that is 7-bit goes as 7bit, with its line
+// endings made CRLF. An attached email that is not 7-bit goes as
+// message/global, which RFC 6532 lets be base64 encoded. Any other composite
+// that is not 7-bit, and a multipart type without a boundary, is refused.
+func compositePart(p *part) (*part, error) {
+	if strings.HasPrefix(p.mediaType, "multipart/") && p.params["boundary"] == "" {
+		return nil, fmt.Errorf("%w: %s attachment has no boundary", ErrInvalid, p.mediaType)
+	}
+	if data, ok := sevenBit(p.body); ok {
+		p.encoding, p.body = sevenBitEncoding, data
+		return p, nil
+	}
+	if p.mediaType == "message/rfc822" {
+		p.mediaType = "message/global"
+		return p, nil
+	}
+	return nil, fmt.Errorf("%w: %s attachment is not 7-bit data", ErrInvalid, p.mediaType)
+}
+
+// sevenBit returns data with CRLF line endings, and whether it is 7bit data
+// as RFC 2045 defines it: no NUL, no byte over 127 and no line over 998
+// bytes.
+func sevenBit(data []byte) ([]byte, bool) {
+	lines := strings.Split(lf(string(data)), "\n")
+	for _, l := range lines {
+		if len(l) > 998 || strings.ContainsFunc(l, func(r rune) bool { return r == 0 || r > 127 }) {
+			return nil, false
+		}
+	}
+	return []byte(strings.Join(lines, "\r\n")), true
 }
 
 // part is one MIME entity of the message being built.

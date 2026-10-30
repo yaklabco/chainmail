@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/emersion/go-message"
 	gomail "github.com/emersion/go-message/mail"
@@ -369,6 +370,25 @@ func TestBuildHTML(t *testing.T) {
 
 func TestBuildHTMLInsertsBeforeBody(t *testing.T) {
 	t.Parallel()
+	tests := []struct {
+		name, src, want string
+	}{
+		{"capitals", "<html><body><p>hi</p></BODY></html>", "<html><body><p>hi</p>SIG</BODY></html>"},
+		{"comment after", "<html><body>Hi</body><!-- </body> --></html>", "<html><body>HiSIG</body><!-- </body> --></html>"},
+		{"comment inside", "<html><body>Hi<!-- </body> --></body></html>", "<html><body>Hi<!-- </body> -->SIG</body></html>"},
+		{"script", "<html><body>Hi</body><script>var s = \"</body>\";</script></html>", "<html><body>HiSIG</body><script>var s = \"</body>\";</script></html>"},
+		{"textarea", "<body><textarea></body></textarea></body>", "<body><textarea></body></textarea>SIG</body>"},
+		{"no body end", "<p>Hi</p><!-- </body> -->", "<p>Hi</p><!-- </body> -->SIG"},
+		{"attribute", "<p title=\"</body>\">Hi</p>", "<p title=\"</body>\">Hi</p>SIG"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := insertBeforeBodyEnd(tt.src, "SIG"); got != tt.want {
+				t.Errorf("got  %q\nwant %q", got, tt.want)
+			}
+		})
+	}
 	s := baseSpec()
 	s.Body = Body{Kind: HTML, Source: "<html><body><p>hi</p></BODY></html>"}
 	s.Signature = "James"
@@ -827,8 +847,15 @@ func FuzzBuild(f *testing.F) {
 		assertCRLF(t, m.Raw)
 		root := parse(t, m.Raw)
 		h := gomail.Header{Header: root.header}
-		if _, err := h.Subject(); err != nil {
+		got, err := h.Subject()
+		if err != nil {
 			t.Errorf("subject does not decode: %v", err)
+		}
+		// Parsing drops the whitespace around a field value unless it is
+		// inside an encoded word, and only valid UTF-8 can round-trip through
+		// a utf-8 encoded word.
+		if utf8.ValidString(subject) && got != subject && got != strings.Trim(subject, " \t") {
+			t.Errorf("subject = %q, want %q", got, subject)
 		}
 		if h.Has("Bcc") {
 			t.Errorf("subject injected a header")
@@ -837,21 +864,142 @@ func FuzzBuild(f *testing.F) {
 }
 
 // TestBuildCompositeAttachment checks a file declared as a composite type,
-// such as an attached email a forward re-attaches, is sent as opaque data:
-// base64 is not allowed for message/rfc822, and a multipart type would be
-// read as structure.
+// such as an attached email a forward re-attaches, keeps its declared type.
+// RFC 2046 allows only 7bit, 8bit or binary for those, and the sender does
+// not ask for 8BITMIME, so 7-bit data goes as 7bit in canonical CRLF form.
+// An attached email that is not 7-bit goes as message/global (RFC 6532),
+// which allows base64. Any other composite that is not 7-bit is refused.
 func TestBuildCompositeAttachment(t *testing.T) {
 	t.Parallel()
-	for _, ct := range []string{"message/rfc822", "multipart/mixed; boundary=x"} {
-		s := baseSpec()
-		s.Attachments = []File{{Filename: "note.eml", ContentType: ct, Data: []byte("Subject: hi\r\n\r\nhi\r\n")}}
-		root := parse(t, mustBuild(t, s).Raw)
-		if len(root.parts) != 2 {
-			t.Fatalf("%s: shape = %s", ct, root.shape())
+	email := "Subject: hi\r\nMessage-ID: <a@example.org>\r\n\r\nhi\r\n"
+	inner := "--in\r\nContent-Type: text/plain\r\n\r\ninner text\r\n--in--\r\n"
+	tests := []struct {
+		name, ct, data    string
+		wantType, wantEnc string
+		wantData          string
+	}{
+		{"email", "message/rfc822", email, "message/rfc822", "7bit", email},
+		{"email with LF", "message/rfc822", strings.ReplaceAll(email, "\r\n", "\n"), "message/rfc822", "7bit", email},
+		{"8-bit email", "message/rfc822", "Subject: Grüße\r\n\r\nü\r\n", "message/global", "base64", "Subject: Grüße\r\n\r\nü\r\n"},
+		{"email with a long line", "message/rfc822", "Subject: x\r\n\r\n" + strings.Repeat("y", 1200) + "\r\n", "message/global", "base64", "Subject: x\r\n\r\n" + strings.Repeat("y", 1200) + "\r\n"},
+		{"global email", "message/global", "Subject: Grüße\r\n\r\nü\r\n", "message/global", "base64", "Subject: Grüße\r\n\r\nü\r\n"},
+		{"multipart", "multipart/mixed; boundary=in", inner, "multipart/mixed", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := baseSpec()
+			s.Attachments = []File{{Filename: "note.eml", ContentType: tt.ct, Data: []byte(tt.data)}}
+			m := mustBuild(t, s)
+			assertLineLimit(t, m.Raw)
+			assertCRLF(t, m.Raw)
+			root := parse(t, m.Raw)
+			if len(root.parts) != 2 {
+				t.Fatalf("shape = %s", root.shape())
+			}
+			p := root.parts[1]
+			if p.mediaType != tt.wantType {
+				t.Errorf("type = %s, want %s", p.mediaType, tt.wantType)
+			}
+			if enc := p.header.Get("Content-Transfer-Encoding"); enc != tt.wantEnc {
+				t.Errorf("encoding = %q, want %q", enc, tt.wantEnc)
+			}
+			if disp, params, err := p.header.ContentDisposition(); err != nil || disp != "attachment" || params["filename"] != "note.eml" {
+				t.Errorf("disposition = %q %v %v", disp, params, err)
+			}
+			if tt.wantType == "multipart/mixed" {
+				if p.params["boundary"] != "in" || len(p.parts) != 1 || p.parts[0].body != "inner text" {
+					t.Errorf("multipart attachment = %s %v", p.shape(), p.params)
+				}
+				return
+			}
+			if p.raw != tt.wantData {
+				t.Errorf("data = %q, want %q", p.raw, tt.wantData)
+			}
+		})
+	}
+}
+
+func TestBuildCompositeAttachmentInvalid(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, ct, data string }{
+		{"multipart without boundary", "multipart/mixed", "--in\r\n\r\nx\r\n--in--\r\n"},
+		{"8-bit multipart", "multipart/mixed; boundary=in", "--in\r\n\r\nü\r\n--in--\r\n"},
+		{"multipart with a NUL", "multipart/mixed; boundary=in", "--in\r\n\r\n\x00\r\n--in--\r\n"},
+		{"8-bit partial", "message/partial; id=x; number=1", "ü\r\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := baseSpec()
+			s.Attachments = []File{{Filename: "f", ContentType: tt.ct, Data: []byte(tt.data)}}
+			if _, err := build(s, &seqReader{}); !errors.Is(err, ErrInvalid) {
+				t.Errorf("err = %v, want ErrInvalid", err)
+			}
+		})
+	}
+}
+
+// TestBuildHeaderNameLength checks a long X- header name is refused rather
+// than reaching go-message, whose folding panics when the name leaves no
+// room on the first line, and that every accepted name round-trips.
+func TestBuildHeaderNameLength(t *testing.T) {
+	t.Parallel()
+	for n := 1; n <= 150; n++ {
+		key := "X-" + strings.Repeat("A", n)
+		for _, v := range []string{"v", strings.Repeat("word ", 40) + "end"} {
+			s := baseSpec()
+			s.Headers = map[string]string{key: v}
+			m, err := build(s, &seqReader{})
+			if len(key) > maxFieldName {
+				if !errors.Is(err, ErrInvalid) {
+					t.Errorf("name of %d bytes: err = %v, want ErrInvalid", len(key), err)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatalf("name of %d bytes: %v", len(key), err)
+			}
+			assertLineLimit(t, m.Raw)
+			h := gomail.Header{Header: parse(t, m.Raw).header}
+			if got, err := h.Text(key); err != nil || got != v {
+				t.Errorf("name of %d bytes: value = %q, %v", len(key), got, err)
+			}
 		}
-		p := root.parts[1]
-		if p.mediaType != "application/octet-stream" || p.raw != string(s.Attachments[0].Data) {
-			t.Errorf("%s: sent as %s %q", ct, p.mediaType, p.raw)
+	}
+}
+
+// TestBuildHeaderValueFidelity checks unstructured values that folding
+// cannot split at whitespace, or that look like encoded words, come back
+// exactly as given.
+func TestBuildHeaderValueFidelity(t *testing.T) {
+	t.Parallel()
+	values := []string{
+		strings.Repeat("x", 1500),
+		strings.Repeat("word ", 300) + strings.Repeat("x", 1500),
+		strings.Repeat("y", 1200) + " tail",
+		"Grüße " + strings.Repeat("z", 1200),
+		"=?utf-8?q?hi?=",
+		"before =?utf-8?b?aGk=?= after",
+		"a_b=c?d " + strings.Repeat("q", 950),
+		strings.Repeat("x", 900),
+	}
+	for i, v := range values {
+		s := baseSpec()
+		s.Subject = v
+		s.UserAgent = v
+		s.Headers = map[string]string{"X-Long": v}
+		m := mustBuild(t, s)
+		assertLineLimit(t, m.Raw)
+		assertCRLF(t, m.Raw)
+		h := gomail.Header{Header: parse(t, m.Raw).header}
+		if got, err := h.Subject(); err != nil || got != v {
+			t.Errorf("value %d: subject = %.80q (%d bytes), %v", i, got, len(got), err)
+		}
+		for _, k := range []string{"X-Long", "User-Agent"} {
+			if got, err := h.Text(k); err != nil || got != v {
+				t.Errorf("value %d: %s = %.80q (%d bytes), %v", i, k, got, len(got), err)
+			}
 		}
 	}
 }
