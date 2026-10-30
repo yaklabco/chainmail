@@ -368,7 +368,7 @@ func staticCriteria(f *folder, c *imap.SearchCriteria) (*imap.SearchCriteria, er
 	return &out, nil
 }
 
-// staticUIDSet returns a copy of set with * resolved to f's highest UID, as
+// staticUIDSet returns a copy of set with * resolved to f.highestUID, as
 // imapmemserver does. Without it, Contains reads n:* as "n and above" and a
 // bare * as nothing.
 func staticUIDSet(f *folder, set imap.UIDSet) (imap.UIDSet, error) {
@@ -377,7 +377,7 @@ func staticUIDSet(f *folder, set imap.UIDSet) (imap.UIDSet, error) {
 	}
 	out := slices.Clone(set)
 	for i := range out {
-		staticRange(&out[i].Start, &out[i].Stop, f.nextUID-1)
+		staticRange(&out[i].Start, &out[i].Stop, f.highestUID())
 	}
 	return out, nil
 }
@@ -455,7 +455,9 @@ func unsupportedFetchItem(options *imap.FetchOptions, opts Options) (string, boo
 
 // messagesIn returns the positions in the view of the messages numSet names
 // that are still in the folder. Sequence numbers count every entry the
-// client knows of, as IMAP requires until an EXPUNGE is sent.
+// client knows of, as IMAP requires until an EXPUNGE is sent, and reach only
+// as far as the last EXISTS: a sequence set never names an arrival the client
+// has not been told of.
 func (sess *session) messagesIn(numSet imap.NumSet) ([]int, error) {
 	f := sess.selected
 	var contains func(seq uint32, uid imap.UID) bool
@@ -467,11 +469,12 @@ func (sess *session) messagesIn(numSet imap.NumSet) ([]int, error) {
 		}
 		contains = func(_ uint32, uid imap.UID) bool { return static.Contains(uid) }
 	case imap.SeqSet:
-		static, err := staticSeqSet(uint32(len(sess.view)), set)
+		known := uint32(sess.known)
+		static, err := staticSeqSet(known, set)
 		if err != nil {
 			return nil, err
 		}
-		contains = func(seq uint32, _ imap.UID) bool { return static.Contains(seq) }
+		contains = func(seq uint32, _ imap.UID) bool { return seq <= known && static.Contains(seq) }
 	default:
 		return nil, &imap.Error{Type: imap.StatusResponseTypeBad, Text: fmt.Sprintf("fakegmail: unexpected message set %T", numSet)}
 	}
@@ -748,8 +751,14 @@ func (sess *session) Create(name string, _ *imap.CreateOptions) error {
 	return nil
 }
 
+// beneath reports whether name is below parent in the label hierarchy,
+// ignoring case as Gmail does.
+func beneath(name, parent string) bool {
+	return len(name) > len(parent) && strings.EqualFold(name[:len(parent)+1], parent+"/")
+}
+
 // Rename renames a user label and the labels under it, on every message that
-// carries them. UIDs and UIDVALIDITY stay.
+// carries them. UIDs and UIDVALIDITY stay. A label cannot move beneath itself.
 func (sess *session) Rename(name, newName string, _ *imap.RenameOptions) error {
 	if err := checkUserLabel(name); err != nil {
 		return err
@@ -764,27 +773,39 @@ func (sess *session) Rename(name, newName string, _ *imap.RenameOptions) error {
 	if f == nil {
 		return noSuchFolder(name)
 	}
+	if beneath(newName, f.name) {
+		return &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeCannot, Text: "fakegmail: cannot move " + f.name + " beneath itself"}
+	}
 	renames := map[*folder]string{}
+	byLabel := map[string]string{} // old label, folded, to new label
 	for _, g := range s.folders {
 		switch {
 		case g.kind != kindLabel || strings.HasPrefix(g.label, `\`):
+			continue
 		case g == f:
 			renames[g] = newName
-		case len(g.name) > len(f.name) && strings.EqualFold(g.name[:len(f.name)+1], f.name+"/"):
+		case beneath(g.name, f.name):
 			renames[g] = newName + g.name[len(f.name):]
+		default:
+			continue
 		}
+		byLabel[strings.ToLower(g.label)] = renames[g]
 	}
 	for _, to := range renames {
 		if other := s.folderFoldLocked(to); other != nil && renames[other] == "" {
 			return folderExists(to)
 		}
 	}
-	for g, to := range renames {
-		for _, m := range s.msgs {
-			if i := slices.IndexFunc(m.Labels, func(l string) bool { return strings.EqualFold(l, g.label) }); i >= 0 {
+	// Each label is looked up once against the old names, so no label is
+	// renamed twice whatever order the folders come in.
+	for _, m := range s.msgs {
+		for i, l := range m.Labels {
+			if to, ok := byLabel[strings.ToLower(l)]; ok {
 				m.Labels[i] = to
 			}
 		}
+	}
+	for g, to := range renames {
 		g.name, g.label = to, to
 	}
 	return nil
@@ -873,7 +894,7 @@ func (sess *session) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags 
 }
 
 // storeFlags applies a flag change to m in f. \Deleted goes to the folder,
-// the rest to the message.
+// the rest to the message, and \Starred follows \Flagged.
 func storeFlags(f *folder, m *Message, op imap.StoreFlagsOp, flags []imap.Flag) {
 	deleted := slices.Contains(flags, imap.FlagDeleted)
 	var others []imap.Flag
@@ -905,6 +926,7 @@ func storeFlags(f *folder, m *Message, op imap.StoreFlagsOp, flags []imap.Flag) 
 			delete(f.deleted, m)
 		}
 	}
+	starFromFlags(m)
 }
 
 // uidPair is one message's UID in the source and destination of a COPY or MOVE.
@@ -1036,7 +1058,8 @@ var systemLabels = []string{`\Inbox`, `\Important`, `\Starred`, `\Sent`, `\Draft
 // the FETCH answers. op Set replaces the labels. System labels are matched
 // without regard to case, a user label the server lacks is created, as Gmail
 // does, and the folder names INBOX, Sent Mail and Drafts stand for their
-// labels. A set that names no current message answers OK with no FETCH.
+// labels. \Flagged follows \Starred. A set that names no current message
+// answers OK with no FETCH.
 //
 // Nothing calls it over the wire yet: the go-imap fork's STORE parser takes
 // FLAGS only. Once it accepts X-GM-LABELS, the session hook it calls wraps
@@ -1080,6 +1103,7 @@ func (sess *session) storeLabels(numSet imap.NumSet, op imap.StoreFlagsOp, label
 				addLabel(m, name)
 			}
 		}
+		starFromLabels(m)
 	}
 	s.refreshLocked()
 	updates := make([]labelUpdate, 0, len(idx))

@@ -9,7 +9,9 @@
 // It accepts writes the way Gmail does with its default IMAP settings and
 // expunge set to move to Trash:
 //   - STORE of flags. Flags belong to the message and show in every folder,
-//     except \Deleted, which belongs to the folder it was set in. A STORE
+//     except \Deleted, which belongs to the folder it was set in (a fixture's
+//     \Deleted marks every folder the message starts in). \Flagged and the
+//     \Starred label are one state, whichever a write changes. A STORE
 //     naming no current message answers OK with no FETCH.
 //   - COPY and APPEND to a label folder (INBOX, Sent Mail, Drafts or a user
 //     label) add that label; to Trash or Spam they move the message there; to
@@ -19,8 +21,9 @@
 //   - EXPUNGE and UID EXPUNGE of messages marked \Deleted in the selected
 //     folder: in Trash or Spam the message is gone for good, in All Mail it
 //     moves to Trash, and in a label folder it loses that label.
-//   - CREATE, RENAME (children follow) and DELETE of user labels. INBOX and
-//     the [Gmail] folders answer NO.
+//   - CREATE, RENAME (children follow) and DELETE of user labels. INBOX, the
+//     [Gmail] folders and a RENAME beneath the label itself answer NO.
+//   - In UID sets, * is the highest UID still in the folder.
 //   - A message that leaves Trash or Spam gets a new UID in each folder it
 //     returns to, as on Gmail. Moving to Trash keeps the message's labels, so
 //     restoring it brings them back.
@@ -48,9 +51,12 @@
 // It is stricter than Gmail in one place: X-GM-RAW under NOT or OR is
 // refused. It is still looser in some: matching is by substring where Gmail
 // tokenises, is: values other than read and unread mean starred, any has:
-// means an attachment, LIST patterns are case-sensitive even for INBOX, and
-// \Starred and \Flagged are not linked. Another session learns of changes
-// at its next command, as EXISTS and EXPUNGE, but not of flag changes.
+// means an attachment, and LIST patterns are case-sensitive even for INBOX.
+// Another session learns of changes at its next command, as EXISTS and
+// EXPUNGE, but not of flag changes. Sequence sets reach only the messages
+// the last EXISTS announced, but a UID command can name a newer arrival, and
+// its FETCH answer then comes before the EXISTS: imapserver lets a session
+// write EXISTS only once the command is done.
 //
 // The go-imap fork parses STORE FLAGS only, so STORE X-GM-LABELS is not yet
 // reachable over the wire; session.storeLabels holds its behaviour.
@@ -171,6 +177,11 @@ func StartWith(t testing.TB, ca *tlstest.CA, opts Options, username, password st
 		m := msgs[i]
 		// Writes change flags and labels; keep the caller's slices untouched.
 		m.Flags, m.Labels = slices.Clone(m.Flags), slices.Clone(m.Labels)
+		// Gmail's star is one state: a fixture that names either form has both.
+		if hasLabel(&m, labelStarred) || slices.Contains(m.Flags, imap.FlagFlagged) {
+			addLabel(&m, labelStarred)
+			starFromLabels(&m)
+		}
 		m.msgID = firstMsgID + uint64(i)
 		m.threadID = m.msgID
 		if m.ThreadOf > 0 {
@@ -227,6 +238,30 @@ func removeLabel(m *Message, label string) {
 	m.Labels = slices.DeleteFunc(m.Labels, func(l string) bool { return strings.EqualFold(l, label) })
 }
 
+// labelStarred is the label Gmail links to the \Flagged flag.
+const labelStarred = `\Starred`
+
+// starFromFlags gives m the \Starred label exactly when it is \Flagged, as
+// Gmail does after a flag STORE.
+func starFromFlags(m *Message) {
+	if slices.Contains(m.Flags, imap.FlagFlagged) {
+		addLabel(m, labelStarred)
+	} else {
+		removeLabel(m, labelStarred)
+	}
+}
+
+// starFromLabels flags m exactly when it carries \Starred, as Gmail does
+// after a label STORE.
+func starFromLabels(m *Message) {
+	switch flagged := slices.Contains(m.Flags, imap.FlagFlagged); {
+	case hasLabel(m, labelStarred) && !flagged:
+		m.Flags = append(m.Flags, imap.FlagFlagged)
+	case !hasLabel(m, labelStarred) && flagged:
+		m.Flags = slices.DeleteFunc(m.Flags, func(fl imap.Flag) bool { return fl == imap.FlagFlagged })
+	}
+}
+
 func live(m *Message) bool { return !m.Trash && !m.Spam && !m.gone }
 
 func (f *folder) member(m *Message) bool {
@@ -258,6 +293,15 @@ func (f *folder) ensure(m *Message) imap.UID {
 		return uid
 	}
 	return f.add(m)
+}
+
+// highestUID is what * stands for in f's UID sets: the highest UID still in
+// the folder, or UIDNEXT when it is empty, as RFC 9051 says.
+func (f *folder) highestUID() imap.UID {
+	if n := len(f.order); n > 0 {
+		return f.uids[f.order[n-1]] // order is in UID order
+	}
+	return f.nextUID
 }
 
 // flags returns m's flags as seen in f.
@@ -306,6 +350,19 @@ func (s *Server) buildFolders() {
 		}
 	}
 	s.refreshLocked()
+	// A fixture's \Deleted marks the message in each folder it starts in,
+	// where STORE and EXPUNGE look for it, rather than in the shared flags.
+	for _, m := range s.msgs {
+		if !slices.Contains(m.Flags, imap.FlagDeleted) {
+			continue
+		}
+		m.Flags = slices.DeleteFunc(m.Flags, func(fl imap.Flag) bool { return fl == imap.FlagDeleted })
+		for _, f := range s.folders {
+			if _, ok := f.uids[m]; ok {
+				f.deleted[m] = true
+			}
+		}
+	}
 }
 
 // refreshLocked brings every folder's membership up to date after a change:
