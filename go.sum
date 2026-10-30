@@ -81,8 +81,8 @@ github.com/hashicorp/golang-lru/v2 v2.0.7 h1:a+bsQ5rvGLjzHuww6tVxozPZFVghXaHOwFs
 github.com/hashicorp/golang-lru/v2 v2.0.7/go.mod h1:QeFd9opnmA6QUJc5vARoKUSoFhyfM2/ZepoAG6RGpeM=
 github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
-github.com/jamesainslie/go-imap/v2 v2.0.0-beta.8.0.20261029164137-0bd4e366225f h1:Z/nY+H9wlflaBnTC4q/yXHaJA9YOTPuBa8wSs4L8zbk=
-github.com/jamesainslie/go-imap/v2 v2.0.0-beta.8.0.20261029164137-0bd4e366225f/go.mod h1:dhoFe2Q0PwLrMD7oZw8ODuaD0vLYPe5uj2wcOMnvh48=
+github.com/jamesainslie/go-imap/v2 v2.0.0-beta.8.0.20261030150908-e39a9564a74d h1:87nTDSv0/YFMyGPtfgxQI3hN40LWC9fLcOl8T1KgiJg=
+github.com/jamesainslie/go-imap/v2 v2.0.0-beta.8.0.20261030150908-e39a9564a74d/go.mod h1:dhoFe2Q0PwLrMD7oZw8ODuaD0vLYPe5uj2wcOMnvh48=
 github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
 github.com/kr/pretty v0.3.1/go.mod h1:hoEshYVHaxMs3cyo3Yncou5ZscifuDolrwPKZanG3xk=
 github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
