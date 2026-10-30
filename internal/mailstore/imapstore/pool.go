@@ -173,6 +173,13 @@ func (p *pool[C]) shrink() int {
 	return p.max
 }
 
+// openCount returns how many connections are dialing, borrowed or idle.
+func (p *pool[C]) openCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.open
+}
+
 // size returns the cap: the most connections open at once.
 func (p *pool[C]) size() int {
 	p.mu.Lock()

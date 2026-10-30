@@ -203,6 +203,12 @@ func (s *Store) Close() error {
 	return errors.Join(errs...)
 }
 
+// OpenConns returns how many of the store's pooled connections are open:
+// dialing, borrowed or idle. A borrowed one, such as a stream reader's,
+// counts until it comes back, after Close too. ProbeDial's connections are
+// not pooled and do not count.
+func (s *Store) OpenConns() int { return s.pool.openCount() }
+
 // PoolSize returns the most connections the store opens at once:
 // Options.PoolSize, less one for each time the server refused a connection
 // for being over its limit.
