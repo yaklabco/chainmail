@@ -98,6 +98,7 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 		newThreadCmd(ctx, env, g),
 		newAttachmentCmd(ctx, env, g),
 	)
+	root.AddCommand(newOrganizeCmds(ctx, env, g)...)
 	return root
 }
 

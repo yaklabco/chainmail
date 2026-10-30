@@ -18,6 +18,8 @@ import (
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/auth"
+	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/provider"
 	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
 	"github.com/jamesainslie/chainmail/internal/testutil/imaptest"
@@ -70,7 +72,7 @@ func errorReason(t *testing.T, stderr string) string {
 
 func TestAccountsListGolden(t *testing.T) {
 	t.Parallel()
-	h := daemontest.Start(t, twoAccounts, daemontest.Options{})
+	h := daemontest.Start(t, twoAccounts, daemontest.Options{NewStore: offlineStores})
 	if got := runCLI(t, Env{Stdin: strings.NewReader("pw\n")}, "--socket", h.Socket, "secret", "set", "accounts/icloud"); got.code != 0 {
 		t.Fatalf("secret set: %+v", got)
 	}
@@ -83,7 +85,7 @@ func TestAccountsListGolden(t *testing.T) {
 
 func TestAccountsListTable(t *testing.T) {
 	t.Parallel()
-	h := daemontest.Start(t, twoAccounts, daemontest.Options{})
+	h := daemontest.Start(t, twoAccounts, daemontest.Options{NewStore: offlineStores})
 	got := runCLI(t, Env{}, "--socket", h.Socket, "--output", "table", "accounts", "list")
 	if got.code != 0 {
 		t.Fatalf("accounts list: %+v", got)
@@ -111,7 +113,7 @@ address = "me@example.test"
 imap = { host = "127.0.0.1", port = %[1]d }
 smtp = { host = "127.0.0.1", port = %[2]d, security = "starttls" }
 `, imapEP.Port, smtpEP.Port)
-	h := daemontest.Start(t, cfg, daemontest.Options{RootCAs: ca.Pool})
+	h := daemontest.Start(t, cfg, daemontest.Options{RootCAs: ca.Pool, NewStore: offlineStores})
 	for name, pw := range map[string]string{"good": "pw", "bad": "wrong"} {
 		if got := runCLI(t, Env{Stdin: strings.NewReader(pw)}, "--socket", h.Socket, "secret", "set", "accounts/"+name); got.code != 0 {
 			t.Fatalf("secret set %s: %+v", name, got)
@@ -144,9 +146,9 @@ smtp = { host = "127.0.0.1", port = %[2]d, security = "starttls" }
 
 func TestSecretSet(t *testing.T) {
 	t.Parallel()
-	h := daemontest.Start(t, twoAccounts, daemontest.Options{})
+	h := daemontest.Start(t, twoAccounts, daemontest.Options{NewStore: offlineStores})
 	got := runCLI(t, Env{Stdin: strings.NewReader("hunter2\n")}, "--socket", h.Socket, "--output", "json", "secret", "set", "accounts/host")
-	if got.code != 0 || got.stdout != `{"name":"accounts/host","set":true}`+"\n" {
+	if got.code != 0 || !strings.HasSuffix(got.stdout, `"name":"accounts/host","set":true}`+"\n") {
 		t.Fatalf("secret set: %+v", got)
 	}
 	if v, err := h.Vault.Get("accounts/host"); err != nil || string(v) != "hunter2" {
@@ -161,7 +163,7 @@ func TestSecretSet(t *testing.T) {
 
 func TestSecretSetFromPass(t *testing.T) {
 	t.Parallel()
-	h := daemontest.Start(t, twoAccounts, daemontest.Options{})
+	h := daemontest.Start(t, twoAccounts, daemontest.Options{NewStore: offlineStores})
 	var asked string
 	env := Env{Getenv: passStore(t, "", "email/hostinger"), PassShow: func(_ context.Context, path string) ([]byte, error) {
 		asked = path
@@ -182,7 +184,7 @@ func TestSecretSetFromPass(t *testing.T) {
 
 func TestSecretSetFromTerminal(t *testing.T) {
 	t.Parallel()
-	h := daemontest.Start(t, twoAccounts, daemontest.Options{})
+	h := daemontest.Start(t, twoAccounts, daemontest.Options{NewStore: offlineStores})
 	var stderr bytes.Buffer
 	env := Env{Stderr: &stderr, ReadPassword: func() ([]byte, error) { return []byte("typed-value"), nil }}
 	got := runCLI(t, env, "--socket", h.Socket, "secret", "set", "accounts/host")
@@ -200,7 +202,7 @@ func TestSecretSetFromTerminal(t *testing.T) {
 
 func TestSecretSetErrors(t *testing.T) {
 	t.Parallel()
-	h := daemontest.Start(t, twoAccounts, daemontest.Options{})
+	h := daemontest.Start(t, twoAccounts, daemontest.Options{NewStore: offlineStores})
 	empty := runCLI(t, Env{Stdin: strings.NewReader("\n")}, "--socket", h.Socket, "secret", "set", "accounts/host")
 	if empty.code != 2 || errorReason(t, empty.stderr) != "USAGE" {
 		t.Errorf("empty: %+v", empty)
@@ -249,8 +251,32 @@ func (p *pasteReader) Read(b []byte) (int, error) {
 
 func TestAuthLogin(t *testing.T) {
 	t.Parallel()
-	o := oauthtest.Start(t)
-	cfg := `
+	for _, tt := range []struct {
+		name     string
+		newStore func(config.ResolvedAccount) mailstore.Store
+		output   string
+		stdout   string
+		warning  string
+	}{
+		{
+			name: "json", newStore: probingStores(map[string]int{"gm": 3}), output: "json",
+			stdout: `{"account":"gm","limit":{"account":"gm","imap_cap":3,"pool_size":1,"probed_at":"2026-10-29T12:00:00Z","error":null},"logged_in":true}` + "\n",
+		},
+		{name: "table", newStore: probingStores(map[string]int{"gm": 3}), output: "table", stdout: "logged in to gm\nconnections: cap 3, pool 1\n"},
+		// A failed probe never fails the login: it is a warning.
+		{
+			name: "probe fails", newStore: offlineStores, output: "table", stdout: "logged in to gm\n",
+			warning: "warning: connection probe failed: INTERNAL: probe not supported\n",
+		},
+		{
+			name: "probe fails json", newStore: offlineStores, output: "json",
+			stdout: `{"account":"gm","limit":{"account":"gm","imap_cap":0,"pool_size":0,"probed_at":null,"error":{"reason":"INTERNAL","message":"probe not supported","hint":""}},"logged_in":true}` + "\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			o := oauthtest.Start(t)
+			cfg := `
 [oauth_clients.g]
 client_id = "client-id"
 
@@ -260,21 +286,30 @@ address = "me@gmail.com"
 auth = "oauth2"
 oauth_client = "g"
 `
-	h := daemontest.Start(t, cfg, daemontest.Options{AuthOptions: []auth.Option{auth.WithOAuthEndpoint(o.Endpoint())}})
-	if got := runCLI(t, Env{Stdin: strings.NewReader(oauthtest.ClientSecret)}, "--socket", h.Socket, "secret", "set", "oauth_clients/g"); got.code != 0 {
-		t.Fatalf("secret set: %+v", got)
-	}
-	var stderr bytes.Buffer
-	env := Env{Stderr: &stderr, Stdin: &pasteReader{t: t, stderr: &stderr}}
-	got := runCLI(t, env, "--socket", h.Socket, "--output", "json", "auth", "login", "gm")
-	if got.code != 0 {
-		t.Fatalf("auth login: code %d, stderr %s", got.code, stderr.String())
-	}
-	if got.stdout != `{"account":"gm","logged_in":true}`+"\n" {
-		t.Errorf("stdout = %q", got.stdout)
-	}
-	if rt, err := h.Vault.Get(auth.RefreshTokenSecret("gm")); err != nil || string(rt) != oauthtest.RefreshToken {
-		t.Errorf("refresh token = %q, %v", rt, err)
+			h := daemontest.Start(t, cfg, daemontest.Options{
+				AuthOptions: []auth.Option{auth.WithOAuthEndpoint(o.Endpoint())},
+				NewStore:    tt.newStore,
+				Now:         func() time.Time { return cliNow },
+			})
+			if got := runCLI(t, Env{Stdin: strings.NewReader(oauthtest.ClientSecret)}, "--socket", h.Socket, "secret", "set", "oauth_clients/g"); got.code != 0 {
+				t.Fatalf("secret set: %+v", got)
+			}
+			var stderr bytes.Buffer
+			env := Env{Stderr: &stderr, Stdin: &pasteReader{t: t, stderr: &stderr}}
+			got := runCLI(t, env, "--socket", h.Socket, "--output", tt.output, "auth", "login", "gm")
+			if got.code != 0 {
+				t.Fatalf("auth login: code %d, stderr %s", got.code, stderr.String())
+			}
+			if got.stdout != tt.stdout {
+				t.Errorf("stdout = %q, want %q", got.stdout, tt.stdout)
+			}
+			if w := tt.warning; (w == "") == strings.Contains(stderr.String(), "warning:") || (w != "" && !strings.HasSuffix(stderr.String(), w)) {
+				t.Errorf("stderr = %q, want warning %q", stderr.String(), w)
+			}
+			if rt, err := h.Vault.Get(auth.RefreshTokenSecret("gm")); err != nil || string(rt) != oauthtest.RefreshToken {
+				t.Errorf("refresh token = %q, %v", rt, err)
+			}
+		})
 	}
 }
 
@@ -288,7 +323,7 @@ func TestDaemonUnreachable(t *testing.T) {
 
 func TestSocketFromEnvironment(t *testing.T) {
 	t.Parallel()
-	h := daemontest.Start(t, twoAccounts, daemontest.Options{})
+	h := daemontest.Start(t, twoAccounts, daemontest.Options{NewStore: offlineStores})
 	env := Env{Getenv: func(k string) string {
 		if k == "CHAINMAIL_SOCKET" {
 			return h.Socket
@@ -390,7 +425,7 @@ func TestDaemonCommandServes(t *testing.T) {
 
 func TestSecretSetInvalidNameDoesNotPrompt(t *testing.T) {
 	t.Parallel()
-	h := daemontest.Start(t, twoAccounts, daemontest.Options{})
+	h := daemontest.Start(t, twoAccounts, daemontest.Options{NewStore: offlineStores})
 	env := Env{
 		ReadPassword: func() ([]byte, error) { t.Error("prompted for a secret with an invalid name"); return []byte("x"), nil },
 		PassShow: func(context.Context, string) ([]byte, error) {
@@ -441,7 +476,7 @@ address = "me@gmail.com"
 auth = "oauth2"
 oauth_client = "g"
 `
-	h := daemontest.Start(t, cfg, daemontest.Options{AuthOptions: []auth.Option{auth.WithOAuthEndpoint(o.Endpoint())}})
+	h := daemontest.Start(t, cfg, daemontest.Options{AuthOptions: []auth.Option{auth.WithOAuthEndpoint(o.Endpoint())}, NewStore: offlineStores})
 	if got := runCLI(t, Env{Stdin: strings.NewReader(oauthtest.ClientSecret)}, "--socket", h.Socket, "secret", "set", "oauth_clients/g"); got.code != 0 {
 		t.Fatalf("secret set: %+v", got)
 	}
@@ -456,7 +491,7 @@ oauth_client = "g"
 
 func TestSecretSetRejectsBadInput(t *testing.T) {
 	t.Parallel()
-	h := daemontest.Start(t, twoAccounts, daemontest.Options{})
+	h := daemontest.Start(t, twoAccounts, daemontest.Options{NewStore: offlineStores})
 	passCalled := false
 	env := Env{PassShow: func(context.Context, string) ([]byte, error) { passCalled = true; return []byte("x"), nil }}
 	dash := runCLI(t, env, "--socket", h.Socket, "secret", "set", "accounts/host", "--from-pass=--clip")
@@ -563,7 +598,7 @@ func passStore(t *testing.T, via string, entries ...string) func(string) string 
 
 func TestSecretSetFromPassRefusesFolders(t *testing.T) {
 	t.Parallel()
-	h := daemontest.Start(t, twoAccounts, daemontest.Options{})
+	h := daemontest.Start(t, twoAccounts, daemontest.Options{NewStore: offlineStores})
 	const value = "do-not-print-me"
 
 	t.Run("missing entry", func(t *testing.T) {
@@ -638,7 +673,7 @@ address = "me@gmail.com"
 auth = "oauth2"
 oauth_client = "g"
 `
-	h := daemontest.Start(t, cfg, daemontest.Options{AuthOptions: []auth.Option{auth.WithOAuthEndpoint(o.Endpoint())}})
+	h := daemontest.Start(t, cfg, daemontest.Options{AuthOptions: []auth.Option{auth.WithOAuthEndpoint(o.Endpoint())}, NewStore: offlineStores})
 	if got := runCLI(t, Env{Stdin: strings.NewReader(oauthtest.ClientSecret)}, "--socket", h.Socket, "secret", "set", "oauth_clients/g"); got.code != 0 {
 		t.Fatalf("secret set: %+v", got)
 	}
