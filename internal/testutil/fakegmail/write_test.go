@@ -616,3 +616,62 @@ func TestFakeGmailStoreLabelsOverTheWire(t *testing.T) {
 		t.Error("STORE +X-GM-LABELS ([Gmail]/Trash) succeeded; Trash is not a label")
 	}
 }
+
+// Tests arm faults from AfterAppend: the hook runs before the APPEND is
+// answered, and each fault fails the next command of its kind, once.
+func TestFakeGmailFaultsAfterAppend(t *testing.T) {
+	t.Parallel()
+	const raw = "From: Me <me@gmail.example>\r\nSubject: New\r\nMessage-ID: <new@gmail.example>\r\n\r\nHi.\r\n"
+	examine := func(c *imapclient.Client) error {
+		_, err := c.Select("[Gmail]/Drafts", &imap.SelectOptions{ReadOnly: true}).Wait()
+		return err
+	}
+	fetch := func(c *imapclient.Client) error {
+		_, err := c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{UID: true}).Collect()
+		return err
+	}
+	for _, tc := range []struct {
+		name  string
+		fault string
+		cmd   func(*imapclient.Client) error
+	}{
+		{"EXAMINE", "EXAMINE", examine},
+		{"FETCH", "FETCH", fetch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s, ca := startWrites(t)
+			s.AfterAppend(func() { s.FailNext(tc.fault) })
+			c := dial(t, s, ca)
+			appendRaw(t, c, "[Gmail]/Drafts", raw)
+			if tc.fault == "FETCH" {
+				if err := examine(c); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := tc.cmd(c); err == nil {
+				t.Errorf("%s after the armed APPEND succeeded, want NO", tc.name)
+			}
+			if err := tc.cmd(c); err != nil {
+				t.Errorf("second %s = %v, want the fault spent", tc.name, err)
+			}
+			if n := s.Appends(); n != 1 {
+				t.Errorf("Appends = %d, want 1", n)
+			}
+		})
+	}
+	t.Run("new UIDVALIDITY", func(t *testing.T) {
+		t.Parallel()
+		s, ca := startWrites(t)
+		s.AfterAppend(func() { s.NewUIDValidity("[Gmail]/Drafts") })
+		c := dial(t, s, ca)
+		data := appendRaw(t, c, "[Gmail]/Drafts", raw)
+		sel, err := c.Select("[Gmail]/Drafts", &imap.SelectOptions{ReadOnly: true}).Wait()
+		if err != nil {
+			t.Fatalf("SELECT on the same connection: %v, want it kept open", err)
+		}
+		if sel.UIDValidity == data.UIDValidity {
+			t.Errorf("UIDVALIDITY %d after the APPEND, want it changed from the APPENDUID's", sel.UIDValidity)
+		}
+	})
+}

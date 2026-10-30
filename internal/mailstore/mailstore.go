@@ -224,7 +224,10 @@ type RefResult struct {
 // Writes open folders read-write with SELECT, and a write is never retried
 // once the server has answered it.
 type Writer interface {
-	// Append stores raw in folder with flags and returns its ref, from APPENDUID.
+	// Append stores raw in folder with flags and returns its ref, from
+	// APPENDUID. The ref is zero, with no error, when the message was stored
+	// but its place is unknown: the server gave no APPENDUID, or, on Google,
+	// the message's X-GM-MSGID could not be read.
 	Append(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) (ref.Ref, error)
 	// Move moves refs to folder and returns their new refs.
 	Move(ctx context.Context, refs []ref.Ref, folder string) []RefResult

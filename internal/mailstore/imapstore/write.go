@@ -27,9 +27,11 @@ import (
 // only. Without one, from a server lacking UIDPLUS, the APPEND still
 // succeeded and the ref is zero: the new place is unknown. On Google
 // accounts the ref also carries the message's X-GM-MSGID, which APPENDUID
-// does not give, so it is fetched after the APPEND. The APPEND has happened
-// by then, so a failed fetch leaves the ref without it rather than failing
-// the call.
+// does not give, so it is fetched after the APPEND, on the same connection.
+// The APPEND has happened by then and is never sent again, so when the
+// X-GM-MSGID cannot be read, or the folder's UIDVALIDITY has changed since
+// the APPENDUID, the call still succeeds, with a zero ref: a Google ref
+// without its X-GM-MSGID is never returned.
 func (s *Store) Append(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) (ref.Ref, error) {
 	fl, err := imapFlags(flags)
 	if err != nil {
@@ -46,7 +48,9 @@ func (s *Store) Append(ctx context.Context, folder string, flags []string, date 
 		if data.UID != 0 && data.UIDValidity != 0 {
 			out = ref.Ref{Account: s.acct.Name, Folder: folder, UIDValidity: data.UIDValidity, UID: uint32(data.UID)}
 			if s.gmail() {
-				out.GmailMsgID = s.appendedMsgID(ctx, c, out)
+				if out.GmailMsgID = s.appendedMsgID(ctx, c, out); out.GmailMsgID == 0 {
+					out = ref.Ref{}
+				}
 			}
 		}
 		return nil

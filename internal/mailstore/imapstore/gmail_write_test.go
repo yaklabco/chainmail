@@ -516,6 +516,43 @@ func TestGmailFoundAndAppendedRefsCarryGmailMsgID(t *testing.T) {
 	})
 }
 
+// An APPEND the server acknowledged is never sent again, but on Google its
+// ref is only complete with the message's X-GM-MSGID. When the follow-up
+// that reads it fails, or finds the folder's UIDVALIDITY changed, Append
+// succeeds with a zero ref rather than a ref without the ID.
+func TestGmailAppendWithoutItsGmailMsgIDReturnsAZeroRef(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		fault func(srv *fakegmail.Server, folder string)
+	}{
+		{"EXAMINE fails", func(srv *fakegmail.Server, _ string) { srv.FailNext("EXAMINE") }},
+		{"FETCH fails", func(srv *fakegmail.Server, _ string) { srv.FailNext("FETCH") }},
+		{"UIDVALIDITY changed", func(srv *fakegmail.Server, folder string) { srv.NewUIDValidity(folder) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newGmailWrites(t)
+			const folder = "[Gmail]/Drafts"
+			w.srv.AfterAppend(func() { tc.fault(w.srv, folder) })
+			got, err := w.store.Append(t.Context(), folder, nil, gmailDay(9), []byte(gwRaw("appended")))
+			if err != nil {
+				t.Fatalf("Append = %v, want success: the server stored the message", err)
+			}
+			if got != (ref.Ref{}) {
+				t.Errorf("Append = %v, want a zero ref: its X-GM-MSGID is unknown", got)
+			}
+			if n := w.srv.Appends(); n != 1 {
+				t.Errorf("APPENDs = %d, want 1", n)
+			}
+			found, err := w.store.FindByMessageID(t.Context(), folder, "appended@x")
+			if err != nil || len(found) != 1 || found[0].GmailMsgID == 0 {
+				t.Errorf("FindByMessageID = %v, %v; want the one appended message, with its X-GM-MSGID", found, err)
+			}
+		})
+	}
+}
+
 func TestGmailMoveMixedBatch(t *testing.T) {
 	t.Parallel()
 	w := newGmailWrites(t)

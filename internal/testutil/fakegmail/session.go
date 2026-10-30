@@ -69,6 +69,15 @@ func (sess *session) Select(name string, options *imap.SelectOptions) (*imap.Sel
 	s := sess.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	command := "SELECT"
+	if options != nil && options.ReadOnly {
+		command = "EXAMINE"
+	}
+	if err := s.faultLocked(command); err != nil {
+		// A failed SELECT or EXAMINE leaves no folder selected.
+		sess.selected, sess.view = nil, nil
+		return nil, err
+	}
 	f := s.folderLocked(name)
 	if f == nil {
 		return nil, noSuchFolder(name)
@@ -417,6 +426,9 @@ func (sess *session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, option
 	s := sess.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.faultLocked("FETCH"); err != nil {
+		return err
+	}
 	f := sess.selected
 	sess.addNewLocked()
 	idx, err := sess.messagesIn(numSet)
@@ -844,7 +856,8 @@ func (sess *session) Delete(name string) error {
 }
 
 // Append adds a message to a folder as Gmail does: to a label folder with
-// that label, so APPEND to Sent Mail or Drafts gives \Sent or \Draft.
+// that label, so APPEND to Sent Mail or Drafts gives \Sent or \Draft. Once
+// it has stored the message it runs the AfterAppend hook.
 func (sess *session) Append(name string, r imap.LiteralReader, options *imap.AppendOptions) (*imap.AppendData, error) {
 	raw, err := io.ReadAll(r)
 	if err != nil {
@@ -853,12 +866,21 @@ func (sess *session) Append(name string, r imap.LiteralReader, options *imap.App
 	if options == nil {
 		options = &imap.AppendOptions{}
 	}
+	data, hook, err := sess.appendMessage(name, raw, options)
+	if err == nil && hook != nil {
+		hook()
+	}
+	return data, err
+}
+
+// appendMessage stores an APPEND's message and returns the AfterAppend hook.
+func (sess *session) appendMessage(name string, raw []byte, options *imap.AppendOptions) (*imap.AppendData, func(), error) {
 	s := sess.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f := s.folderLocked(name)
 	if f == nil {
-		return nil, tryCreate(name)
+		return nil, nil, tryCreate(name)
 	}
 	date := options.Time
 	if date.IsZero() {
@@ -869,7 +891,8 @@ func (sess *session) Append(name string, r imap.LiteralReader, options *imap.App
 	uid := f.ensure(m)
 	storeFlags(f, m, imap.StoreFlagsSet, options.Flags)
 	s.refreshLocked()
-	return &imap.AppendData{UID: uid, UIDValidity: f.uidValidity}, nil
+	s.appends++
+	return &imap.AppendData{UID: uid, UIDValidity: f.uidValidity}, s.afterAppend, nil
 }
 
 // Store changes flags. A set that names no current message answers OK with

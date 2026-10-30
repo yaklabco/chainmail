@@ -55,6 +55,11 @@
 //     advertise, such as BINARY and CONDSTORE.
 //   - STORE, MOVE and EXPUNGE answer NO in a folder opened with EXAMINE.
 //
+// Tests can make it fail where Gmail rarely does: FailNext makes the next
+// SELECT, EXAMINE or FETCH answer NO, NewUIDValidity renumbers a folder
+// under a new UIDVALIDITY, and AfterAppend arms either once an APPEND has
+// stored its message.
+//
 // It is stricter than Gmail in one place: X-GM-RAW under NOT or OR is
 // refused. It is still looser in some: matching is by substring where Gmail
 // tokenises, is: values other than read and unread mean starred, any has:
@@ -137,6 +142,11 @@ type Server struct {
 	writableSelects int
 	logins          int
 	conns           map[net.Conn]bool
+	appends         int
+	// afterAppend runs after each APPEND stores its message (AfterAppend).
+	afterAppend func()
+	// faults counts the armed failures of each command (FailNext).
+	faults map[string]int
 }
 
 // folderKind says which messages a folder holds.
@@ -178,7 +188,7 @@ func Start(t testing.TB, ca *tlstest.CA, username, password string, msgs ...Mess
 // StartWith is Start with options.
 func StartWith(t testing.TB, ca *tlstest.CA, opts Options, username, password string, msgs ...Message) *Server {
 	t.Helper()
-	s := &Server{username: username, password: password, opts: opts, conns: map[net.Conn]bool{}}
+	s := &Server{username: username, password: password, opts: opts, conns: map[net.Conn]bool{}, faults: map[string]int{}}
 	for i := range msgs {
 		m := msgs[i]
 		// Writes change flags and labels; keep the caller's slices untouched.
@@ -579,8 +589,18 @@ func (s *Server) Logins() int {
 // rarely, and drops every connection, as a server would. The new UIDs are
 // above every other folder's, so none of them names a message elsewhere.
 func (s *Server) ResetAllMail() {
+	s.NewUIDValidity("[Gmail]/All Mail")
+	s.DropConnections()
+}
+
+// NewUIDValidity gives folder a new UIDVALIDITY and new UIDs, as
+// ResetAllMail does for All Mail, but keeps every connection open, so a
+// session learns of it only when it next opens the folder. The new UIDs are
+// above every other folder's.
+func (s *Server) NewUIDValidity(folder string) {
 	s.mu.Lock()
-	f := s.folderLocked("[Gmail]/All Mail")
+	defer s.mu.Unlock()
+	f := s.folderLocked(folder)
 	f.uidValidity += 1000
 	var shift imap.UID
 	for _, other := range s.folders {
@@ -590,8 +610,41 @@ func (s *Server) ResetAllMail() {
 		f.uids[m] = uid + shift
 	}
 	f.nextUID += shift
-	s.mu.Unlock()
-	s.DropConnections()
+}
+
+// AfterAppend runs f after every APPEND has stored its message, before the
+// server answers it, so a test can arm faults for the commands that follow
+// an acknowledged APPEND. f runs without the server's lock.
+func (s *Server) AfterAppend(f func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.afterAppend = f
+}
+
+// Appends counts the APPENDs that stored a message.
+func (s *Server) Appends() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.appends
+}
+
+// FailNext makes the next command of its kind answer NO, once. command is
+// SELECT, EXAMINE or FETCH, which covers UID FETCH too. Calls add up: two
+// fail the next two.
+func (s *Server) FailNext(command string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.faults[command]++
+}
+
+// faultLocked spends an armed failure of command and returns its error, or
+// nil when none is armed. s.mu must be held.
+func (s *Server) faultLocked(command string) error {
+	if s.faults[command] == 0 {
+		return nil
+	}
+	s.faults[command]--
+	return &imap.Error{Type: imap.StatusResponseTypeNo, Text: "fakegmail: injected " + command + " failure"}
 }
 
 // DropConnections closes every open client connection.
