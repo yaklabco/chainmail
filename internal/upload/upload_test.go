@@ -6,12 +6,14 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -444,4 +446,81 @@ func TestPutCanceledMidStream(t *testing.T) {
 	if names := dirNames(t, dir); len(names) != 0 {
 		t.Errorf("dir entries = %v, want none", names)
 	}
+}
+
+func TestSweepRetriesFailedRemoval(t *testing.T) {
+	t.Parallel()
+	s, dir, c := newStore(t, time.Hour)
+	info, err := s.Put(t.Context(), "a.txt", "text/plain", strings.NewReader("secret"), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(time.Hour)
+	// A read-only directory makes the removal fail.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if n := s.Sweep(); n != 0 {
+		t.Errorf("Sweep with a failing removal = %d, want 0", n)
+	}
+	if _, _, err := s.Open(info.Handle); !errors.Is(err, ErrUnknownHandle) {
+		t.Errorf("Open of an expired upload err = %v, want ErrUnknownHandle", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.Sweep(); n != 1 {
+		t.Errorf("Sweep after the failure cleared = %d, want 1", n)
+	}
+	if names := dirNames(t, dir); len(names) != 0 {
+		t.Errorf("dir entries = %v, want none", names)
+	}
+}
+
+func TestPutMaxInt64Limit(t *testing.T) {
+	t.Parallel()
+	s, _, _ := newStore(t, time.Hour)
+	info, err := s.Put(t.Context(), "a.txt", "text/plain", strings.NewReader("hello"), math.MaxInt64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size != 5 {
+		t.Errorf("Size = %d, want 5", info.Size)
+	}
+}
+
+func TestPutNegativeLimit(t *testing.T) {
+	t.Parallel()
+	s, _, _ := newStore(t, time.Hour)
+	if _, err := s.Put(t.Context(), "a.txt", "text/plain", strings.NewReader("hello"), -1); !errors.Is(err, ErrTooLarge) {
+		t.Errorf("Put with a negative limit err = %v, want ErrTooLarge", err)
+	}
+}
+
+func TestRunSweepsEveryMinute(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "uploads")
+		s, err := New(dir, time.Minute, time.Now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Put(t.Context(), "a.txt", "text/plain", strings.NewReader("x"), 10); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() {
+			s.Run(ctx)
+			close(done)
+		}()
+		time.Sleep(sweepInterval + time.Second)
+		synctest.Wait()
+		if names := dirNames(t, dir); len(names) != 0 {
+			t.Errorf("dir entries after a sweep interval = %v, want none", names)
+		}
+		cancel()
+		<-done
+	})
 }

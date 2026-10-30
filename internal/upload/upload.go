@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -116,7 +117,11 @@ func (s *Store) Put(ctx context.Context, filename, contentType string, r io.Read
 	h := sha256.New()
 	// Read one byte past the limit so an oversized upload is detected without
 	// reading the rest of it.
-	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(ctxReader{ctx: ctx, r: r}, maxBytes+1))
+	limit := maxBytes
+	if limit < math.MaxInt64 {
+		limit++
+	}
+	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(ctxReader{ctx: ctx, r: r}, limit))
 	if err != nil {
 		return Info{}, fmt.Errorf("upload: write: %w", err)
 	}
@@ -154,7 +159,7 @@ func (s *Store) Open(handle string) (Info, []byte, error) {
 	s.mu.Lock()
 	e, ok := s.index[handle]
 	if ok && s.expired(e) {
-		s.removeLocked(handle)
+		s.removeLocked(handle) // a failed removal is retried by the next Sweep
 		ok = false
 	}
 	s.mu.Unlock()
@@ -178,8 +183,7 @@ func (s *Store) Sweep() int {
 	defer s.mu.Unlock()
 	n := 0
 	for handle, e := range s.index {
-		if s.expired(e) {
-			s.removeLocked(handle)
+		if s.expired(e) && s.removeLocked(handle) {
 			n++
 		}
 	}
@@ -205,11 +209,16 @@ func (s *Store) expired(e entry) bool {
 	return !s.now().Before(e.created.Add(s.ttl))
 }
 
-// removeLocked drops handle from the index and deletes its file. The caller
+// removeLocked deletes handle's file and then drops it from the index. When
+// the file cannot be deleted the entry stays, still expired, so the next
+// Sweep tries again. It reports whether the upload is gone. The caller
 // holds s.mu.
-func (s *Store) removeLocked(handle string) {
+func (s *Store) removeLocked(handle string) bool {
+	if err := os.Remove(filepath.Join(s.dir, handle)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
 	delete(s.index, handle)
-	_ = os.Remove(filepath.Join(s.dir, handle))
+	return true
 }
 
 // newHandle returns "up_" and 26 lowercase base32 characters from 16 random
