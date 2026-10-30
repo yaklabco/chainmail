@@ -487,6 +487,10 @@ func TestUploadAllBoundsConcurrency(t *testing.T) {
 		files[i] = uploadFile{path: fmt.Sprintf("f%d", i)}
 	}
 	var running, peak atomic.Int32
+	// overlap closes once two uploads run at once. Each upload waits for it,
+	// so the overlap does not depend on how the scheduler runs them.
+	overlap := make(chan struct{})
+	var once sync.Once
 	var mu sync.Mutex
 	seen := map[string]bool{}
 	got, err := uploadAll(t.Context(), files, func(_ context.Context, f uploadFile) (uploaded, error) {
@@ -498,7 +502,14 @@ func TestUploadAllBoundsConcurrency(t *testing.T) {
 				break
 			}
 		}
-		time.Sleep(5 * time.Millisecond)
+		if n >= 2 {
+			once.Do(func() { close(overlap) })
+		}
+		select {
+		case <-overlap:
+		case <-time.After(10 * time.Second):
+			t.Error("no two uploads ran at once")
+		}
 		mu.Lock()
 		seen[f.path] = true
 		mu.Unlock()
