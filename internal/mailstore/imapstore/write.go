@@ -24,16 +24,28 @@ import (
 )
 
 // Append implements mailstore.Writer. Without APPENDUID, from a server
-// lacking UIDPLUS, the message is found again by its Message-ID; one without
-// a Message-ID, or one the search misses, gives a zero ref.
+// lacking UIDPLUS, the message is found again by its Message-ID among the
+// messages newer than the folder's UIDNEXT read before the APPEND. One
+// without a Message-ID, or one the search cannot single out, gives a zero
+// ref.
 func (s *Store) Append(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) (ref.Ref, error) {
 	fl, err := imapFlags(flags)
 	if err != nil {
 		return ref.Ref{}, err
 	}
+	id := messageIDOf(raw)
 	var out ref.Ref
 	err = s.writeConn(ctx, "", false, func(c *conn, sent func()) error {
 		out = ref.Ref{}
+		var before boundary
+		if id != "" && !c.client().Caps().Has(imap.CapUIDPlus) {
+			// No APPENDUID will come. Read before the change, so a failure
+			// here is retried as reads are.
+			var err error
+			if before, err = c.boundary(ctx, folder); err != nil {
+				return err
+			}
+		}
 		sent()
 		data, err := c.append(ctx, folder, fl, date, raw)
 		if err != nil {
@@ -43,7 +55,7 @@ func (s *Store) Append(ctx context.Context, folder string, flags []string, date 
 			out = ref.Ref{Account: s.acct.Name, Folder: folder, UIDValidity: data.UIDValidity, UID: uint32(data.UID)}
 			return nil
 		}
-		out = s.findAfterWrite(ctx, c, folder, messageIDOf(raw))
+		out = s.findAfterWrite(ctx, c, folder, id, before)
 		return nil
 	})
 	return out, err
@@ -205,16 +217,36 @@ func (s *Store) findByID(ctx context.Context, c *conn, folder, id string) ([]ref
 	return out, nil
 }
 
-// findAfterWrite finds, after an APPEND the server answered without the new
-// UID, the message with Message-ID id in folder. It gives a zero ref when
-// there is no ID, when the search fails, and unless exactly one message
-// matches: with several, which one is new is unknown. The write itself
-// happened either way, so a failure here is not reported as its failure.
-func (s *Store) findAfterWrite(ctx context.Context, c *conn, folder, id string) ref.Ref {
-	if id == "" {
-		return ref.Ref{}
+// boundary is a folder's UIDVALIDITY and UIDNEXT, read before a write: a
+// message the write makes there gets a UID of at least next, under the same
+// UIDVALIDITY. The zero boundary is unknown, and then nothing found
+// afterwards can be shown to be new.
+type boundary struct{ validity, next uint32 }
+
+// isNew reports whether r was made after b was read.
+func (b boundary) isNew(r ref.Ref) bool {
+	return b.next != 0 && r.UIDValidity == b.validity && r.UID >= b.next
+}
+
+// findNew searches folder, opened on c, for the messages with Message-ID id
+// made after before was read. Older messages with that ID, which a search
+// also matches, are left out.
+func (s *Store) findNew(ctx context.Context, c *conn, folder, id string, before boundary) ([]ref.Ref, error) {
+	if id == "" || before.next == 0 {
+		return nil, nil
 	}
 	refs, err := s.findByID(ctx, c, folder, id)
+	return slices.DeleteFunc(refs, func(r ref.Ref) bool { return !before.isNew(r) }), err
+}
+
+// findAfterWrite finds, after an APPEND the server answered without the new
+// UID, the message with Message-ID id made in folder since before. It gives
+// a zero ref when there is no ID or boundary, when the search fails, and
+// unless exactly one new message matches: with several, which one is this
+// APPEND's is unknown. The write itself happened either way, so a failure
+// here is not reported as its failure.
+func (s *Store) findAfterWrite(ctx context.Context, c *conn, folder, id string, before boundary) ref.Ref {
+	refs, err := s.findNew(ctx, c, folder, id, before)
 	if err != nil {
 		s.opts.Logger.Debug("finding a written message by Message-ID", "account", s.acct.Name, "folder", folder, "err", err)
 		return ref.Ref{}
@@ -226,12 +258,14 @@ func (s *Store) findAfterWrite(ctx context.Context, c *conn, folder, id string) 
 }
 
 // findCopies finds in dest, by Message-ID, the copies of the source
-// messages ids names, after a COPY or MOVE the server answered without
-// COPYUID. A source gets a ref only when nothing else could be its copy: it
-// has a Message-ID that no other source in ids shares, dest holds exactly
-// one message with it, and no other source matched that message. Any other
-// source is left out of the map, since its new place is unknown.
-func (s *Store) findCopies(ctx context.Context, c *conn, dest string, ids map[uint32]string) map[uint32]ref.Ref {
+// messages ids names, after a COPY or MOVE the server acknowledged without
+// COPYUID. It only reports new places: it never confirms a copy, so nothing
+// may be deleted on its word. A source gets a ref only when nothing else
+// could be its copy: it has a Message-ID that no other source in ids
+// shares, dest holds exactly one message with it made since before, and no
+// other source matched that message. Any other source is left out of the
+// map, since its new place is unknown.
+func (s *Store) findCopies(ctx context.Context, c *conn, dest string, ids map[uint32]string, before boundary) map[uint32]ref.Ref {
 	sources := map[string]int{}
 	for _, id := range ids {
 		sources[strings.ToLower(id)]++ // servers match header values case-insensitively
@@ -243,7 +277,7 @@ func (s *Store) findCopies(ctx context.Context, c *conn, dest string, ids map[ui
 		if id == "" || sources[strings.ToLower(id)] > 1 {
 			continue
 		}
-		refs, err := s.findByID(ctx, c, dest, id)
+		refs, err := s.findNew(ctx, c, dest, id, before)
 		if err != nil {
 			s.opts.Logger.Debug("finding copied messages by Message-ID", "account", s.acct.Name, "folder", dest, "err", err)
 			break
@@ -257,9 +291,15 @@ func (s *Store) findCopies(ctx context.Context, c *conn, dest string, ids map[ui
 	return out
 }
 
+// errCopyUnconfirmed is the outcome of a move done by COPY that the server
+// acknowledged without a readable COPYUID: the copy may exist, but nothing
+// names it, so the original stays.
+var errCopyUnconfirmed = fmt.Errorf("%w: copied, but the original was kept: the server did not confirm the copy", mailstore.ErrUnavailable)
+
 // transfer moves, or with keepOriginal copies, refs into dest. Refs already
 // in dest are left as they are by a move. New refs come from COPYUID, or,
-// when the server sends none, from a search of dest by Message-ID.
+// after a MOVE or COPY the server acknowledged without one, from a search
+// of dest by Message-ID among the messages made since the transfer began.
 func (s *Store) transfer(ctx context.Context, refs []ref.Ref, dest string, keepOriginal bool) []mailstore.RefResult {
 	if dest == "" {
 		return failAll(refs, fmt.Errorf("%w: no folder named", mailstore.ErrNotFound))
@@ -274,40 +314,49 @@ func (s *Store) transfer(ctx context.Context, refs []ref.Ref, dest string, keepO
 		caps := c.client().Caps()
 		uidplus := caps.Has(imap.CapUIDPlus)
 		move := !keepOriginal && caps.Has(imap.CapMove)
-		if !keepOriginal && !move && !uidplus {
+		switch {
+		case !keepOriginal && !move && !uidplus:
 			g.failAll(fmt.Errorf("%w: the server has neither MOVE nor UID EXPUNGE (UIDPLUS)", mailstore.ErrUnsupported))
 			return nil
+		case !keepOriginal && !move:
+			return s.moveByCopy(ctx, c, g, dest, sent)
 		}
-		ids, cu, err := s.sendTransfer(ctx, c, g.uids, dest, move, uidplus, sent)
+		t, err := s.sendTransfer(ctx, c, g.uids, dest, move, uidplus, sent)
 		if err != nil {
 			return s.destError(err, dest)
 		}
-		if cu.validity != 0 {
-			return s.placeByCOPYUID(ctx, c, g, dest, cu, keepOriginal || move)
+		// From here on the server has acknowledged the MOVE or COPY, so each
+		// message it named is a success, whatever happens to the reads that
+		// look for the new places.
+		if t.cu.validity != 0 {
+			pairs, ok := t.cu.pairs(len(g.uids))
+			if !ok {
+				// The COPYUID cannot be read: the new places are unknown.
+				g.setAll(mailstore.RefResult{})
+				return nil
+			}
+			s.setPlaced(g, dest, t.cu.validity, pairs)
+			return nil
 		}
 		// No COPYUID: there never is one without UIDPLUS, and a UIDPLUS
 		// server leaves it out when it copied nothing, or, against the RFC,
 		// always. The Message-IDs say which messages there were and how to
 		// find their copies.
+		ids := t.ids
 		if ids == nil && !move {
 			// A COPY leaves the originals, so they can still be read.
 			if ids, err = c.messageIDs(ctx, uidSet(g.uids)); err != nil {
-				return err
+				s.opts.Logger.Debug("reading the Message-IDs of copied messages", "account", s.acct.Name, "err", err)
+				ids = nil
 			}
 		}
 		if ids == nil {
-			// The MOVE went through, but the Message-IDs read with it were
-			// refused: the new places are unknown.
-			for _, uid := range g.uids {
-				g.set(uid, mailstore.RefResult{})
-			}
+			// The Message-IDs could not be read: the new places are unknown.
+			g.setAll(mailstore.RefResult{})
 			return nil
 		}
 		maps.DeleteFunc(ids, func(uid uint32, _ string) bool { return g.byUID[uid] == nil })
-		found := s.findCopies(ctx, c, dest, ids)
-		if !keepOriginal && !move {
-			return s.expungePlaced(ctx, c, g, ids, found)
-		}
+		found := s.findCopies(ctx, c, dest, ids, t.before)
 		for uid := range ids {
 			g.set(uid, mailstore.RefResult{Ref: found[uid]})
 		}
@@ -315,99 +364,79 @@ func (s *Store) transfer(ctx context.Context, refs []ref.Ref, dest string, keepO
 	})
 }
 
+// moveByCopy moves g's messages into dest on a server with UIDPLUS but no
+// MOVE: UID COPY, then UID STORE \Deleted and UID EXPUNGE of exactly the
+// originals the COPY's COPYUID names, so a failed COPY never loses mail.
+// Without a readable COPYUID nothing names the copies, so nothing is
+// deleted and every message fails with errCopyUnconfirmed.
+func (s *Store) moveByCopy(ctx context.Context, c *conn, g *groupWrite, dest string, sent func()) error {
+	sent()
+	cu, err := c.uidCopy(ctx, uidSet(g.uids), dest)
+	if err != nil {
+		return s.destError(err, dest)
+	}
+	pairs, ok := cu.pairs(len(g.uids))
+	if cu.validity == 0 || !ok {
+		g.failAll(errCopyUnconfirmed)
+		return nil
+	}
+	copied := slices.Sorted(maps.Keys(pairs))
+	copied = slices.DeleteFunc(copied, func(u uint32) bool { return g.byUID[u] == nil })
+	if len(copied) > 0 {
+		if err := c.expungeUIDs(ctx, uidSet(copied)); err != nil {
+			return err
+		}
+	}
+	s.setPlaced(g, dest, cu.validity, pairs)
+	return nil
+}
+
+// setPlaced records the new refs a COPYUID's pairs give in dest.
+func (s *Store) setPlaced(g *groupWrite, dest string, validity uint32, pairs map[uint32]uint32) {
+	for src, dst := range pairs {
+		g.set(src, mailstore.RefResult{Ref: ref.Ref{Account: s.acct.Name, Folder: dest, UIDValidity: validity, UID: dst}})
+	}
+}
+
+// sentTransfer is what sendTransfer learned: the COPYUID, when the server
+// sent one, and for finding the copies without it, the Message-IDs of the
+// messages that existed and dest's boundary, both read before the change.
+type sentTransfer struct {
+	cu     copyUID
+	ids    map[uint32]string
+	before boundary
+}
+
 // sendTransfer sends the UID MOVE, when move, or else the UID COPY, of uids
-// into dest, calling sent first. It also returns the Message-IDs, by UID,
-// of the messages that existed, read before the change in the two cases
-// where they cannot be read after it: without UIDPLUS, where no COPYUID
-// will come, and before a MOVE, which takes the originals away. Elsewhere,
-// or when the server refuses that read, ids is nil.
-func (s *Store) sendTransfer(ctx context.Context, c *conn, uids []uint32, dest string, move, uidplus bool, sent func()) (ids map[uint32]string, cu copyUID, err error) {
+// into dest, calling sent first. Pipelined ahead of it, it reads dest's
+// boundary, and the Message-IDs, by UID, of the messages that exist in the
+// two cases where they cannot be read after the change: without UIDPLUS,
+// where no COPYUID will come, and before a MOVE, which takes the originals
+// away. Elsewhere, or when the server refuses that read, ids is nil.
+func (s *Store) sendTransfer(ctx context.Context, c *conn, uids []uint32, dest string, move, uidplus bool, sent func()) (sentTransfer, error) {
 	set := uidSet(uids)
+	var t sentTransfer
+	var err error
 	switch {
 	case !uidplus:
-		if ids, err = c.messageIDs(ctx, set); err != nil || len(ids) == 0 {
-			return ids, copyUID{}, err
+		if t.ids, t.before, err = c.messageIDsBefore(ctx, set, dest); err != nil || len(t.ids) == 0 {
+			return t, err
 		}
-		set = uidSet(slices.Sorted(maps.Keys(ids)))
+		set = uidSet(slices.Sorted(maps.Keys(t.ids)))
 		sent()
 		if move {
-			cu, err = c.uidMove(ctx, set, dest)
+			t.cu, err = c.uidMove(ctx, set, dest)
 		} else {
-			cu, err = c.uidCopy(ctx, set, dest)
+			t.cu, err = c.uidCopy(ctx, set, dest)
 		}
-		return ids, cu, err
+		return t, err
 	case move:
 		sent()
 		return c.moveWithIDs(ctx, set, dest)
 	default:
 		sent()
-		cu, err = c.uidCopy(ctx, set, dest)
-		return nil, cu, err
+		return c.copyWithBoundary(ctx, set, dest)
 	}
-}
-
-// placeByCOPYUID records the new refs COPYUID gives. When the transfer was
-// a COPY standing in for a move (done false), it then removes the originals,
-// but only those COPYUID names, and only once the COPY succeeded, so a
-// failed COPY never loses mail.
-func (s *Store) placeByCOPYUID(ctx context.Context, c *conn, g *groupWrite, dest string, cu copyUID, done bool) error {
-	pairs, ok := cu.pairs(len(g.uids))
-	if !ok {
-		if done {
-			// The server did the work but its COPYUID cannot be read: the
-			// new places are unknown.
-			for _, uid := range g.uids {
-				g.set(uid, mailstore.RefResult{})
-			}
-			return nil
-		}
-		g.failAll(fmt.Errorf("%w: %s copied the messages but its COPYUID reply could not be read, so the originals were kept", mailstore.ErrUnavailable, s.acct.Name))
-		return nil
-	}
-	if !done {
-		copied := slices.Sorted(maps.Keys(pairs))
-		copied = slices.DeleteFunc(copied, func(u uint32) bool { return g.byUID[u] == nil })
-		if len(copied) > 0 {
-			if err := c.expungeUIDs(ctx, uidSet(copied)); err != nil {
-				return err
-			}
-		}
-	}
-	for src, dst := range pairs {
-		g.set(src, mailstore.RefResult{Ref: ref.Ref{Account: s.acct.Name, Folder: dest, UIDValidity: cu.validity, UID: dst}})
-	}
-	return nil
-}
-
-// expungePlaced finishes a move done by COPY that came back without
-// COPYUID. Only the originals whose copies findCopies placed are removed;
-// the others are kept, and fail with ErrUnavailable, since their copies
-// cannot be told apart. The search left dest open on c, so the source
-// folder is opened again first, and nothing is removed if its UIDVALIDITY
-// changed meanwhile.
-func (s *Store) expungePlaced(ctx context.Context, c *conn, g *groupWrite, ids map[uint32]string, found map[uint32]ref.Ref) error {
-	kept := fmt.Errorf("%w: %s copied the message without saying where, so the original was kept; search the destination before trying again", mailstore.ErrUnavailable, s.acct.Name)
-	if err := s.openMode(ctx, c, g.refs[0].Folder, true); err != nil {
-		return err
-	}
-	if c.uidValidity != g.validity {
-		g.failAll(kept)
-		return nil
-	}
-	placed := slices.Sorted(maps.Keys(found))
-	if len(placed) > 0 {
-		if err := c.expungeUIDs(ctx, uidSet(placed)); err != nil {
-			return err
-		}
-	}
-	for uid := range ids {
-		if r, ok := found[uid]; ok {
-			g.set(uid, mailstore.RefResult{Ref: r})
-		} else {
-			g.set(uid, mailstore.RefResult{Err: kept})
-		}
-	}
-	return nil
 }
 
 // destError reports a write the server refused because dest is missing as
@@ -608,6 +637,13 @@ func (g *groupWrite) keep(uid uint32) {
 	}
 }
 
+// setAll records r for every UID of the group.
+func (g *groupWrite) setAll(r mailstore.RefResult) {
+	for _, uid := range g.uids {
+		g.set(uid, r)
+	}
+}
+
 // failAll fails every ref that has no outcome yet.
 func (g *groupWrite) failAll(err error) {
 	for j := range g.res {
@@ -750,44 +786,119 @@ func (c *conn) messageIDs(ctx context.Context, set imap.UIDSet) (map[uint32]stri
 	return idsOf(bufs), nil
 }
 
-// moveWithIDs pipelines a UID FETCH of the Message-IDs of set with the UID
-// MOVE of set into dest, so the Message-IDs are there if no COPYUID comes
-// back, at no extra round trip. A refused FETCH gives nil ids and does not
-// fail the MOVE, which may have gone through.
-func (c *conn) moveWithIDs(ctx context.Context, set imap.UIDSet, dest string) (map[uint32]string, copyUID, error) {
-	var bufs []*imapclient.FetchMessageBuffer
-	fetchOK := false
-	var cu copyUID
-	err := c.pipelined(ctx, func(cl *imapclient.Client) []func() error {
-		fetch := cl.Fetch(set, &imap.FetchOptions{UID: true, Envelope: true})
-		mv := cl.Move(set, dest)
-		return []func() error{
-			func() error {
-				var err error
-				bufs, err = fetch.Collect()
-				var reply *imap.Error
-				if errors.As(err, &reply) {
-					return nil // the server refused the read; the move stands alone
-				}
-				fetchOK = err == nil
-				return err
-			},
-			func() error {
-				data, err := mv.Wait()
-				if err != nil {
-					return err
-				}
-				cu.validity = data.UIDValidity
-				cu.src, _ = data.SourceUIDs.(imap.UIDSet) // nil without COPYUID
-				cu.dst, _ = data.DestUIDs.(imap.UIDSet)
-				return nil
-			},
+// boundary reads folder's boundary with STATUS. A refused STATUS gives the
+// zero boundary and no error: the write that follows decides the outcome.
+func (c *conn) boundary(ctx context.Context, folder string) (boundary, error) {
+	var b boundary
+	err := c.do(ctx, statusBoundary(c.client(), folder, &b))
+	return b, err
+}
+
+// statusBoundary sends a STATUS of folder's UIDVALIDITY and UIDNEXT, for
+// pipelined, and stores the reply in b. A refused STATUS leaves b zero and
+// is no error.
+func statusBoundary(cl *imapclient.Client, folder string, b *boundary) func() error {
+	cmd := cl.Status(folder, &imap.StatusOptions{UIDNext: true, UIDValidity: true})
+	return func() error {
+		data, err := cmd.Wait()
+		var reply *imap.Error
+		switch {
+		case errors.As(err, &reply):
+			return nil
+		case err != nil:
+			return err
 		}
-	})
-	if err != nil || !fetchOK {
-		return nil, cu, err
+		*b = boundary{validity: data.UIDValidity, next: uint32(data.UIDNext)}
+		return nil
 	}
-	return idsOf(bufs), cu, nil
+}
+
+// fetchIDs sends a UID FETCH of the Message-IDs of set, for pipelined, and
+// stores what it finds in ids. A refused FETCH leaves ids nil and is no
+// error, so it never hides the outcome of a write pipelined with it.
+func fetchIDs(cl *imapclient.Client, set imap.UIDSet, ids *map[uint32]string) func() error {
+	cmd := cl.Fetch(set, &imap.FetchOptions{UID: true, Envelope: true})
+	return func() error {
+		bufs, err := cmd.Collect()
+		var reply *imap.Error
+		switch {
+		case errors.As(err, &reply):
+			return nil
+		case err != nil:
+			return err
+		}
+		*ids = idsOf(bufs)
+		return nil
+	}
+}
+
+// messageIDsBefore reads dest's boundary and the Message-IDs of set,
+// pipelined, before a transfer that will send no COPYUID. Nothing has
+// changed yet, so a refused FETCH is an error here.
+func (c *conn) messageIDsBefore(ctx context.Context, set imap.UIDSet, dest string) (map[uint32]string, boundary, error) {
+	var b boundary
+	var bufs []*imapclient.FetchMessageBuffer
+	err := c.pipelined(ctx, func(cl *imapclient.Client) []func() error {
+		status := statusBoundary(cl, dest, &b)
+		fetch := cl.Fetch(set, &imap.FetchOptions{UID: true, Envelope: true})
+		return []func() error{status, func() error {
+			var err error
+			bufs, err = fetch.Collect()
+			return err
+		}}
+	})
+	if err != nil {
+		return nil, boundary{}, err
+	}
+	return idsOf(bufs), b, nil
+}
+
+// moveWithIDs pipelines a STATUS of dest's boundary and a UID FETCH of the
+// Message-IDs of set with the UID MOVE of set into dest, so both are there
+// if no COPYUID comes back, at no extra round trip. A refused STATUS or
+// FETCH leaves its part unknown and does not fail the MOVE, which may have
+// gone through.
+func (c *conn) moveWithIDs(ctx context.Context, set imap.UIDSet, dest string) (sentTransfer, error) {
+	var t sentTransfer
+	err := c.pipelined(ctx, func(cl *imapclient.Client) []func() error {
+		status := statusBoundary(cl, dest, &t.before)
+		fetch := fetchIDs(cl, set, &t.ids)
+		mv := cl.Move(set, dest)
+		return []func() error{status, fetch, func() error {
+			data, err := mv.Wait()
+			if err != nil {
+				return err
+			}
+			t.cu.validity = data.UIDValidity
+			t.cu.src, _ = data.SourceUIDs.(imap.UIDSet) // nil without COPYUID
+			t.cu.dst, _ = data.DestUIDs.(imap.UIDSet)
+			return nil
+		}}
+	})
+	if err != nil {
+		return sentTransfer{cu: t.cu}, err
+	}
+	return t, nil
+}
+
+// copyWithBoundary pipelines a STATUS of dest's boundary with the UID COPY
+// of set into dest, so the boundary is there if no COPYUID comes back. A
+// refused STATUS leaves it unknown and does not fail the COPY.
+func (c *conn) copyWithBoundary(ctx context.Context, set imap.UIDSet, dest string) (sentTransfer, error) {
+	var t sentTransfer
+	err := c.pipelined(ctx, func(cl *imapclient.Client) []func() error {
+		status := statusBoundary(cl, dest, &t.before)
+		cp := cl.Copy(set, dest)
+		return []func() error{status, func() error {
+			data, err := cp.Wait()
+			if err != nil {
+				return err
+			}
+			t.cu = copyUID{validity: data.UIDValidity, src: data.SourceUIDs, dst: data.DestUIDs}
+			return nil
+		}}
+	})
+	return t, err
 }
 
 // idsOf maps the UID of each fetched message to its Message-ID, without
