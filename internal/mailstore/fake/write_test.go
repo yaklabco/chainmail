@@ -252,7 +252,9 @@ func TestWriteMove(t *testing.T) {
 		// Spec 7.1, standard.
 		{name: "standard move gives a new ref", from: "INBOX", dest: "Projects", wantFolder: "Projects"},
 		{name: "standard move to Trash", from: "INBOX", dest: "Trash", wantFolder: "Trash"},
-		{name: "standard move to its own folder", from: "INBOX", dest: "INBOX", wantFolder: "INBOX", sameRef: true},
+		// UID MOVE into the same mailbox makes a new message, as Dovecot does
+		// (RFC 6851 section 3.3).
+		{name: "standard move to its own folder gives a new ref", from: "INBOX", dest: "INBOX", wantFolder: "INBOX"},
 		{name: "standard unknown folder", from: "INBOX", dest: "Nope", wantErr: mailstore.ErrNotFound},
 		// Spec 7.1, Google.
 		{
@@ -487,7 +489,7 @@ func TestWriteArchive(t *testing.T) {
 		},
 		{name: "standard archive_folder missing", from: "INBOX", setup: func(s *Store) { s.SetArchiveFolder("Gone") }, wantErr: mailstore.ErrNotFound},
 		{name: "standard neither", from: "INBOX", setup: func(s *Store) { dropRole(s, mailstore.RoleArchive) }, wantErr: mailstore.ErrNotFound},
-		{name: "standard already archived", from: "Archive", wantFolder: "Archive", sameRef: true},
+		{name: "standard already archived moves again", from: "Archive", wantFolder: "Archive"},
 		{name: "Gmail drops \\Inbox", gmail: true, from: allMail, wantFolder: allMail, sameRef: true},
 		{name: "Gmail ignores archive_folder", gmail: true, from: allMail, setup: func(s *Store) { s.SetArchiveFolder("Receipts") }, wantFolder: allMail, sameRef: true},
 	}
@@ -515,6 +517,12 @@ func TestWriteArchive(t *testing.T) {
 			}
 			if res.Ref.Folder != tt.wantFolder || tt.sameRef != (res.Ref == r) {
 				t.Fatalf("archived ref = %s, old %s, want folder %s same=%v", res.Ref, r, tt.wantFolder, tt.sameRef)
+			}
+			if !tt.sameRef {
+				gone(t, s, r)
+				if n := listed(t, s, tt.wantFolder); n != 1 {
+					t.Errorf("%s holds %d messages, want 1", tt.wantFolder, n)
+				}
 			}
 			m := fetch(t, s, res.Ref)
 			if tt.gmail {
@@ -775,6 +783,9 @@ func TestWriteStoreLabels(t *testing.T) {
 	}
 }
 
+// longName is a folder name too long for a ref to carry.
+var longName = strings.Repeat("x", 2100)
+
 func TestWriteCreateFolder(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -791,11 +802,23 @@ func TestWriteCreateFolder(t *testing.T) {
 		{name: "standard INBOX in any case", create: "inbox", wantErr: mailstore.ErrExists},
 		{name: "standard role folder", create: "Trash", wantErr: mailstore.ErrExists},
 		{name: "standard empty name", create: "", wantErr: mailstore.ErrRefused},
+		{name: "standard non-ASCII and punctuation", create: "Clients/Café & 100%", wantNames: []string{"Clients", "Clients/Café & 100%"}},
+		{name: "standard NUL", create: "Bad\x00Name", wantErr: mailstore.ErrRefused},
+		{name: "standard newline", create: "Bad\nName", wantErr: mailstore.ErrRefused},
+		{name: "standard DEL", create: "Bad\x7fName", wantErr: mailstore.ErrRefused},
+		{name: "standard invalid UTF-8", create: "Bad\xffName", wantErr: mailstore.ErrRefused},
+		{name: "standard bad level creates no parent", create: "Fresh/Bad\x01", wantErr: mailstore.ErrRefused},
+		{name: "standard too long for a ref", create: "Fresh/" + longName, wantErr: mailstore.ErrRefused},
 		{name: "Gmail label", gmail: true, create: "Clients", wantNames: []string{"Clients"}},
 		{name: "Gmail nested label", gmail: true, create: "Work/Q1", wantNames: []string{"Work", "Work/Q1"}},
 		{name: "Gmail existing label", gmail: true, create: "Receipts", wantErr: mailstore.ErrExists},
 		{name: "Gmail [Gmail] folder", gmail: true, create: "[Gmail]/Mine", wantErr: mailstore.ErrRefused},
 		{name: "Gmail [Gmail] itself", gmail: true, create: "[Gmail]", wantErr: mailstore.ErrRefused},
+		{name: "Gmail non-ASCII label", gmail: true, create: "Café/Reçus", wantNames: []string{"Café", "Café/Reçus"}},
+		{name: "Gmail NUL", gmail: true, create: "Bad\x00Name", wantErr: mailstore.ErrRefused},
+		{name: "Gmail tab", gmail: true, create: "Bad\tName", wantErr: mailstore.ErrRefused},
+		{name: "Gmail invalid UTF-8", gmail: true, create: "Fresh/Bad\xc3", wantErr: mailstore.ErrRefused},
+		{name: "Gmail too long for a ref", gmail: true, create: longName, wantErr: mailstore.ErrRefused},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -831,6 +854,9 @@ func TestWriteCreateFolder(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Append to the new folder: %v", err)
 			}
+			if back, err := ref.Parse(r.String()); err != nil || back != r {
+				t.Errorf("ref %q into the new folder does not round-trip: %v, %v", r.String(), back, err)
+			}
 			if refs, err := s.FindByMessageID(t.Context(), tt.create, "n@x"); err != nil || len(refs) != 1 || refs[0] != r {
 				t.Errorf("FindByMessageID in the new folder = %v, %v", refs, err)
 			}
@@ -864,6 +890,8 @@ func TestWriteRenameFolder(t *testing.T) {
 		gmail    bool
 		from, to string
 		wantErr  error
+		// child gives from a child folder even when the rename fails.
+		child bool
 	}{
 		{name: "standard rename", from: "Projects", to: "Work"},
 		{name: "standard rename under a new parent", from: "Projects", to: "Old/Projects"},
@@ -872,10 +900,18 @@ func TestWriteRenameFolder(t *testing.T) {
 		{name: "standard INBOX", from: "INBOX", to: "Old", wantErr: mailstore.ErrRefused},
 		{name: "standard role folder", from: "Sent", to: "Sent2", wantErr: mailstore.ErrRefused},
 		{name: "standard into its own child", from: "Projects", to: "Projects/Sub", wantErr: mailstore.ErrRefused},
+		{name: "standard to a non-ASCII name", from: "Projects", to: "Projets/Résumés"},
+		{name: "standard to a NUL", from: "Projects", to: "Bad\x00Name", wantErr: mailstore.ErrRefused},
+		{name: "standard to a control byte under a new parent", from: "Projects", to: "Fresh/Bad\x1b", wantErr: mailstore.ErrRefused},
+		{name: "standard to invalid UTF-8", from: "Projects", to: "Bad\xfe", wantErr: mailstore.ErrRefused},
+		{name: "standard child too long for a ref", from: "Projects", to: longName[:2010], wantErr: mailstore.ErrRefused, child: true},
 		{name: "Gmail label rename", gmail: true, from: "Receipts", to: "Bills"},
 		{name: "Gmail onto an existing label", gmail: true, from: "Receipts", to: "INBOX", wantErr: mailstore.ErrExists},
 		{name: "Gmail role folder", gmail: true, from: gmailSent, to: "Sent", wantErr: mailstore.ErrRefused},
 		{name: "Gmail into [Gmail]", gmail: true, from: "Receipts", to: "[Gmail]/Receipts", wantErr: mailstore.ErrRefused},
+		{name: "Gmail to a DEL", gmail: true, from: "Receipts", to: "Bad\x7f", wantErr: mailstore.ErrRefused},
+		{name: "Gmail to invalid UTF-8 under a new parent", gmail: true, from: "Receipts", to: "Fresh/Bad\x80", wantErr: mailstore.ErrRefused},
+		{name: "Gmail too long for a ref", gmail: true, from: "Receipts", to: longName, wantErr: mailstore.ErrRefused},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -885,7 +921,7 @@ func TestWriteRenameFolder(t *testing.T) {
 				s, home = newGmail(), allMail
 			}
 			child := tt.from + "/Child"
-			if !tt.gmail && tt.wantErr == nil {
+			if !tt.gmail && (tt.wantErr == nil || tt.child) {
 				s.AddFolder(child, mailstore.RoleNone)
 			}
 			r := s.Add(Message{Folder: home, Subject: "kept", MessageID: "k@x", Labels: []string{"Receipts"}})

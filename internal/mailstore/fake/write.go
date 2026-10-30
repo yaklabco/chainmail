@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/mail"
 	"slices"
@@ -289,8 +290,9 @@ func parseRaw(raw []byte) Message {
 	return m
 }
 
-// Move implements mailstore.Writer. A ref already in folder succeeds
-// unchanged.
+// Move implements mailstore.Writer. On standard accounts every move gives a
+// new UID, even into the folder the message is in, as UID MOVE does on
+// Dovecot (RFC 6851 section 3.3).
 func (s *Store) Move(ctx context.Context, refs []ref.Ref, folder string) []mailstore.RefResult {
 	var dest mailstore.Folder
 	return s.batch(ctx, opMove, refs, func() (err error) {
@@ -301,14 +303,18 @@ func (s *Store) Move(ctx context.Context, refs []ref.Ref, folder string) []mails
 	})
 }
 
-// moveLocked moves m to dest. On Gmail a label folder is a label edit:
-// a message in Trash or Spam goes back to All Mail first, then gains the
-// label, and loses \Inbox unless dest is INBOX.
+// moveLocked moves m to dest. A standard move always gives a new UID. On
+// Gmail a message already in dest keeps its ref, and a label folder is a
+// label edit: a message in Trash or Spam goes back to All Mail first, then
+// gains the label, and loses \Inbox unless dest is INBOX.
 func (s *Store) moveLocked(m *Message, dest mailstore.Folder) (ref.Ref, error) {
+	if !s.gmail {
+		return s.relocateLocked(m, dest.Name), nil
+	}
 	if m.Folder == dest.Name {
 		return s.refLocked(m), nil
 	}
-	if !s.gmail || holdsMail(dest.Role) {
+	if holdsMail(dest.Role) {
 		return s.relocateLocked(m, dest.Name), nil
 	}
 	if s.roleLocked(m.Folder) != mailstore.RoleAll {
@@ -390,6 +396,9 @@ func (s *Store) Trash(ctx context.Context, refs []ref.Ref) []mailstore.RefResult
 		dest, err = s.folderLocked(name)
 		return err
 	}, func(m *Message) (ref.Ref, error) {
+		if m.Folder == dest.Name {
+			return s.refLocked(m), nil // already in Trash: a no-op success (spec 7.1)
+		}
 		return s.moveLocked(m, dest)
 	})
 }
@@ -556,11 +565,14 @@ func (s *Store) CreateFolder(ctx context.Context, name string) error {
 	return nil
 }
 
-// checkNameLocked refuses an empty name, one with an empty level, and on
-// Gmail any name under [Gmail].
+// checkNameLocked refuses an empty name, one with an empty level, one a ref
+// cannot carry, and on Gmail any name under [Gmail].
 func (s *Store) checkNameLocked(name string) error {
 	if name == "" || slices.Contains(strings.Split(name, delimiter), "") {
 		return fmt.Errorf("%w: folder name %q", mailstore.ErrRefused, name)
+	}
+	if !s.refCarriesLocked(name) {
+		return fmt.Errorf("%w: folder name %q cannot be carried by a ref", mailstore.ErrRefused, name)
 	}
 	if s.gmail && isGmailFolder(name) {
 		return fmt.Errorf("%w: %s folders belong to Gmail", mailstore.ErrRefused, gmailPrefix)
@@ -631,6 +643,9 @@ func (s *Store) RenameFolder(ctx context.Context, from, to string) error {
 	for _, c := range moving {
 		if err := s.checkMutableLocked(c); err != nil {
 			return err
+		}
+		if err := s.checkNameLocked(renamed(c.Name)); err != nil {
+			return err // a child's longer name may not fit in a ref
 		}
 		if s.existsLocked(renamed(c.Name)) {
 			return fmt.Errorf("%w: folder %q", mailstore.ErrExists, renamed(c.Name))
@@ -719,4 +734,17 @@ func (s *Store) FindByMessageID(ctx context.Context, folder, messageID string) (
 		return cmp.Or(cmp.Compare(a.Folder, b.Folder), cmp.Compare(a.UID, b.UID))
 	})
 	return out, nil
+}
+
+// refCarriesLocked reports whether every ref into a folder called name
+// survives ref.Parse of its String: UTF-8 without control bytes, short
+// enough even with the largest UIDs. A server answers anything else with
+// BAD, so the fake refuses it rather than hand out refs nobody can use.
+func (s *Store) refCarriesLocked(name string) bool {
+	probe := ref.Ref{Account: s.account, Folder: name, UIDValidity: math.MaxUint32, UID: math.MaxUint32}
+	if s.gmail {
+		probe.GmailMsgID = math.MaxUint64
+	}
+	back, err := ref.Parse(probe.String())
+	return err == nil && back == probe
 }
