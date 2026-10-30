@@ -2,7 +2,7 @@
 
 Email for AI agents. chainmail is one Go binary that lets agents read, write and organize mail over IMAP and SMTP without ever holding a password or token. A long-running daemon owns every credential and every connection to the mail servers. Agents talk to it through the `chainmail` CLI, which is a thin client on a Unix socket. Every call except `admin status` is written to an audit log.
 
-Two sub-projects exist today. Sub-project 1, the foundation, is the daemon and its socket, the vault, password and OAuth2 login, `secret set`, `auth login` and `accounts test`. Sub-project 2 reads mail: `folders`, `search`, `get`, `thread` and `attachment`. Sending, policy, approvals and the MCP server arrive in later sub-projects.
+Three sub-projects exist today. Sub-project 1, the foundation, is the daemon and its socket, the vault, password and OAuth2 login, `secret set`, `auth login` and `accounts test`. Sub-project 2 reads mail: `folders`, `search`, `get`, `thread` and `attachment`. Sub-project 3 writes and organizes it: `send`, `send-raw`, `reply`, `forward` and `draft`, then `move`, `copy`, `archive`, `trash`, `expunge`, the flag and label commands, `folder`, and `accounts probe`. Policy, approvals and the MCP server arrive in later sub-projects.
 
 ```mermaid
 flowchart LR
@@ -26,7 +26,8 @@ flowchart LR
 - **Secrets go in and never come out.** `chainmail secret set` and `chainmail auth login` write secrets. No API call returns one. `chainmail admin status` lists secret names only.
 - **The vault is encrypted at rest.** `vault.age` is an [age](https://age-encryption.org) file. In production its key arrives through systemd `LoadCredentialEncrypted=`, sealed to the host's TPM2, at `$CREDENTIALS_DIRECTORY/vault-key`. In development it is a file passed with `--vault-key-file`. The daemon refuses a key file that others can access. The file must either be owned by the daemon's user with no group or other bits (`0600` or `0400`), or be owned by `root:root` with no other bits and at most group read. The second form exists because systemd delivers a `LoadCredential` file as `0440 root:root` and grants the service user read access through an ACL.
 - **The socket has a group and a peer check.** The daemon creates its socket with mode `0660`. In production it sets the socket's group to `client_group` (default `chainmail-clients`). On every connection it reads the peer's credentials with `SO_PEERCRED` and allows only its own user and members of the client group. Membership is looked up per request, so adding a user to the group takes effect without a restart. Release builds are pure Go (`CGO_ENABLED=0`), so users, groups and memberships are read from `/etc/passwd` and `/etc/group`, not through NSS. A user or membership that exists only in NSS, such as one from LDAP or SSSD, is refused. A dev daemon allows only your own user. A refused peer gets `FORBIDDEN` (exit 3).
-- **Every change is audited.** The `audit` table in `state.db` records the time, caller UID, client kind (`cli`, `live-test`), account, action, targets, result and error reason for each call. Today the audited actions are `accounts.list`, `account.test`, `secret.set`, `auth.login.begin`, `auth.login.finish`, `folders.list`, `search`, `get`, `get.raw`, `thread` and `attachment`. The client kind is self-reported in the `Chainmail-Client` header, so any local caller can claim any kind. The caller UID comes from the socket and is the authoritative identity. Rows never contain secret values or message content. A read's row holds counts and refs only, never subjects, addresses or the search query. An account or secret name that is not a valid name, or a client kind that is not a short lowercase name, is recorded as `(invalid)`, and the call fails with `INVALID_ARGUMENT`. The table is append-only: triggers refuse updates and deletes. If the audit write fails, the call fails too, so chainmail never reports success for something it could not record. A `chainmail audit` reader arrives in sub-project 4. Until then, query `state.db` with `sqlite3`.
+- **There is no send gate yet.** Until sub-project 4 adds the policy engine, any client that passes the socket's peer check can send mail as any configured account, to anyone, and can move, trash and expunge mail. Nothing holds a send for approval. Give the socket only to users and agents you trust to send as you. Every send and every change is audited, so you can see afterwards what was done.
+- **Every change is audited.** The `audit` table in `state.db` records the time, caller UID, client kind (`cli`, `live-test`), account, action, targets, result and error reason for each call. The audited reads are `accounts.list`, `account.test`, `secret.set`, `auth.login.begin`, `auth.login.finish`, `folders.list`, `search`, `get`, `get.raw`, `thread` and `attachment`. The audited writes are `send`, `send_raw`, `reply`, `forward`, `upload`, `draft.create`, `draft.update`, `draft.send`, `draft.delete`, `move`, `copy`, `archive`, `trash`, `expunge`, `flags`, `labels`, `folders.create`, `folders.rename`, `folders.delete` and `limits.probe`. A send's row names the account and the Message-ID, never the recipients, subject or body. A batch that spans accounts records one row per account, and a repeated send records the decision `duplicate`. The client kind is self-reported in the `Chainmail-Client` header, so any local caller can claim any kind. The caller UID comes from the socket and is the authoritative identity. Rows never contain secret values or message content. A read's row holds counts and refs only, never subjects, addresses or the search query. An account or secret name that is not a valid name, or a client kind that is not a short lowercase name, is recorded as `(invalid)`, and the call fails with `INVALID_ARGUMENT`. The table is append-only: triggers refuse updates and deletes. If the audit write fails, the call fails too, so chainmail never reports success for something it could not record. A `chainmail audit` reader arrives in sub-project 4. Until then, query `state.db` with `sqlite3`.
 - **Root is out of scope.** chainmail stops accidents and prompt injection that run through chainmail. It does not stop an agent that can become root. If your user has passwordless sudo or is in the `docker` group, an agent with an unrestricted shell can read the vault through root. Closing that gap means running agents without sudo or docker, which is outside chainmail.
 
 ## Build
@@ -148,6 +149,8 @@ client_id = "5678.apps.googleusercontent.com"
 provider = "google-workspace"    # auth defaults to oauth2, the only method it accepts
 address = "james@example.org"
 oauth_client = "workspace"       # refresh token stored as tokens/work by auth login
+display_name = "James Ainslie"   # the From name on mail this account sends
+signature = "James\n[example.org](https://example.org)"   # Markdown
 
 [accounts.personal]
 provider = "gmail"
@@ -162,6 +165,9 @@ address = "james@icloud.com"     # app password in the vault as accounts/icloud
 [accounts.site]
 provider = "hostinger"
 address = "me@example.com"
+archive_folder = "Archive"       # where archive moves mail; default the \Archive folder
+pool = 2                         # IMAP connections; default from the probe
+max_message_size = "35MiB"       # largest message it sends; default from the preset
 
 [accounts.lab]
 provider = "custom"
@@ -196,6 +202,11 @@ security = "starttls"
 | `accounts.<name>.imap.host`, `.smtp.host` | yes, in an override | | Server host name. |
 | `accounts.<name>.imap.port`, `.smtp.port` | yes, in an override | | Port, 1 to 65535. |
 | `accounts.<name>.imap.security`, `.smtp.security` | no | `tls` | `tls` (TLS from the first byte, as on 993 and 465) or `starttls` (as on 587). |
+| `accounts.<name>.display_name` | no | none | The display name in the From of mail the account sends. From's address is always `address`. |
+| `accounts.<name>.signature` | no | none | Markdown added under the body of every message the account writes, after `-- ` in the text part. `--no-signature` leaves it out. |
+| `accounts.<name>.archive_folder` | no | the folder with the `\Archive` attribute | Where `archive` moves mail on accounts other than Google. Google archives by removing the Inbox label. |
+| `accounts.<name>.pool` | no | from the probe, else the preset | IMAP connections the daemon keeps for the account, 1 to 12. Set it to override the probed size. See [Connection probing and pool sizing](#connection-probing-and-pool-sizing). |
+| `accounts.<name>.max_message_size` | no | `25MiB` for Google and custom servers, `35MiB` for iCloud and Hostinger | The largest message the account sends, attachments included, between `1KiB` and `1024MiB`. Also caps each upload. |
 
 Vault secret names:
 
@@ -252,10 +263,16 @@ chainmail accounts list --output table
 chainmail accounts test work --output table
 ```
 
-Finally, run the live smoke test. It talks to every configured account through the daemon at `$CHAINMAIL_SOCKET`. It fails if any IMAP or SMTP check fails, if an account has no inbox or no mail, or if listing folders, searching, or reading the newest message and its thread fails. It then reads one unread message per account with `get`, `thread`, `get --raw` and, when the message has one, `attachment`, and fails if any of those marks it read. It prefers an unread message with an attachment. An account with no unread mail skips that check, so mark a message unread in another client first. The test only reads and never changes a flag, and its log holds counts and refs, never subjects, addresses or bodies. It talks to real servers, so it never runs in CI or in `go test ./...`. It only builds with the `live` tag.
+Finally, run the live smoke test. Its read tests talk to every configured account through the daemon at `$CHAINMAIL_SOCKET`. It fails if any IMAP or SMTP check fails, if an account has no inbox or no mail, or if listing folders, searching, or reading the newest message and its thread fails. It then reads one unread message per account with `get`, `thread`, `get --raw` and, when the message has one, `attachment`, and fails if any of those marks it read. It prefers an unread message with an attachment. An account with no unread mail skips that check, so mark a message unread in another client first. The read tests never change a flag, and the log holds counts and refs, never subjects, addresses or bodies. It talks to real servers, so it never runs in CI or in `go test ./...`. It only builds with the `live` tag.
 
 ```fish
 nix develop -c go tool stave test:live
+```
+
+The same run holds the write tests, which send real mail and probe connection limits, so they skip unless `CHAINMAIL_LIVE_WRITES=1` is set too. Each account sends only to its own address. For each account they send a message, check that sending it again with the same idempotency key sends nothing, reply to it, forward it, and create, update, send and delete drafts. They take another message through a `chainmail-test-<random>` folder, a label on Google: copy, flag, unflag, labels on Google, move, archive, trash and expunge, then delete the folder. Last, they probe each account's connection limit. Every message they make has a random token in its subject, and they touch no other message. They clean up after themselves even when a test fails, by expunging every message with the token and deleting the folder. If a cleanup fails, its error names the token, so you can find what is left with `chainmail search subject:<token> in:anywhere`. Run them only when you mean to send and probe:
+
+```fish
+CHAINMAIL_LIVE_WRITES=1 nix develop -c go tool stave test:live
 ```
 
 ## Commands
@@ -270,11 +287,23 @@ Every command accepts `--socket <path>` and `--output json|table`. Without `--ou
 | `chainmail get <ref>...` | Reads 1 to 50 messages. `--full` keeps quotes and signatures and skips the `body_limit` cut. `--raw` writes the original RFC 5322 bytes of one message to stdout instead. | `{"items":[{"ref":...,"message":{...}}],...}` |
 | `chainmail thread <ref>` | Reads the whole thread a message belongs to, oldest first. Takes `--full`, as `get` does. | `{"thread_id":...,"messages":[...],"truncated":...,"omitted_refs":[...],...}` |
 | `chainmail attachment <ref> <part> --out <path>` | Downloads one attachment, decoded, to a file, or to stdout with `--out -`. | `{"path":...,"bytes":...,"content_type":...,"filename":{"untrusted":...}}` |
+| `chainmail send` | Sends a new message from one account. See [Sending mail](#sending-mail). | `{"result":{"sent":{"message_id":...,"sent_ref":...,"duplicate":...,"sent_copy_error":...}}}` |
+| `chainmail send-raw (--file <f> \| -)` | Sends a finished RFC 5322 message as given. | as `send` |
+| `chainmail reply <ref>` | Replies to a message, quoting it. `--all` replies to everyone. | as `send` |
+| `chainmail forward <ref> --to <address>` | Forwards a message with its attachments. | as `send` |
+| `chainmail draft create\|update\|send\|delete` | Saves, replaces, sends and deletes drafts. | `{"draft":{"ref":...,"message_id":...}}`, or as `send` for `draft send` |
+| `chainmail move <ref>... --to <folder>`, `copy <ref>... --to <folder>` | Moves or copies messages to a folder on their own account. | `{"outcomes":[{"ref":...,"new_ref":...,"error":...}]}` |
+| `chainmail archive\|trash\|expunge <ref>...` | Archives, trashes or permanently deletes messages. | as `move` |
+| `chainmail flag\|unflag\|read\|unread <ref>...` | Stars, unstars, or marks messages read or unread. | as `move` |
+| `chainmail flags <ref>... [--add <flag>]... [--remove <flag>]...` | Adds and removes any IMAP flags or keywords. | as `move` |
+| `chainmail label <ref>... [--add <label>]... [--remove <label>]...` | Adds and removes Gmail labels. Google accounts only. | as `move` |
+| `chainmail folder create\|rename\|delete --account <account>` | Creates, renames and deletes folders, or labels on Google. | `{}` |
+| `chainmail accounts probe [<account>]...` | Measures how many IMAP connections accounts allow and sizes their pools from it. | `{"limits":[{"account":...,"imap_cap":...,"pool_size":...,"probed_at":...,"error":...}]}` |
 | `chainmail daemon` | Runs the daemon. Flags: `--dev`, `--config` (default `/etc/chainmail/config.toml`), `--state-dir` (default `/var/lib/chainmail`), `--vault-key-file` (default `$CREDENTIALS_DIRECTORY/vault-key`). | JSON log lines on stderr |
 | `chainmail accounts list` | Lists accounts with provider, address, auth method and auth state. `auth_detail` says what to run when `auth_state` is `AUTH_STATE_REQUIRED`. | `{"accounts":[...]}` |
 | `chainmail accounts test <account>` | Logs in to the account's IMAP server, then its SMTP server, and reports each check. | `{"account":...,"imap":{...},"smtp":{...}}` |
-| `chainmail secret set <name> [--from-pass <entry>]` | Stores a secret in the vault. The name must be `accounts/<account>` for a configured password account, or `oauth_clients/<client>` for a configured OAuth2 client. Any other name, including `tokens/<account>`, fails with `INVALID_ARGUMENT` (exit 2). | `{"name":...,"set":true}` |
-| `chainmail auth login <account>` | Runs the OAuth2 paste-back flow and stores the refresh token. | `{"account":...,"logged_in":true}` |
+| `chainmail secret set <name> [--from-pass <entry>]` | Stores a secret in the vault. The name must be `accounts/<account>` for a configured password account, or `oauth_clients/<client>` for a configured OAuth2 client. Any other name, including `tokens/<account>`, fails with `INVALID_ARGUMENT` (exit 2). For an account password it then probes the account's connection limit. | `{"name":...,"set":true}`, plus `"limit":{...}` for `accounts/<account>` |
+| `chainmail auth login <account>` | Runs the OAuth2 paste-back flow, stores the refresh token, then probes the account's connection limit. | `{"account":...,"logged_in":true,"limit":{...}}` |
 | `chainmail admin status` | Shows the daemon's version, start time, dev mode and stored secret names. | `{"version":...,"started_at":...,"dev_mode":...,"secret_names":[...]}` |
 | `chainmail help [command]` | Prints help. `--help` on any command does the same. | help text |
 
@@ -378,6 +407,226 @@ Fields held as 64-bit integers arrive as JSON strings, as protobuf's JSON mappin
 
 `get` and `thread` return the text of each body. An HTML-only body is converted to text. They trim a trailing quoted reply or signature and set `quoted_trimmed` and `trimmed_bytes`, except in a forward, whose quoted text is the point. They cut a body longer than `[daemon] body_limit` (default `64KiB`) and set `truncated`. In text output, a line after the body says which happened. `--full` returns the body untrimmed and without the `body_limit` cut. The daemon reads at most 4 MiB of one text part, so a longer part is still cut and has `truncated` set, even with `--full`. `get --raw` returns the whole message.
 
+## Sending mail
+
+Five commands send: `send`, `send-raw`, `reply`, `forward` and `draft send`. Each sends from one account, with that account's address as From. Every send is audited. There is no approval step yet (see [Security model](#security-model)), so a send goes out as soon as the daemon has built it.
+
+### Composing
+
+`send` takes the account, the recipients, a subject and a body. `--to`, `--cc` and `--bcc` repeat, and each takes `a@b` or `"Name <a@b>"`. Bcc recipients get the message but are never written into it.
+
+```fish
+chainmail send --account work --to ann@example.com --subject "Q3 numbers" --body "See the *attached* report." --attach q3.pdf
+```
+
+The body is Markdown unless you say otherwise. chainmail sends it as two parts: the Markdown source as the plain-text part, and an HTML part rendered from it, with tables, strikethrough, autolinks and task lists. Raw HTML inside the Markdown is not passed through. The body comes from one of:
+
+- `--body TEXT`, the Markdown on the command line.
+- `--body-file F`, Markdown read from a file.
+- `--body -`, Markdown read from stdin.
+- `--text` with `--body` or `--body-file`, to send the body as plain text only, with no HTML part.
+- `--html-file F`, to send your own HTML as it is. `--body` then gives its plain-text part. Without it, the text part is converted from the HTML.
+
+```fish
+cat notes.md | chainmail send --account work --to ann@example.com --subject "Notes" --body -
+chainmail send --account work --to ann@example.com --subject "Status" --body "All green." --text
+chainmail send --account work --to ann@example.com --subject "Newsletter" --html-file issue.html --body "The text version."
+```
+
+`--attach F` attaches a file. Repeat it for more files. The media type comes from the file's extension, or else from its content. Filenames that are not ASCII are encoded so every mail client shows them.
+
+`--inline NAME=F` shows the image `F` inside the body wherever the body refers to `NAME`, as `![chart](chart.png)` in Markdown or `src="chart.png"` in HTML. Only images can go inline, and every `--inline` name must be used by the body. An unused one fails with `INVALID_ARGUMENT`.
+
+```fish
+chainmail send --account work --to ann@example.com --subject "Trend" --body "Here it is: ![chart](chart.png)" --inline chart.png=./build/chart.png
+```
+
+The CLI uploads attachments and inline images to the daemon before the send, several at once. An upload lasts an hour and is tied to the account it was made for. The whole message, attachments included, must fit the account's size limit: 25 MiB on Google accounts and custom servers, 35 MiB on iCloud and Hostinger, or `max_message_size` from the config. A message over the limit fails with `INVALID_ARGUMENT` before anything is sent.
+
+The account's `signature` from the config goes under the body: after a `-- ` line in the text part, and as its own block in the HTML part. In a reply or forward it goes under the new text and above the quoted original. `--no-signature` leaves it out.
+
+The message gets a new `Message-ID` on the account's domain, a `Date` in the daemon's time zone, and `User-Agent: chainmail/<version>`. A subject that is not ASCII is encoded for you.
+
+### Dry runs
+
+`--dry-run` builds the message and writes it as MIME to stdout instead of sending it. It connects to no server and needs no idempotency key. Like `get --raw`, it refuses to write to a terminal, so redirect it to a file. With `--output json` it prints the message as a JSON string instead, with the SMTP envelope: `{"result":{"dry_run":{"raw":...,"envelope_from":...,"envelope_to":[...]}}}`. `reply` and `forward` take `--dry-run` too.
+
+```fish
+chainmail send --account work --to ann@example.com --subject "Q3" --body-file q3.md --dry-run > q3.eml
+```
+
+### Sending a finished message
+
+`send-raw` sends a complete RFC 5322 message as given, from `--file F` or from stdin with `-`. It must parse, it must have a `Message-ID`, and its From must be the account's address. The message goes to the addresses in its To, Cc and Bcc. Its Bcc header is removed before sending. The size limit applies.
+
+```fish
+chainmail send-raw --account work --file q3.eml
+```
+
+### After a send
+
+On a terminal a send prints the Message-ID and the ref of the copy in Sent. With JSON output it prints `{"result":{"sent":{...}}}` with `message_id`, `sent_ref`, `duplicate` and `sent_copy_error`.
+
+Google files sent mail in Sent itself. On every other account the daemon stores a copy in the Sent folder, marked read. If storing that copy fails, the message was still sent: `sent_copy_error` says why there is no copy, and the command still succeeds.
+
+A send is never retried, by the daemon or by the CLI. Each send ends in one of these ways:
+
+| Outcome | Reason | Exit | What to do |
+|---|---|---|---|
+| The server accepted it | | 0 | Nothing. |
+| The server refused the sender, a recipient or the message | `INVALID_ARGUMENT` | 2 | Fix the request. Nothing was sent. A refused recipient means nobody got it. |
+| A temporary server error, or the connection dropped before the whole message was handed over | `SERVER_UNAVAILABLE` | 7 | Run the same command again. Nothing was sent. |
+| The server rejected the credentials | `AUTH_REJECTED` or `AUTH_REQUIRED` | 5 | Follow the hint, then run the same command again. |
+| The connection dropped after the whole message was handed over, before the server answered | `SEND_OUTCOME_UNKNOWN` | 8 | Check Sent before sending again, as below. |
+
+In the last case the server may or may not have taken the message. The daemon has already looked for its Message-ID in the Sent folder three times over 10 seconds and did not find it. Look again yourself, for example with `chainmail search in:sent newer_than:1d --account work`. Running the same command again does not send it again: it reports the same unknown outcome. If the message really did not go out, send it again on purpose with a new key, as described under [Idempotency](#idempotency).
+
+### Replies, forwards and drafts
+
+`reply <ref>` replies to a message, from the account the message is on. It goes to the original's Reply-To, or else its From. `--all` adds the original's To and Cc. chainmail drops the account's own address from the list, along with repeats. A reply to the account's own message goes to that message's recipients instead. `--to`, `--cc` and `--bcc` add more recipients. A reply with nobody to send to fails with `INVALID_ARGUMENT`. A reply needs a body, and takes every body and attachment option of `send`.
+
+The subject gets `Re: ` unless it already starts with it. The reply's `In-Reply-To` and `References` point at the original, so mail clients thread it. Under the new text and the signature comes `On <date>, <name> wrote:` and the whole original, quoted, including its own quotes. After the reply is sent, the original is marked `\Answered`.
+
+```fish
+chainmail reply $ref --body "Thanks, that works."
+chainmail reply $ref --all --body-file answer.md --attach notes.pdf
+```
+
+`forward <ref>` forwards a message to new recipients, with at least one of `--to`, `--cc` and `--bcc`. The subject gets `Fwd: `. The new text, which is optional here, goes above a `Forwarded message` block with the original's From, Date, Subject and To, then the original's body. The original's attachments go with it unless `--no-attachments`. After the forward is sent, the original is marked `$Forwarded`.
+
+```fish
+chainmail forward $ref --to ann@example.com --body "FYI"
+```
+
+`--draft` on `send`, `reply` or `forward` saves the message to the account's Drafts folder instead of sending it, and prints the draft's ref. The `draft` commands work on drafts:
+
+- `draft create` saves a new draft. It takes the same options as `send`.
+- `draft update <ref>` replaces a draft with a new version. The whole message is replaced, so give the recipients, subject and body again. The new version has a new ref, which it prints. The old ref is gone. A reply saved as a draft stays a reply.
+- `draft send <ref>` sends a draft and removes it from Drafts. It keeps the draft's Message-ID.
+- `draft delete <ref>` deletes a draft for good.
+
+```fish
+set draft (chainmail draft create --account work --to ann@example.com --subject "Q3" --body-file q3.md | jq -r .draft.ref)
+set draft (chainmail draft update $draft --to ann@example.com --subject "Q3 final" --body-file q3.md | jq -r .draft.ref)
+chainmail draft send $draft
+```
+
+### Idempotency
+
+Every send carries an idempotency key, so a send that is repeated, by an agent retrying or by a script run twice, goes out once. The key is compulsory for the API's `Send`, `SendRaw`, `Reply`, `Forward` and `SendDraft` calls, except for a dry run or a draft. A key is 1 to 128 characters of `A-Z`, `a-z`, `0-9` and `.`, `_`, `:` and `-`.
+
+You rarely pass one yourself. Without `--idempotency-key`, the CLI derives the key from what is sent:
+
+- `send`: the account, the recipients, the subject, the body and the bytes of every attachment and inline image.
+- `send-raw`: the account and the message's bytes.
+- `reply` and `forward`: the original's ref, the extra recipients, the body and the files, and whether it is a reply, a reply to all, or a forward with or without attachments.
+- `draft send`: the draft's ref.
+
+The daemon keeps each key, per account, for 7 days. A second send with the same key and the same request sends nothing. It returns the first send's outcome: its result with `duplicate` set, which the terminal output shows as `duplicate: already sent`, or the same error the first send failed with. If the first send is still running, the second waits for it. The exception is a first send that failed in a way that is safe to retry, such as `SERVER_UNAVAILABLE` or a credential failure, where nothing was sent. Then the same key makes a new attempt. Reusing a key for a different message fails with `INVALID_ARGUMENT`.
+
+To send the same message again on purpose within those 7 days, give it a new key:
+
+```fish
+chainmail send --account work --to ann@example.com --subject "Reminder" --body "Still on for Friday?" --idempotency-key reminder-2
+```
+
+## Organizing mail
+
+These commands change mail on the server. Each takes one or more refs, from any accounts, and acts on each message within its own account:
+
+| Command | Does |
+|---|---|
+| `move <ref>... --to <folder>` | Moves messages to a folder. |
+| `copy <ref>... --to <folder>` | Copies messages to a folder. |
+| `archive <ref>...` | Moves messages out of the inbox into the account's archive. |
+| `trash <ref>...` | Moves messages to Trash. A message already in Trash stays there. |
+| `expunge <ref>...` | Deletes messages for good. This cannot be undone. |
+| `flag`, `unflag <ref>...` | Adds or removes `\Flagged`, the star. |
+| `read`, `unread <ref>...` | Adds or removes `\Seen`. |
+| `flags <ref>... --add <flag> --remove <flag>` | Adds and removes any flags or keywords, such as `\Answered` or `$Label1`. Both repeat. |
+| `label <ref>... --add <label> --remove <label>` | Adds and removes Gmail labels. Other accounts refuse it with `INVALID_ARGUMENT`. |
+
+```fish
+chainmail archive $ref
+chainmail move $ref --to Receipts
+chainmail flags $ref --add '$Todo' --remove '\Seen'
+chainmail label $ref --add Projects/Q3
+```
+
+Refs can also come on stdin, one per line, when the only argument is `-`. That lets a search feed an organize command:
+
+```fish
+chainmail search from:newsletter@example.com older_than:30d --limit 500 | jq -r '.rows[].ref' | chainmail archive -
+```
+
+Each ref succeeds or fails on its own, so one bad ref does not stop the rest. On a terminal the command prints a count, such as `archived 12, failed 1`, then one line per failure. With JSON output it prints `{"outcomes":[...]}`, one per ref in the order given, each with `ref`, `new_ref` and `error`. `new_ref` is the message's ref after a move, copy, archive or trash, and is empty when the ref did not change or the message is gone. Use `new_ref` from then on: the old ref no longer names the message. When every ref succeeds the command exits 0. Otherwise it exits with the code of the first failure.
+
+The daemon takes up to 500 refs per call and works on the folders and accounts in a batch in parallel. The CLI splits a longer list into calls of 500.
+
+### What each action does on each provider
+
+On iCloud, Hostinger and custom servers, folders are IMAP folders:
+
+- `move` moves the messages, with IMAP `MOVE` where the server has it, or else by copying them and deleting the originals.
+- `archive` moves them to the folder with the `\Archive` attribute, or to `archive_folder` from the config. With neither, it fails with `NOT_FOUND`.
+- `trash` moves them to Trash.
+- `expunge` deletes them from their folder. A server without UIDPLUS refuses it with `INVALID_ARGUMENT`.
+- `label` is refused.
+
+Some servers do not say where a moved or copied message landed. Then the call succeeds with an empty `new_ref`, and you search again to find the message. A move done by copying keeps every original whose copy the server did not confirm, so a message is never lost in a move.
+
+On Google accounts, refs live in All Mail and folders are labels:
+
+- `move` to a label adds that label and removes the Inbox label. The ref does not change. `move --to INBOX` puts the Inbox label back.
+- `move` to Trash or Spam moves the message there and gives it a new ref. Moving it out of Trash or Spam brings it back to All Mail first.
+- `copy` adds the label.
+- `archive` removes the Inbox label, as Gmail's own Archive does.
+- `trash` moves the message to Trash.
+- `expunge` moves the message to Trash, if it is not there already, and deletes it from Trash.
+- `flag` stars the message.
+
+Moving a message never marks it read. Changes open the folder read-write, and reads still use `BODY.PEEK`, so reading mail keeps leaving it unread.
+
+A change is never retried once the server has answered it. If the connection drops while a change is under way, the refs it covered fail with `SERVER_UNAVAILABLE` and may or may not have changed. Search again for fresh refs before you retry.
+
+### Folders
+
+`folder create`, `folder rename` and `folder delete` manage folders on one account, named with `--account`. On Google accounts they manage labels.
+
+```fish
+chainmail folder create Projects/Q3 --account work
+chainmail folder rename Projects/Q3 Projects/Q3-2026 --account work
+chainmail folder delete Projects/Q3-2026 --account work
+```
+
+`create` also creates any missing parent folders. The levels of a name are joined with the server's delimiter, as `folders` shows the names. `delete` refuses INBOX and every folder with a role, such as Sent, Trash or Google's `[Gmail]` folders. It refuses a folder that holds mail unless you add `--force`, which deletes the mail with it. A folder that already exists fails `create` with `INVALID_ARGUMENT`.
+
+## Connection probing and pool sizing
+
+The daemon keeps a pool of IMAP connections per account and works on several folders at once, up to the pool's size. Mail servers limit how many connections one account may have, and a pool over the limit gets connections refused. So chainmail measures each account's limit and sizes the pool from it.
+
+`accounts probe` measures one or more accounts, or every account when none is named. For each account it opens IMAP connections one at a time, 250 ms apart, logging each one in, until the server refuses one or 16 are open. Then it logs them all out. The number that worked is the account's cap. The pool size is then:
+
+1. `pool` from the config, when it is set.
+2. Otherwise the cap less 2, between 1 and 12. The 2 left over are for your other mail clients on the same account.
+3. Before any probe, the preset's default: 6 on Google accounts and 3 on the others.
+
+```fish
+chainmail accounts probe
+chainmail accounts probe work site --output table
+```
+
+Each result has `account`, `imap_cap`, `pool_size`, `probed_at` and `error`. A probe whose very first connection fails reports an error rather than a cap. When any probe fails, the command prints every result, then exits with the first failure's code.
+
+The daemon also probes:
+
+- after `auth login` for an account and after `secret set accounts/<account>`, which print the result, such as `connections: cap 10, pool 8`. A failed probe there is a warning and does not fail the command.
+- in the background, on an account's first use, when the account has no stored result or one older than 30 days.
+
+While a probe runs, the account's other calls wait, and the pool is rebuilt at the new size once it ends. If a server refuses a connection for being over its limit in normal use, the daemon lowers that account's pool by one, never below 1, and records the lower cap.
+
+A probe ramps up slowly and stops at the first refusal, but it does open many connections at once, which some providers watch for abuse. It runs rarely. Setting `pool` in the config fixes the pool size whatever a probe finds, though the probes still run and record the cap.
+
 ## Exit codes and error output
 
 On success a command exits 0. With JSON output it prints one line of JSON on stdout. Field names are snake_case and unset fields are included.
@@ -400,7 +649,7 @@ Reasons and exit codes are a contract with agents and never change. They come fr
 | 5 | `AUTH_REQUIRED`, `AUTH_REJECTED` | A human must set a secret or log in. The hint says what to run. |
 | 6 | `NOT_FOUND`, `STALE_REF` | No such account, pass entry, folder, message or attachment part, or a ref that went stale. A name that breaks the naming rules, such as `Work`, is `INVALID_ARGUMENT` instead. |
 | 7 | `SERVER_UNAVAILABLE`, `TIMEOUT`, `DAEMON_UNREACHABLE` | A mail server or the daemon could not be reached in time |
-| 8 | `SEND_OUTCOME_UNKNOWN` | A send may or may not have gone out (sub-project 3) |
+| 8 | `SEND_OUTCOME_UNKNOWN` | A send may or may not have gone out. Check Sent before sending again (see [After a send](#after-a-send)). |
 | 9 | `TOTP_INVALID`, `TOTP_LOCKED` | Approval code refused (sub-project 4) |
 
 Usage errors always exit 2 with `USAGE`. That covers a missing or extra argument, an unknown flag, a bad `--output` value, a group command such as `chainmail accounts` run on its own, an unknown subcommand, and `chainmail help <unknown>`. Shell completion is disabled, so `chainmail completion` is an unknown command too.
