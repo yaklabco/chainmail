@@ -125,7 +125,9 @@ type ComposeBody_Text struct {
 }
 
 type ComposeBody_Html struct {
-	// HTML, sent as given, with a text part from html_text.
+	// HTML, sent as given, with a text part from html_text. Only inline
+	// image references are rewritten, and the signature and any quote are
+	// added before </body>.
 	Html string `protobuf:"bytes,3,opt,name=html,proto3,oneof"`
 }
 
@@ -282,7 +284,8 @@ type ComposeSpec struct {
 	To []string `protobuf:"bytes,2,rep,name=to,proto3" json:"to,omitempty"`
 	// Copied recipients, each "Name <a@b>" or "a@b".
 	Cc []string `protobuf:"bytes,3,rep,name=cc,proto3" json:"cc,omitempty"`
-	// Blind-copied recipients. They are only in the SMTP envelope, never in the message.
+	// Blind-copied recipients. A sent message has them only in the SMTP
+	// envelope. A draft keeps them in a Bcc header, removed when it is sent.
 	Bcc []string `protobuf:"bytes,4,rep,name=bcc,proto3" json:"bcc,omitempty"`
 	// The subject line.
 	Subject string `protobuf:"bytes,5,opt,name=subject,proto3" json:"subject,omitempty"`
@@ -689,7 +692,11 @@ type SendRequest struct {
 	// for the first call if that is still running. The exception is a first
 	// attempt that failed in a way that is safe to retry, such as a temporary
 	// server error before the message was handed over. Then the second call is
-	// a new attempt. The same key with a different request is INVALID_ARGUMENT.
+	// a new attempt. The same key with a different request is INVALID_ARGUMENT
+	// while the first attempt is running or retryable. Once the first attempt
+	// is sent, refused or unknown, its outcome is returned for the key before
+	// the request is read, so a different request is not detected and is not
+	// sent.
 	IdempotencyKey string `protobuf:"bytes,4,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -1440,7 +1447,10 @@ func (x *UpdateDraftResponse) GetDraft() *Draft {
 	return nil
 }
 
-// SendDraftRequest sends a draft and removes it from Drafts.
+// SendDraftRequest sends a draft and removes it from Drafts. The message
+// keeps the draft's Message-ID, and its Date is set to the time of sending.
+// A draft that cannot be removed afterwards stays, and the send still
+// succeeds.
 type SendDraftRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The draft to send. It must be in Drafts.

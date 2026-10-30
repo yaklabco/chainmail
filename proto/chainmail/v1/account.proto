@@ -55,7 +55,8 @@ message TestAccountResponse {
 
 // ProbeLimitsRequest measures how many IMAP connections accounts allow.
 message ProbeLimitsRequest {
-  // Accounts to probe. Empty means every account.
+  // Accounts to probe. Empty means every account. An unknown or invalid
+  // name fails the whole call before any probe runs.
   repeated string accounts = 1;
 }
 
@@ -63,7 +64,8 @@ message ProbeLimitsRequest {
 message AccountLimit {
   // The account probed.
   string account = 1;
-  // Connections the server allowed at once. 0 when error is set.
+  // Connections the server allowed at once: the probe's own, plus those the
+  // daemon already had open to the account. 0 when error is set.
   uint32 imap_cap = 2;
   // Connections the daemon now uses: pool from config, or imap_cap less 2,
   // between 1 and 12.
@@ -88,6 +90,6 @@ service AccountService {
   // TestAccount logs in to the account's IMAP and SMTP servers and reports what happened.
   rpc TestAccount(TestAccountRequest) returns (TestAccountResponse);
   // ProbeLimits opens connections one at a time until the server refuses
-  // one, then sets the pool size from the count.
+  // one or 16 are open, then sets the pool size from the count.
   rpc ProbeLimits(ProbeLimitsRequest) returns (ProbeLimitsResponse);
 }

@@ -51,7 +51,7 @@ type AccountServiceClient interface {
 	// TestAccount logs in to the account's IMAP and SMTP servers and reports what happened.
 	TestAccount(context.Context, *connect.Request[v1.TestAccountRequest]) (*connect.Response[v1.TestAccountResponse], error)
 	// ProbeLimits opens connections one at a time until the server refuses
-	// one, then sets the pool size from the count.
+	// one or 16 are open, then sets the pool size from the count.
 	ProbeLimits(context.Context, *connect.Request[v1.ProbeLimitsRequest]) (*connect.Response[v1.ProbeLimitsResponse], error)
 }
 
@@ -116,7 +116,7 @@ type AccountServiceHandler interface {
 	// TestAccount logs in to the account's IMAP and SMTP servers and reports what happened.
 	TestAccount(context.Context, *connect.Request[v1.TestAccountRequest]) (*connect.Response[v1.TestAccountResponse], error)
 	// ProbeLimits opens connections one at a time until the server refuses
-	// one, then sets the pool size from the count.
+	// one or 16 are open, then sets the pool size from the count.
 	ProbeLimits(context.Context, *connect.Request[v1.ProbeLimitsRequest]) (*connect.Response[v1.ProbeLimitsResponse], error)
 }
 

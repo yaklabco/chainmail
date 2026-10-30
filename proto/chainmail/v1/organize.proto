@@ -8,8 +8,9 @@ import "chainmail/v1/message.proto";
 message RefOutcome {
   // The ref as given.
   string ref = 1;
-  // The message's ref afterwards. Empty when the ref did not change or the
-  // message is gone.
+  // The message's ref afterwards, or for Copy the copy's ref. Empty when
+  // the ref did not change, the message is gone, or the server did not say
+  // where the message landed.
   string new_ref = 2;
   // Set when this ref failed.
   ItemError error = 3;
@@ -79,13 +80,17 @@ message ExpungeResponse {
   repeated RefOutcome outcomes = 1;
 }
 
-// SetFlagsRequest adds and removes IMAP flags, such as \Seen and \Flagged.
+// SetFlagsRequest adds and removes IMAP flags and keywords. The system flags
+// allowed are \Seen, \Flagged, \Answered and \Draft. A keyword is 1 to 64
+// of A-Z, a-z, 0-9 and $ _ . -. Any other flag, \Deleted included, or a
+// request with nothing to add or remove, fails the whole call with
+// INVALID_ARGUMENT.
 message SetFlagsRequest {
   // 1 to 500 refs, from any accounts.
   repeated string refs = 1;
-  // Flags to add.
+  // Flags and keywords to add.
   repeated string add = 2;
-  // Flags to remove.
+  // Flags and keywords to remove.
   repeated string remove = 3;
 }
 
@@ -99,7 +104,8 @@ message SetFlagsResponse {
 message SetLabelsRequest {
   // 1 to 500 refs, from any accounts.
   repeated string refs = 1;
-  // Labels to add.
+  // Labels to add. A label that does not exist is created. The system
+  // labels \Inbox, \Important, \Starred, \Sent and \Draft are accepted.
   repeated string add = 2;
   // Labels to remove.
   repeated string remove = 3;
@@ -135,13 +141,15 @@ message RenameFolderRequest {
 // RenameFolderResponse is empty: the folder has its new name.
 message RenameFolderResponse {}
 
-// DeleteFolderRequest deletes a folder. INBOX and role folders are refused.
+// DeleteFolderRequest deletes a folder. INBOX, role folders and a folder
+// with folders under it are refused.
 message DeleteFolderRequest {
   // The account the folder is on.
   string account = 1;
   // The folder to delete.
   string name = 2;
-  // Delete it even when it holds mail. The mail is deleted with it.
+  // Delete it even when it holds mail. The mail is deleted with it, except
+  // on Google, where deleting a label leaves its messages in All Mail.
   bool force = 3;
 }
 

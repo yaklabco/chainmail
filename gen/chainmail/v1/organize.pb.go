@@ -26,8 +26,9 @@ type RefOutcome struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The ref as given.
 	Ref string `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	// The message's ref afterwards. Empty when the ref did not change or the
-	// message is gone.
+	// The message's ref afterwards, or for Copy the copy's ref. Empty when
+	// the ref did not change, the message is gone, or the server did not say
+	// where the message landed.
 	NewRef string `protobuf:"bytes,2,opt,name=new_ref,json=newRef,proto3" json:"new_ref,omitempty"`
 	// Set when this ref failed.
 	Error         *ItemError `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
@@ -564,14 +565,18 @@ func (x *ExpungeResponse) GetOutcomes() []*RefOutcome {
 	return nil
 }
 
-// SetFlagsRequest adds and removes IMAP flags, such as \Seen and \Flagged.
+// SetFlagsRequest adds and removes IMAP flags and keywords. The system flags
+// allowed are \Seen, \Flagged, \Answered and \Draft. A keyword is 1 to 64
+// of A-Z, a-z, 0-9 and $ _ . -. Any other flag, \Deleted included, or a
+// request with nothing to add or remove, fails the whole call with
+// INVALID_ARGUMENT.
 type SetFlagsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 1 to 500 refs, from any accounts.
 	Refs []string `protobuf:"bytes,1,rep,name=refs,proto3" json:"refs,omitempty"`
-	// Flags to add.
+	// Flags and keywords to add.
 	Add []string `protobuf:"bytes,2,rep,name=add,proto3" json:"add,omitempty"`
-	// Flags to remove.
+	// Flags and keywords to remove.
 	Remove        []string `protobuf:"bytes,3,rep,name=remove,proto3" json:"remove,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -679,7 +684,8 @@ type SetLabelsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// 1 to 500 refs, from any accounts.
 	Refs []string `protobuf:"bytes,1,rep,name=refs,proto3" json:"refs,omitempty"`
-	// Labels to add.
+	// Labels to add. A label that does not exist is created. The system
+	// labels \Inbox, \Important, \Starred, \Sent and \Draft are accepted.
 	Add []string `protobuf:"bytes,2,rep,name=add,proto3" json:"add,omitempty"`
 	// Labels to remove.
 	Remove        []string `protobuf:"bytes,3,rep,name=remove,proto3" json:"remove,omitempty"`
@@ -977,14 +983,16 @@ func (*RenameFolderResponse) Descriptor() ([]byte, []int) {
 	return file_chainmail_v1_organize_proto_rawDescGZIP(), []int{18}
 }
 
-// DeleteFolderRequest deletes a folder. INBOX and role folders are refused.
+// DeleteFolderRequest deletes a folder. INBOX, role folders and a folder
+// with folders under it are refused.
 type DeleteFolderRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The account the folder is on.
 	Account string `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
 	// The folder to delete.
 	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	// Delete it even when it holds mail. The mail is deleted with it.
+	// Delete it even when it holds mail. The mail is deleted with it, except
+	// on Google, where deleting a label leaves its messages in All Mail.
 	Force         bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

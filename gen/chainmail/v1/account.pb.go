@@ -427,7 +427,8 @@ func (x *TestAccountResponse) GetSmtp() *Check {
 // ProbeLimitsRequest measures how many IMAP connections accounts allow.
 type ProbeLimitsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Accounts to probe. Empty means every account.
+	// Accounts to probe. Empty means every account. An unknown or invalid
+	// name fails the whole call before any probe runs.
 	Accounts      []string `protobuf:"bytes,1,rep,name=accounts,proto3" json:"accounts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -475,7 +476,8 @@ type AccountLimit struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The account probed.
 	Account string `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
-	// Connections the server allowed at once. 0 when error is set.
+	// Connections the server allowed at once: the probe's own, plus those the
+	// daemon already had open to the account. 0 when error is set.
 	ImapCap uint32 `protobuf:"varint,2,opt,name=imap_cap,json=imapCap,proto3" json:"imap_cap,omitempty"`
 	// Connections the daemon now uses: pool from config, or imap_cap less 2,
 	// between 1 and 12.
