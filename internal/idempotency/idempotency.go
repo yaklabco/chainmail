@@ -254,6 +254,41 @@ func (s *Store) Finish(ctx context.Context, account, key string, state State, re
 	return nil
 }
 
+// Row is a stored key as Lookup reads it.
+type Row struct {
+	State State
+	// Hash is the request hash the key was first used with.
+	Hash [32]byte
+	// Result is the stored result, nil when there is none.
+	Result []byte
+}
+
+// Lookup reads (account, key) without claiming it. ok is false when the key
+// has no row. A caller that cannot hash its request yet, such as one whose
+// uploads have expired, uses it to replay a settled outcome.
+func (s *Store) Lookup(ctx context.Context, account, key string) (row Row, ok bool, err error) {
+	var (
+		hash   []byte
+		state  string
+		result []byte
+	)
+	err = s.db.QueryRowContext(ctx,
+		"SELECT request_hash, state, result FROM idempotency WHERE account = ? AND key = ?",
+		account, key).Scan(&hash, &state, &result)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Row{}, false, nil
+	}
+	if err != nil {
+		return Row{}, false, fmt.Errorf("reading idempotency key: %w", err)
+	}
+	row.State = State(state)
+	copy(row.Hash[:], hash)
+	if len(result) > 0 {
+		row.Result = result
+	}
+	return row, true, nil
+}
+
 // Recover marks in_progress rows left by an earlier process as unknown. Call once at startup.
 func (s *Store) Recover(ctx context.Context) (int64, error) {
 	res, err := s.db.ExecContext(ctx,

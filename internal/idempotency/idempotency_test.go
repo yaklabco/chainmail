@@ -781,3 +781,32 @@ func TestRunDoesNotLogCancellation(t *testing.T) {
 		t.Errorf("log = %q, want nothing on cancellation", got)
 	}
 }
+
+func TestLookupReadsWithoutClaiming(t *testing.T) {
+	t.Parallel()
+	s, conn, _ := newStore(t)
+	ctx := t.Context()
+	if _, ok, err := s.Lookup(ctx, "acct", "k"); err != nil || ok {
+		t.Fatalf("absent key: ok = %v, err = %v, want no row", ok, err)
+	}
+	if _, err := s.Begin(ctx, "acct", "k", hashOf("req")); err != nil {
+		t.Fatal(err)
+	}
+	row, ok, err := s.Lookup(ctx, "acct", "k")
+	if err != nil || !ok || row.State != InProgress || row.Hash != hashOf("req") || row.Result != nil {
+		t.Fatalf("in progress: row = %+v, ok = %v, err = %v", row, ok, err)
+	}
+	if err := s.Finish(ctx, "acct", "k", Done, []byte("result")); err != nil {
+		t.Fatal(err)
+	}
+	row, ok, err = s.Lookup(ctx, "acct", "k")
+	if err != nil || !ok || row.State != Done || row.Hash != hashOf("req") || string(row.Result) != "result" {
+		t.Fatalf("done: row = %+v, ok = %v, err = %v", row, ok, err)
+	}
+	if got := stateOf(t, conn, "acct", "k"); got != Done {
+		t.Errorf("state after Lookup = %q, want done", got)
+	}
+	if _, ok, err := s.Lookup(ctx, "other", "k"); err != nil || ok {
+		t.Errorf("another account: ok = %v, err = %v, want no row", ok, err)
+	}
+}
