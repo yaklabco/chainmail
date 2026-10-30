@@ -16,6 +16,10 @@ type fakeConn struct {
 	dead       bool
 	noopErr    error
 	closeDelay time.Duration
+	// loggingOut, when set, is closed as Close starts, and Close then
+	// waits for loggedOut to close.
+	loggingOut chan struct{}
+	loggedOut  chan struct{}
 	noops      atomic.Int32
 	closed     atomic.Bool
 }
@@ -29,6 +33,10 @@ func (f *fakeConn) Noop(context.Context) error {
 }
 
 func (f *fakeConn) Close() error {
+	if f.loggingOut != nil {
+		close(f.loggingOut)
+		<-f.loggedOut
+	}
 	time.Sleep(f.closeDelay)
 	f.closed.Store(true)
 	return nil
@@ -332,5 +340,72 @@ func TestPoolShrinkReportsTheNewCap(t *testing.T) {
 		if got := p.size(); got != want {
 			t.Errorf("size() = %d, want %d", got, want)
 		}
+	}
+}
+
+func TestPoolCountsConnectionsStillLoggingOut(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// others are the connections still open once it is logged out.
+		others int
+		// logout sets up a pool with one connection to log out, which it
+		// returns, and the call that logs it out.
+		logout func(t *testing.T) (*pool[*fakeConn], *fakeConn, func())
+	}{
+		{"returned after close", 0, func(t *testing.T) (*pool[*fakeConn], *fakeConn, func()) {
+			p := newTestPool(1, &fakeDialer{}, &testClock{t: time.Unix(0, 0)}, time.Hour)
+			c, _ := p.get(t.Context(), "", false)
+			if err := p.close(); err != nil {
+				t.Fatal(err)
+			}
+			return p, c, func() { p.put(c) }
+		}},
+		{"returned over a shrunk cap", 1, func(t *testing.T) (*pool[*fakeConn], *fakeConn, func()) {
+			p := newTestPool(2, &fakeDialer{}, &testClock{t: time.Unix(0, 0)}, time.Hour)
+			_, _ = p.get(t.Context(), "", false)
+			c, _ := p.get(t.Context(), "", false)
+			p.shrink()
+			return p, c, func() { p.put(c) }
+		}},
+		{"discarded", 0, func(t *testing.T) (*pool[*fakeConn], *fakeConn, func()) {
+			p := newTestPool(1, &fakeDialer{}, &testClock{t: time.Unix(0, 0)}, time.Hour)
+			c, _ := p.get(t.Context(), "", false)
+			return p, c, func() { p.discard(c) }
+		}},
+		{"idle at close", 0, func(t *testing.T) (*pool[*fakeConn], *fakeConn, func()) {
+			p := newTestPool(1, &fakeDialer{}, &testClock{t: time.Unix(0, 0)}, time.Hour)
+			c, _ := p.get(t.Context(), "", false)
+			p.put(c)
+			return p, c, func() { _ = p.close() }
+		}},
+		{"idle too long", 0, func(t *testing.T) (*pool[*fakeConn], *fakeConn, func()) {
+			p := newTestPool(1, &fakeDialer{}, &testClock{t: time.Unix(0, 0)}, 20*time.Millisecond)
+			c, _ := p.get(t.Context(), "", false)
+			// put starts the idle timer, which logs it out.
+			return p, c, func() { p.put(c) }
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p, c, logout := tt.logout(t)
+			c.loggingOut = make(chan struct{})
+			c.loggedOut = make(chan struct{})
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				logout()
+			}()
+			<-c.loggingOut
+			// The server still holds the connection's slot until LOGOUT ends.
+			if n := p.openCount(); n != tt.others+1 {
+				t.Errorf("open while logging out = %d, want %d with the connection counted", n, tt.others+1)
+			}
+			close(c.loggedOut)
+			<-done
+			// An idle timeout logs out on its own goroutine, after logout returned.
+			eventually(t, func() bool { return p.openCount() == tt.others })
+		})
 	}
 }
