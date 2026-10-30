@@ -127,9 +127,9 @@ func TestWriteAppend(t *testing.T) {
 		{name: "standard Sent", folder: "Sent", flags: []string{`\Seen`}, wantFolder: "Sent", listedIn: "Sent"},
 		{name: "standard Drafts", folder: "Drafts", flags: []string{`\Draft`}, wantFolder: "Drafts", listedIn: "Drafts"},
 		{name: "standard unknown folder", folder: "Nope", wantErr: mailstore.ErrNotFound},
-		{name: "Gmail INBOX is All Mail with \\Inbox", gmail: true, folder: "INBOX", wantFolder: allMail, wantLabels: []string{`\Inbox`}, listedIn: "INBOX"},
-		{name: "Gmail Sent Mail is All Mail with \\Sent", gmail: true, folder: gmailSent, wantFolder: allMail, wantLabels: []string{`\Sent`}, listedIn: gmailSent},
-		{name: "Gmail label folder", gmail: true, folder: "Receipts", wantFolder: allMail, wantLabels: []string{"Receipts"}, listedIn: "Receipts"},
+		{name: "Gmail INBOX is All Mail with \\Inbox", gmail: true, folder: "INBOX", wantFolder: "INBOX", wantLabels: []string{`\Inbox`}, listedIn: "INBOX"},
+		{name: "Gmail Sent Mail is All Mail with \\Sent", gmail: true, folder: gmailSent, wantFolder: gmailSent, wantLabels: []string{`\Sent`}, listedIn: gmailSent},
+		{name: "Gmail label folder", gmail: true, folder: "Receipts", wantFolder: "Receipts", wantLabels: []string{"Receipts"}, listedIn: "Receipts"},
 		{name: "Gmail All Mail", gmail: true, folder: allMail, wantFolder: allMail, listedIn: allMail},
 		{name: "Gmail Trash", gmail: true, folder: gmailTrash, wantFolder: gmailTrash, listedIn: gmailTrash},
 		{name: "Gmail star flag is the \\Starred label", gmail: true, folder: allMail, flags: []string{`\Flagged`}, wantFolder: allMail, wantLabels: []string{`\Starred`}, listedIn: allMail},
@@ -462,7 +462,12 @@ func TestWriteCopy(t *testing.T) {
 				}
 			}
 			refs, err := s.FindByMessageID(t.Context(), tt.dest, "c@x")
-			if err != nil || !slices.Contains(refs, res.Ref) {
+			if tt.gmail && tt.dest != res.Ref.Folder {
+				// A label folder lists the message under a UID of its own.
+				if err != nil || len(refs) != 1 || refs[0].Folder != tt.dest || fetch(t, s, refs[0]).Summary.Subject != "copied" {
+					t.Errorf("FindByMessageID(%s) = %v, %v, want the message there", tt.dest, refs, err)
+				}
+			} else if err != nil || !slices.Contains(refs, res.Ref) {
 				t.Errorf("FindByMessageID(%s) = %v, %v, want it to hold %s", tt.dest, refs, err, res.Ref)
 			}
 			if !tt.gmail {
@@ -970,8 +975,11 @@ func TestWriteRenameFolder(t *testing.T) {
 				t.Fatalf("FindByMessageID(%s) = %v, %v", tt.to, refs, err)
 			}
 			if tt.gmail {
-				if refs[0] != r {
-					t.Errorf("renaming a label changed the All Mail ref: %s, was %s", refs[0], r)
+				if refs[0].Folder != tt.to {
+					t.Errorf("FindByMessageID(%s) = %s, want a ref in the renamed label", tt.to, refs[0])
+				}
+				if fetch(t, s, r).Summary.Subject != "kept" {
+					t.Error("renaming a label changed the All Mail ref")
 				}
 				if labels := fetch(t, s, r).Summary.Labels; !slices.Equal(labels, []string{tt.to}) {
 					t.Errorf("labels = %v, want [%s]", labels, tt.to)
@@ -1093,7 +1101,6 @@ func TestWriteFindByMessageID(t *testing.T) {
 		{name: "standard no match", s: host, folder: "INBOX", id: "other@x"},
 		{name: "standard empty id", s: host, folder: "INBOX", id: "<>"},
 		{name: "standard unknown folder", s: host, folder: "Nope", id: "same@x", wantErr: mailstore.ErrNotFound},
-		{name: "Gmail Sent Mail gives All Mail refs", s: gmail, folder: gmailSent, id: "s@x", want: []ref.Ref{sent}},
 		{name: "Gmail All Mail", s: gmail, folder: allMail, id: "s@x", want: []ref.Ref{sent}},
 		{name: "Gmail INBOX does not have it", s: gmail, folder: "INBOX", id: "s@x"},
 		{name: "Gmail unknown folder", s: gmail, folder: "Nope", id: "s@x", wantErr: mailstore.ErrNotFound},
@@ -1358,5 +1365,93 @@ func TestWriteGmailFolderNamesIgnoreCase(t *testing.T) {
 	}
 	if err := std.DeleteFolder(ctx, "PROJECTS", false); !errors.Is(err, mailstore.ErrNotFound) {
 		t.Errorf("standard DeleteFolder in another case = %v, want ErrNotFound", err)
+	}
+}
+
+// TestWriteGmailLabelFolderRefs: on Gmail, Append to a label folder gives a
+// ref in that folder, from APPENDUID, and FindByMessageID in a label folder
+// gives refs there, as imapstore does. Reads and writes take such refs. An
+// edit that keeps the message in the folder keeps the ref, and one that
+// takes it out gives the message's All Mail ref.
+func TestWriteGmailLabelFolderRefs(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := newGmail()
+	s.Add(Message{Folder: allMail, Subject: "sent", MessageID: "s@x", Labels: []string{`\Sent`}})
+	found, err := s.FindByMessageID(ctx, gmailSent, "s@x")
+	if err != nil || len(found) != 1 || found[0].Folder != gmailSent {
+		t.Fatalf("FindByMessageID(Sent Mail) = %v, %v; want a ref in Sent Mail", found, err)
+	}
+	if m := fetch(t, s, found[0]); m.Summary.Ref != found[0] || m.Summary.Subject != "sent" {
+		t.Errorf("reading the Sent Mail ref gave %v %q", m.Summary.Ref, m.Summary.Subject)
+	}
+
+	r, err := s.Append(ctx, "INBOX", nil, time.Time{}, raw("Appended", "a@x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Folder != "INBOX" {
+		t.Fatalf("Append ref = %v, want one in INBOX", r)
+	}
+	if again, err := s.FindByMessageID(ctx, "INBOX", "a@x"); err != nil || !slices.Equal(again, []ref.Ref{r}) {
+		t.Errorf("FindByMessageID(INBOX) = %v, %v; want the Append ref %v", again, err, r)
+	}
+	all, err := s.FindByMessageID(ctx, allMail, "a@x")
+	if err != nil || len(all) != 1 {
+		t.Fatalf("FindByMessageID(All Mail) = %v, %v", all, err)
+	}
+	if m := fetch(t, s, r); m.Summary.Ref != r || m.Summary.Subject != "Appended" || !slices.Contains(m.Summary.Labels, `\Inbox`) {
+		t.Errorf("reading the INBOX ref gave %v %q %q", m.Summary.Ref, m.Summary.Subject, m.Summary.Labels)
+	}
+	if _, rc, err := s.StreamPart(ctx, r, ""); err != nil {
+		t.Errorf("StreamPart of the INBOX ref: %v", err)
+	} else {
+		_ = rc.Close()
+	}
+	for name, res := range map[string]mailstore.RefResult{
+		"StoreFlags":              one(t, s.StoreFlags(ctx, []ref.Ref{r}, []string{`\Seen`}, nil)),
+		"Copy to a label":         one(t, s.Copy(ctx, []ref.Ref{r}, "Receipts")),
+		"StoreLabels of another":  one(t, s.StoreLabels(ctx, []ref.Ref{r}, nil, []string{"Receipts"})),
+		"Move into its own label": one(t, s.Move(ctx, []ref.Ref{r}, "INBOX")),
+	} {
+		if res != (mailstore.RefResult{Ref: r}) {
+			t.Errorf("%s of the INBOX ref = %+v, want it kept", name, res)
+		}
+	}
+	if got := one(t, s.Archive(ctx, []ref.Ref{r})); got != (mailstore.RefResult{Ref: all[0]}) {
+		t.Errorf("Archive of the INBOX ref = %+v, want its All Mail ref %v", got, all[0])
+	}
+	gone(t, s, r)
+	if got := one(t, s.Move(ctx, []ref.Ref{all[0]}, "INBOX")); got != (mailstore.RefResult{Ref: all[0]}) {
+		t.Fatalf("Move back to INBOX = %+v", got)
+	}
+	back, err := s.FindByMessageID(ctx, "INBOX", "a@x")
+	if err != nil || len(back) != 1 || back[0].UID == r.UID {
+		t.Errorf("FindByMessageID(INBOX) after a return = %v, %v; want a new UID, as Gmail gives", back, err)
+	}
+	if got := one(t, s.Move(ctx, back, "Receipts")); got != (mailstore.RefResult{Ref: all[0]}) {
+		t.Errorf("Move of the INBOX ref to a label = %+v, want its All Mail ref: it left INBOX", got)
+	}
+
+	label, err := s.Append(ctx, "Receipts", nil, time.Time{}, raw("Receipt", "r@x"))
+	if err != nil || label.Folder != "Receipts" {
+		t.Fatalf("Append to a label = %v, %v", label, err)
+	}
+	got := one(t, s.Move(ctx, []ref.Ref{label}, allMail))
+	if got.Err != nil || got.Ref.Folder != allMail {
+		t.Fatalf("Move of a label ref to All Mail = %+v", got)
+	}
+	if labels := fetch(t, s, got.Ref).Summary.Labels; slices.Contains(labels, "Receipts") {
+		t.Errorf("labels = %q, want Receipts dropped: a MOVE out of a label folder takes its label", labels)
+	}
+	trashed, err := s.Append(ctx, "INBOX", nil, time.Time{}, raw("Binned", "b@x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := one(t, s.Trash(ctx, []ref.Ref{trashed})); got.Err != nil || got.Ref.Folder != gmailTrash {
+		t.Errorf("Trash of an INBOX ref = %+v", got)
+	}
+	if got := one(t, s.Expunge(ctx, []ref.Ref{back[0]})); !errors.Is(got.Err, mailstore.ErrStaleRef) {
+		t.Errorf("Expunge of an INBOX ref the message left = %+v, want ErrStaleRef", got)
 	}
 }

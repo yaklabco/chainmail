@@ -118,9 +118,9 @@ func (s *Store) beginWrite(ctx context.Context, op string) error {
 }
 
 // batch runs a batch Writer call. prep checks the call as a whole, and an
-// error from it fails every ref. each then changes one resolved message
-// and returns its ref afterwards.
-func (s *Store) batch(ctx context.Context, op string, refs []ref.Ref, prep func() error, each func(*Message) (ref.Ref, error)) []mailstore.RefResult {
+// error from it fails every ref. each then changes one resolved message,
+// given with the ref that named it, and returns its ref afterwards.
+func (s *Store) batch(ctx context.Context, op string, refs []ref.Ref, prep func() error, each func(*Message, ref.Ref) (ref.Ref, error)) []mailstore.RefResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]mailstore.RefResult, len(refs))
@@ -138,8 +138,9 @@ func (s *Store) batch(ctx context.Context, op string, refs []ref.Ref, prep func(
 			out[i].Err = rerr
 			continue
 		}
-		out[i].Ref, out[i].Err = each(m)
+		out[i].Ref, out[i].Err = each(m, r)
 	}
+	s.pruneViewsLocked()
 	return out
 }
 
@@ -214,8 +215,9 @@ func (s *Store) roleFolderLocked(role mailstore.Role) (string, error) {
 }
 
 // Append implements mailstore.Writer. On Gmail, appending to a label folder
-// stores the message in All Mail with that label and returns its All Mail
-// ref. A zero date stores the clock's time as the internal date.
+// stores the message in All Mail with that label and returns its ref in the
+// label folder, as APPENDUID gives it. A zero date stores the clock's time
+// as the internal date.
 func (s *Store) Append(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) (ref.Ref, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -253,7 +255,7 @@ func (s *Store) Append(ctx context.Context, folder string, flags []string, date 
 	s.nextUID[m.Folder]++
 	s.msgs = append(s.msgs, &m)
 	s.appended = append(s.appended, slices.Clone(raw))
-	return s.refLocked(&m), nil
+	return s.refInLocked(&m, folder), nil
 }
 
 // parseRaw fills a message's fields from its header, for search and
@@ -292,31 +294,43 @@ func parseRaw(raw []byte) Message {
 	return m
 }
 
-// Move implements mailstore.Writer. A message already in the folder keeps
-// its ref, as imapstore sends no MOVE for it.
+// Move implements mailstore.Writer. A message already in the folder its ref
+// names keeps the ref, as imapstore sends no MOVE for it.
 func (s *Store) Move(ctx context.Context, refs []ref.Ref, folder string) []mailstore.RefResult {
 	var dest mailstore.Folder
 	return s.batch(ctx, opMove, refs, func() (err error) {
 		dest, err = s.folderLocked(folder)
 		return err
-	}, func(m *Message) (ref.Ref, error) {
-		return s.moveLocked(m, dest)
+	}, func(m *Message, r ref.Ref) (ref.Ref, error) {
+		return s.moveLocked(m, r, dest)
 	})
 }
 
-// moveLocked moves m to dest. A message already in dest keeps its ref. On
-// Gmail a label folder is a label edit: a message in Trash or Spam goes
-// back to All Mail first, then gains the label, and loses \Inbox unless
-// dest is INBOX.
-func (s *Store) moveLocked(m *Message, dest mailstore.Folder) (ref.Ref, error) {
-	if m.Folder == dest.Name {
-		return s.refLocked(m), nil
+// moveLocked moves m, which r names, to dest. A ref into dest is kept. On
+// Gmail a move into All Mail, Trash or Spam is a UID MOVE: the message goes
+// there under a new ref, and leaving a label folder for All Mail drops that
+// folder's label, as Gmail does. A move into a label folder is a label edit:
+// a message in Trash or Spam goes back to All Mail first, then it gains the
+// label and loses \Inbox unless dest is INBOX.
+func (s *Store) moveLocked(m *Message, r ref.Ref, dest mailstore.Folder) (ref.Ref, error) {
+	if r.Folder == dest.Name {
+		return r, nil
 	}
 	if !s.gmail {
 		return s.relocateLocked(m, dest.Name), nil
 	}
+	src, err := s.folderLocked(r.Folder)
+	if err != nil {
+		return ref.Ref{}, err
+	}
 	if holdsMail(dest.Role) {
-		return s.relocateLocked(m, dest.Name), nil
+		if !holdsMail(src.Role) && dest.Role == mailstore.RoleAll {
+			m.Labels = editSet(m.Labels, nil, []string{labelOf(src)})
+		}
+		if m.Folder != dest.Name {
+			s.relocateLocked(m, dest.Name)
+		}
+		return s.refLocked(m), nil
 	}
 	if s.roleLocked(m.Folder) != mailstore.RoleAll {
 		all, err := s.allMailLocked()
@@ -324,49 +338,68 @@ func (s *Store) moveLocked(m *Message, dest mailstore.Folder) (ref.Ref, error) {
 			return ref.Ref{}, err
 		}
 		s.relocateLocked(m, all)
+		r = s.refLocked(m)
 	}
 	label := labelOf(dest)
-	m.Labels = editSet(m.Labels, []string{label}, nil)
+	var remove []string
 	if label != `\Inbox` {
-		m.Labels = editSet(m.Labels, nil, []string{`\Inbox`})
+		remove = []string{`\Inbox`}
 	}
-	return s.refLocked(m), nil
+	return s.labelLocked(m, r, src, []string{label}, remove), nil
+}
+
+// labelLocked edits m's labels where r names it, in src. When the edit
+// takes m out of the label folder r names, the result is m's All Mail ref,
+// as imapstore finds it by X-GM-MSGID; otherwise r is kept.
+func (s *Store) labelLocked(m *Message, r ref.Ref, src mailstore.Folder, add, remove []string) ref.Ref {
+	m.Labels = editSet(m.Labels, add, remove)
+	flagFromLabels(m, add, remove)
+	if !holdsMail(src.Role) && slices.ContainsFunc(remove, func(l string) bool { return strings.EqualFold(l, labelOf(src)) }) {
+		return s.refLocked(m)
+	}
+	return r
+}
+
+// srcLocked is the folder r names, which a resolved ref always has.
+func (s *Store) srcLocked(r ref.Ref) mailstore.Folder {
+	f, _ := s.folderLocked(r.Folder) // r resolved, so its folder exists
+	return f
 }
 
 // Copy implements mailstore.Writer. On standard accounts the copy is a new
 // message with a new ref, even in its own folder. On Gmail copying to a
-// label folder adds the label and returns the same ref, and copying to
-// Trash or Spam moves the message there, as Gmail does: it keeps one copy
-// of a message.
+// label folder adds the label and keeps the ref, and copying to Trash or
+// Spam moves the message there, as Gmail does: it keeps one copy of a
+// message.
 func (s *Store) Copy(ctx context.Context, refs []ref.Ref, folder string) []mailstore.RefResult {
 	var dest mailstore.Folder
 	return s.batch(ctx, opCopy, refs, func() (err error) {
 		dest, err = s.folderLocked(folder)
 		return err
-	}, func(m *Message) (ref.Ref, error) {
-		if s.gmail && (dest.Role == mailstore.RoleTrash || dest.Role == mailstore.RoleSpam) {
-			return s.moveLocked(m, dest)
+	}, func(m *Message, r ref.Ref) (ref.Ref, error) {
+		if !s.gmail {
+			c := cloneMessage(*m)
+			s.msgs = append(s.msgs, &c)
+			return s.relocateLocked(&c, dest.Name), nil
 		}
-		if s.gmail {
-			if dest.Role != mailstore.RoleAll {
-				m.Labels = editSet(m.Labels, []string{labelOf(dest)}, nil)
-			}
-			return s.refLocked(m), nil
+		switch {
+		case dest.Role == mailstore.RoleTrash || dest.Role == mailstore.RoleSpam:
+			return s.moveLocked(m, r, dest)
+		case dest.Role == mailstore.RoleAll || r.Folder == dest.Name:
+			return r, nil
 		}
-		c := cloneMessage(*m)
-		s.msgs = append(s.msgs, &c)
-		return s.relocateLocked(&c, dest.Name), nil
+		return s.labelLocked(m, r, s.srcLocked(r), []string{labelOf(dest)}, nil), nil
 	})
 }
 
 // Archive implements mailstore.Writer. Standard accounts move to the
 // archive folder: the one SetArchiveFolder names, else the one with the
-// archive role, else ErrNotFound. Gmail removes \Inbox and keeps the ref.
+// archive role, else ErrNotFound. Gmail removes \Inbox and keeps the ref,
+// unless it names INBOX.
 func (s *Store) Archive(ctx context.Context, refs []ref.Ref) []mailstore.RefResult {
 	if s.gmail {
-		return s.batch(ctx, opArchive, refs, nil, func(m *Message) (ref.Ref, error) {
-			m.Labels = editSet(m.Labels, nil, []string{`\Inbox`})
-			return s.refLocked(m), nil
+		return s.batch(ctx, opArchive, refs, nil, func(m *Message, r ref.Ref) (ref.Ref, error) {
+			return s.labelLocked(m, r, s.srcLocked(r), nil, []string{`\Inbox`}), nil
 		})
 	}
 	var dest mailstore.Folder
@@ -379,8 +412,8 @@ func (s *Store) Archive(ctx context.Context, refs []ref.Ref) []mailstore.RefResu
 		}
 		dest, err = s.folderLocked(name)
 		return err
-	}, func(m *Message) (ref.Ref, error) {
-		return s.moveLocked(m, dest)
+	}, func(m *Message, r ref.Ref) (ref.Ref, error) {
+		return s.moveLocked(m, r, dest)
 	})
 }
 
@@ -395,18 +428,15 @@ func (s *Store) Trash(ctx context.Context, refs []ref.Ref) []mailstore.RefResult
 		}
 		dest, err = s.folderLocked(name)
 		return err
-	}, func(m *Message) (ref.Ref, error) {
-		if m.Folder == dest.Name {
-			return s.refLocked(m), nil // already in Trash: a no-op success (spec 7.1)
-		}
-		return s.moveLocked(m, dest)
+	}, func(m *Message, r ref.Ref) (ref.Ref, error) {
+		return s.moveLocked(m, r, dest) // a ref in Trash is kept: a no-op success (spec 7.1)
 	})
 }
 
 // Expunge implements mailstore.Writer. On Gmail a message outside Trash is
 // moved to Trash first and expunged there, as Gmail requires.
 func (s *Store) Expunge(ctx context.Context, refs []ref.Ref) []mailstore.RefResult {
-	return s.batch(ctx, opExpunge, refs, nil, func(m *Message) (ref.Ref, error) {
+	return s.batch(ctx, opExpunge, refs, nil, func(m *Message, _ ref.Ref) (ref.Ref, error) {
 		if s.gmail && s.roleLocked(m.Folder) != mailstore.RoleTrash {
 			trash, err := s.roleFolderLocked(mailstore.RoleTrash)
 			if err != nil {
@@ -428,12 +458,12 @@ func (s *Store) StoreFlags(ctx context.Context, refs []ref.Ref, add, remove []st
 			return err
 		}
 		return checkFlags(remove)
-	}, func(m *Message) (ref.Ref, error) {
+	}, func(m *Message, r ref.Ref) (ref.Ref, error) {
 		m.Flags = editSet(m.Flags, add, remove)
 		if s.gmail {
 			starFromFlags(m, add, remove)
 		}
-		return s.refLocked(m), nil
+		return r, nil
 	})
 }
 
@@ -443,7 +473,8 @@ func (s *Store) StoreFlags(ctx context.Context, refs []ref.Ref, add, remove []st
 // standing for their system labels. A user label the account lacks is
 // created when a message gains it, as Gmail does. An unknown system label is
 // ErrNotFound, and All Mail, Trash, Spam, other names under [Gmail] and
-// names that are not text are not labels (ErrUnsupported). The ref is kept.
+// names that are not text are not labels (ErrUnsupported). The ref is kept,
+// unless the edit takes the message out of the label folder it names.
 func (s *Store) StoreLabels(ctx context.Context, refs []ref.Ref, add, remove []string) []mailstore.RefResult {
 	if !s.gmail {
 		return s.batch(ctx, opStoreLabels, refs, func() error {
@@ -457,15 +488,13 @@ func (s *Store) StoreLabels(ctx context.Context, refs []ref.Ref, add, remove []s
 		}
 		removes, err = s.labelsLocked(remove)
 		return err
-	}, func(m *Message) (ref.Ref, error) {
+	}, func(m *Message, r ref.Ref) (ref.Ref, error) {
 		for _, l := range adds {
 			if !strings.HasPrefix(l, `\`) && !s.labelFolderLocked(l) {
 				s.addFolderLocked(l, mailstore.RoleNone, 1, 1)
 			}
 		}
-		m.Labels = editSet(m.Labels, adds, removes)
-		flagFromLabels(m, adds, removes)
-		return s.refLocked(m), nil
+		return s.labelLocked(m, r, s.srcLocked(r), adds, removes), nil
 	})
 }
 
@@ -725,6 +754,7 @@ func (s *Store) RenameFolder(ctx context.Context, from, to string) error {
 			}
 		}
 	}
+	s.pruneViewsLocked()
 	return nil
 }
 
@@ -762,12 +792,13 @@ func (s *Store) DeleteFolder(ctx context.Context, name string, force bool) error
 		s.msgs = slices.DeleteFunc(s.msgs, func(m *Message) bool { return m.Folder == name })
 	}
 	s.removeFolderLocked(name)
+	s.pruneViewsLocked()
 	return nil
 }
 
 // FindByMessageID implements mailstore.Writer. The result is in UID order.
-// On Gmail a label folder gives the All Mail refs of the messages with that
-// label. An empty Message-ID finds nothing.
+// On Gmail a label folder gives refs in that folder, as imapstore does. An
+// empty Message-ID finds nothing.
 func (s *Store) FindByMessageID(ctx context.Context, folder, messageID string) ([]ref.Ref, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -785,7 +816,7 @@ func (s *Store) FindByMessageID(ctx context.Context, folder, messageID string) (
 	var out []ref.Ref
 	for _, m := range s.msgs {
 		if s.inFolderLocked(f, m) && trimID(m.MessageID) == id {
-			out = append(out, s.refLocked(m))
+			out = append(out, s.refInLocked(m, f.Name))
 		}
 	}
 	slices.SortFunc(out, func(a, b ref.Ref) int {
