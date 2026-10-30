@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/textproto"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/emersion/go-smtp"
@@ -58,8 +58,8 @@ type SendError struct {
 
 // Error describes the failure. It names no recipient: Refused is only
 // counted, and an SMTP reply shows only its code and the step it answered,
-// because servers echo addresses in reply text. The full reply stays in the
-// chain for errors.AsType.
+// because servers echo addresses in reply text. A malformed reply is shown
+// only as that. The full reply stays in the chain for errors.AsType.
 func (e *SendError) Error() string {
 	var b strings.Builder
 	b.WriteString("SMTP send: ")
@@ -76,7 +76,14 @@ func (e *SendError) Error() string {
 	if n := len(e.Refused); n > 0 {
 		fmt.Fprintf(&b, ", %d recipient(s) refused", n)
 	}
-	if e.Err != nil && !isReply {
+	_, isProtocol := errors.AsType[textproto.ProtocolError](e.Err)
+	switch {
+	case e.Err == nil || isReply:
+	case isProtocol:
+		// A malformed reply line is server text too, and may hold an address.
+		b.WriteString(": malformed reply at ")
+		b.WriteString(e.step)
+	default:
 		b.WriteString(": ")
 		b.WriteString(e.Err.Error())
 	}
@@ -94,7 +101,7 @@ var (
 // for one goroutine at a time.
 type Conn struct {
 	client  *smtp.Client
-	raw     *trackedConn
+	raw     net.Conn
 	addr    string
 	timeout time.Duration
 	done    bool // Send ran or Close was called
@@ -119,7 +126,7 @@ func dial(ctx context.Context, ep provider.Endpoint, creds auth.Credentials, opt
 	if err != nil {
 		return nil, fmt.Errorf("connecting to %s: %w", ep.Addr(), err)
 	}
-	raw := &trackedConn{Conn: nc}
+	raw := nc
 	// If ctx ends mid-exchange, closing the connection unblocks the read or write in progress.
 	stop := context.AfterFunc(ctx, func() { _ = raw.Close() }) // the caller sees ctx.Err() instead
 	c, err := handshake(ctx, raw, ep, opts.RootCAs)
@@ -239,20 +246,18 @@ func (c *Conn) submit(from string, to []string, raw []byte) *SendError {
 		c.quit()
 		return failure(err, false, "DATA")
 	}
-	// From here until the reply is read, every write carries the message.
-	c.raw.startMessage()
+	// A failed Write means the final dot was never written: not sent.
 	if _, err := w.Write(raw); err != nil {
 		return failure(err, false, "writing the message")
 	}
+	// Close flushes what is still buffered, writes the final dot and reads
+	// the reply. Nothing here can tell a write that failed before the dot
+	// from one that failed after it (TLS also writes while reading, for an
+	// alert or a KeyUpdate), so any failure counts as after the dot. The
+	// message may have been sent, and a duplicate is worse than an unknown.
 	if err := w.Close(); err != nil {
-		// Close writes the final dot and then reads the reply. If no write
-		// of the message failed, the dot went out and it was the reply that
-		// was lost. Writes TLS makes while reading the reply do not count.
-		afterDot := !c.raw.messageWriteFailed()
-		if afterDot {
-			c.quit()
-		}
-		return failure(err, afterDot, "end of DATA")
+		c.quit()
+		return failure(err, true, "end of DATA")
 	}
 	c.quit()
 	return nil
@@ -329,41 +334,4 @@ func allASCII(ss []string) bool {
 		}
 	}
 	return true
-}
-
-// trackedConn is the TCP connection under TLS. It records whether a write
-// of the message failed, which tells a lost reply apart from a message that
-// never fully went out.
-//
-// startMessage marks the start of the message. The client writes the body
-// and the final dot without reading, so every write from then until the
-// first read is the message. A write after that read is not: TLS writes while
-// reading, to answer a KeyUpdate or to send an alert, and such a write can
-// fail after the dot is out. Such a failure leaves the flag clear, so the
-// outcome is Unknown: once the dot may be out, the message may have been sent.
-type trackedConn struct {
-	net.Conn
-	sending    atomic.Bool // startMessage ran and no read has begun since
-	sendFailed atomic.Bool // a write failed while sending was set
-}
-
-func (t *trackedConn) startMessage() {
-	t.sendFailed.Store(false)
-	t.sending.Store(true)
-}
-
-// messageWriteFailed reports whether a write of the message failed.
-func (t *trackedConn) messageWriteFailed() bool { return t.sendFailed.Load() }
-
-func (t *trackedConn) Read(b []byte) (int, error) {
-	t.sending.Store(false)
-	return t.Conn.Read(b)
-}
-
-func (t *trackedConn) Write(b []byte) (int, error) {
-	n, err := t.Conn.Write(b)
-	if err != nil && t.sending.Load() {
-		t.sendFailed.Store(true)
-	}
-	return n, err
 }

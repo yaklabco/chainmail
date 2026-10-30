@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/textproto"
 	"slices"
 	"strings"
 	"sync"
@@ -422,67 +423,6 @@ func TestFailure(t *testing.T) {
 	}
 }
 
-// Only a write that fails between startMessage and the next read counts as
-// a failed message write.
-func TestTrackedConnRecordsMessageWriteFailure(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		// before runs on a working pipe, then the far end closes and a write fails.
-		before func(*trackedConn)
-		want   bool
-	}{
-		{name: "before startMessage", before: func(*trackedConn) {}, want: false},
-		{name: "after startMessage", before: func(tc *trackedConn) { tc.startMessage() }, want: true},
-		{name: "after a good message write", before: func(tc *trackedConn) {
-			tc.startMessage()
-			if _, err := tc.Write([]byte("body")); err != nil {
-				t.Errorf("Write: %v", err)
-			}
-		}, want: true},
-		{name: "after the read that follows the message", before: func(tc *trackedConn) {
-			tc.startMessage()
-			if _, err := tc.Write([]byte("body\r\n.\r\n")); err != nil {
-				t.Errorf("Write: %v", err)
-			}
-			if _, err := tc.Read(make([]byte, 8)); err != nil {
-				t.Errorf("Read: %v", err)
-			}
-		}, want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			a, b := net.Pipe()
-			tc := &trackedConn{Conn: a}
-			go func() { // the far end: drain writes, answer once
-				buf := make([]byte, 64)
-				for {
-					if _, err := b.Read(buf); err != nil {
-						return
-					}
-					_, _ = b.Write([]byte("250 ok\r\n")) // only read in one case; the others leave it unread
-				}
-			}()
-			_ = a.SetDeadline(time.Now().Add(5 * time.Second)) // a pipe always accepts a deadline
-			tt.before(tc)
-			if tc.messageWriteFailed() {
-				t.Fatal("messageWriteFailed before any write failed")
-			}
-			if err := b.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := tc.Write([]byte("lost")); err == nil {
-				t.Fatal("Write to a closed pipe succeeded")
-			}
-			if got := tc.messageWriteFailed(); got != tt.want {
-				t.Errorf("messageWriteFailed() = %v, want %v", got, tt.want)
-			}
-			_ = a.Close() // nothing to do about a close error at test end
-		})
-	}
-}
-
 // Envelopes the client can tell are unsendable fail permanently, before
 // anything reaches the server.
 func TestSendRefusesBadEnvelopeLocally(t *testing.T) {
@@ -653,5 +593,17 @@ func TestSendWriteFailureMidMessageIsNotSent(t *testing.T) {
 				t.Errorf("captured %d messages, want none", n)
 			}
 		})
+	}
+}
+
+func TestSendErrorTextHidesProtocolErrorText(t *testing.T) {
+	t.Parallel()
+	perr := textproto.ProtocolError("short response: oops secret-rcpt@example.com")
+	se := failure(perr, false, "RCPT TO")
+	if msg := se.Error(); strings.Contains(msg, "secret-rcpt") || strings.Contains(msg, "oops") {
+		t.Errorf("Error() = %q, shows the server's malformed response", msg)
+	}
+	if !errors.Is(se, perr) {
+		t.Error("the protocol error is not in the chain")
 	}
 }
