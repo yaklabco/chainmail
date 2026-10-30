@@ -1303,3 +1303,60 @@ func TestWriteConcurrent(t *testing.T) {
 		})
 	}
 }
+
+// TestWriteGmailFolderNamesIgnoreCase: Gmail matches label names ignoring
+// case, and imapstore finds the folder a create, rename or delete names the
+// same way. Standard servers such as Dovecot match names exactly.
+func TestWriteGmailFolderNamesIgnoreCase(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := newGmail()
+	s.AddFolder("Receipts/2026", mailstore.RoleNone)
+	r := s.Add(Message{Folder: allMail, Subject: "labelled", Labels: []string{"Receipts", "Receipts/2026"}})
+	if err := s.CreateFolder(ctx, "RECEIPTS"); !errors.Is(err, mailstore.ErrExists) {
+		t.Errorf("CreateFolder in another case = %v, want ErrExists", err)
+	}
+	if err := s.CreateFolder(ctx, "receipts/2027"); err != nil {
+		t.Fatal(err)
+	}
+	if got := folderNames(t, s); slices.Contains(got, "receipts") || !slices.Contains(got, "receipts/2027") {
+		t.Errorf("folders = %q, want receipts/2027 under the existing Receipts", got)
+	}
+	if err := s.DeleteFolder(ctx, "RECEIPTS/2027", false); err != nil {
+		t.Fatalf("DeleteFolder in another case: %v", err)
+	}
+	if err := s.DeleteFolder(ctx, "receipts", true); !errors.Is(err, mailstore.ErrRefused) {
+		t.Errorf("DeleteFolder of a label with a child, in another case = %v, want ErrRefused", err)
+	}
+	if err := s.RenameFolder(ctx, "receipts", "Bills"); err != nil {
+		t.Fatalf("RenameFolder in another case: %v", err)
+	}
+	if got := folderNames(t, s); !slices.Contains(got, "Bills") || !slices.Contains(got, "Bills/2026") || slices.Contains(got, "Receipts") {
+		t.Errorf("folders = %q, want Receipts and its child renamed to Bills", got)
+	}
+	if err := s.RenameFolder(ctx, "Bills", "BILLS"); err != nil {
+		t.Fatalf("RenameFolder to a change of case: %v", err)
+	}
+	if err := s.RenameFolder(ctx, "bills", "BILLS/Old"); !errors.Is(err, mailstore.ErrRefused) {
+		t.Errorf("RenameFolder under itself in another case = %v, want ErrRefused", err)
+	}
+	labels := fetch(t, s, r).Summary.Labels
+	slices.Sort(labels)
+	if !slices.Equal(labels, []string{"BILLS", "BILLS/2026"}) {
+		t.Errorf("labels = %q, want the renamed labels", labels)
+	}
+	if err := s.DeleteFolder(ctx, "bills/2026", true); err != nil {
+		t.Fatal(err)
+	}
+	if labels := fetch(t, s, r).Summary.Labels; !slices.Equal(labels, []string{"BILLS"}) {
+		t.Errorf("labels = %q, want BILLS/2026 gone", labels)
+	}
+
+	std := newHost()
+	if err := std.CreateFolder(ctx, "projects"); err != nil {
+		t.Errorf("standard CreateFolder of another case = %v, want a new folder", err)
+	}
+	if err := std.DeleteFolder(ctx, "PROJECTS", false); !errors.Is(err, mailstore.ErrNotFound) {
+		t.Errorf("standard DeleteFolder in another case = %v, want ErrNotFound", err)
+	}
+}

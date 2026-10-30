@@ -174,13 +174,13 @@ func (s *Store) folderLocked(name string) (mailstore.Folder, error) {
 }
 
 // existsLocked reports whether a folder is called name. INBOX matches in
-// any case, as IMAP has it.
+// any case, as IMAP has it, and on Gmail every name does.
 func (s *Store) existsLocked(name string) bool {
 	if strings.EqualFold(name, "INBOX") {
 		return true
 	}
-	_, ok := s.uidValidity[name]
-	return ok
+	_, err := s.namedLocked(name)
+	return err == nil
 }
 
 // holdsMail reports whether a Gmail folder holds messages itself rather
@@ -622,11 +622,33 @@ func (s *Store) createWithParentsLocked(name string) {
 func (s *Store) childrenLocked(name string) []mailstore.Folder {
 	var out []mailstore.Folder
 	for _, f := range s.folders {
-		if strings.HasPrefix(f.Name, name+delimiter) {
+		if s.underLocked(f.Name, name) {
 			out = append(out, f)
 		}
 	}
 	return out
+}
+
+// sameName reports whether a and b name one folder in a folder change:
+// INBOX in any case, and on Gmail any name without regard to case, as Gmail
+// matches labels and imapstore finds them.
+func (s *Store) sameName(a, b string) bool {
+	return a == b || ((s.gmail || strings.EqualFold(a, "INBOX")) && strings.EqualFold(a, b))
+}
+
+// underLocked reports whether name is below parent, matched as sameName matches.
+func (s *Store) underLocked(name, parent string) bool {
+	prefix := parent + delimiter
+	return len(name) > len(prefix) && s.sameName(name[:len(prefix)], prefix)
+}
+
+// namedLocked returns the folder a create, rename or delete names, matched
+// as sameName matches.
+func (s *Store) namedLocked(name string) (mailstore.Folder, error) {
+	if i := slices.IndexFunc(s.folders, func(f mailstore.Folder) bool { return s.sameName(f.Name, name) }); i >= 0 {
+		return s.folders[i], nil
+	}
+	return mailstore.Folder{}, fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, name)
 }
 
 // checkMutableLocked refuses changes to INBOX, role folders and, on Gmail,
@@ -642,37 +664,47 @@ func (s *Store) checkMutableLocked(f mailstore.Folder) error {
 // children too and creates missing parents of to. It refuses INBOX, role
 // folders, Gmail's own folders, and a folder moving under itself. A renamed
 // folder keeps its messages under new refs, and on Gmail the label is
-// renamed on every message, whose refs stay.
+// renamed on every message, whose refs stay. On Gmail names match
+// ignoring case, and a change of case alone renames the label.
 func (s *Store) RenameFolder(ctx context.Context, from, to string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.beginWrite(ctx, opRenameFolder); err != nil {
 		return err
 	}
-	f, err := s.folderLocked(from)
+	f, err := s.namedLocked(from)
 	if err != nil {
 		return err
 	}
+	from = f.Name
 	if err := s.checkMutableLocked(f); err != nil {
 		return err
 	}
 	if err := s.checkNameLocked(to); err != nil {
 		return err
 	}
-	if strings.HasPrefix(to, from+delimiter) {
+	if to == from {
+		return fmt.Errorf("%w: folder %q", mailstore.ErrExists, to)
+	}
+	if s.underLocked(to, from) {
 		return fmt.Errorf("%w: %s cannot move under itself", mailstore.ErrRefused, from)
 	}
 	moving := append([]mailstore.Folder{f}, s.childrenLocked(from)...)
-	renamed := func(name string) string { return to + strings.TrimPrefix(name, from) }
+	renamed := func(name string) string { return to + name[len(from):] }
 	for _, c := range moving {
 		if err := s.checkMutableLocked(c); err != nil {
 			return err
 		}
-		if err := s.checkNameLocked(renamed(c.Name)); err != nil {
+		next := renamed(c.Name)
+		if err := s.checkNameLocked(next); err != nil {
 			return err // a child's longer name may not fit in a ref
 		}
-		if s.existsLocked(renamed(c.Name)) {
-			return fmt.Errorf("%w: folder %q", mailstore.ErrExists, renamed(c.Name))
+		// On Gmail a change of case alone renames the label.
+		taken := strings.EqualFold(next, "INBOX") || slices.ContainsFunc(s.folders, func(o mailstore.Folder) bool {
+			return s.sameName(o.Name, next) && !slices.ContainsFunc(moving, func(m mailstore.Folder) bool { return m.Name == o.Name })
+		})
+		if taken {
+			return fmt.Errorf("%w: folder %q", mailstore.ErrExists, next)
 		}
 	}
 	if i := strings.LastIndex(to, delimiter); i > 0 {
@@ -700,16 +732,18 @@ func (s *Store) RenameFolder(ctx context.Context, from, to string) error {
 // Gmail's own folders, a folder with children, and a folder with mail
 // unless force. With force a standard folder's messages are deleted with
 // it, and a Gmail label is taken off its messages, which stay in All Mail.
+// On Gmail the name matches ignoring case.
 func (s *Store) DeleteFolder(ctx context.Context, name string, force bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.beginWrite(ctx, opDeleteFolder); err != nil {
 		return err
 	}
-	f, err := s.folderLocked(name)
+	f, err := s.namedLocked(name)
 	if err != nil {
 		return err
 	}
+	name = f.Name
 	if err := s.checkMutableLocked(f); err != nil {
 		return err
 	}
