@@ -133,7 +133,7 @@ func (s *storeSet) exclusive(ctx context.Context, acct config.ResolvedAccount, f
 		defer e.mu.Unlock()
 		// Logging out is best effort: the new store opens its own connections.
 		if err := e.cur.Close(); err != nil && s.logger != nil {
-			s.logger.Warn("logging out of the replaced store", "account", acct.Name, "err", err)
+			s.logger.Warn("logging out of the replaced store", "account", acct.Name, "reason", errReason(err))
 		}
 		e.retired = append(e.retired, e.cur)
 		e.retiredConnsLocked()
