@@ -8,8 +8,16 @@
 //
 // A standard harness's account has the folders INBOX, Sent, Drafts, Archive,
 // Trash and Junk with those roles, "/" as its hierarchy delimiter, and no
-// archive_folder setting. A Google harness's account has INBOX and
-// [Gmail]/All Mail, Sent Mail, Trash and Spam.
+// archive_folder setting unless a case's Config sets one. A Google
+// harness's account has INBOX and [Gmail]/All Mail, Sent Mail, Trash and
+// Spam.
+//
+// Rows of 7.1 that turn on what the server advertises or answers cannot be
+// set up through every harness, since the fake has no capabilities: a
+// server without MOVE or UIDPLUS, a transfer acknowledged without COPYUID,
+// an expunge that fails after a confirmed copy, a refused Gmail label
+// addition, and Gmail system folders that are hidden, localised or under
+// [Google Mail]. imapstore's scripted-server tests cover those.
 package storetest
 
 import (
@@ -115,11 +123,22 @@ func (m Message) Raw() []byte {
 // through the Store under test.
 type Seeder func(t *testing.T, msgs ...Message)
 
+// Config is the account configuration a case asks for. The zero Config is
+// the account the package comment describes.
+type Config struct {
+	// ArchiveFolder is the account's archive_folder setting: where Archive
+	// moves mail on standard accounts, in place of the folder with the
+	// \Archive role. Google accounts archive by label and ignore it. The
+	// case creates the folder before it archives.
+	ArchiveFolder string
+}
+
 // Harness makes a fresh account for each case.
 type Harness struct {
-	// New returns a Store on an account of the case's own and a Seeder for
-	// it. The harness closes the Store when t ends.
-	New func(t *testing.T) (mailstore.Store, Seeder)
+	// New returns a Store on an account of the case's own, configured as
+	// cfg says, and a Seeder for it. The harness closes the Store when t
+	// ends.
+	New func(t *testing.T, cfg Config) (mailstore.Store, Seeder)
 	// Gmail says the account is a Google account.
 	Gmail bool
 }
@@ -132,8 +151,10 @@ func Run(t *testing.T, h Harness) {
 			continue
 		}
 		t.Run(c.name, func(t *testing.T) {
-			s, seed := h.New(t)
-			c.run(&env{t: t, ctx: t.Context(), s: s, seed: seed, gmail: h.Gmail})
+			e := &env{t: t, ctx: t.Context(), gmail: h.Gmail}
+			e.open = func(cfg Config) { e.s, e.seed = h.New(t, cfg) }
+			e.open(Config{})
+			c.run(e)
 		})
 	}
 }
@@ -159,6 +180,8 @@ type env struct {
 	s     mailstore.Store
 	seed  Seeder
 	gmail bool
+	// open replaces s and seed with a fresh account configured as cfg says.
+	open func(cfg Config)
 }
 
 // day is a fixed date in October 2026.
@@ -405,6 +428,22 @@ func (e *env) wantWhere(token string, want ...string) {
 	}
 }
 
+// unread checks that the message whose subject is token, found with in, is
+// not \Seen: reads never set it.
+func (e *env) unread(token string, in ...string) {
+	e.t.Helper()
+	if got := e.only(strings.Join(in, ""), token).Flags; hasFold(got, `\Seen`) {
+		e.t.Errorf("%s flags = %q after reading it, want no \\Seen: reads never set it", token, got)
+	}
+}
+
+// bumped is r with another UIDVALIDITY, as a ref reads once its folder's
+// UIDVALIDITY has changed.
+func bumped(r ref.Ref) ref.Ref {
+	r.UIDValidity++
+	return r
+}
+
 func wantErr(t *testing.T, what string, err, want error) {
 	t.Helper()
 	if !errors.Is(err, want) {
@@ -417,6 +456,7 @@ var cases = []testCase{
 	{"Append to a missing folder is not found", both, appendMissingFolder},
 	{"Append refuses a flag IMAP cannot store", both, appendBadFlag},
 	{"Append on Gmail gives a ref an edit can follow", gmailOnly, appendThenEditGmail},
+	{"Append and FindByMessageID refs carry only what the server gives", gmailOnly, appendIdentityGmail},
 	{"Move gives new refs and the originals go", standardOnly, moveStandard},
 	{"Move into the folder a ref names keeps it", both, moveIntoOwnFolder},
 	{"Move to a missing folder changes nothing", both, moveMissingFolder},
@@ -425,11 +465,14 @@ var cases = []testCase{
 	{"Move to INBOX adds Inbox and keeps the ref", gmailOnly, moveToInboxGmail},
 	{"Move to Trash or Spam gives a ref there", gmailOnly, moveToBinGmail},
 	{"Move from Trash goes back to All Mail with the label", gmailOnly, moveFromTrashGmail},
+	{"Move from Spam to INBOX and from Trash to All Mail", gmailOnly, moveBackGmail},
 	{"Copy keeps the original", standardOnly, copyStandard},
 	{"Copy into its own folder duplicates", standardOnly, copyIntoOwnFolder},
 	{"Copy to a label adds it and keeps the ref", gmailOnly, copyToLabelGmail},
 	{"Copy to Trash or Spam moves there, as Gmail does", gmailOnly, copyToBinGmail},
+	{"Copy from Trash or Spam to All Mail is unsupported", gmailOnly, copyFromBinToAllMailGmail},
 	{"Archive", both, archive},
+	{"Archive goes to archive_folder when it is set", both, archiveConfigured},
 	{"Trash", both, trash},
 	{"Expunge deletes only the given messages", both, expunge},
 	{"StoreFlags adds and removes", both, storeFlags},
@@ -510,7 +553,7 @@ func appendThenEditGmail(e *env) {
 	}
 	e.checkKept(one(e.t, e.s.StoreFlags(e.ctx, []ref.Ref{r}, []string{`\Seen`}, nil)), r)
 	found, err := e.s.FindByMessageID(e.ctx, "INBOX", m.MessageID)
-	if err != nil || len(found) != 1 || found[0].Folder != "INBOX" || found[0].UID != r.UID {
+	if err != nil || len(found) != 1 || found[0] != r {
 		e.t.Errorf("FindByMessageID(INBOX) = %v, %v; want the append ref %v", found, err, r)
 	}
 	got := one(e.t, e.s.Archive(e.ctx, []ref.Ref{r}))
@@ -522,6 +565,42 @@ func appendThenEditGmail(e *env) {
 		e.t.Errorf("labels = %q after Archive", all.Labels)
 	}
 	e.readable(got.Ref, "CfAppendEdit")
+}
+
+// appendIdentityGmail: APPENDUID and SEARCH give no X-GM-MSGID, so the refs
+// Append and FindByMessageID return carry none, and once the UIDVALIDITY
+// they name changes they are stale, where a ref from a search, which
+// carries it, is found again. Writes keep what the ref they are given
+// carries.
+func appendIdentityGmail(e *env) {
+	m := e.in(e.msg("CfAppendID"), GmailAllMail)
+	r, err := e.s.Append(e.ctx, GmailAllMail, nil, m.Date, m.Raw())
+	if err != nil {
+		e.t.Fatalf("Append: %v", err)
+	}
+	searched := e.ref("CfAppendID")
+	if searched.GmailMsgID == 0 {
+		e.t.Errorf("search ref %v, want it to carry X-GM-MSGID", searched)
+	}
+	want := searched
+	want.GmailMsgID = 0
+	if r != want {
+		e.t.Errorf("Append ref = %v, want %v: APPENDUID gives no X-GM-MSGID", r, want)
+	}
+	found, err := e.s.FindByMessageID(e.ctx, GmailAllMail, m.MessageID)
+	if err != nil || len(found) != 1 || found[0] != want {
+		e.t.Errorf("FindByMessageID = %v, %v; want [%v]: SEARCH gives no X-GM-MSGID", found, err, want)
+	}
+	e.stale(bumped(r))
+	wantErr(e.t, "StoreFlags of the Append ref under another UIDVALIDITY", one(e.t, e.s.StoreFlags(e.ctx, []ref.Ref{bumped(r)}, []string{`\Flagged`}, nil)).Err, mailstore.ErrStaleRef)
+	e.readable(bumped(searched), "CfAppendID")
+	if got := e.only("", "CfAppendID").Flags; hasFold(got, `\Flagged`) {
+		e.t.Errorf("flags = %q, want the stale StoreFlags to change nothing", got)
+	}
+	trashed := one(e.t, e.s.Trash(e.ctx, []ref.Ref{r}))
+	e.checkPlaced(trashed, r, GmailTrash, "CfAppendID")
+	back := one(e.t, e.s.Move(e.ctx, []ref.Ref{trashed.Ref}, "INBOX"))
+	e.checkPlaced(back, trashed.Ref, GmailAllMail, "CfAppendID")
 }
 
 func moveStandard(e *env) {
@@ -618,6 +697,25 @@ func moveFromTrashGmail(e *env) {
 	}
 }
 
+// moveBackGmail: a move out of Spam to INBOX goes back to All Mail and
+// gains \Inbox; a move out of Trash to All Mail goes back and gains nothing.
+func moveBackGmail(e *env) {
+	e.seed(e.t, e.in(e.msg("CfBackSpam"), GmailSpam), e.in(e.msg("CfBackTrash"), GmailTrash))
+	sp, tr := e.ref("CfBackSpam", "spam"), e.ref("CfBackTrash", "trash")
+	e.checkPlaced(one(e.t, e.s.Move(e.ctx, []ref.Ref{sp}, "INBOX")), sp, GmailAllMail, "CfBackSpam")
+	e.wantWhere("CfBackSpam", GmailAllMail)
+	if labels := e.labels("CfBackSpam"); !hasFold(labels, `\Inbox`) {
+		e.t.Errorf("labels = %q, want \\Inbox", labels)
+	}
+	e.stale(sp)
+	e.checkPlaced(one(e.t, e.s.Move(e.ctx, []ref.Ref{tr}, GmailAllMail)), tr, GmailAllMail, "CfBackTrash")
+	e.wantWhere("CfBackTrash", GmailAllMail)
+	if labels := e.labels("CfBackTrash"); hasFold(labels, `\Inbox`) {
+		e.t.Errorf("labels = %q, want no \\Inbox: a move to All Mail adds no label", labels)
+	}
+	e.stale(tr)
+}
+
 func copyStandard(e *env) {
 	e.seed(e.t, e.msg("CfCopy"))
 	r := e.ref("CfCopy")
@@ -654,6 +752,26 @@ func copyToBinGmail(e *env) {
 	}
 }
 
+// copyFromBinToAllMailGmail: a message in Trash or Spam is not in All Mail,
+// and Gmail keeps one copy of a message, so copying it there is refused per
+// ref, while a ref in All Mail in the same batch is a no-op success.
+func copyFromBinToAllMailGmail(e *env) {
+	e.seed(e.t, e.in(e.msg("CfCopyBackTrash"), GmailTrash), e.msg("CfCopyBackAll"), e.in(e.msg("CfCopyBackSpam"), GmailSpam))
+	tr, all, sp := e.ref("CfCopyBackTrash", "trash"), e.ref("CfCopyBackAll"), e.ref("CfCopyBackSpam", "spam")
+	res := e.s.Copy(e.ctx, []ref.Ref{tr, all, sp}, GmailAllMail)
+	if len(res) != 3 {
+		e.t.Fatalf("Copy gave %d results for 3 refs", len(res))
+	}
+	wantErr(e.t, "Copy from Trash to All Mail", res[0].Err, mailstore.ErrUnsupported)
+	e.checkKept(res[1], all)
+	wantErr(e.t, "Copy from Spam to All Mail", res[2].Err, mailstore.ErrUnsupported)
+	e.wantWhere("CfCopyBackTrash", GmailTrash)
+	e.wantWhere("CfCopyBackAll", GmailAllMail)
+	e.wantWhere("CfCopyBackSpam", GmailSpam)
+	e.readable(tr, "CfCopyBackTrash")
+	e.readable(sp, "CfCopyBackSpam")
+}
+
 func archive(e *env) {
 	if e.gmail {
 		e.gmailWithWork("CfArchive")
@@ -682,6 +800,35 @@ func archive(e *env) {
 	e.wantWhere("CfArchive", "Archive")
 }
 
+// archiveConfigured: with archive_folder set, Archive moves there and not
+// to the folder with the \Archive role. Google accounts archive by label
+// whatever it says.
+func archiveConfigured(e *env) {
+	const saved = "Cf Saved"
+	e.open(Config{ArchiveFolder: saved})
+	if e.gmail {
+		e.seed(e.t, e.msg("CfArchiveSet"))
+		r := e.ref("CfArchiveSet")
+		e.checkKept(one(e.t, e.s.Archive(e.ctx, []ref.Ref{r})), r)
+		if got := e.labels("CfArchiveSet"); hasFold(got, `\Inbox`) {
+			e.t.Errorf("labels = %q, want \\Inbox gone", got)
+		}
+		e.wantWhere("CfArchiveSet", GmailAllMail)
+		return
+	}
+	e.mustCreate(saved)
+	e.seed(e.t, e.msg("CfArchiveSet"), e.in(e.msg("CfArchiveSetDone"), saved))
+	r, done := e.ref("CfArchiveSet"), e.ref("CfArchiveSetDone", saved)
+	res := e.s.Archive(e.ctx, []ref.Ref{r, done})
+	if len(res) != 2 {
+		e.t.Fatalf("Archive gave %d results for 2 refs", len(res))
+	}
+	e.checkPlaced(res[0], r, saved, "CfArchiveSet")
+	e.checkKept(res[1], done)
+	e.wantWhere("CfArchiveSet", saved)
+	e.wantWhere("CfArchiveSetDone", saved)
+}
+
 func trash(e *env) {
 	e.seed(e.t, e.msg("CfTrash"), e.in(e.msg("CfTrashed"), e.trash()))
 	r, done := e.ref("CfTrash"), e.ref("CfTrashed", "trash")
@@ -703,7 +850,11 @@ func expunge(e *env) {
 	}
 	e.seed(e.t, e.msg("CfExpunge"), keep, e.in(e.msg("CfExpungeTrash"), e.trash()), e.in(e.msg("CfExpungeTrashKeep"), e.trash()))
 	r, t := e.ref("CfExpunge"), e.ref("CfExpungeTrash", "trash")
-	for i, got := range e.s.Expunge(e.ctx, []ref.Ref{r, t}) {
+	res := e.s.Expunge(e.ctx, []ref.Ref{r, t})
+	if len(res) != 2 {
+		e.t.Fatalf("Expunge gave %d results for 2 refs", len(res))
+	}
+	for i, got := range res {
 		if got != (mailstore.RefResult{}) {
 			e.t.Errorf("Expunge result %d = %+v, want a zero ref", i, got)
 		}
@@ -755,6 +906,9 @@ func storeLabelsStandard(e *env) {
 	e.seed(e.t, e.msg("CfLabelsStd"))
 	r := e.ref("CfLabelsStd")
 	res := e.s.StoreLabels(e.ctx, []ref.Ref{r, r}, []string{"Work"}, nil)
+	if len(res) != 2 {
+		e.t.Fatalf("StoreLabels gave %d results for 2 refs", len(res))
+	}
 	for i, got := range res {
 		wantErr(e.t, fmt.Sprintf("StoreLabels result %d", i), got.Err, mailstore.ErrUnsupported)
 	}
@@ -920,10 +1074,11 @@ func deleteFolder(e *env) {
 func findByMessageID(e *env) {
 	e.seed(e.t, e.msg("CfFind"), e.in(e.msg("CfFindTrash"), e.trash()))
 	r := e.ref("CfFind")
+	r.GmailMsgID = 0 // SEARCH gives no X-GM-MSGID
 	id := e.msg("CfFind").MessageID
 	for _, form := range []string{id, "<" + id + ">", " <" + id + "> "} {
 		got, err := e.s.FindByMessageID(e.ctx, e.home(), form)
-		if err != nil || len(got) != 1 || got[0].Folder != r.Folder || got[0].UID != r.UID || got[0].UIDValidity != r.UIDValidity {
+		if err != nil || len(got) != 1 || got[0] != r {
 			e.t.Errorf("FindByMessageID(%s, %q) = %v, %v; want %v", e.home(), form, got, err, r)
 		}
 	}
@@ -935,13 +1090,13 @@ func findByMessageID(e *env) {
 	if got, err := e.s.FindByMessageID(e.ctx, e.home(), e.msg("CfFindTrash").MessageID); err != nil || len(got) != 0 {
 		e.t.Errorf("FindByMessageID of a message in Trash, searching %s = %v, %v; want nothing", e.home(), got, err)
 	}
-	if got, err := e.s.FindByMessageID(e.ctx, e.trash(), e.msg("CfFindTrash").MessageID); err != nil || len(got) != 1 || got[0].Folder != e.trash() {
+	if got, err := e.s.FindByMessageID(e.ctx, e.trash(), e.msg("CfFindTrash").MessageID); err != nil || len(got) != 1 || got[0].Folder != e.trash() || got[0].GmailMsgID != 0 {
 		e.t.Errorf("FindByMessageID in Trash = %v, %v", got, err)
 	}
 	if e.gmail {
 		got, err := e.s.FindByMessageID(e.ctx, "INBOX", id)
-		if err != nil || len(got) != 1 || got[0].Folder != "INBOX" {
-			e.t.Fatalf("FindByMessageID(INBOX) = %v, %v; want a ref in INBOX", got, err)
+		if err != nil || len(got) != 1 || got[0].Folder != "INBOX" || got[0].GmailMsgID != 0 {
+			e.t.Fatalf("FindByMessageID(INBOX) = %v, %v; want a ref in INBOX without X-GM-MSGID", got, err)
 		}
 		e.readable(got[0], "CfFind")
 	}
@@ -1093,6 +1248,9 @@ func fetchMessages(e *env) {
 	want := e.richMessage("CfFetch")
 	e.seed(e.t, want, e.msg("CfFetchPlain"))
 	r, plain := e.ref("CfFetch"), e.ref("CfFetchPlain")
+	// A write first leaves the folder open read-write; the reads after it
+	// still must not set \Seen.
+	e.checkKept(one(e.t, e.s.StoreFlags(e.ctx, []ref.Ref{plain}, []string{"$Conformance"}, nil)), plain)
 	res := e.s.FetchMessages(e.ctx, []ref.Ref{r, foreign(r), plain, r})
 	if len(res) != 4 {
 		e.t.Fatalf("FetchMessages gave %d results for 4 refs", len(res))
@@ -1134,12 +1292,17 @@ func fetchMessages(e *env) {
 	if got := res[3].Message; got.Summary.Ref != r {
 		e.t.Errorf("repeated ref read as %v", got.Summary.Ref)
 	}
+	e.unread("CfFetch")
+	e.unread("CfFetchPlain")
 }
 
 func streamPart(e *env) {
 	want := e.richMessage("CfStream")
 	e.seed(e.t, want)
 	r := e.ref("CfStream")
+	// A write first leaves the folder open read-write; the reads after it
+	// still must not set \Seen.
+	e.checkKept(one(e.t, e.s.StoreFlags(e.ctx, []ref.Ref{r}, []string{"$Conformance"}, nil)), r)
 	read := func(part string) (mailstore.PartInfo, []byte, error) {
 		info, rc, err := e.s.StreamPart(e.ctx, r, part)
 		if err != nil {
@@ -1156,6 +1319,7 @@ func streamPart(e *env) {
 	if !bytes.Contains(whole, []byte(want.Body)) || !bytes.Contains(whole, []byte("Subject: CfStream")) {
 		e.t.Errorf("whole message = %q", whole)
 	}
+	e.unread("CfStream")
 	for i, a := range want.Attachments {
 		info, data, err := read(AttachmentPart(i))
 		if err != nil {
@@ -1168,6 +1332,7 @@ func streamPart(e *env) {
 	}
 	_, _, err = read("9")
 	wantErr(e.t, "StreamPart of a missing part", err, mailstore.ErrNotFound)
+	e.unread("CfStream")
 	if got := one(e.t, e.s.Expunge(e.ctx, []ref.Ref{r})); got.Err != nil {
 		e.t.Fatal(got.Err)
 	}

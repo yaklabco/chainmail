@@ -19,10 +19,12 @@ import (
 // conformance_integration_test.go.
 func TestConformanceFakeGmail(t *testing.T) {
 	t.Parallel()
-	storetest.Run(t, storetest.Harness{Gmail: true, New: func(t *testing.T) (mailstore.Store, storetest.Seeder) {
+	storetest.Run(t, storetest.Harness{Gmail: true, New: func(t *testing.T, cfg storetest.Config) (mailstore.Store, storetest.Seeder) {
 		ca := tlstest.New(t)
 		srv := fakegmail.Start(t, ca, "conformance@example.test", "pw")
-		s := New(testAccount("gmail", srv.Endpoint, true), passwordCreds("conformance@example.test", "pw"), Options{RootCAs: ca.Pool, Backoff: noBackoff})
+		acct := testAccount("gmail", srv.Endpoint, true)
+		acct.ArchiveFolder = cfg.ArchiveFolder
+		s := New(acct, passwordCreds("conformance@example.test", "pw"), Options{RootCAs: ca.Pool, Backoff: noBackoff})
 		t.Cleanup(func() { _ = s.Close() })
 		return s, func(t *testing.T, msgs ...storetest.Message) {
 			t.Helper()

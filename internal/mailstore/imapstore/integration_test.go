@@ -47,8 +47,16 @@ func doveUser(t *testing.T) string {
 
 func doveStore(t *testing.T, user string) *Store {
 	t.Helper()
+	return doveConfiguredStore(t, user, "")
+}
+
+// doveConfiguredStore is doveStore with the account's archive_folder set to
+// archive.
+func doveConfiguredStore(t *testing.T, user, archive string) *Store {
+	t.Helper()
 	acct := testAccount("dove", dove().Endpoint, false)
 	acct.Username = user
+	acct.ArchiveFolder = archive
 	s := New(acct, passwordCreds(user, dovecot.Password), Options{RootCAs: dove().CA.Pool, Backoff: noBackoff})
 	t.Cleanup(func() { _ = s.Close() })
 	return s
