@@ -65,8 +65,8 @@ message Sent {
   // The ref of the copy in the Sent folder. Empty when the Sent copy could
   // not be found or stored.
   string sent_ref = 2;
-  // True when the idempotency key had already been used: the message was
-  // sent before and was not sent again.
+  // True when this is the stored result of an earlier call with the same
+  // idempotency key: nothing was sent again.
   bool duplicate = 3;
   // Fixed text saying why storing the Sent copy failed. Empty when it worked.
   // The message itself was sent.
@@ -112,9 +112,14 @@ message SendRequest {
   bool dry_run = 2;
   // Save the message to Drafts instead of sending it.
   bool draft = 3;
-  // Required unless dry_run or draft: 1 to 128 of A-Z, a-z, 0-9 and . _ : -.
-  // A second call with the same key returns the first result and does not
-  // send again.
+  // Required unless dry_run or draft, which ignore it: 1 to 128 of A-Z, a-z,
+  // 0-9 and . _ : -. A key is scoped to the sending account and kept for 7
+  // days. A second call with the same key and the same request does not send
+  // again. It returns the first call's result with duplicate set, waiting
+  // for the first call if that is still running. The exception is a first
+  // attempt that failed in a way that is safe to retry, such as a temporary
+  // server error before the message was handed over. Then the second call is
+  // a new attempt. The same key with a different request is INVALID_ARGUMENT.
   string idempotency_key = 4;
 }
 
@@ -133,7 +138,7 @@ message SendRawRequest {
   bytes raw = 2;
   // The SMTP recipients. Empty means To, Cc and Bcc of the message.
   repeated string envelope_to = 3;
-  // Required: 1 to 128 of A-Z, a-z, 0-9 and . _ : -.
+  // Required, as in SendRequest. SendRaw has no dry run or draft.
   string idempotency_key = 4;
 }
 
@@ -229,7 +234,7 @@ message UpdateDraftResponse {
 message SendDraftRequest {
   // The draft to send. It must be in Drafts.
   string ref = 1;
-  // Required: 1 to 128 of A-Z, a-z, 0-9 and . _ : -.
+  // Required, as in SendRequest. SendDraft has no dry run or draft.
   string idempotency_key = 2;
 }
 
@@ -254,6 +259,9 @@ message UploadHeader {
   string filename = 1;
   // A type/subtype such as application/pdf. Empty means sniffed from the bytes.
   string content_type = 2;
+  // Required: the account the upload is for. Its max_message_size caps the
+  // upload, and the handle may only be used in sends from that account.
+  string account = 3;
 }
 
 // UploadAttachmentRequest is one part of an upload: the header first, then

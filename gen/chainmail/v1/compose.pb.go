@@ -372,8 +372,8 @@ type Sent struct {
 	// The ref of the copy in the Sent folder. Empty when the Sent copy could
 	// not be found or stored.
 	SentRef string `protobuf:"bytes,2,opt,name=sent_ref,json=sentRef,proto3" json:"sent_ref,omitempty"`
-	// True when the idempotency key had already been used: the message was
-	// sent before and was not sent again.
+	// True when this is the stored result of an earlier call with the same
+	// idempotency key: nothing was sent again.
 	Duplicate bool `protobuf:"varint,3,opt,name=duplicate,proto3" json:"duplicate,omitempty"`
 	// Fixed text saying why storing the Sent copy failed. Empty when it worked.
 	// The message itself was sent.
@@ -671,9 +671,14 @@ type SendRequest struct {
 	DryRun bool `protobuf:"varint,2,opt,name=dry_run,json=dryRun,proto3" json:"dry_run,omitempty"`
 	// Save the message to Drafts instead of sending it.
 	Draft bool `protobuf:"varint,3,opt,name=draft,proto3" json:"draft,omitempty"`
-	// Required unless dry_run or draft: 1 to 128 of A-Z, a-z, 0-9 and . _ : -.
-	// A second call with the same key returns the first result and does not
-	// send again.
+	// Required unless dry_run or draft, which ignore it: 1 to 128 of A-Z, a-z,
+	// 0-9 and . _ : -. A key is scoped to the sending account and kept for 7
+	// days. A second call with the same key and the same request does not send
+	// again. It returns the first call's result with duplicate set, waiting
+	// for the first call if that is still running. The exception is a first
+	// attempt that failed in a way that is safe to retry, such as a temporary
+	// server error before the message was handed over. Then the second call is
+	// a new attempt. The same key with a different request is INVALID_ARGUMENT.
 	IdempotencyKey string `protobuf:"bytes,4,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -793,7 +798,7 @@ type SendRawRequest struct {
 	Raw []byte `protobuf:"bytes,2,opt,name=raw,proto3" json:"raw,omitempty"`
 	// The SMTP recipients. Empty means To, Cc and Bcc of the message.
 	EnvelopeTo []string `protobuf:"bytes,3,rep,name=envelope_to,json=envelopeTo,proto3" json:"envelope_to,omitempty"`
-	// Required: 1 to 128 of A-Z, a-z, 0-9 and . _ : -.
+	// Required, as in SendRequest. SendRaw has no dry run or draft.
 	IdempotencyKey string `protobuf:"bytes,4,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -1429,7 +1434,7 @@ type SendDraftRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The draft to send. It must be in Drafts.
 	Ref string `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	// Required: 1 to 128 of A-Z, a-z, 0-9 and . _ : -.
+	// Required, as in SendRequest. SendDraft has no dry run or draft.
 	IdempotencyKey string `protobuf:"bytes,2,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -1614,7 +1619,10 @@ type UploadHeader struct {
 	// The file's name, as attachments show it.
 	Filename string `protobuf:"bytes,1,opt,name=filename,proto3" json:"filename,omitempty"`
 	// A type/subtype such as application/pdf. Empty means sniffed from the bytes.
-	ContentType   string `protobuf:"bytes,2,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
+	ContentType string `protobuf:"bytes,2,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
+	// Required: the account the upload is for. Its max_message_size caps the
+	// upload, and the handle may only be used in sends from that account.
+	Account       string `protobuf:"bytes,3,opt,name=account,proto3" json:"account,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1659,6 +1667,13 @@ func (x *UploadHeader) GetFilename() string {
 func (x *UploadHeader) GetContentType() string {
 	if x != nil {
 		return x.ContentType
+	}
+	return ""
+}
+
+func (x *UploadHeader) GetAccount() string {
+	if x != nil {
+		return x.Account
 	}
 	return ""
 }
@@ -1918,10 +1933,11 @@ const file_chainmail_v1_compose_proto_rawDesc = "" +
 	"\x06result\x18\x01 \x01(\v2\x1b.chainmail.v1.ComposeResultR\x06result\"&\n" +
 	"\x12DeleteDraftRequest\x12\x10\n" +
 	"\x03ref\x18\x01 \x01(\tR\x03ref\"\x15\n" +
-	"\x13DeleteDraftResponse\"M\n" +
+	"\x13DeleteDraftResponse\"g\n" +
 	"\fUploadHeader\x12\x1a\n" +
 	"\bfilename\x18\x01 \x01(\tR\bfilename\x12!\n" +
-	"\fcontent_type\x18\x02 \x01(\tR\vcontentType\"m\n" +
+	"\fcontent_type\x18\x02 \x01(\tR\vcontentType\x12\x18\n" +
+	"\aaccount\x18\x03 \x01(\tR\aaccount\"m\n" +
 	"\x17UploadAttachmentRequest\x124\n" +
 	"\x06header\x18\x01 \x01(\v2\x1a.chainmail.v1.UploadHeaderH\x00R\x06header\x12\x14\n" +
 	"\x04data\x18\x02 \x01(\fH\x00R\x04dataB\x06\n" +
