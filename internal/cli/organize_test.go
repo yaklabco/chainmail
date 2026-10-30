@@ -288,6 +288,11 @@ func TestCallChunkedBoundsAndOrder(t *testing.T) {
 	var inFlight, peak atomic.Int32
 	var mu sync.Mutex
 	var sizes []int
+	// Each call waits until maxCallsInFlight calls run at once, so the peak
+	// reaches the bound without relying on a sleep. A callChunked that runs
+	// fewer at once waits out the deadline and fails the peak check.
+	overlap := make(chan struct{})
+	var overlapped sync.Once
 	outs, err := callChunked(t.Context(), refs, func(_ context.Context, chunk []string) ([]*chainmailv1.RefOutcome, error) {
 		n := inFlight.Add(1)
 		defer inFlight.Add(-1)
@@ -297,17 +302,23 @@ func TestCallChunkedBoundsAndOrder(t *testing.T) {
 				break
 			}
 		}
+		if n >= maxCallsInFlight {
+			overlapped.Do(func() { close(overlap) })
+		}
 		mu.Lock()
 		sizes = append(sizes, len(chunk))
 		mu.Unlock()
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-overlap:
+		case <-time.After(5 * time.Second):
+		}
 		return fakeOutcomes(chunk, nil), nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p := peak.Load(); p > 4 || p < 2 {
-		t.Errorf("peak concurrency = %d, want 2 to 4", p)
+	if p := peak.Load(); p != maxCallsInFlight {
+		t.Errorf("peak concurrency = %d, want %d", p, maxCallsInFlight)
 	}
 	slices.Sort(sizes)
 	if !slices.Equal(sizes, []int{100, 500, 500, 500, 500, 500}) {
