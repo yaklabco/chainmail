@@ -112,6 +112,10 @@ func parseRef(cmd *cobra.Command, s string) (ref.Ref, error) {
 
 // draftSaved is the text output for a saved draft.
 func draftSaved(d *chainmailv1.Draft) string {
+	if d.GetRef() == "" {
+		// The server stored the draft without saying where.
+		return fmt.Sprintf("draft saved; search the Drafts folder for Message-ID <%s>\n", termText(d.GetMessageId()))
+	}
 	return fmt.Sprintf("draft saved %s\n", termText(d.GetRef()))
 }
 

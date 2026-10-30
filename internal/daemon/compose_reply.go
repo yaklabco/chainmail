@@ -63,7 +63,8 @@ func (c *composeService) Reply(ctx context.Context, req *connect.Request[chainma
 				return err
 			}
 			spec.To = mergeAddresses(p.To, spec.To)
-			spec.Cc = mergeAddresses(p.Cc, spec.Cc)
+			// An address already in To is not repeated in Cc.
+			spec.Cc = slices.DeleteFunc(mergeAddresses(p.Cc, spec.Cc), func(a mail.Address) bool { return hasAddress(spec.To, a) })
 			spec.Subject, spec.InReplyTo, spec.References, spec.Quote = p.Subject, p.InReplyTo, p.References, p.Quote
 			return nil
 		},
@@ -146,6 +147,11 @@ func (c *composeService) answer(ctx context.Context, cl caller, a answer) (*chai
 	if err != nil {
 		return nil, c.record(ctx, cl, entry, err)
 	}
+	if !a.dryRun && !a.draft {
+		if res, ok, err := c.replaySettled(ctx, cl, acct, a.key, entry); ok {
+			return res, err
+		}
+	}
 	spec, err := c.answerSpec(ctx, acct, a)
 	if err == nil {
 		err = checkSize(acct, inputSize(spec))
@@ -226,17 +232,25 @@ func (c *composeService) markOriginal(ctx context.Context, acct config.ResolvedA
 func mergeAddresses(first, extra []mail.Address) []mail.Address {
 	out := slices.Clone(first)
 	for _, a := range extra {
-		if !slices.ContainsFunc(out, func(b mail.Address) bool { return strings.EqualFold(a.Address, b.Address) }) {
+		if !hasAddress(out, a) {
 			out = append(out, a)
 		}
 	}
 	return out
 }
 
-// original reads the message r points at in full, as a reply or forward
-// quotes it: the header from FetchMessages, the text and HTML from its raw
-// MIME (the whole message streamed when a text part was clipped), and,
-// with attachments, every attachment part streamed.
+// hasAddress reports whether list has a's address, compared without case.
+func hasAddress(list []mail.Address, a mail.Address) bool {
+	return slices.ContainsFunc(list, func(b mail.Address) bool { return strings.EqualFold(a.Address, b.Address) })
+}
+
+// original reads the message r points at, as a reply or forward quotes it:
+// the header from FetchMessages, the text and HTML from its raw MIME (the
+// whole message streamed when a text part was clipped), and, with
+// attachments, every attachment part streamed. A failed read fails the
+// call rather than quote part of the original. When the text can only be
+// had cut short, because the whole message is over the account's limit or
+// a part over a reading cap, the quote ends with truncatedMarker.
 func (c *composeService) original(ctx context.Context, acct config.ResolvedAccount, r ref.Ref, attachments bool) (compose.Original, error) {
 	st := c.s.stores.get(acct)
 	res := st.FetchMessages(ctx, []ref.Ref{r})
@@ -248,18 +262,23 @@ func (c *composeService) original(ctx context.Context, acct config.ResolvedAccou
 	}
 	msg := res[0].Message
 	raw := msg.Raw
+	truncated := false
 	if msg.TextClipped {
 		_, full, err := readPart(ctx, st, r, "", acct.MaxMessageSize)
-		if err == nil {
+		switch {
+		case errors.Is(err, errPartTooLarge):
+			truncated = true
+		case err != nil:
+			return compose.Original{}, err
+		default:
 			raw = full
-		} else {
-			c.s.opts.Logger.Debug("reading the whole original; quoting the clipped text", "account", acct.Name, "err", err)
 		}
 	}
 	body, err := render.Render(raw, render.Options{Full: true})
 	if err != nil {
-		c.s.opts.Logger.Debug("rendering the original", "account", acct.Name, "err", err)
+		return compose.Original{}, fmt.Errorf("rendering the original: %w", err)
 	}
+	htm, htmlCut := htmlPart(raw)
 	orig := compose.Original{
 		MessageID:  validMsgID(mailstore.MessageIDs([]string{msg.MessageID})),
 		References: validMsgIDs(mailstore.MessageIDs(msg.References)),
@@ -270,7 +289,10 @@ func (c *composeService) original(ctx context.Context, acct config.ResolvedAccou
 		Subject:    msg.Summary.Subject,
 		Date:       msg.Summary.Date,
 		Text:       body.Text,
-		HTML:       htmlPart(raw),
+		HTML:       htm,
+	}
+	if truncated || body.Truncated || htmlCut {
+		markTruncated(&orig)
 	}
 	if attachments {
 		if orig.Attachments, err = c.originalAttachments(ctx, st, acct, r, msg.Attachments); err != nil {
@@ -278,6 +300,22 @@ func (c *composeService) original(ctx context.Context, acct config.ResolvedAccou
 		}
 	}
 	return orig, nil
+}
+
+// truncatedMarker is the last line of a quote whose original text is incomplete.
+const truncatedMarker = "[quoted text truncated]"
+
+// markTruncated ends the original's text, and its HTML when it has any,
+// with truncatedMarker, so the quote in both parts says it is incomplete.
+func markTruncated(orig *compose.Original) {
+	if t := strings.TrimRight(orig.Text, "\n"); t != "" {
+		orig.Text = t + "\n" + truncatedMarker + "\n"
+	} else {
+		orig.Text = truncatedMarker + "\n"
+	}
+	if orig.HTML != "" {
+		orig.HTML += "\n<p>" + truncatedMarker + "</p>\n"
+	}
 }
 
 // errOriginalTooLarge is a forward whose original attachments do not fit.
@@ -414,37 +452,41 @@ func validMsgIDs(ids []string) []string {
 }
 
 // htmlPart returns the first HTML part of raw that is not an attachment,
-// decoded to UTF-8, or "" when it has none.
-func htmlPart(raw []byte) string {
+// decoded to UTF-8, or "" when it has none. cut says the part is
+// incomplete: over maxHTMLBytes, or failing to decode partway.
+func htmlPart(raw []byte) (htm string, cut bool) {
 	// An unknown charset still leaves a readable entity; no entity at all
 	// means there is no HTML to quote.
 	e, _ := message.Read(bytes.NewReader(raw))
 	if e == nil {
-		return ""
+		return "", false
 	}
 	return findHTML(e, 0)
 }
 
-func findHTML(e *message.Entity, depth int) string {
+func findHTML(e *message.Entity, depth int) (string, bool) {
 	if depth > maxMIMEDepth || leadingType(e.Header.Get("Content-Disposition")) == "attachment" {
-		return ""
+		return "", false
 	}
 	if mr := e.MultipartReader(); mr != nil {
 		for {
 			p, _ := mr.NextPart() // a part with an unknown charset comes with an error but is still readable
 			if p == nil {
-				return ""
+				return "", false
 			}
-			if s := findHTML(p, depth+1); s != "" {
-				return s
+			if s, cut := findHTML(p, depth+1); s != "" {
+				return s, cut
 			}
 		}
 	}
 	if leadingType(e.Header.Get("Content-Type")) != "text/html" {
-		return ""
+		return "", false
 	}
-	b, _ := io.ReadAll(io.LimitReader(e.Body, maxHTMLBytes)) // a decoding error keeps what was read
-	return string(b)
+	b, err := io.ReadAll(io.LimitReader(e.Body, maxHTMLBytes+1)) // a decoding error keeps what was read
+	if len(b) > maxHTMLBytes {
+		return string(b[:maxHTMLBytes]), true
+	}
+	return string(b), err != nil
 }
 
 // leadingType is the lower-case type of a Content-Type or

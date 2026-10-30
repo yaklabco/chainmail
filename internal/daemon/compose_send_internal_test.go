@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -20,6 +22,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/sender"
 	"github.com/jamesainslie/chainmail/internal/testutil/smtptest"
 	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
+	"github.com/jamesainslie/chainmail/internal/upload"
 )
 
 // TestRunDialsWhileBuilding proves the SMTP dial and the build overlap:
@@ -362,5 +365,66 @@ func TestRequestHashIgnoresRecipientOrder(t *testing.T) {
 	req := spec([]string{"b@x", "a@x"}, nil, nil)
 	if _, err := requestHash(req, nil); err != nil || req.GetSpec().GetTo()[0] != "b@x" {
 		t.Error("requestHash reordered the caller's request")
+	}
+}
+
+// TestSendReplaysWithoutReadingUploads repeats a settled send whose upload
+// still lives but can no longer be read. The stored outcome is replayed
+// before any upload is opened, so the read failure does not hide it.
+func TestSendReplaysWithoutReadingUploads(t *testing.T) {
+	t.Parallel()
+	s, stateDB := newTestServer(t)
+	ctx := peerContext(t.Context())
+	dir := t.TempDir()
+	var err error
+	if s.uploads, err = upload.New(dir, uploadTTL, time.Now); err != nil {
+		t.Fatal(err)
+	}
+	c := newComposeService(s)
+	c.dial = func(context.Context, provider.Endpoint, auth.Credentials, sender.DialOptions) (*sender.Conn, error) {
+		t.Error("a repeated send dialed")
+		return nil, errors.New("no dial")
+	}
+	info, err := s.uploads.Put(ctx, "a.txt", "text/plain", strings.NewReader("attached"), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.own(info.Handle, "host")
+	// A directory in the file's place: the handle is live, its read fails.
+	path := filepath.Join(dir, info.Handle)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.uploads.Open(info.Handle); err == nil || errors.Is(err, upload.ErrUnknownHandle) {
+		t.Fatalf("Open = %v, want a read failure; the test proves nothing", err)
+	}
+
+	sent, err := proto.Marshal(&chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Sent{Sent: &chainmailv1.Sent{MessageId: "first@example.com"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.idem.Begin(ctx, "host", "done", sha256.Sum256([]byte("first"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.idem.Finish(ctx, "host", "done", idempotency.Done, sent); err != nil {
+		t.Fatal(err)
+	}
+	req := &chainmailv1.SendRequest{IdempotencyKey: "done", Spec: &chainmailv1.ComposeSpec{
+		Account: "host", To: []string{"you@example.net"}, Subject: "s",
+		Content: &chainmailv1.Content{Attachments: []string{info.Handle}},
+	}}
+	res, err := c.send(ctx, caller{uid: 1, client: "test"}, req)
+	if err != nil || !res.GetSent().GetDuplicate() || res.GetSent().GetMessageId() != "first@example.com" {
+		t.Errorf("repeat = %+v, %v, want the stored result as a duplicate", res, err)
+	}
+	var dups int
+	if err := stateDB.QueryRowContext(ctx, "SELECT count(*) FROM audit WHERE decision = 'duplicate'").Scan(&dups); err != nil {
+		t.Fatal(err)
+	}
+	if dups != 1 {
+		t.Errorf("duplicate audit rows = %d, want 1", dups)
 	}
 }

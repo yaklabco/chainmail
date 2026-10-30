@@ -247,10 +247,15 @@ func TestSendIdempotencyKeyOverride(t *testing.T) {
 	if keys := e.keys(t); len(keys) != 1 || keys[0] != "my-key.1" {
 		t.Errorf("keys = %q, want [my-key.1]", keys)
 	}
-	// The key now names that message; another body under it is refused.
+	// The key now names that settled send. Its outcome is replayed before
+	// the request is read, so another body under it sends nothing and gets
+	// the first result.
 	got := e.run(t, Env{}, sendArgs("--body", "Different", "--idempotency-key", "my-key.1")...)
-	if got.code != 2 || errorReason(t, got.stderr) != "INVALID_ARGUMENT" {
+	if got.code != 0 || !strings.Contains(got.stdout, `"duplicate":true`) {
 		t.Errorf("reused key: %+v", got)
+	}
+	if n := len(e.smtp.Messages()); n != 1 {
+		t.Errorf("captured %d messages, want 1", n)
 	}
 }
 
@@ -561,5 +566,19 @@ func TestComposeResultCleansMessageIDOnTerminal(t *testing.T) {
 	}
 	if s := out.String(); strings.ContainsAny(s, "\x1b\x07\u202e") {
 		t.Errorf("terminal output = %q, still holds control or bidi characters", s)
+	}
+}
+
+// A draft the server stored without naming it has no ref. The table output
+// says where to find it instead of printing an empty ref.
+func TestDraftWithoutARef(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	res := &chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Draft{Draft: &chainmailv1.Draft{MessageId: "d.1@example.com"}}}
+	if err := writeComposeResult(Env{Stdout: &out}, &globals{output: "table"}, false, &chainmailv1.SendResponse{Result: res}, res); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "search the Drafts folder") || !strings.Contains(got, "<d.1@example.com>") {
+		t.Errorf("output = %q", got)
 	}
 }

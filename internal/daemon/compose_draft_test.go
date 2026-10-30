@@ -2,8 +2,11 @@ package daemon_test
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -340,5 +343,152 @@ func TestGmailDrafts(t *testing.T) {
 	}
 	if !gone(t, e.gmail, parseRef(t, d2.GetRef())) {
 		t.Error("the deleted Gmail draft is still there")
+	}
+}
+
+// gmailDraftsFolder makes h behave as the IMAP store does on Gmail: an
+// append to [Gmail]/Drafts returns a ref in that folder, without
+// X-GM-MSGID, while the message itself is in All Mail with the Drafts
+// label. Refs into Drafts are served from All Mail. FindByMessageID returns
+// refs without X-GM-MSGID, as a SEARCH does. Expunge waits until a
+// FindByMessageID has returned, so a lookup runs while the draft is still
+// there.
+func gmailDraftsFolder(t *testing.T, h *hookStore) {
+	const folder, validity = "[Gmail]/Drafts", 7
+	var (
+		mu     sync.Mutex
+		inMail = map[uint32]ref.Ref{}
+		looked = make(chan struct{})
+		once   sync.Once
+	)
+	toAllMail := func(r ref.Ref) ref.Ref {
+		mu.Lock()
+		defer mu.Unlock()
+		if a, ok := inMail[r.UID]; ok && r.Folder == folder {
+			return a
+		}
+		return r
+	}
+	h.append = func(ctx context.Context, f string, flags []string, date time.Time, raw []byte) (ref.Ref, error) {
+		a, err := h.Store.Append(ctx, f, flags, date, raw)
+		if err != nil || f != folder {
+			return a, err
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		uid := uint32(len(inMail) + 1)
+		inMail[uid] = a
+		return ref.Ref{Account: a.Account, Folder: folder, UIDValidity: validity, UID: uid}, nil
+	}
+	h.fetch = func(ctx context.Context, refs []ref.Ref) []mailstore.MessageResult {
+		mapped := make([]ref.Ref, len(refs))
+		for i, r := range refs {
+			mapped[i] = toAllMail(r)
+		}
+		return h.Store.FetchMessages(ctx, mapped)
+	}
+	h.stream = func(ctx context.Context, r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error) {
+		return h.Store.StreamPart(ctx, toAllMail(r), part)
+	}
+	h.find = func(ctx context.Context, f, id string) ([]ref.Ref, error) {
+		defer once.Do(func() { close(looked) })
+		refs, err := h.Store.FindByMessageID(ctx, f, id)
+		for i := range refs {
+			refs[i].GmailMsgID = 0
+		}
+		return refs, err
+	}
+	h.expunge = func(ctx context.Context, refs []ref.Ref) []mailstore.RefResult {
+		select {
+		case <-looked:
+		case <-time.After(5 * time.Second):
+			t.Error("Expunge ran without a FindByMessageID")
+		}
+		mapped := make([]ref.Ref, len(refs))
+		for i, r := range refs {
+			mapped[i] = toAllMail(r)
+		}
+		return h.Store.Expunge(ctx, mapped)
+	}
+}
+
+// TestGmailDraftInDraftsFolderIsNotTheSentCopy sends a Gmail draft whose
+// ref is in [Gmail]/Drafts. The Sent-copy lookup in All Mail finds the
+// draft too, under another folder's ref, and must tell it apart by
+// X-GM-MSGID, so the result names the message Gmail filed.
+func TestGmailDraftInDraftsFolderIsNotTheSentCopy(t *testing.T) {
+	t.Parallel()
+	hs := &hookStore{}
+	e := startSend(t, hooked("gmail", hs))
+	e.gmail.AddFolder("[Gmail]/Drafts", mailstore.RoleDrafts)
+	gmailDraftsFolder(t, hs)
+	var filed atomic.Pointer[ref.Ref]
+	e.smtp(t, smtptest.Options{
+		OnMessage: func(env smtptest.Envelope) {
+			r, err := e.gmail.Append(context.Background(), "[Gmail]/Sent Mail", []string{`\Seen`}, time.Time{}, env.Data)
+			if err != nil {
+				t.Errorf("filing the message: %v", err)
+				return
+			}
+			filed.Store(&r)
+		},
+	})
+	spec := hostSpec()
+	spec.Account = "gmail"
+	d := e.createDraft(t, spec)
+	if f := parseRef(t, d.GetRef()).Folder; f != "[Gmail]/Drafts" {
+		t.Fatalf("draft folder = %q; the test proves nothing", f)
+	}
+	res, err := e.sendDraft(t, d.GetRef(), "g")
+	if err != nil {
+		t.Fatalf("SendDraft: %v", err)
+	}
+	if r := filed.Load(); r == nil || res.GetSent().GetSentRef() != r.String() {
+		t.Errorf("sent_ref = %q, want the filed message %v", res.GetSent().GetSentRef(), r)
+	}
+}
+
+// TestUpdateDraftWithoutAnAppendedRef updates drafts on a server that
+// stores the new version without saying where (no APPENDUID). The old
+// version is removed once the new one is stored, and the result has no ref
+// rather than an unusable one. When removing the old one fails, the hint
+// points at the Drafts folder, not at a ref.
+func TestUpdateDraftWithoutAnAppendedRef(t *testing.T) {
+	t.Parallel()
+	hs := &hookStore{}
+	var unnamed atomic.Bool
+	hs.append = func(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) (ref.Ref, error) {
+		r, err := hs.Store.Append(ctx, folder, flags, date, raw)
+		if err == nil && unnamed.Load() {
+			return ref.Ref{}, nil
+		}
+		return r, err
+	}
+	e := startSend(t, hooked("host", hs))
+	first := e.createDraft(t, hostSpec())
+	second := e.createDraft(t, hostSpec())
+	unnamed.Store(true)
+
+	d, err := e.updateDraft(t, first.GetRef(), hostSpec())
+	if err != nil {
+		t.Fatalf("UpdateDraft: %v", err)
+	}
+	if d.GetRef() != "" || d.GetMessageId() == "" {
+		t.Errorf("draft = %+v, want no ref and the Message-ID", d)
+	}
+	if !gone(t, e.host, parseRef(t, first.GetRef())) {
+		t.Error("the old version is still there")
+	}
+	if refs, err := e.host.FindByMessageID(t.Context(), "Drafts", d.GetMessageId()); err != nil || len(refs) != 1 {
+		t.Errorf("new version in Drafts: %v, %v, want one", refs, err)
+	}
+
+	e.host.FailWrite("Expunge", fmt.Errorf("%w: lost", mailstore.ErrUnavailable))
+	_, err = e.updateDraft(t, second.GetRef(), hostSpec())
+	if hint := api.Detail(err).GetHint(); err == nil || !strings.Contains(hint, "Drafts folder") || strings.Contains(hint, "cm1:") {
+		t.Errorf("UpdateDraft with a failed removal: err = %v, hint %q, want a hint to search the Drafts folder", err, hint)
+	}
+	if gone(t, e.host, parseRef(t, second.GetRef())) {
+		t.Error("the old version is gone though its removal failed")
 	}
 }

@@ -108,15 +108,34 @@ func (c *composeService) updateDraft(ctx context.Context, req *chainmailv1.Updat
 	if err != nil {
 		return nil, err
 	}
-	entry.Targets = append(entry.Targets, d.GetRef(), msg.MessageID)
+	entry.Targets = appendTargets(entry.Targets, d.GetRef(), msg.MessageID)
 	if err := expungeOne(ctx, st, old); err != nil {
 		c.s.opts.Logger.Warn("removing the old version of a draft", "account", acct.Name, "ref", old.String(), "err", err)
 		cerr := composeErr(err)
 		return nil, api.New(cerr.Code(), api.Detail(cerr).GetReason(),
-			"the new version is "+d.GetRef()+"; delete the old one with DeleteDraft",
+			newVersionHint(d)+"; delete the old one with DeleteDraft",
 			&fixedTextError{msg: "the new version was saved, but removing the old one failed", err: err})
 	}
 	return d, nil
+}
+
+// newVersionHint names the new version of a draft: its ref, or when the
+// server stored it without saying where, its Message-ID to search Drafts for.
+func newVersionHint(d *chainmailv1.Draft) string {
+	if d.GetRef() != "" {
+		return "the new version is " + d.GetRef()
+	}
+	return "search the Drafts folder for the new version, Message-ID <" + d.GetMessageId() + ">"
+}
+
+// appendTargets adds the non-empty values to audit targets.
+func appendTargets(targets []string, values ...string) []string {
+	for _, v := range values {
+		if v != "" {
+			targets = append(targets, v)
+		}
+	}
+	return targets
 }
 
 // SendDraft implements chainmailv1connect.ComposeServiceHandler.
@@ -150,9 +169,16 @@ func (c *composeService) sendDraft(ctx context.Context, cl caller, req *chainmai
 		return nil, c.record(ctx, cl, entry, err)
 	}
 	st := c.s.stores.get(acct)
+	// draft is r with the X-GM-MSGID build reads, so on Google the draft is
+	// known in All Mail too. build sets it before the Sent copy is looked up.
+	draft := r
 	build := func(ctx context.Context) (compose.Message, error) {
-		if _, err := fetchDraft(ctx, st, acct, r); err != nil {
+		prev, err := fetchDraft(ctx, st, acct, r)
+		if err != nil {
 			return compose.Message{}, err
+		}
+		if id := prev.Summary.Ref.GmailMsgID; id != 0 {
+			draft.GmailMsgID = id
 		}
 		_, raw, err := readPart(ctx, st, r, "", acct.MaxMessageSize)
 		if errors.Is(err, errPartTooLarge) {
@@ -174,7 +200,8 @@ func (c *composeService) sendDraft(ctx context.Context, cl caller, req *chainmai
 	}
 	return c.run(ctx, sendJob{
 		acct: acct, key: req.GetIdempotencyKey(), hash: hash, build: build, after: after,
-		action: action, targets: []string{r.String()}, caller: cl, notSentCopy: r,
+		action: action, targets: []string{r.String()}, caller: cl,
+		notSentCopy: func() ref.Ref { return draft },
 	})
 }
 

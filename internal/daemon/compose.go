@@ -97,14 +97,12 @@ func (c *composeService) send(ctx context.Context, cl caller, req *chainmailv1.S
 	if err != nil {
 		return nil, c.record(ctx, cl, entry, err)
 	}
-	spec, err := c.specFromProto(ctx, p)
-	if errors.Is(err, upload.ErrUnknownHandle) && !req.GetDryRun() && !req.GetDraft() {
-		// The uploads are gone, so the request cannot be hashed, but an
-		// earlier attempt with this key may have settled its outcome.
+	if !req.GetDryRun() && !req.GetDraft() {
 		if res, ok, err := c.replaySettled(ctx, cl, acct, req.GetIdempotencyKey(), entry); ok {
 			return res, err
 		}
 	}
+	spec, err := c.specFromProto(ctx, p)
 	if err == nil {
 		err = checkSize(acct, inputSize(spec))
 	}
@@ -164,7 +162,7 @@ func (c *composeService) draft(ctx context.Context, cl caller, acct config.Resol
 	if err != nil {
 		return nil, c.record(ctx, cl, entry, err)
 	}
-	entry.Targets = slices.Concat(base, []string{d.GetRef(), msg.MessageID})
+	entry.Targets = appendTargets(slices.Clone(base), d.GetRef(), msg.MessageID)
 	if err := c.record(ctx, cl, entry, nil); err != nil {
 		return nil, err
 	}
@@ -196,6 +194,9 @@ func (c *composeService) sendRaw(ctx context.Context, cl caller, req *chainmailv
 	acct, err := c.account(target)
 	if err != nil {
 		return nil, c.record(ctx, cl, entry, err)
+	}
+	if res, ok, err := c.replaySettled(ctx, cl, acct, req.GetIdempotencyKey(), entry); ok {
+		return res, err
 	}
 	if err := checkSize(acct, int64(len(req.GetRaw()))); err != nil {
 		return nil, c.record(ctx, cl, entry, err)

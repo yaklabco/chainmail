@@ -114,9 +114,10 @@ type sendJob struct {
 	// targets are audit targets. The Message-ID is added to them.
 	targets []string
 	caller  caller
-	// notSentCopy is never taken for the Sent copy. SendDraft sets it to
-	// the draft, which has the sent message's Message-ID.
-	notSentCopy ref.Ref
+	// notSentCopy, when set, returns a message never taken for the Sent
+	// copy. It is called after build. SendDraft returns the draft, which
+	// has the sent message's Message-ID, with the X-GM-MSGID build read.
+	notSentCopy func() ref.Ref
 }
 
 // run executes spec 6.1: idempotency, dial || build, one Send, outcome
@@ -294,7 +295,11 @@ func (c *composeService) afterSend(ctx context.Context, job sendJob, msg compose
 		wg.Go(func() { job.after(ctx) })
 	}
 	if sent.GetSentRef() == "" {
-		sent.SentRef, sent.SentCopyError = c.sentCopy(ctx, job.acct, msg, job.notSentCopy)
+		var skip ref.Ref
+		if job.notSentCopy != nil {
+			skip = job.notSentCopy()
+		}
+		sent.SentRef, sent.SentCopyError = c.sentCopy(ctx, job.acct, msg, skip)
 	}
 	wg.Wait()
 }
@@ -302,8 +307,8 @@ func (c *composeService) afterSend(ctx context.Context, job sendJob, msg compose
 // sentCopy returns the ref of the Sent copy, or fixed text saying why there
 // is none. Google files sent mail itself, so its copy is looked for once in
 // All Mail, and not finding it yet is no error. Elsewhere the message is
-// appended to the Sent folder, marked read. skip is never taken for the
-// copy.
+// appended to the Sent folder, marked read. skip, when set, is a message
+// never taken for the copy.
 func (c *composeService) sentCopy(ctx context.Context, acct config.ResolvedAccount, msg compose.Message, skip ref.Ref) (sentRef, copyErr string) {
 	st := c.s.stores.get(acct)
 	if acct.Provider.Gmail {
@@ -311,9 +316,9 @@ func (c *composeService) sentCopy(ctx context.Context, acct config.ResolvedAccou
 		if err != nil {
 			c.s.opts.Logger.Debug("looking up Gmail's Sent copy", "account", acct.Name, "reason", errReason(err))
 		}
-		refs = slices.DeleteFunc(refs, func(r ref.Ref) bool {
-			return r.Folder == skip.Folder && r.UIDValidity == skip.UIDValidity && r.UID == skip.UID
-		})
+		if skip != (ref.Ref{}) {
+			refs = c.without(ctx, st, acct, refs, skip)
+		}
 		if len(refs) == 0 {
 			return "", ""
 		}
@@ -323,12 +328,68 @@ func (c *composeService) sentCopy(ctx context.Context, acct config.ResolvedAccou
 	if err == nil {
 		r, aerr := st.Append(ctx, folder, []string{flagSeen}, time.Time{}, msg.Raw)
 		if aerr == nil {
-			return r.String(), ""
+			// Without APPENDUID the copy is stored but has no ref.
+			return refString(r), ""
 		}
 		err = aerr
 	}
 	c.s.opts.Logger.Warn("storing the Sent copy failed", "account", acct.Name, "message_id", msg.MessageID, "reason", errReason(err))
 	return "", sentCopyFailed
+}
+
+// without drops from refs the message skip names. On Google a message has
+// one ref per folder it shows in, so a draft in Drafts and in All Mail has
+// two, and the message is told by its X-GM-MSGID: refs without one get it
+// from the server, and a ref whose X-GM-MSGID is still unknown is dropped
+// too, as it may be skip.
+func (c *composeService) without(ctx context.Context, st mailstore.Store, acct config.ResolvedAccount, refs []ref.Ref, skip ref.Ref) []ref.Ref {
+	byID := acct.Provider.Gmail && skip.GmailMsgID != 0
+	if byID {
+		refs = c.withGmailIDs(ctx, st, acct, refs)
+	}
+	return slices.DeleteFunc(refs, func(r ref.Ref) bool {
+		return sameMessage(r, skip) || (byID && r.GmailMsgID == 0)
+	})
+}
+
+// withGmailIDs returns refs with the X-GM-MSGID of each that lacks one,
+// read from the summaries of its folder. A ref whose summary cannot be read
+// keeps 0.
+func (c *composeService) withGmailIDs(ctx context.Context, st mailstore.Store, acct config.ResolvedAccount, refs []ref.Ref) []ref.Ref {
+	out := slices.Clone(refs)
+	groups := map[mailstore.Source][]uint32{}
+	for _, r := range out {
+		if r.GmailMsgID == 0 {
+			src := mailstore.Source{Folder: r.Folder, UIDValidity: r.UIDValidity}
+			groups[src] = append(groups[src], r.UID)
+		}
+	}
+	for src, uids := range groups {
+		sums, err := st.FetchSummaries(ctx, src, uids, mailstore.SummaryOptions{})
+		if err != nil {
+			c.s.opts.Logger.Debug("reading X-GM-MSGIDs", "account", acct.Name, "reason", errReason(err))
+			continue
+		}
+		ids := make(map[uint32]uint64, len(sums))
+		for _, s := range sums {
+			ids[s.Ref.UID] = s.Ref.GmailMsgID
+		}
+		for i, r := range out {
+			if r.GmailMsgID == 0 && r.Folder == src.Folder && r.UIDValidity == src.UIDValidity {
+				out[i].GmailMsgID = ids[r.UID]
+			}
+		}
+	}
+	return out
+}
+
+// refString is r as a client sees it, or "" for the zero ref of a write
+// the server confirmed without naming where the message went.
+func refString(r ref.Ref) string {
+	if r == (ref.Ref{}) {
+		return ""
+	}
+	return r.String()
 }
 
 // searchOutcome looks for messageID in the Sent folder, up to outcomeTries
@@ -378,12 +439,14 @@ func (c *composeService) finish(ctx context.Context, job sendJob, state idempote
 	}
 }
 
-// replaySettled answers a keyed request that cannot be hashed because its
-// uploads expired or a restart dropped them. When the key is settled (done,
-// failed or unknown) or still in progress, its outcome is replayed as a
-// duplicate without connecting. A different request reusing such a key is
-// only caught while its uploads resolve. ok is false when the key is unused
-// or retryable, or cannot be read: the call then needs its uploads.
+// replaySettled answers a keyed send-type call from the outcome stored for
+// its key, before anything the request names is read: uploads, the
+// original, the draft, or the account's size limit. A key that is done,
+// failed or unknown is replayed as a duplicate without connecting, so a
+// different request reusing such a key gets the first outcome too. ok is
+// false when the key is unused, retryable or still in progress, or cannot
+// be read: the call goes on, and Begin checks the request against the key
+// and waits for an attempt still running in this process.
 func (c *composeService) replaySettled(ctx context.Context, cl caller, acct config.ResolvedAccount, key string, entry audit.Entry) (*chainmailv1.ComposeResult, bool, error) {
 	if !idempotency.ValidKey(key) {
 		return nil, false, nil
@@ -393,7 +456,11 @@ func (c *composeService) replaySettled(ctx context.Context, cl caller, acct conf
 		c.s.opts.Logger.Warn("reading an idempotency key failed", "account", acct.Name, "err", err)
 		return nil, false, nil
 	}
-	if !found || row.State == idempotency.Retryable {
+	switch {
+	case !found:
+		return nil, false, nil
+	case row.State == idempotency.Done, row.State == idempotency.Failed, row.State == idempotency.Unknown:
+	default:
 		return nil, false, nil
 	}
 	entry.Decision = decisionDuplicate
@@ -593,44 +660,60 @@ func checkSize(acct config.ResolvedAccount, n int64) error {
 	}
 }
 
-// Headroom inputSize adds for what a message has besides its text and
-// files: the header fields the builder writes, and each part's MIME header
-// and boundary.
-const (
-	messageHeadroom = 2 << 10
-	partHeadroom    = 256
-)
-
-// inputSize estimates from spec alone the size of the message it builds, so
-// a message plainly too large is refused before dialing. Every text field
-// and every file counts at base64's 4/3 growth with its line breaks, plus
-// headroom for header fields and MIME structure. A Markdown body is sent
-// twice, as text and as HTML, and quoted-printable can grow text further,
-// so the size of the built message is checked again before it is sent.
+// inputSize is a lower bound, from spec alone, on the size of the message
+// it builds, so a message certainly too large is refused before dialing.
+// Attachments and inline images count at their exact base64 size with line
+// breaks, as they are always sent base64. Text counts at its length with
+// trailing white space dropped from each line, which is all quoted-printable
+// and format=flowed can save. Header fields count at the length of the
+// values the builder writes, each address once. Bcc counts for nothing: it
+// is only in the envelope. The size of the built message is checked again
+// before it is sent.
 func inputSize(spec compose.Spec) int64 {
-	text := len(spec.Subject) + len(spec.Body.Source) + len(spec.Body.HTMLText) + len(spec.Signature) + len(spec.InReplyTo)
-	for _, list := range [][]mail.Address{spec.To, spec.Cc, spec.Bcc} {
+	n := textLen(spec.Body.Source)
+	if spec.Body.Kind == compose.HTML && len(spec.Inline) > 0 {
+		// Rewriting the image references can shorten the HTML.
+		n = 0
+	}
+	n += textLen(spec.Body.HTMLText) + textLen(spec.Signature)
+	n += headerLen(spec.Subject) + headerLen(spec.InReplyTo) + headerLen(spec.UserAgent) + int64(len(spec.From.Address))
+	seen := map[string]bool{}
+	for _, list := range [][]mail.Address{spec.To, spec.Cc} {
 		for _, a := range list {
-			text += len(a.Name) + len(a.Address)
+			if k := strings.ToLower(a.Address); !seen[k] {
+				seen[k] = true
+				n += int64(len(a.Address))
+			}
 		}
 	}
 	for k, v := range spec.Headers {
-		text += len(k) + len(v)
+		n += int64(len(k)) + headerLen(v)
 	}
 	for _, r := range spec.References {
-		text += len(r)
+		n += int64(len(r))
 	}
-	if q := spec.Quote; q != nil {
-		text += len(q.Header) + len(q.Text) + len(q.HTML)
-	}
-	n := base64Len(text) + messageHeadroom
 	for _, f := range spec.Attachments {
-		n += base64Len(len(f.Data)+len(f.Filename)+len(f.ContentType)) + partHeadroom
+		n += base64Len(len(f.Data))
 	}
-	for name, f := range spec.Inline {
-		n += base64Len(len(f.Data)+len(name)+len(f.Filename)+len(f.ContentType)) + partHeadroom
+	for _, f := range spec.Inline {
+		n += base64Len(len(f.Data))
 	}
 	return n
+}
+
+// textLen is the length of s without the white space at the end of each
+// line.
+func textLen(s string) int64 {
+	var n int64
+	for l := range strings.SplitSeq(s, "\n") {
+		n += int64(len(strings.TrimRight(l, " \t\r"))) + 1
+	}
+	return n - 1
+}
+
+// headerLen is the length of a header value without its line breaks.
+func headerLen(s string) int64 {
+	return int64(len(s) - strings.Count(s, "\r") - strings.Count(s, "\n"))
 }
 
 // base64Len is the base64 size of n bytes in lines of 76 characters.
@@ -895,7 +978,7 @@ func (c *composeService) saveDraft(ctx context.Context, acct config.ResolvedAcco
 	if err != nil {
 		return nil, err
 	}
-	return &chainmailv1.Draft{Ref: r.String(), MessageId: msg.MessageID}, nil
+	return &chainmailv1.Draft{Ref: refString(r), MessageId: msg.MessageID}, nil
 }
 
 // recoverSends settles the keys an earlier daemon left in progress as of

@@ -449,14 +449,30 @@ func TestSendDuplicateKey(t *testing.T) {
 		t.Errorf("decisions = %v", d)
 	}
 
-	// The same key with a different body is refused and sends nothing.
+	// A settled key replays before the request is read, so the same key
+	// with a different body gets the first outcome and sends nothing.
 	other := &chainmailv1.SendRequest{Spec: hostSpec(), IdempotencyKey: "dup"}
 	other.Spec.Content.Body = markdown("something else")
-	if _, err := e.send(t, other); reasonOf(err) != api.ReasonInvalidArgument {
-		t.Errorf("different body: err = %v, want INVALID_ARGUMENT", err)
+	if res, err := e.send(t, other); err != nil || !res.GetSent().GetDuplicate() {
+		t.Errorf("different body, settled key: %+v, %v, want the first result", res, err)
 	}
 	if n := len(srv.Messages()); n != 1 {
 		t.Errorf("captured %d messages, want 1", n)
+	}
+
+	// A key that may still send is checked against the request: a
+	// different body there is refused and sends nothing.
+	e.smtp(t, smtptest.Options{FailMail: &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 3, 0}, Message: "later"}})
+	if _, err := e.send(t, &chainmailv1.SendRequest{Spec: hostSpec(), IdempotencyKey: "dup-retry"}); reasonOf(err) != api.ReasonServerUnavailable {
+		t.Fatalf("temporary failure: err = %v, want SERVER_UNAVAILABLE", err)
+	}
+	good := e.smtp(t, smtptest.Options{})
+	other.IdempotencyKey = "dup-retry"
+	if _, err := e.send(t, other); reasonOf(err) != api.ReasonInvalidArgument {
+		t.Errorf("different body, retryable key: err = %v, want INVALID_ARGUMENT", err)
+	}
+	if n := len(good.Messages()); n != 0 {
+		t.Errorf("captured %d messages, want none", n)
 	}
 }
 
@@ -946,12 +962,13 @@ func TestSendCredentialsRejected(t *testing.T) {
 
 // TestSendInputBoundCountsEveryField checks that the size bound taken from
 // the request before dialing counts the subject and an html_text
-// alternative, not only the body source.
+// alternative, not only the body source: each alone is over the limit, so
+// the finished message certainly is.
 func TestSendInputBoundCountsEveryField(t *testing.T) {
 	t.Parallel()
 	e := startSend(t)
 	srv := e.smtp(t, smtptest.Options{})
-	long := strings.Repeat("z", 13<<10)
+	long := strings.Repeat("z", 17<<10)
 	subject := hostSpec()
 	subject.Account = "small"
 	subject.Subject = long
@@ -1109,4 +1126,143 @@ func TestSendKeepsServerTextOutOfLogs(t *testing.T) {
 		t.Errorf("the logs hold the server's text:\n%s", logs.String())
 	}
 	e.checkAuditPrivate(t, private)
+}
+
+// hookStore is a fake store with methods a test can intercept. A nil hook
+// leaves the fake's own method. Hooks are set before the daemon uses the
+// store and not changed after.
+type hookStore struct {
+	*fake.Store
+	append  func(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) (ref.Ref, error)
+	fetch   func(ctx context.Context, refs []ref.Ref) []mailstore.MessageResult
+	stream  func(ctx context.Context, r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error)
+	expunge func(ctx context.Context, refs []ref.Ref) []mailstore.RefResult
+	find    func(ctx context.Context, folder, messageID string) ([]ref.Ref, error)
+}
+
+func (h *hookStore) Append(ctx context.Context, folder string, flags []string, date time.Time, raw []byte) (ref.Ref, error) {
+	if h.append != nil {
+		return h.append(ctx, folder, flags, date, raw)
+	}
+	return h.Store.Append(ctx, folder, flags, date, raw)
+}
+
+func (h *hookStore) FetchMessages(ctx context.Context, refs []ref.Ref) []mailstore.MessageResult {
+	if h.fetch != nil {
+		return h.fetch(ctx, refs)
+	}
+	return h.Store.FetchMessages(ctx, refs)
+}
+
+func (h *hookStore) StreamPart(ctx context.Context, r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error) {
+	if h.stream != nil {
+		return h.stream(ctx, r, part)
+	}
+	return h.Store.StreamPart(ctx, r, part)
+}
+
+func (h *hookStore) Expunge(ctx context.Context, refs []ref.Ref) []mailstore.RefResult {
+	if h.expunge != nil {
+		return h.expunge(ctx, refs)
+	}
+	return h.Store.Expunge(ctx, refs)
+}
+
+func (h *hookStore) FindByMessageID(ctx context.Context, folder, messageID string) ([]ref.Ref, error) {
+	if h.find != nil {
+		return h.find(ctx, folder, messageID)
+	}
+	return h.Store.FindByMessageID(ctx, folder, messageID)
+}
+
+// hooked serves account name from h, wrapped around the fake startSend made
+// for it. The hooks reach that fake as h.Store, the same store as sendEnv's.
+func hooked(name string, h *hookStore) func(*daemontest.Options) {
+	return func(o *daemontest.Options) {
+		prev := o.NewStore
+		var once sync.Once
+		o.NewStore = func(a config.ResolvedAccount) mailstore.Store {
+			if a.Name != name {
+				return prev(a)
+			}
+			once.Do(func() { h.Store = prev(a).(*fake.Store) })
+			return h
+		}
+	}
+}
+
+// TestSendReplaysBeforeCheckingInputs repeats settled Send and SendRaw calls
+// with content now over the account's limit, as after max_message_size was
+// lowered. The stored outcome comes back as a duplicate without a size
+// check or a connection.
+func TestSendReplaysBeforeCheckingInputs(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	spec := hostSpec()
+	spec.Account = "small"
+	first, err := e.send(t, &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: "fits"})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	firstRaw, err := e.sendRaw(t, &chainmailv1.SendRawRequest{Account: "small", Raw: rawMessage("small@example.com", "short"), IdempotencyKey: "raw-fits"})
+	if err != nil {
+		t.Fatalf("SendRaw: %v", err)
+	}
+	conns := e.proxy.accepts.Load()
+
+	big := hostSpec()
+	big.Account = "small"
+	big.Content.Body = markdown(strings.Repeat("x", 20<<10))
+	res, err := e.send(t, &chainmailv1.SendRequest{Spec: big, IdempotencyKey: "fits"})
+	if err != nil || !res.GetSent().GetDuplicate() || res.GetSent().GetMessageId() != first.GetSent().GetMessageId() {
+		t.Errorf("Send repeat: %+v, %v, want the first result as a duplicate", res, err)
+	}
+	raw := rawMessage("small@example.com", strings.Repeat("y", 20<<10))
+	res, err = e.sendRaw(t, &chainmailv1.SendRawRequest{Account: "small", Raw: raw, IdempotencyKey: "raw-fits"})
+	if err != nil || !res.GetSent().GetDuplicate() || res.GetSent().GetMessageId() != firstRaw.GetSent().GetMessageId() {
+		t.Errorf("SendRaw repeat: %+v, %v, want the first result as a duplicate", res, err)
+	}
+	if e.proxy.accepts.Load() != conns || len(srv.Messages()) != 2 {
+		t.Error("a repeat connected or sent")
+	}
+	for _, action := range []string{"send", "send_raw"} {
+		if d := e.decisions(t, action); len(d) != 2 || d[1] != "duplicate" {
+			t.Errorf("%s decisions = %v, want the repeat audited as a duplicate", action, d)
+		}
+	}
+}
+
+// TestSendSizeBoundIsALowerBound sends messages whose finished form fits the
+// account's limit, though a bound that counted text at base64 size or
+// counted Bcc would refuse them: a long ASCII text body, and a short message
+// with many Bcc recipients, which go only in the envelope.
+func TestSendSizeBoundIsALowerBound(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	text := hostSpec()
+	text.Account = "small"
+	text.Content.Body = &chainmailv1.ComposeBody{Kind: &chainmailv1.ComposeBody_Text{Text: strings.Repeat("a line of plain text\n", (13<<10)/21)}}
+	bcc := hostSpec()
+	bcc.Account = "small"
+	for i := range 700 {
+		bcc.Bcc = append(bcc.Bcc, fmt.Sprintf("rcpt%03d@example.net", i))
+	}
+	for key, spec := range map[string]*chainmailv1.ComposeSpec{"long-text": text, "many-bcc": bcc} {
+		dry, err := e.send(t, &chainmailv1.SendRequest{Spec: spec, DryRun: true})
+		if err != nil {
+			t.Errorf("%s: dry run: %v", key, err)
+			continue
+		}
+		if n := len(dry.GetDryRun().GetRaw()); n > 16<<10 {
+			t.Fatalf("%s: the finished message is %d bytes, over the limit; the test proves nothing", key, n)
+		}
+		if _, err := e.send(t, &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: key}); err != nil {
+			t.Errorf("%s: Send: %v", key, err)
+		}
+	}
+	if n := len(srv.Messages()); n != 2 {
+		t.Errorf("captured %d messages, want 2", n)
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
 	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
 	"github.com/jamesainslie/chainmail/internal/testutil/smtptest"
 )
 
@@ -437,5 +439,180 @@ func TestForwardDraft(t *testing.T) {
 	}
 	if len(srv.Messages()) != 0 || slices.Contains(e.gmail.Flags(orig), "$Forwarded") {
 		t.Error("a forward draft was sent or marked the original")
+	}
+}
+
+// TestReplyAndForwardReplayAfterUploadExpires repeats settled replies and
+// forwards whose uploaded attachment expired. Each stored outcome comes
+// back without a connection.
+func TestReplyAndForwardReplayAfterUploadExpires(t *testing.T) {
+	t.Parallel()
+	clock := &settableClock{now: time.Now()}
+	e := startSend(t, func(o *daemontest.Options) { o.Now = clock.Now })
+	e.smtp(t, smtptest.Options{})
+	orig := e.original(t)
+	up, err := e.upload(t, &chainmailv1.UploadHeader{Account: "host", Filename: "a.txt", ContentType: "text/plain"}, []byte("attached"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := func() *chainmailv1.Content {
+		return &chainmailv1.Content{Body: markdown("see attached"), Attachments: []string{up.GetHandle()}}
+	}
+	reply := &chainmailv1.ReplyRequest{Ref: orig.String(), Content: content(), IdempotencyKey: "r-done"}
+	forward := &chainmailv1.ForwardRequest{Ref: orig.String(), To: []string{"bob@example.net"}, Content: content(), IdempotencyKey: "f-done"}
+	firstReply, err := e.reply(t, reply)
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	firstForward, err := e.forward(t, forward)
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	e.smtp(t, smtptest.Options{DropAfterDataEnd: true})
+	unknown := &chainmailv1.ReplyRequest{Ref: orig.String(), Content: content(), IdempotencyKey: "r-unknown"}
+	if _, err := e.reply(t, unknown); reasonOf(err) != api.ReasonSendOutcomeUnknown {
+		t.Fatalf("lost reply: err = %v, want SEND_OUTCOME_UNKNOWN", err)
+	}
+
+	clock.Add(2 * time.Hour)
+	conns := e.proxy.accepts.Load()
+	if res, err := e.reply(t, reply); err != nil || !res.GetSent().GetDuplicate() || res.GetSent().GetMessageId() != firstReply.GetSent().GetMessageId() {
+		t.Errorf("reply after expiry: %+v, %v, want the first result as a duplicate", res, err)
+	}
+	if res, err := e.forward(t, forward); err != nil || !res.GetSent().GetDuplicate() || res.GetSent().GetMessageId() != firstForward.GetSent().GetMessageId() {
+		t.Errorf("forward after expiry: %+v, %v, want the first result as a duplicate", res, err)
+	}
+	if _, err := e.reply(t, unknown); reasonOf(err) != api.ReasonSendOutcomeUnknown {
+		t.Errorf("unknown after expiry: err = %v, want SEND_OUTCOME_UNKNOWN", err)
+	}
+	if e.proxy.accepts.Load() != conns {
+		t.Error("a repeat after expiry connected")
+	}
+	for action, want := range map[string]int{"reply": 2, "forward": 1} {
+		d := e.decisions(t, action)
+		if n := len(d); n < want || slices.ContainsFunc(d[n-want:], func(s string) bool { return s != "duplicate" }) {
+			t.Errorf("%s decisions = %v, want the repeats audited as duplicates", action, d)
+		}
+	}
+}
+
+// clipText makes the fake's FetchMessages report every text part clipped,
+// keeping keep bytes of the body, as a store does at TextPartCap.
+func clipText(h *hookStore, keep int) {
+	h.fetch = func(ctx context.Context, refs []ref.Ref) []mailstore.MessageResult {
+		res := h.Store.FetchMessages(ctx, refs)
+		for _, r := range res {
+			if m := r.Message; m != nil {
+				if i := bytes.Index(m.Raw, []byte("\r\n\r\n")); i >= 0 && len(m.Raw) > i+4+keep {
+					m.Raw = m.Raw[:i+4+keep]
+				}
+				m.TextClipped = true
+			}
+		}
+		return res
+	}
+}
+
+// TestReplyFailsWhenTheOriginalCannotBeRead clips the original's text, so
+// the whole message must be streamed, and fails that stream. The reply and
+// the forward fail instead of quoting part of the original, and send
+// nothing.
+func TestReplyFailsWhenTheOriginalCannotBeRead(t *testing.T) {
+	t.Parallel()
+	hs := &hookStore{}
+	e := startSend(t, hooked("host", hs))
+	srv := e.smtp(t, smtptest.Options{})
+	clipText(hs, 1<<20)
+	hs.stream = func(ctx context.Context, r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error) {
+		if part == "" {
+			return mailstore.PartInfo{}, nil, fmt.Errorf("%w: the connection dropped", mailstore.ErrUnavailable)
+		}
+		return hs.Store.StreamPart(ctx, r, part)
+	}
+	orig := e.original(t)
+	if _, err := e.reply(t, &chainmailv1.ReplyRequest{Ref: orig.String(), Content: replyContent("hi"), IdempotencyKey: "r"}); reasonOf(err) != api.ReasonServerUnavailable {
+		t.Errorf("Reply: err = %v, want SERVER_UNAVAILABLE", err)
+	}
+	if _, err := e.forward(t, &chainmailv1.ForwardRequest{Ref: orig.String(), To: []string{"bob@example.net"}, IdempotencyKey: "f"}); reasonOf(err) != api.ReasonServerUnavailable {
+		t.Errorf("Forward: err = %v, want SERVER_UNAVAILABLE", err)
+	}
+	if n := len(srv.Messages()); n != 0 {
+		t.Errorf("captured %d messages, want none", n)
+	}
+	if slices.Contains(e.host.Flags(orig), `\Answered`) {
+		t.Error("the original was marked answered")
+	}
+	for _, key := range []string{"r", "f"} {
+		if got := e.idemState(t, "host", key); got != "retryable" {
+			t.Errorf("%s: idempotency state = %q, want retryable", key, got)
+		}
+	}
+}
+
+// truncatedMarker ends a quote whose original text was cut short.
+const truncatedMarker = "[quoted text truncated]"
+
+// TestReplyMarksATruncatedQuote replies to an original whose text the store
+// clipped and whose whole message is over the account's limit, so only the
+// clipped text can be quoted. The quote says so in both parts.
+func TestReplyMarksATruncatedQuote(t *testing.T) {
+	t.Parallel()
+	hs := &hookStore{}
+	e := startSend(t, hooked("small", hs))
+	srv := e.smtp(t, smtptest.Options{})
+	clipText(hs, 1<<10)
+	orig := e.small.Add(fake.Message{
+		Folder:    "INBOX",
+		Date:      time.Date(2026, 10, 29, 9, 30, 0, 0, time.UTC),
+		From:      []mailstore.Address{{Name: "Alice", Email: "alice@example.net"}},
+		To:        []mailstore.Address{{Email: "small@example.com"}},
+		Subject:   "Long",
+		Body:      strings.Repeat("a long original line\r\n", 1000),
+		MessageID: "<long@example.net>",
+	})
+	if _, err := e.reply(t, &chainmailv1.ReplyRequest{Ref: orig.String(), Content: replyContent("short answer"), IdempotencyKey: "r"}); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	msgs := srv.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("captured %d messages, want 1", len(msgs))
+	}
+	parts := leaves(t, msgs[0].Data)
+	text := strings.TrimRight(parts["text/plain"], "\r\n")
+	if last := text[strings.LastIndexByte(text, '\n')+1:]; strings.TrimLeft(last, "> ") != truncatedMarker {
+		t.Errorf("the text part ends %q, want %q", last, truncatedMarker)
+	}
+	if !strings.Contains(text, "> a long original line") {
+		t.Errorf("text part = %q, want the clipped quote", text)
+	}
+	htm := parts["text/html"]
+	if i := strings.LastIndex(htm, truncatedMarker); i < 0 || strings.Contains(htm[i:], "a long original line") {
+		t.Errorf("the HTML part does not end its quote with %q: %q", truncatedMarker, htm)
+	}
+}
+
+// TestReplyExtraRecipientsAreNotRepeated adds extra recipients a reply
+// already has: each address shows once across To and Cc, To first.
+func TestReplyExtraRecipientsAreNotRepeated(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	orig := e.original(t)
+	if _, err := e.reply(t, &chainmailv1.ReplyRequest{Ref: orig.String(), Content: replyContent("one"), Cc: []string{"ALICE@example.net"}, IdempotencyKey: "a"}); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if _, err := e.reply(t, &chainmailv1.ReplyRequest{Ref: orig.String(), All: true, Content: replyContent("two"), To: []string{"bob@example.net"}, IdempotencyKey: "b"}); err != nil {
+		t.Fatalf("Reply all: %v", err)
+	}
+	msgs := srv.Messages()
+	if len(msgs) != 2 {
+		t.Fatalf("captured %d messages, want 2", len(msgs))
+	}
+	if h := header(t, msgs[0].Data); strings.Contains(strings.ToLower(h.Get("Cc")), "alice@") {
+		t.Errorf("reply: To %q, Cc %q, want alice only in To", h.Get("To"), h.Get("Cc"))
+	}
+	h := header(t, msgs[1].Data)
+	if !strings.Contains(h.Get("To"), "bob@example.net") || strings.Contains(h.Get("Cc"), "bob@") {
+		t.Errorf("reply all: To %q, Cc %q, want bob only in To", h.Get("To"), h.Get("Cc"))
 	}
 }
