@@ -148,7 +148,7 @@ func (c *composeService) answer(ctx context.Context, cl caller, a answer) (*chai
 	}
 	spec, err := c.answerSpec(ctx, acct, a)
 	if err == nil {
-		err = checkSize(acct, minSize(spec))
+		err = checkSize(acct, inputSize(spec))
 	}
 	if err != nil {
 		return nil, c.record(ctx, cl, entry, err)

@@ -82,7 +82,7 @@ func (c *composeService) updateDraft(ctx context.Context, req *chainmailv1.Updat
 	}
 	spec, err := c.specFromProto(ctx, p)
 	if err == nil {
-		err = checkSize(acct, minSize(spec))
+		err = checkSize(acct, inputSize(spec))
 	}
 	if err != nil {
 		return nil, err
