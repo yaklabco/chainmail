@@ -139,8 +139,7 @@ func TestMailNeedsAuth(t *testing.T) {
 	srv := StartWith(t, ca, provider.SecurityTLS, Options{}, tester)
 	c := dial(t, ca, srv.Endpoint(), false)
 	step, err := submit(c, tester.Username, []string{"a@example.com"}, raw)
-	var smtpErr *smtp.SMTPError
-	if step != "MAIL" || !errors.As(err, &smtpErr) || smtpErr.Code != 530 {
+	if smtpErr, ok := errors.AsType[*smtp.SMTPError](err); step != "MAIL" || !ok || smtpErr.Code != 530 {
 		t.Errorf("%s: %v, want 530 at MAIL", step, err)
 	}
 	if n := len(srv.Messages()); n != 0 {
@@ -179,8 +178,7 @@ func TestFaults(t *testing.T) {
 				if step != tt.wantStep {
 					t.Fatalf("failed at %q with %v, want a failure at %q", step, err, tt.wantStep)
 				}
-				var smtpErr *smtp.SMTPError
-				isReply := errors.As(err, &smtpErr)
+				smtpErr, isReply := errors.AsType[*smtp.SMTPError](err)
 				switch {
 				case tt.wantCode != 0 && (!isReply || smtpErr.Code != tt.wantCode):
 					t.Errorf("err = %v, want SMTP %d", err, tt.wantCode)
@@ -237,8 +235,7 @@ func TestDropBeforeDataEndClosesInsteadOf354(t *testing.T) {
 	if err == nil {
 		t.Fatal("DATA got its 354")
 	}
-	var smtpErr *smtp.SMTPError
-	if errors.As(err, &smtpErr) {
+	if _, ok := errors.AsType[*smtp.SMTPError](err); ok {
 		t.Errorf("DATA: %v, want a lost connection", err)
 	}
 }

@@ -49,8 +49,8 @@ func dialT(t *testing.T, srv *smtptest.Server, ca *tlstest.CA, opts DialOptions)
 
 func asSendError(t *testing.T, err error) *SendError {
 	t.Helper()
-	var se *SendError
-	if !errors.As(err, &se) {
+	se, ok := errors.AsType[*SendError](err)
+	if !ok {
 		t.Fatalf("err = %v (%T), want a *SendError", err, err)
 	}
 	return se
@@ -196,8 +196,7 @@ func TestSendOutcomes(t *testing.T) {
 					t.Errorf("Refused = %v, want %v", se.Refused, tt.wantRefused)
 				}
 				if tt.wantCode != 0 {
-					var reply *smtp.SMTPError
-					if !errors.As(se, &reply) || reply.Code != tt.wantCode {
+					if reply, ok := errors.AsType[*smtp.SMTPError](se); !ok || reply.Code != tt.wantCode {
 						t.Errorf("err = %v, want the server's %d in the chain", se, tt.wantCode)
 					}
 				}

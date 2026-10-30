@@ -173,9 +173,8 @@ func (c *Conn) Send(ctx context.Context, from string, to []string, raw []byte) e
 	if se == nil {
 		return nil
 	}
-	var reply *smtp.SMTPError
-	if err := ctx.Err(); err != nil && !errors.As(se.Err, &reply) {
-		se.Err = fmt.Errorf("%w: %w", err, se.Err)
+	if _, isReply := errors.AsType[*smtp.SMTPError](se.Err); !isReply && ctx.Err() != nil {
+		se.Err = fmt.Errorf("%w: %w", ctx.Err(), se.Err)
 	}
 	return se
 }
