@@ -3,6 +3,7 @@ package compose
 
 import (
 	"errors"
+	"fmt"
 	"net/mail"
 	"time"
 )
@@ -93,3 +94,8 @@ type Original struct {
 
 // ErrInvalid wraps every spec problem the caller can fix.
 var ErrInvalid = errors.New("invalid message")
+
+// ErrNoRecipients is Reply's error when nobody is left to reply to, as in a
+// note the account sent itself. It wraps ErrInvalid, and Reply still fills
+// in the rest of the parts, so a caller that names recipients can go on.
+var ErrNoRecipients = fmt.Errorf("%w: the reply has no recipients", ErrInvalid)

@@ -1,7 +1,6 @@
 package compose
 
 import (
-	"fmt"
 	"net/mail"
 	"slices"
 	"strings"
@@ -30,7 +29,7 @@ type ReplyParts struct {
 
 // Reply builds the parts of a reply to orig from an account whose own
 // addresses are self. all adds the original To and Cc. An empty recipient
-// list is ErrInvalid.
+// list is ErrNoRecipients, returned with every other part filled in.
 //
 // To is the original's Reply-To, or its From when it has none. With all, Cc
 // is the original's To and Cc. Every address in self is dropped from both,
@@ -60,9 +59,6 @@ func Reply(orig Original, self []string, all bool, loc *time.Location) (ReplyPar
 	case all:
 		p.Cc = keepNew(slices.Concat(orig.To, orig.Cc), seen)
 	}
-	if len(p.To) == 0 && len(p.Cc) == 0 {
-		return ReplyParts{}, fmt.Errorf("%w: the reply has no recipients", ErrInvalid)
-	}
 	p.Subject = prefixSubject(orig.Subject, "Re: ", "re:")
 	p.References = slices.Clone(orig.References)
 	if orig.MessageID != "" {
@@ -83,6 +79,9 @@ func Reply(orig Original, self []string, all bool, loc *time.Location) (ReplyPar
 		Header: header,
 		Text:   orig.Text,
 		HTML:   SanitizeHTML(orig.HTML),
+	}
+	if len(p.To) == 0 && len(p.Cc) == 0 {
+		return p, ErrNoRecipients
 	}
 	return p, nil
 }

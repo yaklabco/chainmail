@@ -311,6 +311,29 @@ func TestReplyRefusals(t *testing.T) {
 	}
 }
 
+// A note to self has nobody to reply to, but recipients the caller names
+// make it a reply all the same, threaded under the note.
+func TestReplyToSelfWithRecipients(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	self := e.host.Add(fake.Message{
+		Folder: "INBOX", From: []mailstore.Address{{Email: "me@example.com"}}, To: []mailstore.Address{{Email: "me@example.com"}},
+		Subject: "note", Body: "x", MessageID: "<self@example.com>",
+	})
+	if _, err := e.reply(t, &chainmailv1.ReplyRequest{Ref: self.String(), To: []string{"zed@example.org"}, Content: replyContent("fyi"), IdempotencyKey: "self-1"}); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	msgs := srv.Messages()
+	if len(msgs) != 1 || !slices.Equal(msgs[0].To, []string{"zed@example.org"}) {
+		t.Fatalf("sent %v, want one message to zed@example.org", msgs)
+	}
+	h := header(t, msgs[0].Data)
+	if subj, _ := h.Subject(); subj != "Re: note" || !strings.Contains(h.Get("In-Reply-To"), "self@example.com") {
+		t.Errorf("Subject %q, In-Reply-To %q, want a threaded reply", subj, h.Get("In-Reply-To"))
+	}
+}
+
 func TestForward(t *testing.T) {
 	t.Parallel()
 	e := startSend(t)

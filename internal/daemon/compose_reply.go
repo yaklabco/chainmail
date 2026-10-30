@@ -59,7 +59,10 @@ func (c *composeService) Reply(ctx context.Context, req *connect.Request[chainma
 		flag: flagAnswered,
 		parts: func(spec *compose.Spec, orig compose.Original, self string) error {
 			p, err := compose.Reply(orig, []string{self}, m.GetAll(), nil)
-			if err != nil {
+			// Nobody to reply to, as in a note to self, is fine when the
+			// caller named recipients of its own.
+			named := len(spec.To)+len(spec.Cc)+len(spec.Bcc) > 0
+			if err != nil && (!errors.Is(err, compose.ErrNoRecipients) || !named) {
 				return err
 			}
 			spec.To = mergeAddresses(p.To, spec.To)

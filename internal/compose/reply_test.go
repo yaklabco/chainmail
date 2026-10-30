@@ -436,3 +436,23 @@ func TestQuoteWithoutDate(t *testing.T) {
 		t.Errorf("forward Header = %q, want an empty Date", h)
 	}
 }
+
+// A note to self leaves no one to reply to, but the caller can still name
+// recipients: Reply reports ErrNoRecipients and fills in everything else.
+func TestReplyNoRecipientsStillFillsTheParts(t *testing.T) {
+	t.Parallel()
+	o := replyOriginal()
+	o.From = []mail.Address{replyMe}
+	o.To = []mail.Address{replyMe}
+	o.Cc = nil
+	p, err := Reply(o, []string{"me@example.com"}, false, replyZone)
+	if !errors.Is(err, ErrNoRecipients) || !errors.Is(err, ErrInvalid) {
+		t.Fatalf("err = %v, want ErrNoRecipients wrapping ErrInvalid", err)
+	}
+	if len(p.To) != 0 || len(p.Cc) != 0 {
+		t.Errorf("recipients = %v, %v, want none", p.To, p.Cc)
+	}
+	if p.Subject != "Re: Lunch" || p.InReplyTo != "orig@example.com" || p.Quote == nil {
+		t.Errorf("parts = %+v, want the subject, In-Reply-To and quote filled in", p)
+	}
+}
