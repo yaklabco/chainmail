@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -108,7 +109,7 @@ func (c *composeService) send(ctx context.Context, cl caller, req *chainmailv1.S
 	case req.GetDryRun():
 		return c.dryRun(ctx, cl, acct, entry, build)
 	case req.GetDraft():
-		return c.draft(ctx, cl, acct, entry, build)
+		return c.draft(ctx, cl, acct, entry, withBcc(build, spec.Bcc))
 	}
 	hash, err := requestHash(req, uploadSums(p.GetContent(), spec))
 	if err != nil {
@@ -130,7 +131,7 @@ func (c *composeService) dryRun(ctx context.Context, cl caller, acct config.Reso
 	if err != nil {
 		return nil, c.record(ctx, cl, entry, err)
 	}
-	entry.Targets = []string{msg.MessageID}
+	entry.Targets = append(entry.Targets, msg.MessageID)
 	if err := c.record(ctx, cl, entry, nil); err != nil {
 		return nil, err
 	}
@@ -150,12 +151,13 @@ func (c *composeService) draft(ctx context.Context, cl caller, acct config.Resol
 	if err != nil {
 		return nil, c.record(ctx, cl, entry, err)
 	}
-	entry.Targets = []string{msg.MessageID}
+	base := entry.Targets
+	entry.Targets = slices.Concat(base, []string{msg.MessageID})
 	d, err := c.saveDraft(ctx, acct, msg)
 	if err != nil {
 		return nil, c.record(ctx, cl, entry, err)
 	}
-	entry.Targets = []string{d.GetRef(), msg.MessageID}
+	entry.Targets = slices.Concat(base, []string{d.GetRef(), msg.MessageID})
 	if err := c.record(ctx, cl, entry, nil); err != nil {
 		return nil, err
 	}

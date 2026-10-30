@@ -114,6 +114,9 @@ type sendJob struct {
 	// targets are audit targets. The Message-ID is added to them.
 	targets []string
 	caller  caller
+	// notSentCopy is never taken for the Sent copy. SendDraft sets it to
+	// the draft, which has the sent message's Message-ID.
+	notSentCopy ref.Ref
 }
 
 // run executes spec 6.1: idempotency, dial || build, one Send, outcome
@@ -279,7 +282,7 @@ func (c *composeService) afterSend(ctx context.Context, job sendJob, msg compose
 		wg.Go(func() { job.after(ctx) })
 	}
 	if sent.GetSentRef() == "" {
-		sent.SentRef, sent.SentCopyError = c.sentCopy(ctx, job.acct, msg)
+		sent.SentRef, sent.SentCopyError = c.sentCopy(ctx, job.acct, msg, job.notSentCopy)
 	}
 	wg.Wait()
 }
@@ -287,14 +290,18 @@ func (c *composeService) afterSend(ctx context.Context, job sendJob, msg compose
 // sentCopy returns the ref of the Sent copy, or fixed text saying why there
 // is none. Google files sent mail itself, so its copy is looked for once in
 // All Mail, and not finding it yet is no error. Elsewhere the message is
-// appended to the Sent folder, marked read.
-func (c *composeService) sentCopy(ctx context.Context, acct config.ResolvedAccount, msg compose.Message) (sentRef, copyErr string) {
+// appended to the Sent folder, marked read. skip is never taken for the
+// copy.
+func (c *composeService) sentCopy(ctx context.Context, acct config.ResolvedAccount, msg compose.Message, skip ref.Ref) (sentRef, copyErr string) {
 	st := c.s.stores.get(acct)
 	if acct.Provider.Gmail {
 		refs, err := findIn(ctx, st, mailstore.RoleAll, msg.MessageID)
 		if err != nil {
 			c.s.opts.Logger.Debug("looking up Gmail's Sent copy", "account", acct.Name, "err", err)
 		}
+		refs = slices.DeleteFunc(refs, func(r ref.Ref) bool {
+			return r.Folder == skip.Folder && r.UIDValidity == skip.UIDValidity && r.UID == skip.UID
+		})
 		if len(refs) == 0 {
 			return "", ""
 		}
