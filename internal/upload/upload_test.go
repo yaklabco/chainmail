@@ -524,3 +524,28 @@ func TestRunSweepsEveryMinute(t *testing.T) {
 		<-done
 	})
 }
+
+// TestStatReadsNoBytes stats a live upload whose file is gone: the info
+// comes from the index alone. Unknown and expired handles are unknown.
+func TestStatReadsNoBytes(t *testing.T) {
+	t.Parallel()
+	s, dir, c := newStore(t, time.Hour)
+	info, err := s.Put(t.Context(), "f.bin", "application/octet-stream", strings.NewReader("twelve bytes"), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, info.Handle)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Stat(info.Handle)
+	if err != nil || got != info {
+		t.Errorf("Stat = %+v, %v, want %+v", got, err, info)
+	}
+	if _, err := s.Stat("up_aaaaaaaaaaaaaaaaaaaaaaaaaa"); !errors.Is(err, ErrUnknownHandle) {
+		t.Errorf("Stat of an unknown handle err = %v, want ErrUnknownHandle", err)
+	}
+	c.Advance(time.Hour)
+	if _, err := s.Stat(info.Handle); !errors.Is(err, ErrUnknownHandle) {
+		t.Errorf("Stat after expiry err = %v, want ErrUnknownHandle", err)
+	}
+}

@@ -156,17 +156,11 @@ func (s *Store) Put(ctx context.Context, filename, contentType string, r io.Read
 // Open returns the info and bytes of a live handle. An unknown or expired
 // handle returns ErrUnknownHandle.
 func (s *Store) Open(handle string) (Info, []byte, error) {
-	s.mu.Lock()
-	e, ok := s.index[handle]
-	if ok && s.expired(e) {
-		s.removeLocked(handle) // a failed removal is retried by the next Sweep
-		ok = false
+	info, err := s.Stat(handle)
+	if err != nil {
+		return Info{}, nil, err
 	}
-	s.mu.Unlock()
-	if !ok {
-		return Info{}, nil, ErrUnknownHandle
-	}
-	data, err := os.ReadFile(filepath.Join(s.dir, e.info.Handle))
+	data, err := os.ReadFile(filepath.Join(s.dir, info.Handle))
 	if errors.Is(err, os.ErrNotExist) {
 		// Swept between the lookup and the read.
 		return Info{}, nil, ErrUnknownHandle
@@ -174,7 +168,24 @@ func (s *Store) Open(handle string) (Info, []byte, error) {
 	if err != nil {
 		return Info{}, nil, fmt.Errorf("upload: read: %w", err)
 	}
-	return e.info, data, nil
+	return info, data, nil
+}
+
+// Stat returns the info of a live handle without reading its bytes, so a
+// caller can check sizes first. An unknown or expired handle returns
+// ErrUnknownHandle.
+func (s *Store) Stat(handle string) (Info, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.index[handle]
+	if ok && s.expired(e) {
+		s.removeLocked(handle) // a failed removal is retried by the next Sweep
+		ok = false
+	}
+	if !ok {
+		return Info{}, ErrUnknownHandle
+	}
+	return e.info, nil
 }
 
 // Sweep removes expired uploads and returns how many.

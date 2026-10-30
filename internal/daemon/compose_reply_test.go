@@ -778,3 +778,47 @@ func TestReplyReadsRepeatedAddressFields(t *testing.T) {
 		t.Errorf("reply-all RCPT TO = %v, want %v", got, want)
 	}
 }
+
+// TestForwardSizeCheckedBeforeStreaming forwards originals whose
+// attachments, at the sizes the store reports, do not fit the account's
+// limit: alone, or with the caller's own upload. Each is refused before
+// any part is streamed.
+func TestForwardSizeCheckedBeforeStreaming(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	add := func(id string, size int) ref.Ref {
+		return e.small.Add(fake.Message{
+			Folder: "INBOX", From: []mailstore.Address{{Email: "alice@example.net"}}, Subject: "big", Body: "x", MessageID: "<" + id + "@example.net>",
+			Attachments: []fake.Attachment{
+				{Part: "2", Filename: "a.bin", ContentType: "application/octet-stream", Data: bytes.Repeat([]byte("a"), size)},
+				{Part: "3", Filename: "b.bin", ContentType: "application/octet-stream", Data: bytes.Repeat([]byte("b"), size)},
+			},
+		})
+	}
+	up, err := e.upload(t, &chainmailv1.UploadHeader{Account: "small", Filename: "mine.txt", ContentType: "text/plain"}, bytes.Repeat([]byte("m"), 12<<10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name    string
+		orig    ref.Ref
+		content *chainmailv1.Content
+	}{
+		{"original alone", add("alone", 7<<10), replyContent("x")},
+		{"with the caller's upload", add("with", 2<<10), &chainmailv1.Content{Body: markdown("x"), Attachments: []string{up.GetHandle()}}},
+	}
+	for i, tt := range tests {
+		before := e.small.Calls("StreamPart")
+		_, err := e.forward(t, &chainmailv1.ForwardRequest{Ref: tt.orig.String(), To: []string{"zed@example.org"}, Content: tt.content, IdempotencyKey: fmt.Sprintf("big-%d", i)})
+		if reasonOf(err) != api.ReasonInvalidArgument {
+			t.Errorf("%s: err = %v, want INVALID_ARGUMENT", tt.name, err)
+		}
+		if n := e.small.Calls("StreamPart") - before; n != 0 {
+			t.Errorf("%s: streamed %d parts before refusing, want none", tt.name, n)
+		}
+	}
+	if len(srv.Messages()) != 0 {
+		t.Error("a refused forward was sent")
+	}
+}

@@ -162,8 +162,11 @@ func (c *composeService) answer(ctx context.Context, cl caller, a answer) (*chai
 	if err != nil {
 		return nil, c.record(ctx, cl, entry, err)
 	}
+	// The original's attachments get what the caller's content leaves of the
+	// account's limit.
+	budget := acct.MaxMessageSize - inputSize(spec)
 	build := func(ctx context.Context) (compose.Message, error) {
-		orig, err := c.original(ctx, acct, r, a.attachments)
+		orig, err := c.original(ctx, acct, r, a.attachments, budget)
 		if err != nil {
 			return compose.Message{}, err
 		}
@@ -255,7 +258,7 @@ func hasAddress(list []mail.Address, a mail.Address) bool {
 // had cut short, because the whole message is over the account's limit or
 // a part over a reading cap, the original is marked truncated, so the
 // quote ends with compose.TruncatedMarker.
-func (c *composeService) original(ctx context.Context, acct config.ResolvedAccount, r ref.Ref, attachments bool) (compose.Original, error) {
+func (c *composeService) original(ctx context.Context, acct config.ResolvedAccount, r ref.Ref, attachments bool, budget int64) (compose.Original, error) {
 	st := c.s.stores.get(acct)
 	res := st.FetchMessages(ctx, []ref.Ref{r})
 	if len(res) != 1 {
@@ -298,7 +301,7 @@ func (c *composeService) original(ctx context.Context, acct config.ResolvedAccou
 		Truncated:  truncated || body.Truncated || htmlCut,
 	}
 	if attachments {
-		if orig.Attachments, err = c.originalAttachments(ctx, st, acct, r, msg.Attachments); err != nil {
+		if orig.Attachments, err = c.originalAttachments(ctx, st, acct, r, msg.Attachments, budget); err != nil {
 			return compose.Original{}, err
 		}
 	}
@@ -311,14 +314,22 @@ var errOriginalTooLarge = &argError{
 	hint: "forward with no_attachments, or send the files as links",
 }
 
-// originalAttachments streams each attachment of r. Together they must fit
-// the account's message size limit at their raw size, a lower bound on how
-// they are sent.
-func (c *composeService) originalAttachments(ctx context.Context, st mailstore.Store, acct config.ResolvedAccount, r ref.Ref, list []mailstore.Attachment) ([]compose.File, error) {
+// originalAttachments streams each attachment of r. Before any is read,
+// their sizes as the store reports them, encoded as they are sent again,
+// must together fit budget. Once read, they must together fit the
+// account's message size limit at their raw size, a lower bound on how they
+// are sent.
+func (c *composeService) originalAttachments(ctx context.Context, st mailstore.Store, acct config.ResolvedAccount, r ref.Ref, list []mailstore.Attachment, budget int64) ([]compose.File, error) {
 	var (
 		out   []compose.File
 		total int64
 	)
+	var reported int64
+	for _, a := range list {
+		if reported += a.Size; reported > budget {
+			return nil, errOriginalTooLarge
+		}
+	}
 	for _, a := range list {
 		info, data, err := readPart(ctx, st, r, a.Part, acct.MaxMessageSize)
 		if errors.Is(err, errPartTooLarge) {

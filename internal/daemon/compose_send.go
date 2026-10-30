@@ -750,7 +750,8 @@ func (c *composeService) specFromProto(ctx context.Context, p *chainmailv1.Compo
 }
 
 // applyContent sets spec's body, attachments, inline images, headers and
-// signature from p, reading the uploads it names.
+// signature from p, reading the uploads it names once their recorded sizes
+// together fit the account's limit.
 func (c *composeService) applyContent(spec *compose.Spec, acct config.ResolvedAccount, p *chainmailv1.Content) error {
 	body := p.GetBody()
 	switch k := body.GetKind().(type) {
@@ -766,6 +767,9 @@ func (c *composeService) applyContent(spec *compose.Spec, acct config.ResolvedAc
 	if body.GetHtmlText() != "" && spec.Body.Kind != compose.HTML {
 		return &argError{msg: "html_text is only for an html body", hint: "drop html_text, or send the body as html"}
 	}
+	if err := c.checkUploadSizes(acct, p); err != nil {
+		return err
+	}
 	for i, h := range p.GetAttachments() {
 		f, err := c.openUpload(acct, h)
 		if err != nil {
@@ -774,13 +778,6 @@ func (c *composeService) applyContent(spec *compose.Spec, acct config.ResolvedAc
 		spec.Attachments = append(spec.Attachments, f)
 	}
 	for i, in := range p.GetInline() {
-		name := in.GetName()
-		if name == "" || strings.ContainsFunc(name, isControl) {
-			return &argError{msg: fmt.Sprintf("inline image %d has no usable name", i+1), hint: "name each inline image as the body refers to it"}
-		}
-		if _, dup := spec.Inline[name]; dup {
-			return &argError{msg: fmt.Sprintf("inline image %d repeats a name", i+1), hint: "give each inline image its own name"}
-		}
 		f, err := c.openUpload(acct, in.GetUpload())
 		if err != nil {
 			return fmt.Errorf("inline image %d: %w", i+1, err)
@@ -788,13 +785,45 @@ func (c *composeService) applyContent(spec *compose.Spec, acct config.ResolvedAc
 		if spec.Inline == nil {
 			spec.Inline = map[string]compose.File{}
 		}
-		spec.Inline[name] = f
+		spec.Inline[in.GetName()] = f
 	}
 	spec.Headers = p.GetHeaders()
 	if !p.GetNoSignature() {
 		spec.Signature = acct.Signature
 	}
 	return nil
+}
+
+// checkUploadSizes checks the inline image names and every upload p names,
+// and refuses the uploads when together, at their recorded sizes, they are
+// over acct's limit. It reads no upload's bytes, so a request naming large
+// uploads, or one upload many times, is refused before any is loaded.
+func (c *composeService) checkUploadSizes(acct config.ResolvedAccount, p *chainmailv1.Content) error {
+	var total int64
+	for i, h := range p.GetAttachments() {
+		info, err := c.statUpload(acct, h)
+		if err != nil {
+			return fmt.Errorf("attachment %d: %w", i+1, err)
+		}
+		total += info.Size
+	}
+	names := map[string]bool{}
+	for i, in := range p.GetInline() {
+		name := in.GetName()
+		if name == "" || strings.ContainsFunc(name, isControl) {
+			return &argError{msg: fmt.Sprintf("inline image %d has no usable name", i+1), hint: "name each inline image as the body refers to it"}
+		}
+		if names[name] {
+			return &argError{msg: fmt.Sprintf("inline image %d repeats a name", i+1), hint: "give each inline image its own name"}
+		}
+		names[name] = true
+		info, err := c.statUpload(acct, in.GetUpload())
+		if err != nil {
+			return fmt.Errorf("inline image %d: %w", i+1, err)
+		}
+		total += info.Size
+	}
+	return checkSize(acct, total)
 }
 
 // uploadSums maps each upload handle p names to the hex SHA-256 of the
@@ -924,12 +953,26 @@ func (c *composeService) own(handle, account string) {
 	c.owners[handle] = uploadOwner{account: account, at: now}
 }
 
-// openUpload reads an upload of acct. A handle of another account reads as unknown.
-func (c *composeService) openUpload(acct config.ResolvedAccount, handle string) (compose.File, error) {
+// owned reports whether handle is a live upload of acct.
+func (c *composeService) owned(acct config.ResolvedAccount, handle string) bool {
 	c.mu.Lock()
 	o, ok := c.owners[handle]
 	c.mu.Unlock()
-	if !ok || o.account != acct.Name || c.s.uploads == nil {
+	return ok && o.account == acct.Name && c.s.uploads != nil
+}
+
+// statUpload is the info of an upload of acct, without its bytes. A handle
+// of another account is unknown.
+func (c *composeService) statUpload(acct config.ResolvedAccount, handle string) (upload.Info, error) {
+	if !c.owned(acct, handle) {
+		return upload.Info{}, upload.ErrUnknownHandle
+	}
+	return c.s.uploads.Stat(handle)
+}
+
+// openUpload reads an upload of acct. A handle of another account reads as unknown.
+func (c *composeService) openUpload(acct config.ResolvedAccount, handle string) (compose.File, error) {
+	if !c.owned(acct, handle) {
 		return compose.File{}, upload.ErrUnknownHandle
 	}
 	info, data, err := c.s.uploads.Open(handle)

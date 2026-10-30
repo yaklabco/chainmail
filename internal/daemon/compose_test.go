@@ -10,6 +10,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -1349,5 +1351,40 @@ func TestSendRawRefusesRepeatedFrom(t *testing.T) {
 	}
 	if len(srv.Messages()) != 0 {
 		t.Error("a message with two From fields was sent")
+	}
+}
+
+// TestSendSizeCheckedBeforeReadingUploads names one live upload many times
+// as attachments and inline images, together over the account's limit,
+// after its file was removed from disk. The call is refused for its size
+// from the uploads' recorded sizes, so no upload's bytes are read: reading
+// one would fail as an unknown upload instead.
+func TestSendSizeCheckedBeforeReadingUploads(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	png := append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0}, 6<<10)...)
+	up, err := e.upload(t, &chainmailv1.UploadHeader{Account: "small", Filename: "a.png", ContentType: "image/png"}, png)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(filepath.Dir(e.Socket), "uploads", up.GetHandle())); err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string]func(*chainmailv1.Content){
+		"attachments": func(c *chainmailv1.Content) { c.Attachments = []string{up.GetHandle(), up.GetHandle(), up.GetHandle()} },
+		"attachments and inline": func(c *chainmailv1.Content) {
+			c.Body = markdown("![a](a.png) ![b](b.png)")
+			c.Attachments = []string{up.GetHandle()}
+			c.Inline = []*chainmailv1.InlineImage{{Name: "a.png", Upload: up.GetHandle()}, {Name: "b.png", Upload: up.GetHandle()}}
+		},
+	}
+	for name, fill := range tests {
+		spec := hostSpec()
+		spec.Account = "small"
+		fill(spec.Content)
+		_, err := e.send(t, &chainmailv1.SendRequest{Spec: spec, DryRun: true})
+		if reasonOf(err) != api.ReasonInvalidArgument || !strings.Contains(err.Error(), "over the account's limit") {
+			t.Errorf("%s: err = %v, want INVALID_ARGUMENT for the size", name, err)
+		}
 	}
 }
