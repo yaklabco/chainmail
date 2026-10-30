@@ -701,3 +701,28 @@ func TestGmailSystemFoldersByAttribute(t *testing.T) {
 		}
 	})
 }
+
+// TestGmailWritesOfGoneMessagesAreStale: a UID MOVE of messages that are
+// gone moves nothing and answers without COPYUID. Expunge and a move out of
+// Trash report those refs stale, as the other writes do, rather than as a
+// move that went unconfirmed.
+func TestGmailWritesOfGoneMessagesAreStale(t *testing.T) {
+	t.Parallel()
+	w := newGmailWrites(t)
+	gone, kept := w.ref(t, allMail, 999), w.ref(t, allMail, 2)
+	res := w.store.Expunge(t.Context(), []ref.Ref{gone, kept})
+	if !errors.Is(res[0].Err, mailstore.ErrStaleRef) || res[1] != (mailstore.RefResult{}) {
+		t.Errorf("Expunge = %+v, want the gone ref stale and the other expunged", res)
+	}
+	if got := one(t, w.store.Expunge(t.Context(), []ref.Ref{gone})); !errors.Is(got.Err, mailstore.ErrStaleRef) {
+		t.Errorf("Expunge of only a gone ref = %+v, want ErrStaleRef", got)
+	}
+	goneTrash := w.ref(t, gmailTrash, 399)
+	if got := one(t, w.store.Move(t.Context(), []ref.Ref{goneTrash}, "Work")); !errors.Is(got.Err, mailstore.ErrStaleRef) {
+		t.Errorf("Move of a gone Trash ref to a label = %+v, want ErrStaleRef", got)
+	}
+	res = w.store.Move(t.Context(), []ref.Ref{goneTrash, w.ref(t, gmailTrash, 301)}, "Work")
+	if !errors.Is(res[0].Err, mailstore.ErrStaleRef) || res[1].Err != nil || res[1].Ref.Folder != allMail {
+		t.Errorf("Move = %+v, want the gone ref stale and the other back in All Mail", res)
+	}
+}

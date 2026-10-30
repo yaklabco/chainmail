@@ -14,6 +14,7 @@ package imapstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -295,19 +296,19 @@ func (s *Store) gmailExpunge(ctx context.Context, refs []ref.Ref) []mailstore.Re
 			return expungeGroup(ctx, c, g, sent)
 		}
 		sent()
-		cu, err := c.uidMove(ctx, uidSet(g.uids), trash)
+		m, err := c.moveExisting(ctx, uidSet(g.uids), trash)
 		if err != nil {
 			return s.destError(err, trash)
 		}
-		pairs, ok := cu.pairs(len(g.uids))
-		if cu.validity == 0 || !ok {
-			g.failAll(fmt.Errorf("%w: %s moved the messages to Trash without saying where, so they were not expunged; they are in Trash", mailstore.ErrUnavailable, s.acct.Name))
+		pairs, ok := m.cu.pairs(len(g.uids))
+		if m.cu.validity == 0 || !ok {
+			m.unconfirmed(g, fmt.Errorf("%w: %s moved the messages to Trash without saying where, so they were not expunged; they are in Trash", mailstore.ErrUnavailable, s.acct.Name))
 			return nil
 		}
 		if len(pairs) == 0 {
 			return nil // all gone already
 		}
-		if err := s.expungeMoved(ctx, c, trash, cu.validity, pairs); err != nil {
+		if err := s.expungeMoved(ctx, c, trash, m.cu.validity, pairs); err != nil {
 			s.opts.Logger.Debug("expunging in Trash", "account", s.acct.Name, "err", err)
 			kept := fmt.Errorf("%w: %s moved the message to Trash, but expunging it there failed; it is in Trash", mailstore.ErrUnavailable, s.acct.Name)
 			for src := range pairs {
@@ -521,19 +522,19 @@ func (s *Store) restoreThenLabel(ctx context.Context, c *conn, g *groupWrite, al
 		return nil
 	}
 	sent()
-	cu, err := c.uidMove(ctx, uidSet(g.uids), allMail)
+	m, err := c.moveExisting(ctx, uidSet(g.uids), allMail)
 	if err != nil {
 		return s.destError(err, allMail)
 	}
-	pairs, ok := cu.pairs(len(g.uids))
-	if cu.validity == 0 || !ok {
-		g.failAll(fmt.Errorf("%w: %s moved the messages to All Mail without saying where, so the label was not applied; search again", mailstore.ErrUnavailable, s.acct.Name))
+	pairs, ok := m.cu.pairs(len(g.uids))
+	if m.cu.validity == 0 || !ok {
+		m.unconfirmed(g, fmt.Errorf("%w: %s moved the messages to All Mail without saying where, so the label was not applied; search again", mailstore.ErrUnavailable, s.acct.Name))
 		return nil
 	}
 	if len(pairs) == 0 {
 		return nil // all gone already
 	}
-	if err := s.labelMoved(ctx, c, allMail, cu.validity, pairs, e); err != nil {
+	if err := s.labelMoved(ctx, c, allMail, m.cu.validity, pairs, e); err != nil {
 		s.opts.Logger.Debug("labelling messages moved to All Mail", "account", s.acct.Name, "err", err)
 		half := fmt.Errorf("%w: %s moved the message back to All Mail, but the label change failed; search again", mailstore.ErrUnavailable, s.acct.Name)
 		for src := range pairs {
@@ -542,7 +543,7 @@ func (s *Store) restoreThenLabel(ctx context.Context, c *conn, g *groupWrite, al
 		return nil
 	}
 	for src, dst := range pairs {
-		g.place(src, ref.Ref{Account: s.acct.Name, Folder: allMail, UIDValidity: cu.validity, UID: dst})
+		g.place(src, ref.Ref{Account: s.acct.Name, Folder: allMail, UIDValidity: m.cu.validity, UID: dst})
 	}
 	return nil
 }
@@ -561,4 +562,62 @@ func (s *Store) labelMoved(ctx context.Context, c *conn, allMail string, validit
 		return err
 	}
 	return c.removeLabels(ctx, set, e)
+}
+
+// gmailMove is what moveExisting learned: the COPYUID, and which of the
+// UIDs named existed just before the move, when the server said.
+type gmailMove struct {
+	cu       copyUID
+	existed  []uint32
+	answered bool // whether the FETCH that read existed was answered
+}
+
+// moveExisting sends a UID FETCH of set pipelined ahead of its UID MOVE into
+// dest, so the messages that were there are known even when no COPYUID
+// comes back, as when every one of them was gone. A refused FETCH leaves
+// that unknown and does not fail the MOVE, which may have gone through.
+func (c *conn) moveExisting(ctx context.Context, set imap.UIDSet, dest string) (gmailMove, error) {
+	var m gmailMove
+	err := c.pipelined(ctx, func(cl *imapclient.Client) []func() error {
+		fetch := cl.Fetch(set, &imap.FetchOptions{UID: true})
+		mv := cl.Move(set, dest)
+		return []func() error{func() error {
+			bufs, err := fetch.Collect()
+			var reply *imap.Error
+			switch {
+			case errors.As(err, &reply):
+				return nil
+			case err != nil:
+				return err
+			}
+			m.answered = true
+			for _, b := range bufs {
+				m.existed = append(m.existed, uint32(b.UID))
+			}
+			return nil
+		}, func() error {
+			data, err := mv.Wait()
+			if err != nil {
+				return err
+			}
+			m.cu.validity = data.UIDValidity
+			m.cu.src, _ = data.SourceUIDs.(imap.UIDSet) // nil without COPYUID
+			m.cu.dst, _ = data.DestUIDs.(imap.UIDSet)
+			return nil
+		}}
+	})
+	return m, err
+}
+
+// unconfirmed fails, with err, the messages of g a MOVE without a readable
+// COPYUID may have moved: those that existed, or every one when that is
+// unknown. The others were gone, and finish reports them stale.
+func (m gmailMove) unconfirmed(g *groupWrite, err error) {
+	if !m.answered {
+		g.failAll(err)
+		return
+	}
+	for _, uid := range m.existed {
+		g.set(uid, mailstore.RefResult{Err: err})
+	}
 }
