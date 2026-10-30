@@ -83,6 +83,12 @@ type Preset struct {
 	OAuth2 *OAuth2
 	// MaxConnections caps simultaneous IMAP connections per account, IDLE included.
 	MaxConnections int
+	// DefaultPool is how many IMAP connections the daemon uses when config
+	// sets no pool and no probe result exists.
+	DefaultPool int
+	// MaxMessageSize is the largest message the provider accepts, in bytes.
+	// Config max_message_size overrides it.
+	MaxMessageSize int64
 	// Gmail is set for providers that speak Gmail's X-GM-EXT-1 extensions.
 	Gmail bool
 }
@@ -106,33 +112,43 @@ var (
 // Gmail allows 15 IMAP connections per account. Both Google presets take 10
 // so the user's other mail clients on the same account keep 5 for
 // themselves. iCloud and Hostinger don't document a limit, so they start
-// low until the live tests measure them.
+// low until the live tests measure them. DefaultPool is the pool size before
+// a probe has measured the account. Google documents a 25 MiB message limit;
+// iCloud and Hostinger take 35 MiB until measured, and custom servers 25 MiB.
 var presets = map[string]Preset{
 	"google-workspace": {
 		IMAP: gmailIMAP, SMTP: gmailSMTP,
 		AuthMethods: []AuthMethod{AuthOAuth2}, OAuth2: &googleOAuth2,
 		MaxConnections: 10, Gmail: true,
+		DefaultPool: 6, MaxMessageSize: 25 << 20,
 	},
 	"gmail": {
 		IMAP: gmailIMAP, SMTP: gmailSMTP,
 		AuthMethods: []AuthMethod{AuthOAuth2, AuthPassword}, OAuth2: &googleOAuth2,
 		MaxConnections: 10, Gmail: true,
+		DefaultPool: 6, MaxMessageSize: 25 << 20,
 	},
 	"hostinger": {
 		IMAP:           Endpoint{Host: "imap.hostinger.com", Port: 993, Security: SecurityTLS},
 		SMTP:           Endpoint{Host: "smtp.hostinger.com", Port: 465, Security: SecurityTLS},
 		AuthMethods:    []AuthMethod{AuthPassword},
 		MaxConnections: 3,
+		DefaultPool:    3,
+		MaxMessageSize: 35 << 20,
 	},
 	"icloud": {
 		IMAP:           Endpoint{Host: "imap.mail.me.com", Port: 993, Security: SecurityTLS},
 		SMTP:           Endpoint{Host: "smtp.mail.me.com", Port: 587, Security: SecurityStartTLS},
 		AuthMethods:    []AuthMethod{AuthPassword},
 		MaxConnections: 3,
+		DefaultPool:    3,
+		MaxMessageSize: 35 << 20,
 	},
 	"custom": {
 		AuthMethods:    []AuthMethod{AuthPassword},
 		MaxConnections: 3,
+		DefaultPool:    3,
+		MaxMessageSize: 25 << 20,
 	},
 }
 

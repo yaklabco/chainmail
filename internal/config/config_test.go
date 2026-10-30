@@ -325,3 +325,101 @@ func TestParseByteSize(t *testing.T) {
 		}
 	}
 }
+
+func TestComposeFields(t *testing.T) {
+	t.Parallel()
+	config := `
+[accounts.host]
+provider = "hostinger"
+address = "me@example.com"
+display_name = "James Ainslie"
+signature = "James\n[ainslies.us](https://ainslies.us)"
+archive_folder = "Archive"
+pool = 4
+max_message_size = "10MiB"
+`
+	cfg, err := Parse([]byte(config))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got, err := cfg.Account("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DisplayName != "James Ainslie" {
+		t.Errorf("DisplayName = %q", got.DisplayName)
+	}
+	if got.Signature != "James\n[ainslies.us](https://ainslies.us)" {
+		t.Errorf("Signature = %q", got.Signature)
+	}
+	if got.ArchiveFolder != "Archive" {
+		t.Errorf("ArchiveFolder = %q", got.ArchiveFolder)
+	}
+	if got.Pool != 4 {
+		t.Errorf("Pool = %d, want 4", got.Pool)
+	}
+	if got.MaxMessageSize != 10<<20 {
+		t.Errorf("MaxMessageSize = %d, want %d", got.MaxMessageSize, 10<<20)
+	}
+}
+
+func TestComposeFieldDefaults(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse([]byte(validConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string]int64{
+		"work":      25 << 20,
+		"hostinger": 35 << 20,
+		"icloud":    35 << 20,
+		"local":     25 << 20,
+	}
+	for name, size := range tests {
+		got, err := cfg.Account(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Pool != 0 {
+			t.Errorf("%s: Pool = %d, want 0 (not set)", name, got.Pool)
+		}
+		if got.MaxMessageSize != size {
+			t.Errorf("%s: MaxMessageSize = %d, want the preset's %d", name, got.MaxMessageSize, size)
+		}
+		if got.DisplayName != "" || got.Signature != "" || got.ArchiveFolder != "" {
+			t.Errorf("%s: compose fields = %q %q %q, want empty", name, got.DisplayName, got.Signature, got.ArchiveFolder)
+		}
+	}
+}
+
+func TestComposeFieldsInvalid(t *testing.T) {
+	t.Parallel()
+	const base = "[accounts.host]\nprovider = \"hostinger\"\naddress = \"me@example.com\"\n"
+	tests := []struct {
+		name  string
+		extra string
+		want  string
+	}{
+		{name: "pool negative", extra: "pool = -1", want: "accounts.host: pool"},
+		{name: "pool too large", extra: "pool = 13", want: "accounts.host: pool"},
+		{name: "size unparsable", extra: `max_message_size = "10MB"`, want: "accounts.host: max_message_size"},
+		{name: "size zero", extra: `max_message_size = "0"`, want: "accounts.host: max_message_size"},
+		{name: "size too small", extra: `max_message_size = "512B"`, want: "accounts.host: max_message_size"},
+		{name: "size too large", extra: `max_message_size = "2048MiB"`, want: "accounts.host: max_message_size"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(base + tt.extra + "\n"))
+			var verr *ValidationError
+			if !errors.As(err, &verr) || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("err = %v, want a %q problem", err, tt.want)
+			}
+		})
+	}
+	for _, ok := range []string{"pool = 0", "pool = 1", "pool = 12", `max_message_size = "1KiB"`, `max_message_size = "1024MiB"`} {
+		if _, err := Parse([]byte(base + ok + "\n")); err != nil {
+			t.Errorf("%s: err = %v, want valid", ok, err)
+		}
+	}
+}
