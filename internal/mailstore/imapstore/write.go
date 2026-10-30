@@ -113,28 +113,32 @@ func (s *Store) Expunge(ctx context.Context, refs []ref.Ref) []mailstore.RefResu
 	if s.gmail() {
 		return s.gmailExpunge(ctx, refs)
 	}
-	return s.writeBatch(ctx, refs, func(ctx context.Context, c *conn, g *groupWrite, sent func()) error {
-		if !c.client().Caps().Has(imap.CapUIDPlus) {
-			g.failAll(fmt.Errorf("%w: the server has no UID EXPUNGE (UIDPLUS), so expunging would remove other deleted mail too", mailstore.ErrUnsupported))
-			return nil
-		}
-		set := uidSet(g.uids)
-		var found []uint32
-		sent()
-		err := c.pipelined(ctx, func(cl *imapclient.Client) []func() error {
-			exists := cl.Fetch(set, &imap.FetchOptions{UID: true})
-			store := cl.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagDeleted}}, nil)
-			expunge := cl.UIDExpunge(set)
-			return []func() error{collectUIDs(exists, &found), store.Close, expunge.Close}
-		})
-		if err != nil {
-			return err
-		}
-		for _, uid := range found {
-			g.set(uid, mailstore.RefResult{})
-		}
+	return s.writeBatch(ctx, refs, expungeGroup)
+}
+
+// expungeGroup is Expunge's writeOp: it expunges a group's messages from
+// the folder they are in. Gmail's Expunge uses it in Trash.
+func expungeGroup(ctx context.Context, c *conn, g *groupWrite, sent func()) error {
+	if !c.client().Caps().Has(imap.CapUIDPlus) {
+		g.failAll(fmt.Errorf("%w: the server has no UID EXPUNGE (UIDPLUS), so expunging would remove other deleted mail too", mailstore.ErrUnsupported))
 		return nil
+	}
+	set := uidSet(g.uids)
+	var found []uint32
+	sent()
+	err := c.pipelined(ctx, func(cl *imapclient.Client) []func() error {
+		exists := cl.Fetch(set, &imap.FetchOptions{UID: true})
+		store := cl.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagDeleted}}, nil)
+		expunge := cl.UIDExpunge(set)
+		return []func() error{collectUIDs(exists, &found), store.Close, expunge.Close}
 	})
+	if err != nil {
+		return err
+	}
+	for _, uid := range found {
+		g.set(uid, mailstore.RefResult{})
+	}
+	return nil
 }
 
 // StoreFlags implements mailstore.Writer: UID STORE +FLAGS.SILENT and
@@ -644,6 +648,16 @@ func (g *groupWrite) setAll(r mailstore.RefResult) {
 	}
 }
 
+// place records that the message uid names is now at r, keeping each ref's
+// X-GM-MSGID, which stays with a Gmail message wherever it goes.
+func (g *groupWrite) place(uid uint32, r ref.Ref) {
+	for _, j := range g.byUID[uid] {
+		out := r
+		out.GmailMsgID = g.refs[j].GmailMsgID
+		g.setAt(j, mailstore.RefResult{Ref: out})
+	}
+}
+
 // failAll fails every ref that has no outcome yet.
 func (g *groupWrite) failAll(err error) {
 	for j := range g.res {
@@ -669,11 +683,6 @@ func failAll(refs []ref.Ref, err error) []mailstore.RefResult {
 		out[i].Err = err
 	}
 	return out
-}
-
-// unsupported fails every ref with mailstore.ErrUnsupported.
-func unsupported(refs []ref.Ref) []mailstore.RefResult {
-	return failAll(refs, mailstore.ErrUnsupported)
 }
 
 // copyUID is a COPYUID response code: the destination's UIDVALIDITY and the
