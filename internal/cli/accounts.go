@@ -60,7 +60,7 @@ func newAccountsCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		&cobra.Command{
 			Use:   "probe [<account>]...",
 			Short: "Measure how many IMAP connections accounts allow, and size their pools from it",
-			Long: "Open IMAP connections to each account one at a time until the server refuses one, " +
+			Long: "Open IMAP connections to each account one at a time until the server refuses one or 16 are open, " +
 				"then size the account's connection pool from the count. With no account, probe every account.",
 			Args: cobra.ArbitraryArgs,
 			RunE: func(_ *cobra.Command, args []string) error {

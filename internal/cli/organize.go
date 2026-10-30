@@ -81,8 +81,8 @@ func newOrganizeCmds(ctx context.Context, env Env, g *globals) []*cobra.Command 
 		call: setFlags(&flagsAdd, &flagsRemove),
 		wrap: func(o []*chainmailv1.RefOutcome) proto.Message { return &chainmailv1.SetFlagsResponse{Outcomes: o} },
 	})
-	flags.Flags().StringArrayVar(&flagsAdd, "add", nil, "a flag to add (repeatable)")
-	flags.Flags().StringArrayVar(&flagsRemove, "remove", nil, "a flag to remove (repeatable)")
+	flags.Flags().StringArrayVar(&flagsAdd, "add", nil, `a flag to add: \Seen, \Flagged, \Answered, \Draft or a keyword (repeatable)`)
+	flags.Flags().StringArrayVar(&flagsRemove, "remove", nil, `a flag to remove: \Seen, \Flagged, \Answered, \Draft or a keyword (repeatable)`)
 	label := newBatchCmd(ctx, env, g, batchCmd{
 		use: "label <ref>... [--add <label>]... [--remove <label>]...", short: "Add and remove Gmail labels", verb: "labelled",
 		call: func(ctx context.Context, c *client.Client, refs []string) ([]*chainmailv1.RefOutcome, error) {
@@ -92,7 +92,7 @@ func newOrganizeCmds(ctx context.Context, env Env, g *globals) []*cobra.Command 
 		},
 		wrap: func(o []*chainmailv1.RefOutcome) proto.Message { return &chainmailv1.SetLabelsResponse{Outcomes: o} },
 	})
-	label.Flags().StringArrayVar(&labelsAdd, "add", nil, "a label to add (repeatable)")
+	label.Flags().StringArrayVar(&labelsAdd, "add", nil, "a label to add, created if missing (repeatable)")
 	label.Flags().StringArrayVar(&labelsRemove, "remove", nil, "a label to remove (repeatable)")
 	return []*cobra.Command{
 		move, cp,
@@ -360,7 +360,7 @@ func newFolderCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			})
 		},
 	}
-	del.Flags().BoolVar(&force, "force", false, "delete the folder even when it holds mail, and the mail with it")
+	del.Flags().BoolVar(&force, "force", false, "delete the folder even when it holds mail, and the mail with it (on Google the messages stay in All Mail)")
 	cmd.AddCommand(
 		&cobra.Command{
 			Use:   "create <name> --account <account>",
