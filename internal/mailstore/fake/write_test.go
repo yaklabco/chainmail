@@ -742,6 +742,7 @@ func TestWriteStoreLabels(t *testing.T) {
 		remove     []string
 		wantLabels []string
 		wantFlags  []string
+		wantFolder string // a folder the label makes
 		wantErr    error
 	}{
 		{name: "add a label", add: []string{"Receipts"}, wantLabels: []string{`\Inbox`, "Receipts"}},
@@ -751,7 +752,14 @@ func TestWriteStoreLabels(t *testing.T) {
 		{name: "add and remove", add: []string{"Receipts", `\Important`}, remove: []string{`\Inbox`}, wantLabels: []string{"Receipts", `\Important`}},
 		{name: "star label sets \\Flagged", add: []string{`\Starred`}, wantLabels: []string{`\Inbox`, `\Starred`}, wantFlags: []string{`\Flagged`}},
 		{name: "unstar label clears \\Flagged", labels: []string{`\Starred`}, flags: []string{`\Flagged`}, remove: []string{`\Starred`}, wantLabels: []string{}, wantFlags: []string{}},
-		{name: "unknown label", add: []string{"Nope"}, wantErr: mailstore.ErrNotFound},
+		// Gmail creates a label a STORE names that the account lacks, as
+		// imapstore relies on.
+		{name: "new label is created", add: []string{"Brand New"}, wantLabels: []string{`\Inbox`, "Brand New"}, wantFolder: "Brand New"},
+		{name: "new nested label", add: []string{"Brand/New"}, wantLabels: []string{`\Inbox`, "Brand/New"}, wantFolder: "Brand/New"},
+		{name: "removing an unknown label", remove: []string{"Nope"}, wantLabels: []string{`\Inbox`}},
+		{name: "empty label", add: []string{""}, wantErr: mailstore.ErrUnsupported},
+		{name: "label with a line break", add: []string{"a\r\nb"}, wantErr: mailstore.ErrUnsupported},
+		{name: "a new name under [Gmail]", add: []string{"[Gmail]/Mine"}, wantErr: mailstore.ErrUnsupported},
 		{name: "unknown system label", add: []string{`\Bogus`}, wantErr: mailstore.ErrNotFound},
 		{name: "All Mail is not a label", add: []string{allMail}, wantErr: mailstore.ErrUnsupported},
 		{name: "Trash is not a label", add: []string{gmailTrash}, wantErr: mailstore.ErrUnsupported},
@@ -770,6 +778,9 @@ func TestWriteStoreLabels(t *testing.T) {
 				if !errors.Is(res.Err, tt.wantErr) {
 					t.Fatalf("StoreLabels = %+v, want %v", res, tt.wantErr)
 				}
+				if got := folderNames(t, s); len(got) != 6 {
+					t.Errorf("folders = %q after a refused edit", got)
+				}
 				return
 			}
 			if res.Err != nil || res.Ref != r {
@@ -785,6 +796,9 @@ func TestWriteStoreLabels(t *testing.T) {
 			}
 			if tt.wantFlags != nil && !slices.Equal(m.Summary.Flags, tt.wantFlags) && (len(m.Summary.Flags) != 0 || len(tt.wantFlags) != 0) {
 				t.Errorf("flags = %v, want %v", m.Summary.Flags, tt.wantFlags)
+			}
+			if tt.wantFolder != "" && !slices.Contains(folderNames(t, s), tt.wantFolder) {
+				t.Errorf("folders = %q, want the new label %q", folderNames(t, s), tt.wantFolder)
 			}
 		})
 	}

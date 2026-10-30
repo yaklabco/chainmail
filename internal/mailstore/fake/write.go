@@ -23,6 +23,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/ref"
@@ -437,10 +439,11 @@ func (s *Store) StoreFlags(ctx context.Context, refs []ref.Ref, add, remove []st
 
 // StoreLabels implements mailstore.Writer. Standard accounts fail every ref
 // with ErrUnsupported. On Gmail a label is a system label such as \Inbox
-// or \Starred, or the name of an existing label folder in any case, with
-// INBOX, Sent Mail and Drafts standing for their system labels. An unknown
-// label is ErrNotFound, and All Mail, Trash and Spam are not labels
-// (ErrUnsupported). The ref is kept.
+// or \Starred, or a user label in any case, with INBOX, Sent Mail and Drafts
+// standing for their system labels. A user label the account lacks is
+// created when a message gains it, as Gmail does. An unknown system label is
+// ErrNotFound, and All Mail, Trash, Spam, other names under [Gmail] and
+// names that are not text are not labels (ErrUnsupported). The ref is kept.
 func (s *Store) StoreLabels(ctx context.Context, refs []ref.Ref, add, remove []string) []mailstore.RefResult {
 	if !s.gmail {
 		return s.batch(ctx, opStoreLabels, refs, func() error {
@@ -455,17 +458,31 @@ func (s *Store) StoreLabels(ctx context.Context, refs []ref.Ref, add, remove []s
 		removes, err = s.labelsLocked(remove)
 		return err
 	}, func(m *Message) (ref.Ref, error) {
+		for _, l := range adds {
+			if !strings.HasPrefix(l, `\`) && !s.labelFolderLocked(l) {
+				s.addFolderLocked(l, mailstore.RoleNone, 1, 1)
+			}
+		}
 		m.Labels = editSet(m.Labels, adds, removes)
 		flagFromLabels(m, adds, removes)
 		return s.refLocked(m), nil
 	})
 }
 
-// labelsLocked resolves the labels StoreLabels names.
+// labelFolderLocked reports whether a folder is called name, ignoring case
+// as Gmail matches labels.
+func (s *Store) labelFolderLocked(name string) bool {
+	return slices.ContainsFunc(s.folders, func(f mailstore.Folder) bool { return strings.EqualFold(f.Name, name) })
+}
+
+// labelsLocked resolves the labels StoreLabels names, as imapstore does.
 func (s *Store) labelsLocked(names []string) ([]string, error) {
 	out := make([]string, 0, len(names))
 	for _, n := range names {
-		if strings.HasPrefix(n, `\`) {
+		switch {
+		case n == "" || !utf8.ValidString(n) || strings.ContainsFunc(n, unicode.IsControl):
+			return nil, fmt.Errorf("%w: a label must be non-empty text without control characters", mailstore.ErrUnsupported)
+		case strings.HasPrefix(n, `\`):
 			i := slices.IndexFunc(systemLabels, func(l string) bool { return strings.EqualFold(l, n) })
 			if i < 0 {
 				return nil, fmt.Errorf("%w: no system label %q", mailstore.ErrNotFound, n)
@@ -475,16 +492,24 @@ func (s *Store) labelsLocked(names []string) ([]string, error) {
 		}
 		// Gmail label names ignore case.
 		i := slices.IndexFunc(s.folders, func(f mailstore.Folder) bool { return strings.EqualFold(f.Name, n) })
-		if i < 0 {
-			return nil, fmt.Errorf("%w: no label %q", mailstore.ErrNotFound, n)
-		}
-		f := s.folders[i]
-		if holdsMail(f.Role) {
+		switch {
+		case i < 0 && isGmailFolderFold(n):
+			return nil, fmt.Errorf("%w: %s is one of Gmail's own folders, not a label", mailstore.ErrUnsupported, n)
+		case i < 0:
+			out = append(out, n) // a new label
+		case holdsMail(s.folders[i].Role):
 			return nil, fmt.Errorf("%w: %s is not a label; move or trash instead", mailstore.ErrUnsupported, n)
+		default:
+			out = append(out, labelOf(s.folders[i]))
 		}
-		out = append(out, labelOf(f))
 	}
 	return out, nil
+}
+
+// isGmailFolderFold is isGmailFolder ignoring case, as Gmail matches names.
+func isGmailFolderFold(name string) bool {
+	prefix := gmailPrefix + delimiter
+	return strings.EqualFold(name, gmailPrefix) || (len(name) > len(prefix) && strings.EqualFold(name[:len(prefix)], prefix))
 }
 
 // Gmail's star is both the \Flagged flag and the \Starred label, and
