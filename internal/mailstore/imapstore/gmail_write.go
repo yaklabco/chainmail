@@ -7,7 +7,8 @@ package imapstore
 // Refs live in [Gmail]/All Mail, Trash and Spam. A move or copy into a label
 // folder (INBOX, Sent Mail, Drafts or a user label) is a label edit with UID
 // STORE X-GM-LABELS and keeps the ref; only moves into or out of Trash and
-// Spam give a new one. A ref into a label folder, as Append gives, is edited
+// Spam give a new one. A copy into Trash or Spam is such a move, as Gmail
+// makes it, since Gmail keeps one copy of a message. A ref into a label folder, as Append gives, is edited
 // in place too, and when the edit takes the message out of that folder the
 // result is its All Mail ref, found by X-GM-MSGID.
 
@@ -249,7 +250,9 @@ func (s *Store) gmailCopy(ctx context.Context, refs []ref.Ref, folder string) []
 	}
 	switch dest.kind {
 	case gmailBin:
-		return failAll(refs, fmt.Errorf("%w: Gmail keeps one copy of a message, so it cannot be copied into %s; move or trash it instead", mailstore.ErrUnsupported, dest.name))
+		// Gmail keeps one copy of a message, and answers a COPY into Trash
+		// or Spam by moving it there.
+		return s.transfer(ctx, refs, dest.name, false)
 	case gmailOther:
 		return failAll(refs, otherFolder(dest.name))
 	case gmailAll:

@@ -275,13 +275,15 @@ func TestGmailCopy(t *testing.T) {
 	if got := one(t, w.store.Copy(t.Context(), []ref.Ref{inbox}, "Work")); got != (mailstore.RefResult{Ref: inbox}) {
 		t.Errorf("Copy of an INBOX ref = %+v, want it unchanged: the message stays in INBOX", got)
 	}
-	for _, dest := range []string{gmailTrash, gmailSpam} {
-		if got := one(t, w.store.Copy(t.Context(), []ref.Ref{r}, dest)); !errors.Is(got.Err, mailstore.ErrUnsupported) {
-			t.Errorf("Copy to %s = %+v, want ErrUnsupported", dest, got)
+	// Gmail answers COPY into Trash or Spam by moving the message there,
+	// since it keeps one copy of a message, so a copy there is a move.
+	for dest, msg := range map[string]int{gmailTrash: gwInbox, gmailSpam: gwWork} {
+		from := w.ref(t, allMail, w.where(t, msg)[allMail])
+		got := one(t, w.store.Copy(t.Context(), []ref.Ref{from}, dest))
+		where := w.where(t, msg)
+		if !in(where, dest) || got.Err != nil || got.Ref != w.ref(t, dest, where[dest]) {
+			t.Errorf("Copy to %s = %+v, message in %v; want it moved there under a new ref", dest, got, where)
 		}
-	}
-	if got := w.where(t, gwInbox); !in(got, allMail, "INBOX", "Receipts", "Work") {
-		t.Errorf("message is in %v after refused copies", got)
 	}
 }
 
