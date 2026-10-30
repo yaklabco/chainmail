@@ -323,10 +323,10 @@ func limitsTable(w io.Writer, loc *time.Location, r *chainmailv1.ProbeLimitsResp
 	_, _ = fmt.Fprintln(tw, "ACCOUNT\tCAP\tPOOL\tPROBED\tERROR")
 	for _, l := range r.GetLimits() {
 		if e := l.GetError(); e != nil {
-			_, _ = fmt.Fprintf(tw, "%s\t\t\t\t%s: %s\n", l.GetAccount(), e.GetReason(), e.GetMessage())
+			_, _ = fmt.Fprintf(tw, "%s\t\t\t\t%s: %s\n", termText(l.GetAccount()), termText(e.GetReason()), termText(e.GetMessage()))
 			continue
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t\n", l.GetAccount(), l.GetImapCap(), l.GetPoolSize(), shortDate(l.GetProbedAt(), loc))
+		_, _ = fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t\n", termText(l.GetAccount()), l.GetImapCap(), l.GetPoolSize(), shortDate(l.GetProbedAt(), loc))
 	}
 	return tw.Flush()
 }

@@ -17,6 +17,7 @@ import (
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/client"
+	"github.com/jamesainslie/chainmail/internal/render"
 )
 
 const (
@@ -160,7 +161,7 @@ func newBatchCmd(ctx context.Context, env Env, g *globals, b batchCmd) *cobra.Co
 					return err
 				}
 			}
-			refs, err := refArgs(cmd, env.Stdin, args)
+			refs, err := refArgs(ctx, cmd, env.Stdin, args)
 			if err != nil {
 				return err
 			}
@@ -186,29 +187,60 @@ func newBatchCmd(ctx context.Context, env Env, g *globals, b batchCmd) *cobra.Co
 }
 
 // refArgs returns the command's refs: args, or the lines of stdin when args
-// is just -. Blank lines and the space around a ref are dropped.
-func refArgs(cmd *cobra.Command, stdin io.Reader, args []string) ([]string, error) {
+// is just -. Blank lines and the space around a ref are dropped. It gives up
+// when ctx ends, so a signal stops a command whose input pipe stays open.
+func refArgs(ctx context.Context, cmd *cobra.Command, stdin io.Reader, args []string) ([]string, error) {
 	if !slices.Contains(args, "-") {
 		return args, nil
 	}
 	if len(args) != 1 {
 		return nil, usageError{err: errors.New("- reads refs from stdin and cannot be given with other refs"), hint: helpHint(cmd)}
 	}
-	var refs []string
-	sc := bufio.NewScanner(stdin)
-	for sc.Scan() {
-		if r := strings.TrimSpace(sc.Text()); r != "" {
-			refs = append(refs, r)
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("reading refs from stdin: %w", err)
+	refs, err := readRefs(ctx, stdin)
+	if err != nil {
+		return nil, err
 	}
 	if len(refs) == 0 {
 		return nil, usageError{err: errors.New("no refs on stdin"), hint: "pipe refs in one per line, for example: chainmail search ... -o json | jq -r '.rows[].ref'"}
 	}
 	return refs, nil
 }
+
+// readRefs reads the non-blank lines of stdin, or returns errInterrupted
+// when ctx ends first. Stdin belongs to the caller, so it is not closed:
+// the abandoned read ends with the process, as readLine's does.
+func readRefs(ctx context.Context, stdin io.Reader) ([]string, error) {
+	type result struct {
+		refs []string
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		var refs []string
+		sc := bufio.NewScanner(stdin)
+		for sc.Scan() {
+			if r := strings.TrimSpace(sc.Text()); r != "" {
+				refs = append(refs, r)
+			}
+		}
+		done <- result{refs, sc.Err()}
+	}()
+	select {
+	case res := <-done:
+		if res.err != nil {
+			return nil, fmt.Errorf("reading refs from stdin: %w", res.err)
+		}
+		return res.refs, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("%w: reading refs from stdin: %w", errInterrupted, ctx.Err())
+	}
+}
+
+// termText makes text the daemon returns, which may echo refs read from
+// stdin, safe to print on a terminal: one line, with no control or
+// invisible characters that could move the cursor or forge output. JSON
+// output keeps values as they are.
+func termText(s string) string { return render.CleanHeader(s) }
 
 // callChunked sends refs in calls of at most maxCallRefs, up to
 // maxCallsInFlight at once, and returns the outcomes in the order of refs.
@@ -262,7 +294,7 @@ func outcomesText(w io.Writer, verb string, outs []*chainmailv1.RefOutcome) erro
 	fmt.Fprintf(&b, "%s %d, failed %d\n", verb, len(outs)-failed, failed)
 	for _, o := range outs {
 		if e := o.GetError(); e != nil {
-			fmt.Fprintf(&b, "%s: %s %s\n", o.GetRef(), e.GetReason(), e.GetMessage())
+			fmt.Fprintf(&b, "%s: %s %s\n", termText(o.GetRef()), termText(e.GetReason()), termText(e.GetMessage()))
 		}
 	}
 	return writeString(w, b.String())

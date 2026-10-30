@@ -169,8 +169,8 @@ func reportProbe(env Env, g *globals, done string, fields map[string]any, l *cha
 			return err
 		}
 		var b strings.Builder
-		fmt.Fprintf(&b, "warning: connection probe failed: %s: %s\n", e.GetReason(), e.GetMessage())
-		writeHint(&b, e.GetHint())
+		fmt.Fprintf(&b, "warning: connection probe failed: %s: %s\n", termText(e.GetReason()), termText(e.GetMessage()))
+		writeHint(&b, termText(e.GetHint()))
 		// The command succeeded; a lost warning loses nothing else.
 		_ = writeString(env.Stderr, b.String())
 		return nil

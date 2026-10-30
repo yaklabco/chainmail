@@ -462,3 +462,117 @@ func TestProbeAccountCallFails(t *testing.T) {
 		t.Errorf("limit = %v", l)
 	}
 }
+
+// A pipe that stays open must not hold a command once its context ends,
+// and no organize call may follow.
+func TestOrganizeStdinStopsWhenContextEnds(t *testing.T) {
+	t.Parallel()
+	m := startCLIMail(t)
+	// The daemon must have started, or the harness reports a cancelled
+	// startup when this test, which never reaches it, ends first.
+	if got := m.run(t, Env{}, "admin", "status"); got.code != 0 {
+		t.Fatalf("admin status: %+v", got)
+	}
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+	wrote := make(chan struct{})
+	go func() {
+		defer close(wrote)
+		_, _ = fmt.Fprintln(pw, m.invoice.String()) // returns once the command has read it
+	}()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	before := m.host.Calls("Archive")
+	var out, errOut strings.Builder
+	done := make(chan int, 1)
+	go func() {
+		env := Env{Stdin: pr, Stdout: &out, Stderr: &errOut, Getenv: func(string) string { return "" }}
+		done <- Execute(ctx, []string{"--socket", m.socket, "archive", "-"}, env)
+	}()
+	select {
+	case <-wrote:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the command never read stdin")
+	}
+	cancel()
+	select {
+	case code := <-done:
+		if code == 0 || !strings.Contains(errOut.String(), "interrupted") {
+			t.Errorf("exit %d, stderr %q, want an interrupted failure", code, errOut.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("archive - still reading stdin after its context ended")
+	}
+	if calls := m.host.Calls("Archive") - before; calls != 0 {
+		t.Errorf("Archive calls = %d after an interrupted read, want 0", calls)
+	}
+}
+
+// hasTerminalControls reports whether s holds a control character other
+// than newline, or an invisible format character.
+func hasTerminalControls(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool {
+		return (r < 0x20 && r != '\n') || r == 0x7f || (r >= 0x80 && r <= 0x9f) || r == 0x202e
+	})
+}
+
+// A malformed ref on stdin comes back in its failed outcome. On a terminal
+// it must not carry escape sequences; JSON keeps it as given.
+func TestOrganizeTableCleansUntrustedText(t *testing.T) {
+	t.Parallel()
+	m := startCLIMail(t)
+	bad := "bad\x1b[2J\x1b]0;pwned\x07\u202eref"
+	table := m.run(t, Env{Stdin: strings.NewReader(bad + "\n")}, "--output", "table", "read", "-")
+	if table.code != api.ExitUsage || hasTerminalControls(table.stdout) || !strings.Contains(table.stdout, "bad[2J]0;pwnedref: INVALID_ARGUMENT") {
+		t.Errorf("table: exit %d, stdout %q", table.code, table.stdout)
+	}
+	js := m.run(t, Env{Stdin: strings.NewReader(bad + "\n")}, "--output", "json", "read", "-")
+	var resp chainmailv1.SetFlagsResponse
+	if err := protojson.Unmarshal([]byte(js.stdout), &resp); err != nil {
+		t.Fatalf("stdout is not a SetFlagsResponse: %v\n%s", err, js.stdout)
+	}
+	if o := resp.GetOutcomes(); len(o) != 1 || o[0].GetRef() != bad {
+		t.Errorf("json outcomes = %v, want the ref as given", o)
+	}
+
+	var b strings.Builder
+	err := outcomesText(&b, "moved", []*chainmailv1.RefOutcome{{
+		Ref:   "r\x1b[1m1",
+		Error: &chainmailv1.ItemError{Reason: "STALE\x1b[0m_REF", Message: "gone\r\nforged: line\u009b"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "moved 0, failed 1\nr[1m1: STALE[0m_REF gone forged: line\n"; b.String() != want {
+		t.Errorf("outcomesText = %q, want %q", b.String(), want)
+	}
+}
+
+func TestProbeOutputCleansUntrustedText(t *testing.T) {
+	t.Parallel()
+	limits := &chainmailv1.ProbeLimitsResponse{Limits: []*chainmailv1.AccountLimit{
+		{Account: "ok\x1b[31m", ImapCap: 4, PoolSize: 2},
+		{Account: "bad\tone", Error: &chainmailv1.ItemError{Reason: "TIME\x1bOUT", Message: "slow\x07\nforged"}},
+	}}
+	var b strings.Builder
+	if err := limitsTable(&b, time.UTC, limits); err != nil {
+		t.Fatal(err)
+	}
+	want := "ACCOUNT  CAP  POOL  PROBED  ERROR\n" +
+		"ok[31m   4    2             \n" +
+		"bad one                     TIMEOUT: slow forged\n"
+	if b.String() != want {
+		t.Errorf("limitsTable =\n%q\nwant\n%q", b.String(), want)
+	}
+
+	var out, errOut strings.Builder
+	l := &chainmailv1.AccountLimit{Account: "host", Error: &chainmailv1.ItemError{
+		Reason: "INTER\x1bNAL", Message: "no\x1b[2J", Hint: "run\x1b]8;;http://x\x07 this",
+	}}
+	if err := reportProbe(Env{Stdout: &out, Stderr: &errOut}, &globals{output: "table"}, "logged in to host\n", nil, l); err != nil {
+		t.Fatal(err)
+	}
+	if want := "warning: connection probe failed: INTERNAL: no[2J\n  hint: run]8;;http://x this\n"; errOut.String() != want {
+		t.Errorf("warning = %q, want %q", errOut.String(), want)
+	}
+}
