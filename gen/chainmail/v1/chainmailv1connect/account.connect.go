@@ -39,6 +39,9 @@ const (
 	// AccountServiceTestAccountProcedure is the fully-qualified name of the AccountService's
 	// TestAccount RPC.
 	AccountServiceTestAccountProcedure = "/chainmail.v1.AccountService/TestAccount"
+	// AccountServiceProbeLimitsProcedure is the fully-qualified name of the AccountService's
+	// ProbeLimits RPC.
+	AccountServiceProbeLimitsProcedure = "/chainmail.v1.AccountService/ProbeLimits"
 )
 
 // AccountServiceClient is a client for the chainmail.v1.AccountService service.
@@ -47,6 +50,9 @@ type AccountServiceClient interface {
 	ListAccounts(context.Context, *connect.Request[v1.ListAccountsRequest]) (*connect.Response[v1.ListAccountsResponse], error)
 	// TestAccount logs in to the account's IMAP and SMTP servers and reports what happened.
 	TestAccount(context.Context, *connect.Request[v1.TestAccountRequest]) (*connect.Response[v1.TestAccountResponse], error)
+	// ProbeLimits opens connections one at a time until the server refuses
+	// one, then sets the pool size from the count.
+	ProbeLimits(context.Context, *connect.Request[v1.ProbeLimitsRequest]) (*connect.Response[v1.ProbeLimitsResponse], error)
 }
 
 // NewAccountServiceClient constructs a client for the chainmail.v1.AccountService service. By
@@ -72,6 +78,12 @@ func NewAccountServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(accountServiceMethods.ByName("TestAccount")),
 			connect.WithClientOptions(opts...),
 		),
+		probeLimits: connect.NewClient[v1.ProbeLimitsRequest, v1.ProbeLimitsResponse](
+			httpClient,
+			baseURL+AccountServiceProbeLimitsProcedure,
+			connect.WithSchema(accountServiceMethods.ByName("ProbeLimits")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -79,6 +91,7 @@ func NewAccountServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 type accountServiceClient struct {
 	listAccounts *connect.Client[v1.ListAccountsRequest, v1.ListAccountsResponse]
 	testAccount  *connect.Client[v1.TestAccountRequest, v1.TestAccountResponse]
+	probeLimits  *connect.Client[v1.ProbeLimitsRequest, v1.ProbeLimitsResponse]
 }
 
 // ListAccounts calls chainmail.v1.AccountService.ListAccounts.
@@ -91,12 +104,20 @@ func (c *accountServiceClient) TestAccount(ctx context.Context, req *connect.Req
 	return c.testAccount.CallUnary(ctx, req)
 }
 
+// ProbeLimits calls chainmail.v1.AccountService.ProbeLimits.
+func (c *accountServiceClient) ProbeLimits(ctx context.Context, req *connect.Request[v1.ProbeLimitsRequest]) (*connect.Response[v1.ProbeLimitsResponse], error) {
+	return c.probeLimits.CallUnary(ctx, req)
+}
+
 // AccountServiceHandler is an implementation of the chainmail.v1.AccountService service.
 type AccountServiceHandler interface {
 	// ListAccounts returns every configured account and its auth state.
 	ListAccounts(context.Context, *connect.Request[v1.ListAccountsRequest]) (*connect.Response[v1.ListAccountsResponse], error)
 	// TestAccount logs in to the account's IMAP and SMTP servers and reports what happened.
 	TestAccount(context.Context, *connect.Request[v1.TestAccountRequest]) (*connect.Response[v1.TestAccountResponse], error)
+	// ProbeLimits opens connections one at a time until the server refuses
+	// one, then sets the pool size from the count.
+	ProbeLimits(context.Context, *connect.Request[v1.ProbeLimitsRequest]) (*connect.Response[v1.ProbeLimitsResponse], error)
 }
 
 // NewAccountServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -118,12 +139,20 @@ func NewAccountServiceHandler(svc AccountServiceHandler, opts ...connect.Handler
 		connect.WithSchema(accountServiceMethods.ByName("TestAccount")),
 		connect.WithHandlerOptions(opts...),
 	)
+	accountServiceProbeLimitsHandler := connect.NewUnaryHandler(
+		AccountServiceProbeLimitsProcedure,
+		svc.ProbeLimits,
+		connect.WithSchema(accountServiceMethods.ByName("ProbeLimits")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chainmail.v1.AccountService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case AccountServiceListAccountsProcedure:
 			accountServiceListAccountsHandler.ServeHTTP(w, r)
 		case AccountServiceTestAccountProcedure:
 			accountServiceTestAccountHandler.ServeHTTP(w, r)
+		case AccountServiceProbeLimitsProcedure:
+			accountServiceProbeLimitsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -139,4 +168,8 @@ func (UnimplementedAccountServiceHandler) ListAccounts(context.Context, *connect
 
 func (UnimplementedAccountServiceHandler) TestAccount(context.Context, *connect.Request[v1.TestAccountRequest]) (*connect.Response[v1.TestAccountResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chainmail.v1.AccountService.TestAccount is not implemented"))
+}
+
+func (UnimplementedAccountServiceHandler) ProbeLimits(context.Context, *connect.Request[v1.ProbeLimitsRequest]) (*connect.Response[v1.ProbeLimitsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chainmail.v1.AccountService.ProbeLimits is not implemented"))
 }

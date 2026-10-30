@@ -51,6 +51,12 @@ func toConnectError(err error) *connect.Error {
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, queryHint, err)
 	case errors.Is(err, mailstore.ErrUnsupportedQuery):
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, "drop the operator, or search a Google account", err)
+	case errors.Is(err, mailstore.ErrUnsupported):
+		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, "this account does not support that action", err)
+	case errors.Is(err, mailstore.ErrRefused):
+		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, "that folder cannot be changed that way", err)
+	case errors.Is(err, mailstore.ErrExists):
+		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, "a folder with that name exists", err)
 	case errors.Is(err, ref.ErrInvalid):
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, "refs come from search results; pass them unchanged", err)
 	case errors.Is(err, ref.ErrInvalidCursor):

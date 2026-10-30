@@ -1,0 +1,302 @@
+syntax = "proto3";
+
+package chainmail.v1;
+
+// ComposeBody is the text of a new message: exactly one of markdown, text or
+// html. It is named ComposeBody because Body is the rendered body of a
+// message that was read.
+message ComposeBody {
+  oneof kind {
+    // Markdown, the default. It is sent as the text part and rendered to
+    // the HTML part. Raw HTML in it is not passed through.
+    string markdown = 1;
+    // Plain text, sent as the only part.
+    string text = 2;
+    // HTML, sent as given, with a text part from html_text.
+    string html = 3;
+  }
+  // html_text is the plain-text part sent with html. Empty means derived from html.
+  string html_text = 4;
+}
+
+// InlineImage is an image shown in the body rather than attached.
+message InlineImage {
+  // name is how the body refers to the image, as in ![x](name) or src="name".
+  // Every name must be referred to by the body.
+  string name = 1;
+  // An upload handle from UploadAttachment. Its type must be an image type.
+  string upload = 2;
+}
+
+// Content is what a person writes: the body, attachments and options.
+message Content {
+  // The new text. A reply or forward puts the quoted original under it.
+  ComposeBody body = 1;
+  // Upload handles from UploadAttachment, attached in order.
+  repeated string attachments = 2;
+  // Images the body shows inline.
+  repeated InlineImage inline = 3;
+  // Leave out the account's configured signature.
+  bool no_signature = 4;
+  // headers may only hold Reply-To and X- headers.
+  map<string, string> headers = 5;
+}
+
+// ComposeSpec is a new message: who it is from and to, and its content.
+message ComposeSpec {
+  // The account to send from. From is its address, with its display_name.
+  string account = 1;
+  // Recipients, each "Name <a@b>" or "a@b".
+  repeated string to = 2;
+  // Copied recipients, each "Name <a@b>" or "a@b".
+  repeated string cc = 3;
+  // Blind-copied recipients. They are only in the SMTP envelope, never in the message.
+  repeated string bcc = 4;
+  // The subject line.
+  string subject = 5;
+  // The body, attachments and options.
+  Content content = 6;
+}
+
+// Sent is the result of a message that was sent.
+message Sent {
+  // The Message-ID of the sent message, without angle brackets.
+  string message_id = 1;
+  // The ref of the copy in the Sent folder. Empty when the Sent copy could
+  // not be found or stored.
+  string sent_ref = 2;
+  // True when the idempotency key had already been used: the message was
+  // sent before and was not sent again.
+  bool duplicate = 3;
+  // Fixed text saying why storing the Sent copy failed. Empty when it worked.
+  // The message itself was sent.
+  string sent_copy_error = 4;
+}
+
+// DryRun is a message that was built but not sent.
+message DryRun {
+  // The whole RFC 5322 message, as it would be sent.
+  bytes raw = 1;
+  // The SMTP MAIL FROM address.
+  string envelope_from = 2;
+  // The SMTP RCPT TO addresses: To, Cc and Bcc, without duplicates.
+  repeated string envelope_to = 3;
+}
+
+// Draft is a message saved in the account's Drafts folder.
+message Draft {
+  // The ref of the draft. Pass it to UpdateDraft, SendDraft or DeleteDraft.
+  string ref = 1;
+  // The Message-ID of the draft, without angle brackets. SendDraft keeps it.
+  string message_id = 2;
+}
+
+// ComposeResult is what a send-type call did: sent, built as a dry run, or
+// saved as a draft.
+message ComposeResult {
+  oneof result {
+    // The message was sent.
+    Sent sent = 1;
+    // dry_run was set: the message was built and not sent.
+    DryRun dry_run = 2;
+    // draft was set: the message was saved to Drafts and not sent.
+    Draft draft = 3;
+  }
+}
+
+// SendRequest sends a new message.
+message SendRequest {
+  // The message to send.
+  ComposeSpec spec = 1;
+  // Build the message and return it without sending.
+  bool dry_run = 2;
+  // Save the message to Drafts instead of sending it.
+  bool draft = 3;
+  // Required unless dry_run or draft: 1 to 128 of A-Z, a-z, 0-9 and . _ : -.
+  // A second call with the same key returns the first result and does not
+  // send again.
+  string idempotency_key = 4;
+}
+
+// SendResponse is the result of Send.
+message SendResponse {
+  // Sent, dry run or draft.
+  ComposeResult result = 1;
+}
+
+// SendRawRequest sends a complete RFC 5322 message as given.
+message SendRawRequest {
+  // The account to send from. The message's From must be its address.
+  string account = 1;
+  // The whole message. It must parse and have a Message-ID. A Bcc header is
+  // removed before sending.
+  bytes raw = 2;
+  // The SMTP recipients. Empty means To, Cc and Bcc of the message.
+  repeated string envelope_to = 3;
+  // Required: 1 to 128 of A-Z, a-z, 0-9 and . _ : -.
+  string idempotency_key = 4;
+}
+
+// SendRawResponse is the result of SendRaw.
+message SendRawResponse {
+  // Always sent.
+  ComposeResult result = 1;
+}
+
+// ReplyRequest replies to a message.
+message ReplyRequest {
+  // The message to reply to.
+  string ref = 1;
+  // Reply to everyone: add the original To and Cc, less this account's own address.
+  bool all = 2;
+  // The new text, attachments and options. The quoted original goes under it.
+  Content content = 3;
+  // More recipients, added to the ones the reply goes to.
+  repeated string to = 4;
+  // More copied recipients.
+  repeated string cc = 5;
+  // Blind-copied recipients.
+  repeated string bcc = 6;
+  // Build the reply and return it without sending.
+  bool dry_run = 7;
+  // Save the reply to Drafts instead of sending it.
+  bool draft = 8;
+  // Required unless dry_run or draft, as in SendRequest.
+  string idempotency_key = 9;
+}
+
+// ReplyResponse is the result of Reply.
+message ReplyResponse {
+  // Sent, dry run or draft.
+  ComposeResult result = 1;
+}
+
+// ForwardRequest forwards a message.
+message ForwardRequest {
+  // The message to forward.
+  string ref = 1;
+  // Recipients, each "Name <a@b>" or "a@b".
+  repeated string to = 2;
+  // Copied recipients.
+  repeated string cc = 3;
+  // Blind-copied recipients.
+  repeated string bcc = 4;
+  // The new text, attachments and options. The forwarded original goes under it.
+  Content content = 5;
+  // Leave out the original's attachments.
+  bool no_attachments = 6;
+  // Build the forward and return it without sending.
+  bool dry_run = 7;
+  // Save the forward to Drafts instead of sending it.
+  bool draft = 8;
+  // Required unless dry_run or draft, as in SendRequest.
+  string idempotency_key = 9;
+}
+
+// ForwardResponse is the result of Forward.
+message ForwardResponse {
+  // Sent, dry run or draft.
+  ComposeResult result = 1;
+}
+
+// CreateDraftRequest saves a new message to Drafts.
+message CreateDraftRequest {
+  // The message to save.
+  ComposeSpec spec = 1;
+}
+
+// CreateDraftResponse is the saved draft.
+message CreateDraftResponse {
+  // The new draft.
+  Draft draft = 1;
+}
+
+// UpdateDraftRequest replaces a draft with a new version.
+message UpdateDraftRequest {
+  // The draft to replace. It must be in Drafts.
+  string ref = 1;
+  // The new version.
+  ComposeSpec spec = 2;
+}
+
+// UpdateDraftResponse is the new version of the draft.
+message UpdateDraftResponse {
+  // The new version, with a new ref. The old ref is gone.
+  Draft draft = 1;
+}
+
+// SendDraftRequest sends a draft and removes it from Drafts.
+message SendDraftRequest {
+  // The draft to send. It must be in Drafts.
+  string ref = 1;
+  // Required: 1 to 128 of A-Z, a-z, 0-9 and . _ : -.
+  string idempotency_key = 2;
+}
+
+// SendDraftResponse is the result of SendDraft.
+message SendDraftResponse {
+  // Always sent.
+  ComposeResult result = 1;
+}
+
+// DeleteDraftRequest deletes a draft for good.
+message DeleteDraftRequest {
+  // The draft to delete. It must be in Drafts.
+  string ref = 1;
+}
+
+// DeleteDraftResponse is empty: the draft is gone.
+message DeleteDraftResponse {}
+
+// UploadHeader is the first part of an upload.
+message UploadHeader {
+  // The file's name, as attachments show it.
+  string filename = 1;
+  // A type/subtype such as application/pdf. Empty means sniffed from the bytes.
+  string content_type = 2;
+}
+
+// UploadAttachmentRequest is one part of an upload: the header first, then
+// the file's bytes in any number of data parts.
+message UploadAttachmentRequest {
+  oneof part {
+    // The first part.
+    UploadHeader header = 1;
+    // The next bytes of the file.
+    bytes data = 2;
+  }
+}
+
+// UploadAttachmentResponse names a stored upload.
+message UploadAttachmentResponse {
+  // Pass it in Content.attachments or InlineImage.upload. It expires after an hour.
+  string handle = 1;
+  // The SHA-256 of the bytes, in lowercase hexadecimal.
+  string sha256 = 2;
+  // The number of bytes stored.
+  int64 size = 3;
+}
+
+// ComposeService sends mail and manages drafts. A send is never retried
+// automatically: when its outcome is unknown, the error says so and the
+// caller searches Sent before sending again.
+service ComposeService {
+  // Send sends a new message, or builds it as a dry run, or saves it as a draft.
+  rpc Send(SendRequest) returns (SendResponse);
+  // SendRaw sends a complete message as given.
+  rpc SendRaw(SendRawRequest) returns (SendRawResponse);
+  // Reply replies to a message, quoting it.
+  rpc Reply(ReplyRequest) returns (ReplyResponse);
+  // Forward forwards a message, with its attachments unless asked not to.
+  rpc Forward(ForwardRequest) returns (ForwardResponse);
+  // CreateDraft saves a new message to Drafts.
+  rpc CreateDraft(CreateDraftRequest) returns (CreateDraftResponse);
+  // UpdateDraft replaces a draft with a new version.
+  rpc UpdateDraft(UpdateDraftRequest) returns (UpdateDraftResponse);
+  // SendDraft sends a draft and removes it from Drafts.
+  rpc SendDraft(SendDraftRequest) returns (SendDraftResponse);
+  // DeleteDraft deletes a draft for good.
+  rpc DeleteDraft(DeleteDraftRequest) returns (DeleteDraftResponse);
+  // UploadAttachment stores a file for a later send to attach or show inline.
+  rpc UploadAttachment(stream UploadAttachmentRequest) returns (UploadAttachmentResponse);
+}

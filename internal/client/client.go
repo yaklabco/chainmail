@@ -18,9 +18,11 @@ const maxMessageBytes = 17 << 20
 
 // Client holds one Connect client per daemon service.
 type Client struct {
-	Account chainmailv1connect.AccountServiceClient
-	Admin   chainmailv1connect.AdminServiceClient
-	Message chainmailv1connect.MessageServiceClient
+	Account  chainmailv1connect.AccountServiceClient
+	Admin    chainmailv1connect.AdminServiceClient
+	Message  chainmailv1connect.MessageServiceClient
+	Compose  chainmailv1connect.ComposeServiceClient
+	Organize chainmailv1connect.OrganizeServiceClient
 
 	transport *http.Transport
 }
@@ -46,6 +48,8 @@ func New(socketPath, kind string) *Client {
 		Account:   chainmailv1connect.NewAccountServiceClient(hc, baseURL, opts),
 		Admin:     chainmailv1connect.NewAdminServiceClient(hc, baseURL, opts),
 		Message:   chainmailv1connect.NewMessageServiceClient(hc, baseURL, opts, connect.WithReadMaxBytes(maxMessageBytes)),
+		Compose:   chainmailv1connect.NewComposeServiceClient(hc, baseURL, opts, connect.WithReadMaxBytes(maxMessageBytes)),
+		Organize:  chainmailv1connect.NewOrganizeServiceClient(hc, baseURL, opts, connect.WithReadMaxBytes(maxMessageBytes)),
 	}
 }
 

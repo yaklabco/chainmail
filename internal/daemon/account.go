@@ -89,6 +89,11 @@ func (a *accountService) TestAccount(ctx context.Context, req *connect.Request[c
 	return connect.NewResponse(resp), nil
 }
 
+// ProbeLimits is not implemented yet.
+func (a *accountService) ProbeLimits(context.Context, *connect.Request[chainmailv1.ProbeLimitsRequest]) (*connect.Response[chainmailv1.ProbeLimitsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chainmail.v1.AccountService.ProbeLimits is not implemented"))
+}
+
 func (a *accountService) test(ctx context.Context, name string) (*chainmailv1.TestAccountResponse, error) {
 	acct, err := a.s.opts.Config.Account(name)
 	if err != nil {

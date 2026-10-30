@@ -223,6 +223,9 @@ func TestToConnectError(t *testing.T) {
 		{err: fmt.Errorf("%w: x", ref.ErrInvalid), code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
 		{err: fmt.Errorf("%w: x", ref.ErrInvalidCursor), code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
 		{err: &argError{msg: "limit", hint: "h"}, code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
+		{err: fmt.Errorf("%w: labels", mailstore.ErrUnsupported), code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
+		{err: fmt.Errorf("%w: INBOX", mailstore.ErrRefused), code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
+		{err: fmt.Errorf("%w: Projects", mailstore.ErrExists), code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
 		{err: fmt.Errorf("%w: gone", mailstore.ErrStaleRef), code: connect.CodeNotFound, reason: api.ReasonStaleRef},
 		{err: fmt.Errorf("%w: part 9", mailstore.ErrNotFound), code: connect.CodeNotFound, reason: api.ReasonNotFound},
 		{err: fmt.Errorf("%w: down", mailstore.ErrUnavailable), code: connect.CodeUnavailable, reason: api.ReasonServerUnavailable},
@@ -233,6 +236,23 @@ func TestToConnectError(t *testing.T) {
 		got := toConnectError(tt.err)
 		if got.Code() != tt.code || api.Detail(got).GetReason() != tt.reason {
 			t.Errorf("toConnectError(%v) = %v %s, want %v %s", tt.err, got.Code(), api.Detail(got).GetReason(), tt.code, tt.reason)
+		}
+	}
+}
+
+func TestToConnectErrorWriteHints(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		err  error
+		hint string
+	}{
+		{err: fmt.Errorf("%w: labels", mailstore.ErrUnsupported), hint: "this account does not support that action"},
+		{err: fmt.Errorf("%w: INBOX", mailstore.ErrRefused), hint: "that folder cannot be changed that way"},
+		{err: fmt.Errorf("%w: Projects", mailstore.ErrExists), hint: "a folder with that name exists"},
+	}
+	for _, tt := range tests {
+		if got := api.Detail(toConnectError(tt.err)).GetHint(); got != tt.hint {
+			t.Errorf("toConnectError(%v) hint = %q, want %q", tt.err, got, tt.hint)
 		}
 	}
 }

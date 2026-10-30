@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package chainmail.v1;
 
+import "chainmail/v1/message.proto";
+import "google/protobuf/timestamp.proto";
+
 // AuthState says whether chainmail can log in to an account without a human.
 enum AuthState {
   AUTH_STATE_UNSPECIFIED = 0;
@@ -50,10 +53,41 @@ message TestAccountResponse {
   Check smtp = 3;
 }
 
-// AccountService describes configured accounts and tests their connections.
+// ProbeLimitsRequest measures how many IMAP connections accounts allow.
+message ProbeLimitsRequest {
+  // Accounts to probe. Empty means every account.
+  repeated string accounts = 1;
+}
+
+// AccountLimit is the probe result for one account.
+message AccountLimit {
+  // The account probed.
+  string account = 1;
+  // Connections the server allowed at once. 0 when error is set.
+  uint32 imap_cap = 2;
+  // Connections the daemon now uses: pool from config, or imap_cap less 2,
+  // between 1 and 12.
+  uint32 pool_size = 3;
+  // When the probe ran.
+  google.protobuf.Timestamp probed_at = 4;
+  // Set when the probe failed, such as when the first connection was refused.
+  ItemError error = 5;
+}
+
+// ProbeLimitsResponse has one result per account probed.
+message ProbeLimitsResponse {
+  // One per account, in the order asked, or by name for every account.
+  repeated AccountLimit limits = 1;
+}
+
+// AccountService describes configured accounts, tests their connections and
+// measures their connection limits.
 service AccountService {
   // ListAccounts returns every configured account and its auth state.
   rpc ListAccounts(ListAccountsRequest) returns (ListAccountsResponse);
   // TestAccount logs in to the account's IMAP and SMTP servers and reports what happened.
   rpc TestAccount(TestAccountRequest) returns (TestAccountResponse);
+  // ProbeLimits opens connections one at a time until the server refuses
+  // one, then sets the pool size from the count.
+  rpc ProbeLimits(ProbeLimitsRequest) returns (ProbeLimitsResponse);
 }

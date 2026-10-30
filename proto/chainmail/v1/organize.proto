@@ -1,0 +1,175 @@
+syntax = "proto3";
+
+package chainmail.v1;
+
+import "chainmail/v1/message.proto";
+
+// RefOutcome is the result for one ref of a batch. A failed ref fails only itself.
+message RefOutcome {
+  // The ref as given.
+  string ref = 1;
+  // The message's ref afterwards. Empty when the ref did not change or the
+  // message is gone.
+  string new_ref = 2;
+  // Set when this ref failed.
+  ItemError error = 3;
+}
+
+// MoveRequest moves messages to a folder.
+message MoveRequest {
+  // 1 to 500 refs, from any accounts.
+  repeated string refs = 1;
+  // The destination folder, on each ref's own account.
+  string folder = 2;
+}
+
+// MoveResponse has one outcome per ref, in order.
+message MoveResponse {
+  // One per ref, in the order given.
+  repeated RefOutcome outcomes = 1;
+}
+
+// CopyRequest copies messages to a folder.
+message CopyRequest {
+  // 1 to 500 refs, from any accounts.
+  repeated string refs = 1;
+  // The destination folder, on each ref's own account.
+  string folder = 2;
+}
+
+// CopyResponse has one outcome per ref, in order. new_ref is the copy's ref.
+message CopyResponse {
+  // One per ref, in the order given.
+  repeated RefOutcome outcomes = 1;
+}
+
+// ArchiveRequest moves messages out of the inbox to the account's archive.
+message ArchiveRequest {
+  // 1 to 500 refs, from any accounts.
+  repeated string refs = 1;
+}
+
+// ArchiveResponse has one outcome per ref, in order.
+message ArchiveResponse {
+  // One per ref, in the order given.
+  repeated RefOutcome outcomes = 1;
+}
+
+// TrashRequest moves messages to the account's Trash.
+message TrashRequest {
+  // 1 to 500 refs, from any accounts.
+  repeated string refs = 1;
+}
+
+// TrashResponse has one outcome per ref, in order.
+message TrashResponse {
+  // One per ref, in the order given.
+  repeated RefOutcome outcomes = 1;
+}
+
+// ExpungeRequest deletes messages for good.
+message ExpungeRequest {
+  // 1 to 500 refs, from any accounts.
+  repeated string refs = 1;
+}
+
+// ExpungeResponse has one outcome per ref, in order. new_ref is always empty.
+message ExpungeResponse {
+  // One per ref, in the order given.
+  repeated RefOutcome outcomes = 1;
+}
+
+// SetFlagsRequest adds and removes IMAP flags, such as \Seen and \Flagged.
+message SetFlagsRequest {
+  // 1 to 500 refs, from any accounts.
+  repeated string refs = 1;
+  // Flags to add.
+  repeated string add = 2;
+  // Flags to remove.
+  repeated string remove = 3;
+}
+
+// SetFlagsResponse has one outcome per ref, in order.
+message SetFlagsResponse {
+  // One per ref, in the order given.
+  repeated RefOutcome outcomes = 1;
+}
+
+// SetLabelsRequest adds and removes Gmail labels. Other accounts refuse it.
+message SetLabelsRequest {
+  // 1 to 500 refs, from any accounts.
+  repeated string refs = 1;
+  // Labels to add.
+  repeated string add = 2;
+  // Labels to remove.
+  repeated string remove = 3;
+}
+
+// SetLabelsResponse has one outcome per ref, in order.
+message SetLabelsResponse {
+  // One per ref, in the order given.
+  repeated RefOutcome outcomes = 1;
+}
+
+// CreateFolderRequest creates a folder, and its parents when missing.
+message CreateFolderRequest {
+  // The account to create it on.
+  string account = 1;
+  // The full folder name, with the server's delimiter between levels.
+  string name = 2;
+}
+
+// CreateFolderResponse is empty: the folder exists.
+message CreateFolderResponse {}
+
+// RenameFolderRequest renames a folder.
+message RenameFolderRequest {
+  // The account the folder is on.
+  string account = 1;
+  // The folder's current name.
+  string from = 2;
+  // The new name.
+  string to = 3;
+}
+
+// RenameFolderResponse is empty: the folder has its new name.
+message RenameFolderResponse {}
+
+// DeleteFolderRequest deletes a folder. INBOX and role folders are refused.
+message DeleteFolderRequest {
+  // The account the folder is on.
+  string account = 1;
+  // The folder to delete.
+  string name = 2;
+  // Delete it even when it holds mail. The mail is deleted with it.
+  bool force = 3;
+}
+
+// DeleteFolderResponse is empty: the folder is gone.
+message DeleteFolderResponse {}
+
+// OrganizeService moves, copies, flags, labels and deletes messages, and
+// manages folders. Batch calls take refs from any accounts, and a failed ref
+// fails only itself.
+service OrganizeService {
+  // Move moves messages to a folder.
+  rpc Move(MoveRequest) returns (MoveResponse);
+  // Copy copies messages to a folder.
+  rpc Copy(CopyRequest) returns (CopyResponse);
+  // Archive moves messages out of the inbox to the account's archive.
+  rpc Archive(ArchiveRequest) returns (ArchiveResponse);
+  // Trash moves messages to Trash.
+  rpc Trash(TrashRequest) returns (TrashResponse);
+  // Expunge deletes messages for good.
+  rpc Expunge(ExpungeRequest) returns (ExpungeResponse);
+  // SetFlags adds and removes IMAP flags.
+  rpc SetFlags(SetFlagsRequest) returns (SetFlagsResponse);
+  // SetLabels adds and removes Gmail labels.
+  rpc SetLabels(SetLabelsRequest) returns (SetLabelsResponse);
+  // CreateFolder creates a folder.
+  rpc CreateFolder(CreateFolderRequest) returns (CreateFolderResponse);
+  // RenameFolder renames a folder.
+  rpc RenameFolder(RenameFolderRequest) returns (RenameFolderResponse);
+  // DeleteFolder deletes a folder.
+  rpc DeleteFolder(DeleteFolderRequest) returns (DeleteFolderResponse);
+}
