@@ -49,6 +49,14 @@ type Options struct {
 const (
 	// maxRequestBytes caps a request message. Secrets and redirect URLs are far smaller.
 	maxRequestBytes = 1 << 20
+	// composeMaxRequestBytes caps a ComposeService request, which can hold a
+	// whole message for SendRaw or one part of an upload. The largest
+	// provider limit is 35 MiB; the rest is room for the request's other
+	// fields. The handler still enforces the account's own message size.
+	composeMaxRequestBytes = 40 << 20
+	// composeMaxResponseBytes caps a ComposeService response, which can hold
+	// a whole message built as a dry run.
+	composeMaxResponseBytes = 40 << 20
 	// auditTimeout bounds an audit write that outlives its request.
 	auditTimeout = 5 * time.Second
 	// shutdownTimeout bounds the graceful part of a shutdown, after which
@@ -101,7 +109,8 @@ func New(opts Options) (*Server, error) {
 	mux.Handle(chainmailv1connect.NewAccountServiceHandler(&accountService{s: s}, handlerOpts))
 	mux.Handle(chainmailv1connect.NewAdminServiceHandler(&adminService{s: s}, handlerOpts))
 	mux.Handle(chainmailv1connect.NewMessageServiceHandler(&messageService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
-	mux.Handle(chainmailv1connect.NewComposeServiceHandler(&composeService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
+	mux.Handle(chainmailv1connect.NewComposeServiceHandler(&composeService{s: s},
+		connect.WithReadMaxBytes(composeMaxRequestBytes), connect.WithSendMaxBytes(composeMaxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewOrganizeServiceHandler(&organizeService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)

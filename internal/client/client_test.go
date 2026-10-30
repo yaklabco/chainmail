@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"connectrpc.com/connect"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	"github.com/jamesainslie/chainmail/gen/chainmail/v1/chainmailv1connect"
 	"github.com/jamesainslie/chainmail/internal/api"
 )
 
@@ -110,5 +112,52 @@ func TestStreamingCallsCarryClientHeader(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the stream never reached the server")
+	}
+}
+
+// bigDryRun answers Send with a dry run whose raw message is size bytes.
+type bigDryRun struct {
+	chainmailv1connect.UnimplementedComposeServiceHandler
+	size int
+}
+
+func (b bigDryRun) Send(context.Context, *connect.Request[chainmailv1.SendRequest]) (*connect.Response[chainmailv1.SendResponse], error) {
+	return connect.NewResponse(&chainmailv1.SendResponse{Result: &chainmailv1.ComposeResult{
+		Result: &chainmailv1.ComposeResult_DryRun{DryRun: &chainmailv1.DryRun{Raw: make([]byte, b.size)}},
+	}}), nil
+}
+
+// TestComposeAcceptsLargeResponses checks that the Compose client reads a
+// dry run as large as the daemon's 40 MiB Compose response cap allows.
+func TestComposeAcceptsLargeResponses(t *testing.T) {
+	t.Parallel()
+	dir, err := os.MkdirTemp("", "cmc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "s.sock")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const size = 39 << 20
+	mux := http.NewServeMux()
+	mux.Handle(chainmailv1connect.NewComposeServiceHandler(bigDryRun{size: size}))
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	srv := &http.Server{Protocols: protocols, Handler: mux}
+	go func() { _ = srv.Serve(ln) }() // returns http.ErrServerClosed on Close
+	t.Cleanup(func() { _ = srv.Close() })
+
+	c := New(socket, "cli")
+	defer c.Close()
+	resp, err := c.Compose.Send(t.Context(), connect.NewRequest(&chainmailv1.SendRequest{DryRun: true}))
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if got := len(resp.Msg.GetResult().GetDryRun().GetRaw()); got != size {
+		t.Errorf("raw = %d bytes, want %d", got, size)
 	}
 }

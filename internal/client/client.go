@@ -16,6 +16,11 @@ import (
 // daemon caps its responses at 16 MiB; the rest is protocol overhead.
 const maxMessageBytes = 17 << 20
 
+// maxComposeBytes is the largest Compose response accepted, such as a dry
+// run holding a whole message. The daemon caps Compose responses at 40 MiB;
+// the rest is protocol overhead.
+const maxComposeBytes = 41 << 20
+
 // Client holds one Connect client per daemon service.
 type Client struct {
 	Account  chainmailv1connect.AccountServiceClient
@@ -48,7 +53,7 @@ func New(socketPath, kind string) *Client {
 		Account:   chainmailv1connect.NewAccountServiceClient(hc, baseURL, opts),
 		Admin:     chainmailv1connect.NewAdminServiceClient(hc, baseURL, opts),
 		Message:   chainmailv1connect.NewMessageServiceClient(hc, baseURL, opts, connect.WithReadMaxBytes(maxMessageBytes)),
-		Compose:   chainmailv1connect.NewComposeServiceClient(hc, baseURL, opts, connect.WithReadMaxBytes(maxMessageBytes)),
+		Compose:   chainmailv1connect.NewComposeServiceClient(hc, baseURL, opts, connect.WithReadMaxBytes(maxComposeBytes)),
 		Organize:  chainmailv1connect.NewOrganizeServiceClient(hc, baseURL, opts, connect.WithReadMaxBytes(maxMessageBytes)),
 	}
 }
