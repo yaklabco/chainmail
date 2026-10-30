@@ -209,7 +209,7 @@ func (s *Server) drain() {
 	s.handlers.wait()
 	s.lim.stop()
 	if err := s.stores.closeAll(); err != nil {
-		s.opts.Logger.Warn("logging out of mail servers", "err", err)
+		s.opts.Logger.Warn("logging out of mail servers", "reason", apiReason(err))
 	}
 }
 

@@ -133,7 +133,7 @@ func (a *accountService) test(ctx context.Context, name string) (*chainmailv1.Te
 		}
 		caps := sess.Capabilities()
 		if err := sess.Close(); err != nil {
-			a.s.opts.Logger.Warn("closing IMAP test session", "account", name, "err", err)
+			a.s.opts.Logger.Warn("closing IMAP test session", "account", name, "reason", apiReason(err))
 		}
 		return caps, nil
 	})

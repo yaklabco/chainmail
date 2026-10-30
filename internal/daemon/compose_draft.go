@@ -110,7 +110,7 @@ func (c *composeService) updateDraft(ctx context.Context, req *chainmailv1.Updat
 	}
 	entry.Targets = appendTargets(entry.Targets, d.GetRef(), msg.MessageID)
 	if err := expungeOne(ctx, st, old); err != nil {
-		c.s.opts.Logger.Warn("removing the old version of a draft", "account", acct.Name, "ref", old.String(), "err", err)
+		c.s.opts.Logger.Warn("removing the old version of a draft", "account", acct.Name, "ref", old.String(), "reason", errReason(err))
 		cerr := composeErr(err)
 		return nil, api.New(cerr.Code(), api.Detail(cerr).GetReason(),
 			newVersionHint(d)+"; delete the old one with DeleteDraft",
@@ -199,7 +199,7 @@ func (c *composeService) sendDraft(ctx context.Context, cl caller, req *chainmai
 	}
 	after := func(ctx context.Context) {
 		if err := expungeOne(ctx, st, r); err != nil {
-			c.s.opts.Logger.Warn("removing a sent draft", "account", acct.Name, "ref", r.String(), "err", err)
+			c.s.opts.Logger.Warn("removing a sent draft", "account", acct.Name, "ref", r.String(), "reason", errReason(err))
 		}
 	}
 	return c.run(ctx, sendJob{

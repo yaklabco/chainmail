@@ -216,7 +216,7 @@ func (s *Server) probeIfStale(acct config.ResolvedAccount) {
 			return
 		}
 		if res.err != nil {
-			s.opts.Logger.Warn("background connection probe failed", "account", acct.Name, "reason", apiReason(res.err), "err", res.err)
+			s.opts.Logger.Warn("background connection probe failed", "account", acct.Name, "reason", apiReason(res.err))
 		}
 		c := caller{uid: uint32(os.Getuid()), client: daemonClient}
 		if err := s.record(ctx, c, res.auditEntry(), nil); err != nil {
@@ -323,8 +323,8 @@ func (r probeResult) proto() *chainmailv1.AccountLimit {
 }
 
 // probeText is the whole message a client sees for a failed probe, by
-// reason. The cause can carry the mail server's text, so it stays in the
-// daemon's logs.
+// reason. The cause can carry the mail server's text, so neither the client
+// nor the daemon's logs see it: logs carry the reason only.
 var probeText = map[string]string{
 	api.ReasonServerUnavailable: "the mail server refused or dropped the first connection",
 	api.ReasonTimeout:           "timed out",
@@ -388,7 +388,7 @@ func (s *Server) probeLimits(ctx context.Context, c caller, accts []config.Resol
 	var auditErr error
 	for _, r := range results {
 		if r.err != nil {
-			s.opts.Logger.Warn("connection probe failed", "account", r.acct.Name, "reason", apiReason(r.err), "err", r.err)
+			s.opts.Logger.Warn("connection probe failed", "account", r.acct.Name, "reason", apiReason(r.err))
 		}
 		if err := s.record(ctx, c, r.auditEntry(), nil); err != nil && auditErr == nil {
 			auditErr = err

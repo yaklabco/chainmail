@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -879,4 +880,66 @@ func auditRows(t *testing.T, s *Server) []limitsAudit {
 		t.Fatal(err)
 	}
 	return out
+}
+
+// lockedBuffer is a bytes.Buffer safe for the daemon's concurrent logging.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+// refusingFake is a probeable fake whose every dial fails with err, as a
+// server refusing the first LOGIN does.
+type refusingFake struct {
+	*fake.Store
+	err error
+}
+
+func (r *refusingFake) ProbeDial(context.Context) (io.Closer, error) { return nil, r.err }
+
+// TestProbeFailuresKeepServerTextOutOfLogs fails an explicit and a
+// background probe with a login refusal whose text holds a private marker,
+// as a server echoing the rejected password would. Each failure is logged
+// with its reason, at warning level with debug on, and the marker reaches
+// no log line.
+func TestProbeFailuresKeepServerTextOutOfLogs(t *testing.T) {
+	t.Parallel()
+	const private = "PRIVATE-LOGIN-TEXT"
+	refusal := fmt.Errorf("%w: NO [AUTHENTICATIONFAILED] %s", mailstore.ErrUnavailable, private)
+	s, _ := newLimitsServer(t, func(acct config.ResolvedAccount) mailstore.Store {
+		return &refusingFake{Store: fake.New(acct.Name, acct.Provider.Gmail), err: refusal}
+	})
+	var logs lockedBuffer
+	s.opts.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	probeLimits(t, s, "host")
+	if _, err := s.stores.get(mustAccount(t, s, "gmail")).ListFolders(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	s.lim.wait()
+
+	out := logs.String()
+	for _, msg := range []string{"connection probe failed", "background connection probe failed"} {
+		if !strings.Contains(out, msg) {
+			t.Errorf("no %q log line; the test proves nothing:\n%s", msg, out)
+		}
+	}
+	if !strings.Contains(out, "reason="+api.ReasonServerUnavailable) {
+		t.Errorf("the logs do not give the failures' reason:\n%s", out)
+	}
+	if strings.Contains(out, private) {
+		t.Errorf("the logs hold the server's text:\n%s", out)
+	}
 }

@@ -403,7 +403,7 @@ func (s *Store) retry(ctx context.Context, try func() error) error {
 		if attempt >= s.opts.Retries || timeouts > timeoutRetries {
 			return fmt.Errorf("%w: %s after %d attempts: %w", mailstore.ErrUnavailable, s.acct.Name, attempt+1, err)
 		}
-		s.opts.Logger.Debug("retrying after a dropped connection", "account", s.acct.Name, "attempt", attempt+1, "err", err)
+		s.opts.Logger.Debug("retrying after a dropped connection", logAttrs(err, "account", s.acct.Name, "attempt", attempt+1)...)
 		if err := sleep(ctx, s.opts.Backoff(attempt)); err != nil {
 			return err
 		}

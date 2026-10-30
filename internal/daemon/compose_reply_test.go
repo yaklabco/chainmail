@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
@@ -694,5 +695,49 @@ func TestTruncatedMarkerSurvivesSanitizing(t *testing.T) {
 		if i := strings.LastIndex(htm, truncatedMarker); i < 0 || i < strings.Index(htm, "visible paragraph") {
 			t.Errorf("%s: the HTML part does not end its quote with %q: %q", name, truncatedMarker, htm)
 		}
+	}
+}
+
+// TestPostSendFailuresKeepServerTextOutOfLogs fails the writes that follow a
+// send or a draft save with a private marker in the server's error: the
+// flag on a forwarded original, the removal of an updated draft's old
+// version, and the removal of a sent draft. With debug logging on, each
+// failure is logged by its reason, and the marker reaches no log line.
+func TestPostSendFailuresKeepServerTextOutOfLogs(t *testing.T) {
+	t.Parallel()
+	const private = "PRIVATE-IMAP-TEXT"
+	var logs syncBuffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	e := startSend(t, func(o *daemontest.Options) { o.Logger = logger })
+	e.smtp(t, smtptest.Options{})
+	serverErr := fmt.Errorf("%w: NO %s", mailstore.ErrUnavailable, private)
+
+	orig := e.original(t)
+	e.host.FailWrite("StoreFlags", serverErr)
+	if _, err := e.forward(t, &chainmailv1.ForwardRequest{Ref: orig.String(), To: []string{"zed@example.org"}, Content: replyContent("x"), IdempotencyKey: "fwd-log"}); err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	old := e.createDraft(t, hostSpec())
+	e.host.FailWrite("Expunge", serverErr)
+	if _, err := e.updateDraft(t, old.GetRef(), hostSpec()); err == nil {
+		t.Fatal("UpdateDraft with a failed removal succeeded")
+	}
+	d := e.createDraft(t, hostSpec())
+	e.host.FailWrite("Expunge", serverErr)
+	if _, err := e.sendDraft(t, d.GetRef(), "draft-log"); err != nil {
+		t.Fatalf("SendDraft: %v", err)
+	}
+
+	out := logs.String()
+	for _, msg := range []string{"marking the original after sending", "removing the old version of a draft", "removing a sent draft"} {
+		if !strings.Contains(out, msg) {
+			t.Errorf("no %q log line; the test proves nothing:\n%s", msg, out)
+		}
+	}
+	if !strings.Contains(out, "reason="+api.ReasonServerUnavailable) {
+		t.Errorf("the logs do not give the failures' reason:\n%s", out)
+	}
+	if strings.Contains(out, private) {
+		t.Errorf("the logs hold the server's text:\n%s", out)
 	}
 }

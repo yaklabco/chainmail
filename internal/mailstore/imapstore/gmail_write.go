@@ -309,7 +309,7 @@ func (s *Store) gmailExpunge(ctx context.Context, refs []ref.Ref) []mailstore.Re
 			return nil // all gone already
 		}
 		if err := s.expungeMoved(ctx, c, trash, m.cu.validity, pairs); err != nil {
-			s.opts.Logger.Debug("expunging in Trash", "account", s.acct.Name, "err", err)
+			s.opts.Logger.Debug("expunging in Trash", logAttrs(err, "account", s.acct.Name)...)
 			kept := fmt.Errorf("%w: %s moved the message to Trash, but expunging it there failed; it is in Trash", mailstore.ErrUnavailable, s.acct.Name)
 			for src := range pairs {
 				g.set(src, mailstore.RefResult{Err: kept})
@@ -464,7 +464,7 @@ func (s *Store) labelInPlace(ctx context.Context, c *conn, g *groupWrite, allMai
 		if err := c.removeLabels(ctx, uidSet(present), e); err != nil {
 			// A broken connection has been dropped from the pool already;
 			// either way the removal may not have happened.
-			s.opts.Logger.Debug("removing labels after adding them", "account", s.acct.Name, "err", err)
+			s.opts.Logger.Debug("removing labels after adding them", logAttrs(err, "account", s.acct.Name)...)
 			for _, uid := range present {
 				g.set(uid, mailstore.RefResult{Err: errRemovalFailed})
 			}
@@ -493,12 +493,12 @@ func (s *Store) placeInAllMail(ctx context.Context, c *conn, g *groupWrite, allM
 	found := map[uint32]ref.Ref{}
 	if allMail != "" {
 		if err := s.open(ctx, c, allMail); err != nil {
-			s.opts.Logger.Debug("opening All Mail to find edited messages", "account", s.acct.Name, "err", err)
+			s.opts.Logger.Debug("opening All Mail to find edited messages", logAttrs(err, "account", s.acct.Name)...)
 		} else {
 			for _, src := range slices.Sorted(maps.Keys(ids)) {
 				uid, err := c.findMsgID(ctx, ids[src])
 				if err != nil {
-					s.opts.Logger.Debug("finding an edited message in All Mail", "account", s.acct.Name, "err", err)
+					s.opts.Logger.Debug("finding an edited message in All Mail", logAttrs(err, "account", s.acct.Name)...)
 					break
 				}
 				if uid != 0 {
@@ -535,7 +535,7 @@ func (s *Store) restoreThenLabel(ctx context.Context, c *conn, g *groupWrite, al
 		return nil // all gone already
 	}
 	if err := s.labelMoved(ctx, c, allMail, m.cu.validity, pairs, e); err != nil {
-		s.opts.Logger.Debug("labelling messages moved to All Mail", "account", s.acct.Name, "err", err)
+		s.opts.Logger.Debug("labelling messages moved to All Mail", logAttrs(err, "account", s.acct.Name)...)
 		half := fmt.Errorf("%w: %s moved the message back to All Mail, but the label change failed; search again", mailstore.ErrUnavailable, s.acct.Name)
 		for src := range pairs {
 			g.set(src, mailstore.RefResult{Err: half})

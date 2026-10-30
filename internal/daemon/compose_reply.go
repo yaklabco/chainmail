@@ -225,7 +225,7 @@ func (c *composeService) answerSpec(ctx context.Context, acct config.ResolvedAcc
 func (c *composeService) markOriginal(ctx context.Context, acct config.ResolvedAccount, r ref.Ref, flag string) {
 	for _, res := range c.s.stores.get(acct).StoreFlags(ctx, []ref.Ref{r}, []string{flag}, nil) {
 		if res.Err != nil {
-			c.s.opts.Logger.Warn("marking the original after sending", "account", acct.Name, "ref", r.String(), "flag", flag, "err", res.Err)
+			c.s.opts.Logger.Warn("marking the original after sending", "account", acct.Name, "ref", r.String(), "flag", flag, "reason", errReason(res.Err))
 		}
 	}
 }

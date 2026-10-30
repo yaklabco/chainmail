@@ -370,7 +370,7 @@ func (s *Store) writeConn(ctx context.Context, folder string, writable bool, f f
 			s.writeGen.Add(1) // other connections look again before they read
 		}
 		if sent && errors.Is(err, errConnLost) {
-			s.opts.Logger.Debug("connection lost during a write", "account", s.acct.Name, "err", err)
+			s.opts.Logger.Debug("connection lost during a write", logAttrs(err, "account", s.acct.Name)...)
 			return fmt.Errorf("%w: %s: the connection broke during the change, which may or may not have happened; search again before retrying", mailstore.ErrUnavailable, s.acct.Name)
 		}
 		return err
