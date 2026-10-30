@@ -170,12 +170,14 @@ func (c *composeService) attempt(ctx context.Context, job sendJob, entry *audit.
 	sendErr := conn.Send(detached, msg.EnvelopeFrom, msg.EnvelopeTo, msg.Raw)
 	sent := &chainmailv1.Sent{MessageId: msg.MessageID}
 	if sendErr != nil {
-		// The error's text can quote the server, so it stays at debug.
-		c.s.opts.Logger.Debug("SMTP send failed", "account", job.acct.Name, "message_id", msg.MessageID, "err", sendErr)
 		var se *sender.SendError
 		if !errors.As(sendErr, &se) {
 			se = &sender.SendError{Outcome: sender.NotSentTemporary, Err: sendErr}
 		}
+		// The error's text can quote the server, so only its outcome and
+		// reply code are logged.
+		c.s.opts.Logger.Debug("SMTP send failed", "account", job.acct.Name, "message_id", msg.MessageID,
+			"outcome", se.Outcome.String(), "code", se.Code)
 		switch se.Outcome {
 		case sender.NotSentPermanent:
 			return nil, idempotency.Failed, refusedErr(se)
@@ -195,9 +197,11 @@ func (c *composeService) attempt(ctx context.Context, job sendJob, entry *audit.
 }
 
 // prepare builds the message while it dials, and returns both. A failure of
-// either cancels the other and closes the connection if one was made.
-func (c *composeService) prepare(ctx context.Context, job sendJob) (compose.Message, *sender.Conn, error) {
-	ctx, cancel := context.WithCancel(ctx)
+// either cancels the other and closes the connection if one was made. So
+// does the end of the caller's ctx while either still runs: once both are
+// done, a cancelled call never reaches Send.
+func (c *composeService) prepare(parent context.Context, job sendJob) (compose.Message, *sender.Conn, error) {
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	var (
 		once     sync.Once
@@ -232,10 +236,15 @@ func (c *composeService) prepare(ctx context.Context, job sendJob) (compose.Mess
 		conn = cn
 	})
 	wg.Wait()
+	if firstErr == nil {
+		// The build does not watch ctx, so the caller may have gone while
+		// it ran after a successful dial.
+		firstErr = parent.Err()
+	}
 	if firstErr != nil {
 		if conn != nil {
 			if err := conn.Close(); err != nil {
-				c.s.opts.Logger.Debug("closing an unused SMTP connection", "account", job.acct.Name, "err", err)
+				c.s.opts.Logger.Debug("closing an unused SMTP connection failed", "account", job.acct.Name)
 			}
 		}
 		return compose.Message{}, nil, firstErr
@@ -254,9 +263,9 @@ func (c *composeService) connect(ctx context.Context, acct config.ResolvedAccoun
 	if err == nil {
 		return conn, nil
 	}
-	c.s.opts.Logger.Debug("SMTP dial failed", "account", acct.Name, "err", err)
 	switch {
 	case errors.Is(err, auth.ErrRejected):
+		c.s.opts.Logger.Debug("SMTP dial failed", "account", acct.Name, "step", "auth", "outcome", "rejected")
 		c.s.auth.Rejected(acct.Name, creds)
 		hint := ""
 		if st, serr := c.s.auth.State(acct.Name); serr == nil {
@@ -265,8 +274,11 @@ func (c *composeService) connect(ctx context.Context, acct config.ResolvedAccoun
 		return nil, api.New(connect.CodeUnauthenticated, api.ReasonAuthRejected, hint,
 			&fixedTextError{msg: "the server rejected the credentials; nothing was sent", err: err})
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		c.s.opts.Logger.Debug("SMTP dial failed", "account", acct.Name, "step", "dial", "outcome", "cancelled")
 		return nil, err
 	default:
+		// The error can quote the server's reply, so it is not logged.
+		c.s.opts.Logger.Debug("SMTP dial failed", "account", acct.Name, "step", "dial", "outcome", "unavailable")
 		return nil, api.New(connect.CodeUnavailable, api.ReasonServerUnavailable, "",
 			&fixedTextError{msg: "could not connect to the mail server; nothing was sent", err: err})
 	}
@@ -297,7 +309,7 @@ func (c *composeService) sentCopy(ctx context.Context, acct config.ResolvedAccou
 	if acct.Provider.Gmail {
 		refs, err := findIn(ctx, st, mailstore.RoleAll, msg.MessageID)
 		if err != nil {
-			c.s.opts.Logger.Debug("looking up Gmail's Sent copy", "account", acct.Name, "err", err)
+			c.s.opts.Logger.Debug("looking up Gmail's Sent copy", "account", acct.Name, "reason", errReason(err))
 		}
 		refs = slices.DeleteFunc(refs, func(r ref.Ref) bool {
 			return r.Folder == skip.Folder && r.UIDValidity == skip.UIDValidity && r.UID == skip.UID
@@ -315,7 +327,7 @@ func (c *composeService) sentCopy(ctx context.Context, acct config.ResolvedAccou
 		}
 		err = aerr
 	}
-	c.s.opts.Logger.Warn("storing the Sent copy failed", "account", acct.Name, "message_id", msg.MessageID, "err", err)
+	c.s.opts.Logger.Warn("storing the Sent copy failed", "account", acct.Name, "message_id", msg.MessageID, "reason", errReason(err))
 	return "", sentCopyFailed
 }
 
@@ -337,7 +349,7 @@ func (c *composeService) searchOutcome(ctx context.Context, acct config.Resolved
 		}
 		refs, err := findIn(ctx, st, mailstore.RoleSent, messageID)
 		if err != nil {
-			c.s.opts.Logger.Debug("searching Sent for a send of unknown outcome", "account", acct.Name, "err", err)
+			c.s.opts.Logger.Debug("searching Sent for a send of unknown outcome", "account", acct.Name, "reason", errReason(err))
 			continue
 		}
 		if len(refs) > 0 {
@@ -364,6 +376,32 @@ func (c *composeService) finish(ctx context.Context, job sendJob, state idempote
 	if err := c.s.idem.Finish(ctx, job.acct.Name, job.key, state, b); err != nil {
 		c.s.opts.Logger.Error("settling an idempotency key", "account", job.acct.Name, "state", string(state), "err", err)
 	}
+}
+
+// replaySettled answers a keyed request that cannot be hashed because its
+// uploads expired or a restart dropped them. When the key is settled (done,
+// failed or unknown) or still in progress, its outcome is replayed as a
+// duplicate without connecting. A different request reusing such a key is
+// only caught while its uploads resolve. ok is false when the key is unused
+// or retryable, or cannot be read: the call then needs its uploads.
+func (c *composeService) replaySettled(ctx context.Context, cl caller, acct config.ResolvedAccount, key string, entry audit.Entry) (*chainmailv1.ComposeResult, bool, error) {
+	if !idempotency.ValidKey(key) {
+		return nil, false, nil
+	}
+	row, found, err := c.s.idem.Lookup(ctx, acct.Name, key)
+	if err != nil {
+		c.s.opts.Logger.Warn("reading an idempotency key failed", "account", acct.Name, "err", err)
+		return nil, false, nil
+	}
+	if !found || row.State == idempotency.Retryable {
+		return nil, false, nil
+	}
+	entry.Decision = decisionDuplicate
+	res, err := replay(idempotency.Claim{State: row.State, Result: row.Result})
+	if id := res.GetSent().GetMessageId(); id != "" {
+		entry.Targets = append(entry.Targets, id)
+	}
+	return res, true, c.record(ctx, cl, entry, err)
 }
 
 // replay returns the outcome stored for a key that was not claimed.
@@ -522,6 +560,10 @@ func composeErr(err error) *connect.Error {
 	return api.New(cerr.Code(), d.GetReason(), d.GetHint(), &fixedTextError{msg: msg, err: err})
 }
 
+// errReason is err's reason code, for logs. A mail server's error can quote
+// the server, so logs carry only how it was classified.
+func errReason(err error) string { return api.Detail(toConnectError(err)).GetReason() }
+
 // record writes the audit row for a ComposeService call and returns err as
 // the client sees it.
 func (c *composeService) record(ctx context.Context, cl caller, e audit.Entry, err error) error {
@@ -546,26 +588,56 @@ func checkSize(acct config.ResolvedAccount, n int64) error {
 		return nil
 	}
 	return &argError{
-		msg:  fmt.Sprintf("the message is at least %d bytes, over the account's limit of %d", n, acct.MaxMessageSize),
+		msg:  fmt.Sprintf("the message comes to about %d bytes, over the account's limit of %d", n, acct.MaxMessageSize),
 		hint: "send large files as links, or raise max_message_size in the config",
 	}
 }
 
-// minSize is a lower bound on the size of the message spec builds: the body
-// source, which every body kind sends at least once, and each file
-// base64-encoded. It lets an oversized message be refused before dialing.
-func minSize(spec compose.Spec) int64 {
-	n := int64(len(spec.Body.Source))
-	for _, f := range spec.Attachments {
-		n += base64Len(len(f.Data))
+// Headroom inputSize adds for what a message has besides its text and
+// files: the header fields the builder writes, and each part's MIME header
+// and boundary.
+const (
+	messageHeadroom = 2 << 10
+	partHeadroom    = 256
+)
+
+// inputSize estimates from spec alone the size of the message it builds, so
+// a message plainly too large is refused before dialing. Every text field
+// and every file counts at base64's 4/3 growth with its line breaks, plus
+// headroom for header fields and MIME structure. A Markdown body is sent
+// twice, as text and as HTML, and quoted-printable can grow text further,
+// so the size of the built message is checked again before it is sent.
+func inputSize(spec compose.Spec) int64 {
+	text := len(spec.Subject) + len(spec.Body.Source) + len(spec.Body.HTMLText) + len(spec.Signature) + len(spec.InReplyTo)
+	for _, list := range [][]mail.Address{spec.To, spec.Cc, spec.Bcc} {
+		for _, a := range list {
+			text += len(a.Name) + len(a.Address)
+		}
 	}
-	for _, f := range spec.Inline {
-		n += base64Len(len(f.Data))
+	for k, v := range spec.Headers {
+		text += len(k) + len(v)
+	}
+	for _, r := range spec.References {
+		text += len(r)
+	}
+	if q := spec.Quote; q != nil {
+		text += len(q.Header) + len(q.Text) + len(q.HTML)
+	}
+	n := base64Len(text) + messageHeadroom
+	for _, f := range spec.Attachments {
+		n += base64Len(len(f.Data)+len(f.Filename)+len(f.ContentType)) + partHeadroom
+	}
+	for name, f := range spec.Inline {
+		n += base64Len(len(f.Data)+len(name)+len(f.Filename)+len(f.ContentType)) + partHeadroom
 	}
 	return n
 }
 
-func base64Len(n int) int64 { return int64((n + 2) / 3 * 4) }
+// base64Len is the base64 size of n bytes in lines of 76 characters.
+func base64Len(n int) int64 {
+	enc := int64((n + 2) / 3 * 4)
+	return enc + (enc+75)/76*2
+}
 
 // specFromProto validates a ComposeSpec and resolves uploads into a
 // compose.Spec without Quote. From is the account address with its display

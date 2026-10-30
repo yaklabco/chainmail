@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"slices"
 	"strings"
@@ -69,7 +70,8 @@ type sendEnv struct {
 	host, gmail, small *fake.Store
 }
 
-func startSend(t *testing.T) sendEnv {
+// startSend starts the daemon. Each opt adjusts its harness options.
+func startSend(t *testing.T, opts ...func(*daemontest.Options)) sendEnv {
 	t.Helper()
 	e := sendEnv{
 		ca:    tlstest.New(t),
@@ -78,7 +80,7 @@ func startSend(t *testing.T) sendEnv {
 		gmail: fake.New("gmail", true),
 		small: fake.New("small", false),
 	}
-	e.Harness = daemontest.Start(t, fmt.Sprintf(sendConfig, e.proxy.port()), daemontest.Options{
+	hopts := daemontest.Options{
 		RootCAs: e.ca.Pool,
 		NewStore: func(a config.ResolvedAccount) mailstore.Store {
 			switch a.Name {
@@ -91,7 +93,11 @@ func startSend(t *testing.T) sendEnv {
 			}
 		},
 		OutcomeSearchInterval: 10 * time.Millisecond,
-	})
+	}
+	for _, o := range opts {
+		o(&hopts)
+	}
+	e.Harness = daemontest.Start(t, fmt.Sprintf(sendConfig, e.proxy.port()), hopts)
 	for _, name := range []string{"host", "gmail", "small"} {
 		setSecret(t, e.Harness, "accounts/"+name, "pw")
 	}
@@ -936,4 +942,171 @@ func TestSendCredentialsRejected(t *testing.T) {
 	if e.proxy.accepts.Load() != conns {
 		t.Error("the repeat connected with parked credentials")
 	}
+}
+
+// TestSendInputBoundCountsEveryField checks that the size bound taken from
+// the request before dialing counts the subject and an html_text
+// alternative, not only the body source.
+func TestSendInputBoundCountsEveryField(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	long := strings.Repeat("z", 13<<10)
+	subject := hostSpec()
+	subject.Account = "small"
+	subject.Subject = long
+	htmlText := hostSpec()
+	htmlText.Account = "small"
+	htmlText.Content.Body = &chainmailv1.ComposeBody{Kind: &chainmailv1.ComposeBody_Html{Html: "<p>hi</p>"}, HtmlText: long}
+	for key, spec := range map[string]*chainmailv1.ComposeSpec{"long-subject": subject, "long-html-text": htmlText} {
+		if _, err := e.send(t, &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: key}); reasonOf(err) != api.ReasonInvalidArgument {
+			t.Errorf("%s: err = %v, want INVALID_ARGUMENT", key, err)
+		}
+	}
+	if n := e.proxy.accepts.Load(); n != 0 || len(srv.Messages()) != 0 {
+		t.Errorf("connections = %d, messages = %d, want none", n, len(srv.Messages()))
+	}
+}
+
+// TestSendBuiltSizeCheckedBeforeSubmitting sends a Markdown body under the
+// input bound whose text and HTML parts together exceed the limit. The
+// exact size, checked after the build, refuses it before anything is
+// submitted, and the key stays retryable.
+func TestSendBuiltSizeCheckedBeforeSubmitting(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	spec := hostSpec()
+	spec.Account = "small"
+	spec.Content.Body = markdown(strings.Repeat("word ", (9<<10)/5))
+	if _, err := e.send(t, &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: "expands"}); reasonOf(err) != api.ReasonInvalidArgument {
+		t.Errorf("Send: err = %v, want INVALID_ARGUMENT", err)
+	}
+	if len(srv.Messages()) != 0 {
+		t.Errorf("messages = %d, want none", len(srv.Messages()))
+	}
+	if got := e.idemState(t, "small", "expands"); got != "retryable" {
+		t.Errorf("idempotency state = %q, want retryable", got)
+	}
+}
+
+// settableClock is a daemon clock a test moves forward.
+type settableClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *settableClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *settableClock) Add(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// TestSendReplaysAfterUploadExpires repeats keyed sends after their upload
+// expired. A settled key replays its outcome without connecting. A new key
+// with the expired handle is refused.
+func TestSendReplaysAfterUploadExpires(t *testing.T) {
+	t.Parallel()
+	clock := &settableClock{now: time.Now()}
+	e := startSend(t, func(o *daemontest.Options) { o.Now = clock.Now })
+	e.smtp(t, smtptest.Options{})
+	up, err := e.upload(t, &chainmailv1.UploadHeader{Account: "host", Filename: "a.txt", ContentType: "text/plain"}, []byte("attached"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := hostSpec()
+	spec.Content.Attachments = []string{up.GetHandle()}
+	done := &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: "expire-done"}
+	first, err := e.send(t, done)
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	lost := e.smtp(t, smtptest.Options{DropAfterDataEnd: true})
+	unknown := &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: "expire-unknown"}
+	if _, err := e.send(t, unknown); reasonOf(err) != api.ReasonSendOutcomeUnknown {
+		t.Fatalf("lost reply: err = %v, want SEND_OUTCOME_UNKNOWN", err)
+	}
+
+	clock.Add(2 * time.Hour)
+	conns := e.proxy.accepts.Load()
+	res, err := e.send(t, done)
+	if err != nil || !res.GetSent().GetDuplicate() || res.GetSent().GetMessageId() != first.GetSent().GetMessageId() {
+		t.Errorf("done after expiry: %+v, %v, want the first result as a duplicate", res, err)
+	}
+	if _, err := e.send(t, unknown); reasonOf(err) != api.ReasonSendOutcomeUnknown {
+		t.Errorf("unknown after expiry: err = %v, want SEND_OUTCOME_UNKNOWN", err)
+	}
+	if e.proxy.accepts.Load() != conns || len(lost.Messages()) != 1 {
+		t.Error("a repeat after expiry connected")
+	}
+	if d := e.decisions(t, "send"); len(d) < 2 || d[len(d)-1] != "duplicate" || d[len(d)-2] != "duplicate" {
+		t.Errorf("decisions = %v, want the repeats audited as duplicates", d)
+	}
+	if _, err := e.send(t, &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: "expire-new"}); reasonOf(err) != api.ReasonInvalidArgument {
+		t.Errorf("new key, expired handle: err = %v, want INVALID_ARGUMENT", err)
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for the daemon's concurrent logging.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+// TestSendKeepsServerTextOutOfLogs makes the SMTP server answer with
+// distinctive text at AUTH, MAIL, RCPT and the end of DATA, with debug
+// logging on. The text reaches no log line, client error or audit row.
+func TestSendKeepsServerTextOutOfLogs(t *testing.T) {
+	t.Parallel()
+	const private = "PRIVATE-SERVER-TEXT"
+	var logs syncBuffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	e := startSend(t, func(o *daemontest.Options) { o.Logger = logger })
+	reply := func(code int) *smtp.SMTPError {
+		return &smtp.SMTPError{Code: code, EnhancedCode: smtp.EnhancedCode{code / 100, 0, 0}, Message: private + " you@example.net"}
+	}
+	cases := map[string]smtptest.Options{
+		"mail": {FailMail: reply(451)},
+		"rcpt": {FailRcpt: map[string]*smtp.SMTPError{"you@example.net": reply(550)}},
+		"data": {FailData: reply(554)},
+	}
+	for key, opts := range cases {
+		e.smtp(t, opts)
+		if _, err := e.send(t, &chainmailv1.SendRequest{Spec: hostSpec(), IdempotencyKey: key}); err == nil || strings.Contains(err.Error(), private) {
+			t.Errorf("%s: err = %v, want an error without the server's text", key, err)
+		}
+	}
+	users := slices.Clone(smtpUsers)
+	users[0].AuthError = reply(454)
+	srv := smtptest.StartWith(t, e.ca, provider.SecurityStartTLS, smtptest.Options{}, users...)
+	e.proxy.target.Store(srv.Endpoint().Addr())
+	if _, err := e.send(t, &chainmailv1.SendRequest{Spec: hostSpec(), IdempotencyKey: "auth"}); err == nil || strings.Contains(err.Error(), private) {
+		t.Errorf("auth: err = %v, want an error without the server's text", err)
+	}
+
+	if !strings.Contains(logs.String(), "level=DEBUG") {
+		t.Fatal("no debug logs were written; the test proves nothing")
+	}
+	if strings.Contains(logs.String(), private) {
+		t.Errorf("the logs hold the server's text:\n%s", logs.String())
+	}
+	e.checkAuditPrivate(t, private)
 }

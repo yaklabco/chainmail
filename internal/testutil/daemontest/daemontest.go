@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/x509"
 	"database/sql"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -37,6 +38,8 @@ type Options struct {
 	// OutcomeSearchInterval replaces the wait between the tries of the
 	// Sent search for a send whose outcome is unknown.
 	OutcomeSearchInterval time.Duration
+	// Logger receives the daemon's logs. Nil discards them.
+	Logger *slog.Logger
 }
 
 // Harness is a running daemon and a client connected to it.
@@ -107,6 +110,7 @@ func Start(t testing.TB, configTOML string, opts Options) *Harness {
 		Now:                   opts.Now,
 		StateDir:              dir,
 		OutcomeSearchInterval: opts.OutcomeSearchInterval,
+		Logger:                opts.Logger,
 	})
 	if err != nil {
 		t.Fatal(err)

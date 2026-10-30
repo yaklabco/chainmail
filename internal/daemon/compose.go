@@ -98,8 +98,15 @@ func (c *composeService) send(ctx context.Context, cl caller, req *chainmailv1.S
 		return nil, c.record(ctx, cl, entry, err)
 	}
 	spec, err := c.specFromProto(ctx, p)
+	if errors.Is(err, upload.ErrUnknownHandle) && !req.GetDryRun() && !req.GetDraft() {
+		// The uploads are gone, so the request cannot be hashed, but an
+		// earlier attempt with this key may have settled its outcome.
+		if res, ok, err := c.replaySettled(ctx, cl, acct, req.GetIdempotencyKey(), entry); ok {
+			return res, err
+		}
+	}
 	if err == nil {
-		err = checkSize(acct, minSize(spec))
+		err = checkSize(acct, inputSize(spec))
 	}
 	if err != nil {
 		return nil, c.record(ctx, cl, entry, err)
