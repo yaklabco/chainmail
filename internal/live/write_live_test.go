@@ -158,9 +158,13 @@ func findMessage(t *testing.T, c *client.Client, account, token, in, id string, 
 	t.Helper()
 	within = waitBudget(t, within)
 	start := time.Now()
+	// The deadline bounds the searches and pauses too, so a slow request
+	// cannot carry the wait past within and into the cleanup reserve.
+	ctx, cancel := context.WithTimeout(t.Context(), within)
+	defer cancel()
 	for n := 0; ; n++ {
-		msgs, err := tokenMessages(t.Context(), c, account, token, in)
-		if err != nil {
+		msgs, err := tokenMessages(ctx, c, account, token, in)
+		if err != nil && ctx.Err() == nil {
 			t.Fatalf("waiting for %s in %q: %v", id, in, err)
 		}
 		for _, m := range msgs {
@@ -169,10 +173,10 @@ func findMessage(t *testing.T, c *client.Client, account, token, in, id string, 
 				return m.GetRef()
 			}
 		}
-		if time.Since(start) >= within {
+		if ctx.Err() != nil || time.Since(start) >= within {
 			t.Fatalf("%s did not appear in %q within %v (%d candidates)", id, in, within, len(msgs))
 		}
-		if err := pause(t.Context(), n); err != nil {
+		if err := pause(ctx, n); err != nil && ctx.Err() == nil {
 			t.Fatalf("waiting for %s: %v", id, err)
 		}
 	}
@@ -230,8 +234,13 @@ func newSweeper(t *testing.T, c *client.Client, a *chainmailv1.Account, roles ma
 	return s
 }
 
-// sending is called before each send attempt.
-func (s *sweeper) sending() { s.deliveries.sending(time.Now()) }
+// sending is called before each send attempt. It stops the test instead
+// when only the cleanup reserve is left, so no send eats into it.
+func (s *sweeper) sending(t *testing.T) {
+	t.Helper()
+	waitBudget(t, 0)
+	s.deliveries.sending(time.Now())
+}
 
 // isDelivered says m is the delivered copy of a message the test sent.
 func (s *sweeper) isDelivered(m *chainmailv1.Message) bool {
@@ -446,7 +455,7 @@ func TestEveryAccountSends(t *testing.T) {
 			t.Logf("dry run: %d bytes", len(d.GetRaw()))
 
 			req := &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: liveKey(token, "send")}
-			sw.sending()
+			sw.sending(t)
 			resp, err := c.Compose.Send(t.Context(), connect.NewRequest(req))
 			if err != nil {
 				t.Fatalf("Send: %v (%s)", err, hint(err))
@@ -471,7 +480,7 @@ func TestEveryAccountSends(t *testing.T) {
 			t.Run("reply", func(t *testing.T) {
 				// The original is the account's own message to itself, so
 				// the reply names the account's address as its recipient.
-				sw.sending()
+				sw.sending(t)
 				resp, err := c.Compose.Reply(t.Context(), connect.NewRequest(&chainmailv1.ReplyRequest{
 					Ref: orig, Content: liveContent("A live test reply."), To: []string{a.GetAddress()},
 					IdempotencyKey: liveKey(token, "reply"),
@@ -491,7 +500,7 @@ func TestEveryAccountSends(t *testing.T) {
 			})
 
 			t.Run("forward", func(t *testing.T) {
-				sw.sending()
+				sw.sending(t)
 				resp, err := c.Compose.Forward(t.Context(), connect.NewRequest(&chainmailv1.ForwardRequest{
 					Ref: orig, To: []string{a.GetAddress()}, Content: liveContent("A live test forward."),
 					IdempotencyKey: liveKey(token, "forward"),
@@ -507,6 +516,7 @@ func TestEveryAccountSends(t *testing.T) {
 			})
 
 			t.Run("draft", func(t *testing.T) {
+				waitBudget(t, 0)
 				created, err := c.Compose.CreateDraft(t.Context(), connect.NewRequest(&chainmailv1.CreateDraftRequest{
 					Spec: selfSpec(a, "chainmail live draft "+token, "First version."),
 				}))
@@ -530,7 +540,7 @@ func TestEveryAccountSends(t *testing.T) {
 				}
 				t.Logf("draft updated: %s", second.GetRef())
 
-				sw.sending()
+				sw.sending(t)
 				sendResp, err := c.Compose.SendDraft(t.Context(), connect.NewRequest(&chainmailv1.SendDraftRequest{
 					Ref: second.GetRef(), IdempotencyKey: liveKey(token, "draft-send"),
 				}))
@@ -540,6 +550,7 @@ func TestEveryAccountSends(t *testing.T) {
 				s := sw.sentOf(t, "SendDraft", sendResp.Msg.GetResult())
 				sw.waitDelivered(t, s.GetMessageId())
 
+				waitBudget(t, 0)
 				doomed, err := c.Compose.CreateDraft(t.Context(), connect.NewRequest(&chainmailv1.CreateDraftRequest{
 					Spec: selfSpec(a, "chainmail live draft to delete "+token, "Deleted unsent."),
 				}))
@@ -664,7 +675,7 @@ func TestEveryAccountOrganizes(t *testing.T) {
 				t.Fatalf("%s is not listed after CreateFolder", folder)
 			}
 
-			sw.sending()
+			sw.sending(t)
 			resp, err := c.Compose.Send(t.Context(), connect.NewRequest(&chainmailv1.SendRequest{
 				Spec:           selfSpec(a, "chainmail live organize "+token, "A chainmail live organize test. It deletes itself."),
 				IdempotencyKey: liveKey(token, "organize"),
@@ -793,7 +804,7 @@ func TestEveryAccountOrganizes(t *testing.T) {
 
 			// Expunge every message of the test, the copy and the trashed
 			// original, then check nothing is left.
-			ctx, cancel := context.WithTimeout(t.Context(), cleanupTimeout)
+			ctx, cancel := context.WithTimeout(t.Context(), waitBudget(t, cleanupTimeout))
 			defer cancel()
 			if err := sw.sweep(ctx, t); err != nil {
 				t.Fatalf("Expunge: %v", err)

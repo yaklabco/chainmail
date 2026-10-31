@@ -42,9 +42,11 @@ const (
 	cleanupTimeout = settleTimeout + 5*time.Minute
 	// cleanupReserve is the time no wait may use before go test's -timeout
 	// deadline. A test the deadline kills runs no cleanup and leaves its
-	// mail behind, so the waits stop early enough for the cleanup of the
-	// test under way to finish.
-	cleanupReserve = cleanupTimeout + 2*time.Minute
+	// mail behind, so the waits stop early enough for the cleanups of the
+	// test under way to finish. The organize test runs two, its sweep and
+	// its folder cleanup, one after the other, each bounded by
+	// cleanupTimeout.
+	cleanupReserve = 2*cleanupTimeout + 2*time.Minute
 )
 
 // capWait shortens a wait of want so it ends cleanupReserve before the
