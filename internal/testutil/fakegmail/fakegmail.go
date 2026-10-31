@@ -70,7 +70,8 @@
 // its FETCH answer then comes before the EXISTS: imapserver lets a session
 // write EXISTS only once the command is done. Options.LateArrivals makes it
 // stricter there, as Gmail can be: FETCH, STORE and SEARCH then neither see
-// nor announce a new arrival, and a NOOP does both.
+// nor announce a new arrival, and a NOOP does both. Options.LateExists is
+// stricter still: a NOOP announces it only at the end of the next command.
 package fakegmail
 
 import (
@@ -127,7 +128,18 @@ type Options struct {
 	// a Google Workspace account was seen to behave for a minute after a
 	// message reached Trash.
 	LateArrivals bool
+	// LateExists is LateArrivals, and later still: the NOOP or other
+	// command that would tell a session of new arrivals only makes them
+	// due, and the end of the next command tells it of them, so that
+	// command does not see them either. SELECT and EXAMINE see them at
+	// once. Gmail behaves so for a message another session moved into a
+	// folder: it sends the EXISTS some time after the NOOP's answer.
+	LateExists bool
 }
+
+// late reports whether FETCH, STORE and SEARCH leave new arrivals unseen,
+// under LateArrivals or LateExists.
+func (o Options) late() bool { return o.LateArrivals || o.LateExists }
 
 // RawSearch is one X-GM-RAW string and the folder it was searched in.
 type RawSearch struct {

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"regexp"
 	"slices"
@@ -36,6 +37,10 @@ type session struct {
 	// quiet marks a command ending that leaves new arrivals unlearned, under
 	// Options.LateArrivals: see endQuiet.
 	quiet bool
+	// due, under Options.LateExists, is the highest UID of the arrivals a
+	// command ending has made due, for the end of the next command to tell
+	// of, or 0.
+	due imap.UID
 }
 
 type viewEntry struct {
@@ -93,6 +98,8 @@ func (sess *session) Select(name string, options *imap.SelectOptions) (*imap.Sel
 	}
 	sess.selected = f
 	sess.view, sess.lastUID = nil, 0
+	// Under Options.LateExists the Poll that ends the SELECT makes nothing due.
+	sess.quiet, sess.due = s.opts.LateExists, 0
 	sess.addNewLocked()
 	sess.known = len(sess.view)
 	return &imap.SelectData{
@@ -110,29 +117,44 @@ func noSuchFolder(name string) error {
 // runs before every command, as Gmail and Dovecot sync before answering, so a
 // UID command can name a message another session just added. The client hears
 // of them through EXISTS when the command ends.
-func (sess *session) addNewLocked() {
+func (sess *session) addNewLocked() { sess.addUpToLocked(math.MaxUint32) }
+
+// addUpToLocked is addNewLocked for the arrivals with UIDs up to limit.
+func (sess *session) addUpToLocked(limit imap.UID) {
 	f := sess.selected
 	for _, m := range f.order {
-		if uid := f.uids[m]; uid > sess.lastUID {
+		if uid := f.uids[m]; uid > sess.lastUID && uid <= limit {
 			sess.view = append(sess.view, viewEntry{m: m, uid: uid})
 			sess.lastUID = uid
 		}
 	}
 }
 
+// newestLocked returns the highest UID in the selected folder, or 0.
+func (sess *session) newestLocked() imap.UID {
+	f := sess.selected
+	var newest imap.UID
+	for _, m := range f.order {
+		newest = max(newest, f.uids[m])
+	}
+	return newest
+}
+
 // syncLocked runs addNewLocked before a command, unless Options.LateArrivals
-// leaves new arrivals for the session to learn of later.
+// or Options.LateExists leaves new arrivals for the session to learn of
+// later.
 func (sess *session) syncLocked() {
-	if !sess.s.opts.LateArrivals {
+	if !sess.s.opts.late() {
 		sess.addNewLocked()
 	}
 }
 
 // endQuiet, deferred by FETCH, STORE and SEARCH, keeps a session under
-// Options.LateArrivals from learning of new arrivals in the Poll that ends
-// the command, when the command succeeded and so Poll runs.
+// Options.LateArrivals or Options.LateExists from learning of new arrivals
+// in the Poll that ends the command, when the command succeeded and so Poll
+// runs, unless they are due.
 func (sess *session) endQuiet(err *error) {
-	sess.quiet = *err == nil && sess.s.opts.LateArrivals
+	sess.quiet = *err == nil && sess.s.opts.late()
 }
 
 // present reports whether the entry's message is still in the folder under
@@ -312,7 +334,7 @@ func (sess *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriter
 	var all imap.UIDSet
 	data := &imap.SearchData{}
 	for _, m := range f.order {
-		if s.opts.LateArrivals && f.uids[m] > sess.lastUID {
+		if s.opts.late() && f.uids[m] > sess.lastUID {
 			break // an arrival the session has not learned of, and the rest are later
 		}
 		if matchCriteria(f, m, criteria) && slices.IndexFunc(trees, func(n *query.Node) bool { return !matchRaw(n, m) }) < 0 {
@@ -720,7 +742,8 @@ func (sess *session) Unselect() error {
 
 // Poll tells the client what changed in the selected folder since its last
 // command: EXPUNGE for messages that left, when allowed, and EXISTS for new
-// arrivals.
+// arrivals. Under Options.LateExists a command other than FETCH, STORE and
+// SEARCH only makes new arrivals due, and the next command tells of them.
 func (sess *session) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
 	s := sess.s
 	s.mu.Lock()
@@ -728,7 +751,17 @@ func (sess *session) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
 	if sess.selected == nil {
 		return nil
 	}
-	if !sess.quiet {
+	if sess.due > 0 {
+		sess.addUpToLocked(sess.due)
+		sess.due = 0
+	}
+	switch {
+	case sess.quiet:
+	case s.opts.LateExists:
+		if newest := sess.newestLocked(); newest > sess.lastUID {
+			sess.due = newest
+		}
+	default:
 		sess.addNewLocked()
 	}
 	sess.quiet = false
