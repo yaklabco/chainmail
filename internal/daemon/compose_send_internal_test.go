@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"net/mail"
 	"os"
 	"path/filepath"
@@ -25,8 +26,10 @@ import (
 	"github.com/jamesainslie/chainmail/internal/idempotency"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
+	"github.com/jamesainslie/chainmail/internal/mailstore/imapstore"
 	"github.com/jamesainslie/chainmail/internal/provider"
 	"github.com/jamesainslie/chainmail/internal/sender"
+	"github.com/jamesainslie/chainmail/internal/testutil/imaptest"
 	"github.com/jamesainslie/chainmail/internal/testutil/smtptest"
 	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
 	"github.com/jamesainslie/chainmail/internal/upload"
@@ -595,6 +598,123 @@ func TestDialFailureDuringASlowBuild(t *testing.T) {
 			}
 			if row, ok, err := s.idem.Lookup(t.Context(), "host", "slow"); err != nil || !ok || row.State != tt.wantState {
 				t.Errorf("key = %+v, %v, %v, want %v", row, ok, err, tt.wantState)
+			}
+		})
+	}
+}
+
+// fixedCredentials issues the same password credentials every time and
+// ignores refusals, so a test can read the IMAP server with a store of its
+// own whatever the daemon's auth manager has parked.
+type fixedCredentials auth.Credentials
+
+func (f fixedCredentials) Credentials(context.Context, string) (auth.Credentials, error) {
+	return auth.Credentials(f), nil
+}
+
+func (fixedCredentials) Rejected(string, auth.Credentials) {}
+
+// TestSMTPAuthRejectionAndHolds runs a send whose SMTP server refuses the
+// account's credentials while its IMAP server takes them, through the real
+// dial, auth manager and IMAP store. The build waits until the dial has
+// been refused. A held build still saves its draft, through a new IMAP
+// connection, and leaves the credentials unparked: the hold wins whatever
+// the dial did. An allowed build gets AUTH_REJECTED with its hint, and the
+// account is parked as before.
+func TestSMTPAuthRejectionAndHolds(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		to         string
+		wantHeld   bool
+		wantState  idempotency.State
+		wantParked bool
+		wantDrafts int
+	}{
+		{name: "a held build saves its draft", to: "you@blocked.invalid", wantHeld: true, wantState: idempotency.Done, wantDrafts: 1},
+		{name: "an allowed build parks the account", to: "you@example.net", wantState: idempotency.Retryable, wantParked: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			const user, password = "me@example.test", "pw"
+			ca := tlstest.New(t)
+			imapEP := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{Username: user, Password: password, Folders: []string{"Drafts"}})
+			smtpSrv := smtptest.StartWith(t, ca, provider.SecurityStartTLS, smtptest.Options{}, smtptest.User{Username: user, Password: "not-" + password})
+			cfg := fmt.Sprintf(`
+[accounts.local]
+provider = "custom"
+address = "me@example.test"
+imap = { host = "127.0.0.1", port = %d, security = "tls" }
+smtp = { host = "127.0.0.1", port = %d, security = "starttls" }
+
+[policy]
+send_allow = ["*@example.net"]
+`, imapEP.Port, smtpSrv.Endpoint().Port)
+			s, _ := newTestServerOptions(t, cfg, Options{RootCAs: ca.Pool})
+			t.Cleanup(s.lim.stop) // the store's first use starts a background probe
+			ctx := peerContext(t.Context())
+			if err := setSecretDirect(ctx, s, auth.PasswordSecret("local"), []byte(password)); err != nil {
+				t.Fatal(err)
+			}
+			acct, err := s.opts.Config.Account("local")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dialed := make(chan struct{})
+			var dialErr error
+			c := newComposeService(s)
+			c.dial = func(ctx context.Context, ep provider.Endpoint, creds auth.Credentials, opts sender.DialOptions) (*sender.Conn, error) {
+				defer close(dialed)
+				conn, err := sender.Dial(ctx, ep, creds, opts)
+				dialErr = err
+				return conn, err
+			}
+			const msgID = "refused@example.test"
+			raw := "From: me@example.test\r\nTo: " + tt.to + "\r\nSubject: hi\r\nMessage-ID: <" + msgID + ">\r\n\r\nhi\r\n"
+			job := sendJob{
+				acct: acct, key: "refused", hash: sha256.Sum256([]byte("refused")), action: "send",
+				caller: caller{uid: 1, client: "test"},
+				build: func(ctx context.Context) (compose.Message, error) {
+					select {
+					case <-dialed:
+					case <-ctx.Done():
+						return compose.Message{}, ctx.Err()
+					}
+					return compose.Message{Raw: []byte(raw), MessageID: msgID, EnvelopeFrom: acct.Address, EnvelopeTo: []string{tt.to}}, nil
+				},
+			}
+			res, err := c.run(ctx, job)
+			if !errors.Is(dialErr, auth.ErrRejected) {
+				t.Fatalf("dial err = %v, want the SMTP server to refuse the credentials", dialErr)
+			}
+			if tt.wantHeld {
+				if err != nil || res.GetHeld() == nil {
+					t.Errorf("run = %+v, %v, want held", res, err)
+				}
+			} else {
+				d := api.Detail(err)
+				wantHint := "the server rejected the password; run: chainmail secret set " + auth.PasswordSecret("local")
+				if d.GetReason() != api.ReasonAuthRejected || d.GetHint() != wantHint {
+					t.Errorf("run = %+v, %v, detail %+v, want AUTH_REJECTED with hint %q", res, err, d, wantHint)
+				}
+			}
+			if row, ok, err := s.idem.Lookup(t.Context(), "local", "refused"); err != nil || !ok || row.State != tt.wantState {
+				t.Errorf("key = %+v, %v, %v, want %v", row, ok, err, tt.wantState)
+			}
+			if st, err := s.auth.State("local"); err != nil || st.Required != tt.wantParked {
+				t.Errorf("auth state = %+v, %v, want parked %v", st, err, tt.wantParked)
+			}
+			if got := smtpSrv.Messages(); len(got) != 0 {
+				t.Errorf("SMTP got %d messages, want none", len(got))
+			}
+			// A store of the test's own, which the IMAP server lets in with
+			// the same credentials, counts the drafts.
+			check := imapstore.New(acct, fixedCredentials{Method: provider.AuthPassword, Username: user, Secret: password}, imapstore.Options{RootCAs: ca.Pool})
+			t.Cleanup(func() { _ = check.Close() }) // nothing to do about a close error at test end
+			refs, err := findIn(t.Context(), check, mailstore.RoleDrafts, msgID)
+			if err != nil || len(refs) != tt.wantDrafts {
+				t.Errorf("drafts = %v, %v, want %d", refs, err, tt.wantDrafts)
 			}
 		})
 	}

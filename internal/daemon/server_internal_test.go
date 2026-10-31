@@ -42,6 +42,14 @@ func newTestServer(t *testing.T) (*Server, *sql.DB) {
 // newTestServerConfig is newTestServer with the given config TOML.
 func newTestServerConfig(t *testing.T, configTOML string) (*Server, *sql.DB) {
 	t.Helper()
+	return newTestServerOptions(t, configTOML, Options{})
+}
+
+// newTestServerOptions is newTestServerConfig with opts as the base of the
+// Server's Options, such as RootCAs for in-process mail servers. The
+// config, vault, state database, listener and authorizer are the test's.
+func newTestServerOptions(t *testing.T, configTOML string, opts Options) (*Server, *sql.DB) {
+	t.Helper()
 	cfg, err := config.Parse([]byte(configTOML))
 	if err != nil {
 		t.Fatal(err)
@@ -65,13 +73,9 @@ func newTestServerConfig(t *testing.T, configTOML string) (*Server, *sql.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	s, err := New(Options{
-		Config:     cfg,
-		Vault:      v,
-		StateDB:    stateDB,
-		Listener:   ln,
-		Authorizer: NewAuthorizer(uint32(os.Getuid()), -1),
-	})
+	opts.Config, opts.Vault, opts.StateDB, opts.Listener = cfg, v, stateDB, ln
+	opts.Authorizer = NewAuthorizer(uint32(os.Getuid()), -1)
+	s, err := New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}

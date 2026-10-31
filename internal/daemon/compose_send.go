@@ -305,7 +305,9 @@ func heldDraft(msg compose.Message) (compose.Message, error) {
 // both are done, the result is, in order: a hold, as a heldError carrying
 // the built message; the build's error; the dial's error; the end of the
 // caller's ctx. Any of these closes a connection that was made, so a
-// cancelled call never reaches Send.
+// cancelled call never reaches Send. An SMTP refusal of the credentials
+// parks them only when the call ends with it: a hold still needs them for
+// IMAP, to save its draft.
 func (c *composeService) prepare(parent context.Context, job sendJob) (compose.Message, *sender.Conn, error) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -328,7 +330,7 @@ func (c *composeService) prepare(parent context.Context, job sendJob) (compose.M
 	wg.Wait()
 	err := buildErr // a heldError is a build error, so it comes first
 	if err == nil {
-		err = dialErr
+		err = c.dialOutcome(job.acct, dialErr)
 	}
 	if err == nil {
 		// The build does not watch ctx, so the caller may have gone while
@@ -363,8 +365,39 @@ func (c *composeService) buildChecked(ctx context.Context, job sendJob) (compose
 	return m, nil
 }
 
+// smtpRejectedError is connect's report that the SMTP server refused the
+// account's credentials. It carries the credentials refused, for
+// dialOutcome to park.
+type smtpRejectedError struct {
+	creds auth.Credentials
+	err   error
+}
+
+func (e *smtpRejectedError) Error() string { return "the SMTP server rejected the credentials" }
+
+func (e *smtpRejectedError) Unwrap() error { return e.err }
+
+// dialOutcome returns the error a call ends with when it ends with the
+// dial's err. A refusal of the credentials parks the account as SP1 does,
+// and becomes AUTH_REJECTED with the hint parking gives. Other errors are
+// returned as they are.
+func (c *composeService) dialOutcome(acct config.ResolvedAccount, err error) error {
+	var rejected *smtpRejectedError
+	if !errors.As(err, &rejected) {
+		return err
+	}
+	c.s.auth.Rejected(acct.Name, rejected.creds)
+	hint := ""
+	if st, serr := c.s.auth.State(acct.Name); serr == nil {
+		hint = st.Detail
+	}
+	return api.New(connect.CodeUnauthenticated, api.ReasonAuthRejected, hint,
+		&fixedTextError{msg: "the server rejected the credentials; nothing was sent", err: rejected.err})
+}
+
 // connect fetches the account's credentials and dials its SMTP server. A
-// refusal of the credentials parks the account as SP1 does.
+// refusal of the credentials is an smtpRejectedError, which parks nothing:
+// prepare decides, once the build is done, whether it parks the account.
 func (c *composeService) connect(ctx context.Context, acct config.ResolvedAccount) (*sender.Conn, error) {
 	creds, err := c.s.auth.Credentials(ctx, acct.Name)
 	if err != nil {
@@ -377,13 +410,7 @@ func (c *composeService) connect(ctx context.Context, acct config.ResolvedAccoun
 	switch {
 	case errors.Is(err, auth.ErrRejected):
 		c.s.opts.Logger.Debug("SMTP dial failed", "account", acct.Name, "step", "auth", "outcome", "rejected")
-		c.s.auth.Rejected(acct.Name, creds)
-		hint := ""
-		if st, serr := c.s.auth.State(acct.Name); serr == nil {
-			hint = st.Detail
-		}
-		return nil, api.New(connect.CodeUnauthenticated, api.ReasonAuthRejected, hint,
-			&fixedTextError{msg: "the server rejected the credentials; nothing was sent", err: err})
+		return nil, &smtpRejectedError{creds: creds, err: err}
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		c.s.opts.Logger.Debug("SMTP dial failed", "account", acct.Name, "step", "dial", "outcome", "cancelled")
 		return nil, err
