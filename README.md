@@ -1,8 +1,8 @@
 # chainmail
 
-Email for AI agents. chainmail is one Go binary that lets agents read, write and organize mail over IMAP and SMTP without ever holding a password or token. A long-running daemon owns every credential and every connection to the mail servers. Agents talk to it through the `chainmail` CLI, which is a thin client on a Unix socket. Every call except `admin status` is written to an audit log.
+Email for AI agents. chainmail is one Go binary that lets agents read, write and organize mail over IMAP and SMTP without ever holding a password or token. A long-running daemon owns every credential and every connection to the mail servers. Agents talk to it through the `chainmail` CLI, which is a thin client on a Unix socket. Every call except `admin status` and `audit` is written to an audit log.
 
-Three sub-projects exist today. Sub-project 1, the foundation, is the daemon and its socket, the vault, password and OAuth2 login, `secret set`, `auth login` and `accounts test`. Sub-project 2 reads mail: `folders`, `search`, `get`, `thread` and `attachment`. Sub-project 3 writes and organizes it: `send`, `send-raw`, `reply`, `forward` and `draft`, then `move`, `copy`, `archive`, `trash`, `expunge`, the flag and label commands, `folder`, and `accounts probe`. Policy, approvals and the MCP server arrive in later sub-projects.
+Four sub-projects exist today. Sub-project 1, the foundation, is the daemon and its socket, the vault, password and OAuth2 login, `secret set`, `auth login` and `accounts test`. Sub-project 2 reads mail: `folders`, `search`, `get`, `thread` and `attachment`. Sub-project 3 writes and organizes it: `send`, `send-raw`, `reply`, `forward` and `draft`, then `move`, `copy`, `archive`, `trash`, `expunge`, the flag and label commands, `folder`, and `accounts probe`. Sub-project 4 adds the send policy, which holds a send to anyone off an allowlist as a draft, the policy gates on `expunge` and `folder delete`, the `audit` command, and a NixOS module for production. Approvals and the MCP server arrive in later sub-projects.
 
 ```mermaid
 flowchart LR
@@ -22,12 +22,12 @@ flowchart LR
 
 ## Security model
 
-- **The daemon owns the credentials.** Passwords, OAuth client secrets and refresh tokens live in the daemon's vault and nowhere else. The CLI holds no secrets and no mail logic. In production the daemon runs as its own `chainmail` system user with its state in `/var/lib/chainmail` (mode `0700`), which your user can't read. The NixOS module that sets this up arrives in sub-project 4. Until then the daemon runs with `--dev` as your own user, which is for development only: anything running as you can read a dev vault's key.
+- **The daemon owns the credentials.** Passwords, OAuth client secrets and refresh tokens live in the daemon's vault and nowhere else. The CLI holds no secrets and no mail logic. In production the daemon runs as its own `chainmail` system user with its state in `/var/lib/chainmail` (mode `0700`), which your user can't read. The NixOS module sets this up (see [NixOS deployment](#nixos-deployment)). Elsewhere the daemon runs with `--dev` as your own user, which is for development only: anything running as you can read a dev vault's key.
 - **Secrets go in and never come out.** `chainmail secret set` and `chainmail auth login` write secrets. No API call returns one. `chainmail admin status` lists secret names only.
 - **The vault is encrypted at rest.** `vault.age` is an [age](https://age-encryption.org) file. In production its key arrives through systemd `LoadCredentialEncrypted=`, sealed to the host's TPM2, at `$CREDENTIALS_DIRECTORY/vault-key`. In development it is a file passed with `--vault-key-file`. The daemon refuses a key file that others can access. The file must either be owned by the daemon's user with no group or other bits (`0600` or `0400`), or be owned by `root:root` with no other bits and at most group read. The second form exists because systemd delivers a `LoadCredential` file as `0440 root:root` and grants the service user read access through an ACL.
 - **The socket has a group and a peer check.** The daemon creates its socket with mode `0660`. In production it sets the socket's group to `client_group` (default `chainmail-clients`). On every connection it reads the peer's credentials with `SO_PEERCRED` and allows only its own user and members of the client group. Membership is looked up per request, so adding a user to the group takes effect without a restart. Release builds are pure Go (`CGO_ENABLED=0`), so users, groups and memberships are read from `/etc/passwd` and `/etc/group`, not through NSS. A user or membership that exists only in NSS, such as one from LDAP or SSSD, is refused. A dev daemon allows only your own user. A refused peer gets `FORBIDDEN` (exit 3).
-- **There is no send gate yet.** Until sub-project 4 adds the policy engine, any client that passes the socket's peer check can send mail as any configured account, to anyone, and can move, trash and expunge mail. Nothing holds a send for approval. Give the socket only to users and agents you trust to send as you. Every send and every change is audited, so you can see afterwards what was done.
-- **Every change is audited.** The `audit` table in `state.db` records the time, caller UID, client kind (`cli`, `live-test`, or `daemon` for work the daemon starts itself, such as a background probe), account, action, targets, result and error reason for each call. The audited reads are `accounts.list`, `account.test`, `secret.set`, `auth.login.begin`, `auth.login.finish`, `folders.list`, `search`, `get`, `get.raw`, `thread` and `attachment`. The audited writes are `send`, `send_raw`, `reply`, `forward`, `upload`, `draft.create`, `draft.update`, `draft.send`, `draft.delete`, `move`, `copy`, `archive`, `trash`, `expunge`, `flags`, `labels`, `folders.create`, `folders.rename`, `folders.delete` and `limits.probe`. A send's row names the account and the Message-ID, never the recipients, subject or body. A reply or forward row also names the original's ref, and a draft row the draft's ref. A batch that spans accounts records one row per account, a repeated send records the decision `duplicate`, and a dry run the decision `dry_run`. The client kind is self-reported in the `Chainmail-Client` header, so any local caller can claim any kind. The caller UID comes from the socket and is the authoritative identity. Rows never contain secret values or message content. A read's row holds counts and refs only, never subjects, addresses or the search query. An account or secret name that is not a valid name, or a client kind that is not a short lowercase name, is recorded as `(invalid)`, and the call fails with `INVALID_ARGUMENT`. The table is append-only: triggers refuse updates and deletes. If the audit write fails, the call fails too, so chainmail never reports success for something it could not record. A `chainmail audit` reader arrives in sub-project 4. Until then, query `state.db` with `sqlite3`.
+- **Sends off the allowlist are held, not sent.** A send to any recipient that is not on the policy's allowlist is never transmitted. The daemon saves the exact message to the account's Drafts folder, and you send, edit or delete it from your own mail client. A recipient that is not a plain `local@domain` address, such as one with a quoted local part, is always held, whatever the allowlist says. `expunge` and `folder delete` are refused unless the config enables them. See [Policy](#policy). Any client that passes the socket's peer check can still send as any configured account to anyone on the allowlist, and can move, archive, flag and trash mail. Give the socket only to users and agents you trust that far. Every send and every change is audited, so you can see afterwards what was done.
+- **Every change is audited.** The `audit` table in `state.db` records the time, caller UID, client kind (`cli`, `live-test`, or `daemon` for work the daemon starts itself, such as a background probe), account, action, targets, result and error reason for each call. The audited reads are `accounts.list`, `account.test`, `secret.set`, `auth.login.begin`, `auth.login.finish`, `folders.list`, `search`, `get`, `get.raw`, `thread` and `attachment`. The audited writes are `send`, `send_raw`, `reply`, `forward`, `upload`, `draft.create`, `draft.update`, `draft.send`, `draft.delete`, `move`, `copy`, `archive`, `trash`, `expunge`, `flags`, `labels`, `folders.create`, `folders.rename`, `folders.delete` and `limits.probe`. A send's row names the account and the Message-ID, never the recipients, subject or body. A reply or forward row also names the original's ref, and a draft row the draft's ref. A batch that spans accounts records one row per account, a repeated send records the decision `duplicate`, and a dry run the decision `dry_run`. A send the policy passed records `allowed`, a held send `held`, and a refused `expunge` or `folder delete` `denied` (see [Policy](#policy)). The client kind is self-reported in the `Chainmail-Client` header, so any local caller can claim any kind. The caller UID comes from the socket and is the authoritative identity. Rows never contain secret values or message content. A read's row holds counts and refs only, never subjects, addresses or the search query. An account or secret name that is not a valid name, or a client kind that is not a short lowercase name, is recorded as `(invalid)`, and the call fails with `INVALID_ARGUMENT`. The table is append-only: triggers refuse updates and deletes. If the audit write fails, the call fails too, so chainmail never reports success for something it could not record. Read the log with `chainmail audit` (see [Reading the audit log](#reading-the-audit-log)).
 - **Root is out of scope.** chainmail stops accidents and prompt injection that run through chainmail. It does not stop an agent that can become root. If your user has passwordless sudo or is in the `docker` group, an agent with an unrestricted shell can read the vault through root. Closing that gap means running agents without sudo or docker, which is outside chainmail.
 
 ## Build
@@ -50,7 +50,7 @@ Other stave targets: `check` (the default, and what CI runs: generated code chec
 
 ## Development
 
-`check` runs the unit tests only. They include the IMAP store's tests against an in-memory fake Gmail server, which need nothing installed. `test:integration` runs the IMAP store's package again with the `integration` tag, which adds tests against a real Dovecot server in a Docker container. It needs Docker. It starts its own container from a pinned image and removes it when the run ends, whether the tests pass or fail. If the run is killed before it can clean up, the container stops itself after 20 minutes, and the next run removes it. The run times out after 15 minutes and uses a quarter of the cores.
+`check` runs the unit tests only. They include the IMAP store's tests against an in-memory fake Gmail server, which need nothing installed. `test:integration` runs the IMAP store's package and the daemon's package again with the `integration` tag, which adds tests against a real Dovecot server in a Docker container. The daemon's test sends through the policy and checks that a held send lands in Dovecot's Drafts folder with its Bcc and reaches no SMTP server. It needs Docker. It starts its own container from a pinned image and removes it when the run ends, whether the tests pass or fail. If the run is killed before it can clean up, the container stops itself after 20 minutes, and the next run removes it. The run times out after 15 minutes and uses a quarter of the cores.
 
 ```fish
 nix develop -c go tool stave test:integration
@@ -182,6 +182,15 @@ port = 993                       # security defaults to tls
 host = "mail.lab.example.net"
 port = 587
 security = "starttls"
+
+[accounts.lab.policy]
+send_allow = ["*@lab.example.net"]   # allowed for this account only
+
+[policy]
+send_allow = ["*@example.org", "ann@example.com"]
+max_recipients = 10
+allow_expunge = false
+allow_folder_delete = false
 ```
 
 | Key | Required | Default | Meaning |
@@ -207,6 +216,11 @@ security = "starttls"
 | `accounts.<name>.archive_folder` | no | the folder with the `\Archive` attribute | Where `archive` moves mail on accounts other than Google. Google archives by removing the Inbox label. |
 | `accounts.<name>.pool` | no | from the probe, else the preset | IMAP connections the daemon keeps for the account, 1 to 12. Set it to override the probed size. See [Connection probing and pool sizing](#connection-probing-and-pool-sizing). |
 | `accounts.<name>.max_message_size` | no | `25MiB` for Google and custom servers, `35MiB` for iCloud and Hostinger | The largest message the account sends, attachments included, between `1KiB` and `1024MiB`. Also caps each upload. Whatever it is set to, a `send-raw` message, a body or HTML file, and a dry run's output are limited to 40 MiB, the most one API request or response holds. |
+| `accounts.<name>.policy.send_allow` | no | `[]` | Allowlist entries added to the global `policy.send_allow` for this account only. No other key is allowed in this table. See [Policy](#policy). |
+| `policy.send_allow` | no | `[]` | Allowlist entries for every account: bare addresses and `*@domain`. |
+| `policy.max_recipients` | no | `10` | The most distinct recipients, To, Cc and Bcc together, a send may have. A send with more is held. 1 to 500. |
+| `policy.allow_expunge` | no | `false` | Allows `expunge`, and lets draft removal expunge instead of moving to Trash. |
+| `policy.allow_folder_delete` | no | `false` | Allows `folder delete`, including `--force` on a folder that holds mail. |
 
 Vault secret names:
 
@@ -218,7 +232,7 @@ Vault secret names:
 
 `secret set` accepts only names the config uses: `accounts/<account>` where the account has `auth = "password"`, and `oauth_clients/<client>` where the client is defined. It refuses `tokens/<account>`, because only `auth login` writes a refresh token.
 
-Keys from the full design, such as `watch`, `sync`, `policy` and `rules`, belong to later sub-projects. This version rejects them as unknown.
+Keys from the full design, such as `watch`, `sync` and `rules`, belong to later sub-projects. This version rejects them as unknown.
 
 ## Dev quickstart
 
@@ -269,7 +283,15 @@ Finally, run the live smoke test. Its read tests talk to every configured accoun
 nix develop -c go tool stave test:live
 ```
 
-The same run holds the write tests, which send real mail and probe connection limits, so they skip unless `CHAINMAIL_LIVE_WRITES=1` is set too. Each account sends only to its own address. For each account they send a message, check that sending it again with the same idempotency key sends nothing, reply to it, forward it, and create, update, send and delete drafts. They take another message through a `chainmail-test-<random>` folder, a label on Google: copy, flag, unflag, labels on Google, move, archive, trash and expunge, then delete the folder. Archive is skipped on an account with no archive folder. Last, they probe each account's connection limit. Every message they make has a random token in its subject, and they touch no other message. They clean up after themselves even when a test fails. Each step waits for the delivered copy of what it sent: the copy in the inbox, except on Google. Gmail files a message an account sends to its own address once, in Sent, and adds no inbox copy, so on Google the one All Mail message with the token counts as delivered, and the reply, forward and draft steps run against it. On Hostinger and other servers that keep folders under a personal namespace prefix, the test folder is created as `INBOX.chainmail-test-<random>`, and the test uses the name the server gave it. If the create fails or its answer is lost, cleanup lists the account's folders and deletes the one with the generated name, with or without the namespace prefix, and no other. Cleanup first waits for the delivered copy of every send, then expunges every message with the token, in the inbox, Sent, Drafts and every other folder, and deletes the folder. A send whose delivered copy never shows fails the cleanup, because it may still arrive afterwards. If a cleanup fails, its error names the token, so you can find what is left with `chainmail search subject:<token> in:anywhere`. Run them only when you mean to send and probe:
+The same run holds the write tests, which send real mail and probe connection limits, so they skip unless `CHAINMAIL_LIVE_WRITES=1` is set too. Each account sends only to its own address. For each account they send a message, check that sending it again with the same idempotency key sends nothing, reply to it, forward it, and create, update, send and delete drafts. They take another message through a `chainmail-test-<random>` folder, a label on Google: copy, flag, unflag, labels on Google, move, archive, trash and expunge, then delete the folder. Archive is skipped on an account with no archive folder. Last, they probe each account's connection limit. Every message they make has a random token in its subject, and they touch no other message. They clean up after themselves even when a test fails. Each step waits for the delivered copy of what it sent: the copy in the inbox, except on Google. Gmail files a message an account sends to its own address once, in Sent, and adds no inbox copy, so on Google the one All Mail message with the token counts as delivered, and the reply, forward and draft steps run against it. On Hostinger and other servers that keep folders under a personal namespace prefix, the test folder is created as `INBOX.chainmail-test-<random>`, and the test uses the name the server gave it. If the create fails or its answer is lost, cleanup lists the account's folders and deletes the one with the generated name, with or without the namespace prefix, and no other. Cleanup first waits for the delivered copy of every send, then expunges every message with the token, in the inbox, Sent, Drafts and every other folder, and deletes the folder. A send whose delivered copy never shows fails the cleanup, because it may still arrive afterwards. If a cleanup fails, its error names the token, so you can find what is left with `chainmail search subject:<token> in:anywhere`. The write tests expunge messages and delete their test folder, so the daemon they run against needs both destructive actions turned on in its config:
+
+```toml
+[policy]
+allow_expunge = true
+allow_folder_delete = true
+```
+
+Use that config for the live run only, on a dev daemon, and set both back to `false` afterwards. With either off, the expunge and folder steps and the cleanup fail with `POLICY_DENIED`. The sends go to each account's own address, which the policy always allows, so no `send_allow` entry is needed. Run them only when you mean to send and probe:
 
 ```fish
 CHAINMAIL_LIVE_WRITES=1 nix develop -c go tool stave test:live
@@ -287,17 +309,17 @@ Every command accepts `--socket <path>` and `--output json|table`. Without `--ou
 | `chainmail get <ref>...` | Reads 1 to 50 messages. `--full` keeps quotes and signatures and skips the `body_limit` cut. `--raw` writes the original RFC 5322 bytes of one message to stdout instead. | `{"items":[{"ref":...,"message":{...}}],...}` |
 | `chainmail thread <ref>` | Reads the whole thread a message belongs to, oldest first. Takes `--full`, as `get` does. | `{"thread_id":...,"messages":[...],"truncated":...,"omitted_refs":[...],...}` |
 | `chainmail attachment <ref> <part> --out <path>` | Downloads one attachment, decoded, to a file, or to stdout with `--out -`. | `{"path":...,"bytes":...,"content_type":...,"filename":{"untrusted":...}}` |
-| `chainmail send` | Sends a new message from one account. See [Sending mail](#sending-mail). | `{"result":{"sent":{"message_id":...,"sent_ref":...,"duplicate":...,"sent_copy_error":...}}}` |
+| `chainmail send` | Sends a new message from one account. See [Sending mail](#sending-mail). | `{"result":{"sent":{"message_id":...,"sent_ref":...,"duplicate":...,"sent_copy_error":...}}}`, or `{"result":{"held":{...}}}` and exit 4 when the policy holds it (see [Policy](#policy)) |
 | `chainmail send-raw (--file <f> \| -)` | Sends a finished RFC 5322 message as given. | as `send` |
 | `chainmail reply <ref>` | Replies to a message, quoting it. `--all` replies to everyone. | as `send` |
 | `chainmail forward <ref> --to <address>` | Forwards a message with its attachments. | as `send` |
 | `chainmail draft create\|update\|send\|delete` | Saves, replaces, sends and deletes drafts. | `{"draft":{"ref":...,"message_id":...}}`, or as `send` for `draft send` |
 | `chainmail move <ref>... --to <folder>`, `copy <ref>... --to <folder>` | Moves or copies messages to a folder on their own account. | `{"outcomes":[{"ref":...,"new_ref":...,"error":...}]}` |
-| `chainmail archive\|trash\|expunge <ref>...` | Archives, trashes or permanently deletes messages. | as `move` |
+| `chainmail archive\|trash\|expunge <ref>...` | Archives, trashes or permanently deletes messages. `expunge` needs `policy.allow_expunge`. | as `move` |
 | `chainmail flag\|unflag\|read\|unread <ref>...` | Stars, unstars, or marks messages read or unread. | as `move` |
 | `chainmail flags <ref>... [--add <flag>]... [--remove <flag>]...` | Adds and removes `\Seen`, `\Flagged`, `\Answered`, `\Draft` and keywords. | as `move` |
 | `chainmail label <ref>... [--add <label>]... [--remove <label>]...` | Adds and removes Gmail labels. Google accounts only. | as `move` |
-| `chainmail folder create <name>\|rename <from> <to>\|delete <name> [--force] --account <account>` | Creates, renames and deletes folders, or labels on Google. | `{"name":...}` for `create` and `rename`, with the folder's name on the server, and `{}` for `delete` |
+| `chainmail folder create <name>\|rename <from> <to>\|delete <name> [--force] --account <account>` | Creates, renames and deletes folders, or labels on Google. `delete` needs `policy.allow_folder_delete`. | `{"name":...}` for `create` and `rename`, with the folder's name on the server, and `{}` for `delete` |
 | `chainmail accounts probe [<account>]...` | Measures how many IMAP connections accounts allow and sizes their pools from it. | `{"limits":[{"account":...,"imap_cap":...,"pool_size":...,"probed_at":...,"error":...}]}` |
 | `chainmail daemon` | Runs the daemon. Flags: `--dev`, `--config` (default `/etc/chainmail/config.toml`), `--state-dir` (default `/var/lib/chainmail`), `--vault-key-file` (default `$CREDENTIALS_DIRECTORY/vault-key`). | JSON log lines on stderr |
 | `chainmail accounts list` | Lists accounts with provider, address, auth method and auth state. `auth_detail` says what to run when `auth_state` is `AUTH_STATE_REQUIRED`. | `{"accounts":[...]}` |
@@ -305,6 +327,7 @@ Every command accepts `--socket <path>` and `--output json|table`. Without `--ou
 | `chainmail secret set <name> [--from-pass <entry>]` | Stores a secret in the vault. The name must be `accounts/<account>` for a configured password account, or `oauth_clients/<client>` for a configured OAuth2 client. Any other name, including `tokens/<account>`, fails with `INVALID_ARGUMENT` (exit 2). For an account password it then probes the account's connection limit. | `{"name":...,"set":true}`, plus `"limit":{...}` for `accounts/<account>` |
 | `chainmail auth login <account>` | Runs the OAuth2 paste-back flow, stores the refresh token, then probes the account's connection limit. | `{"account":...,"logged_in":true,"limit":{...}}` |
 | `chainmail admin status` | Shows the daemon's version, start time, dev mode and stored secret names. | `{"version":...,"started_at":...,"dev_mode":...,"secret_names":[...]}` |
+| `chainmail audit [--since 24h] [--account <account>] [--action <action>] [--limit N] [--before-id N]` | Lists audit rows, newest first. See [Reading the audit log](#reading-the-audit-log). | `{"entries":[...],"next_before_id":...}` |
 | `chainmail help [command]` | Prints help. `--help` on any command does the same. | help text |
 
 Each check in `accounts test` has `ok`, `reason` (`AUTH_REJECTED`, `SERVER_UNAVAILABLE` or `TIMEOUT` when it failed), `error`, `capabilities` (IMAP only) and `latency_ms`. When a check fails, the command still prints the full result on stdout, then reports the failure on stderr and exits with its code: 5 if any server rejected the credentials, otherwise the code of the first failed check. If the account is missing a secret or already needs a human, no check runs. The command prints nothing on stdout and fails with `AUTH_REQUIRED` (exit 5).
@@ -409,7 +432,7 @@ Fields held as 64-bit integers arrive as JSON strings, as protobuf's JSON mappin
 
 ## Sending mail
 
-Five commands send: `send`, `send-raw`, `reply`, `forward` and `draft send`. Each sends from one account, with that account's address as From. Every send is audited. There is no approval step yet (see [Security model](#security-model)), so a send goes out as soon as the daemon has built it.
+Five commands send: `send`, `send-raw`, `reply`, `forward` and `draft send`. Each sends from one account, with that account's address as From. Every send is audited. A send to recipients the policy allows goes out as soon as the daemon has built it. A send to anyone else is held: it is saved to Drafts, not sent, and the command exits 4 (see [Policy](#policy)). `--dry-run` and `--draft` send nothing, so the policy does not check them.
 
 ### Composing
 
@@ -474,6 +497,7 @@ A send is never retried, by the daemon or by the CLI. Each send ends in one of t
 | Outcome | Reason | Exit | What to do |
 |---|---|---|---|
 | The server accepted it | | 0 | Nothing. |
+| The policy held it and saved it to Drafts | `HELD` | 4 | Nothing. Do not send it again another way. James reviews the draft. See [Policy](#policy). |
 | The server refused the sender, a recipient or the message | `INVALID_ARGUMENT` | 2 | Fix the request. Nothing was sent. A refused recipient means nobody got it. |
 | A temporary server error, or the connection dropped before the whole message was handed over | `SERVER_UNAVAILABLE` | 7 | Run the same command again. Nothing was sent. |
 | The server rejected the credentials | `AUTH_REJECTED` or `AUTH_REQUIRED` | 5 | Follow the hint, then run the same command again. |
@@ -540,7 +564,7 @@ These commands change mail on the server. Each takes one or more refs, from any 
 | `copy <ref>... --to <folder>` | Copies messages to a folder. |
 | `archive <ref>...` | Moves messages out of the inbox into the account's archive. |
 | `trash <ref>...` | Moves messages to Trash. A message already in Trash stays there. |
-| `expunge <ref>...` | Deletes messages for good. This cannot be undone. |
+| `expunge <ref>...` | Deletes messages for good. This cannot be undone. Refused with `POLICY_DENIED` (exit 3) unless `policy.allow_expunge` is true. |
 | `flag`, `unflag <ref>...` | Adds or removes `\Flagged`, the star. |
 | `read`, `unread <ref>...` | Adds or removes `\Seen`. |
 | `flags <ref>... --add <flag> --remove <flag>` | Adds and removes flags and keywords, such as `\Answered` or `$Label1`. Both repeat. |
@@ -607,9 +631,144 @@ chainmail folder delete Projects/Q3-2026 --account work
 
 `create` also creates any missing parent folders, and so does `rename` for the new name. Join the levels of a name with `/` or with the server's delimiter, as `folders` shows the names: chainmail writes `/` as the server's delimiter. Some servers, such as Hostinger's, keep every folder under a personal namespace prefix, `INBOX.` there, with `.` between levels. On those, `create` and the new name of `rename` go under the prefix unless the name is INBOX or starts with the prefix already, so `chainmail folder create Projects/Q3 --account site` makes `INBOX.Projects.Q3`. The commands print the name the server has, and later commands, such as `move --to` and `folder delete`, take that name. Google matches folder names without regard to case. A folder that already exists fails `create` or `rename` with `INVALID_ARGUMENT`, and a missing one fails `rename` or `delete` with `NOT_FOUND`.
 
-`rename` and `delete` refuse INBOX and every folder with a role, such as Sent, Trash or Google's `[Gmail]` folders, with `INVALID_ARGUMENT`. `rename` also refuses a folder with such a folder under it, or a new name under the folder itself. `delete` refuses a folder that has folders under it. It refuses a folder that holds mail unless you add `--force`. On other accounts `--force` deletes the mail with the folder. On Google it deletes only the label, and the messages stay in All Mail.
+`rename` and `delete` refuse INBOX and every folder with a role, such as Sent, Trash or Google's `[Gmail]` folders, with `INVALID_ARGUMENT`. `rename` also refuses a folder with such a folder under it, or a new name under the folder itself. `delete` refuses a folder that has folders under it. It refuses a folder that holds mail unless you add `--force`. On other accounts `--force` deletes the mail with the folder. On Google it deletes only the label, and the messages stay in All Mail. `folder delete` is refused with `POLICY_DENIED` (exit 3) unless `policy.allow_folder_delete` is true. With it on, `--force` deletes the mail with the folder even while `policy.allow_expunge` is off.
 
 On a terminal the commands print what they did, such as `created folder Projects/Q3 on work`, or `created folder INBOX.Projects.Q3 on site` on Hostinger. With `--output json`, `create` and `rename` print `{"name":...}`, the folder's name on the server.
+
+## Policy
+
+The daemon checks every send against a policy before anything is transmitted, and refuses the destructive actions unless the config turns them on. The policy lives in the config file, `/etc/chainmail/config.toml` in production, as a global `[policy]` table and an optional `[accounts.<name>.policy]` table per account:
+
+```toml
+[policy]
+send_allow = ["*@ainslies.us", "someone@example.com"]
+max_recipients = 10
+allow_expunge = false
+allow_folder_delete = false
+
+[accounts.gmail.policy]
+send_allow = ["friend@gmail.com"]
+```
+
+The keys are listed in the [Configuration reference](#configuration-reference). Like every other key, they are checked at startup, and the daemon refuses to start on an invalid entry or an unknown key.
+
+### The allowlist
+
+An entry in `send_allow` has one of two forms:
+
+- **A bare address**, such as `someone@example.com`: no display name, no angle brackets, exactly one `@`. It matches only that address.
+- **`*@domain`**, such as `*@ainslies.us`. It matches any address whose part after its last `@` is exactly that domain. Subdomains do not match, so `*@ainslies.us` does not allow `bob@mail.ainslies.us`.
+
+Anything else, such as `*@*`, `*.example.com`, `@example.com` or `bob@*`, is a config error that names the table and the entry. Matching ignores case.
+
+For an account, the allowed recipients are the global `send_allow`, that account's own `send_allow`, and the `address` of every configured account, so mail between your own accounts is never held. With no entries at all, only your own addresses are allowed and every other send is held.
+
+### Held sends
+
+The policy checks `send`, `send-raw`, `reply`, `reply --all`, `forward` and `draft send`. It looks at the message's envelope recipients: To, Cc and Bcc together, without repeats, or for `send-raw` the addresses the message would be submitted to. `--dry-run` and `--draft` transmit nothing, so they are not checked. A send is held when:
+
+- any recipient is not allowed, or
+- any recipient is not a plain `local@domain` address, whatever the allowlist says. A quoted local part such as `"ann smith"@example.com`, an address literal such as `ann@[192.0.2.1]`, whitespace or control characters all count as unsafe, because SMTP could read part of the decoded address as its own syntax. These recipients are always held, and the SMTP sender refuses them too, or
+- the message has more than `max_recipients` recipients.
+
+A held send is never transmitted, and no SMTP command is sent for it. Instead the daemon saves the exact message it built to the account's Drafts folder, marked `\Draft` and `\Seen`. When the envelope has recipients that are not in the message's To or Cc, such as Bcc recipients or the extra envelope recipients of `send-raw`, the draft gets a `Bcc` header listing them, so nobody is lost when the draft is sent from a mail client. A held `draft send` saves nothing new: the draft stays in Drafts as it was, and the result names it. A hold still happens while the SMTP server is unreachable, since the message never needed it. If saving the draft fails, for example because IMAP is down, the command fails with that error. The message was neither sent nor saved, and running the same command again tries again.
+
+What a held send means for an agent:
+
+- The command prints the result on stdout as usual, then the `HELD` error on stderr, and exits **4**. With JSON output the result is
+
+  ```json
+  {"result":{"held":{"draft":{"ref":"cm1:work:Drafts:1793457333:12","message_id":"01M69669KM.MJJH0XAXCV@example.org","hint":""},"blocked":["stranger@example.net"],"too_many_recipients":false,"hint":"held by policy: saved to Drafts for James to review and send"}}}
+  ```
+
+  and stderr holds `{"error":{"reason":"HELD","message":"held by policy: saved to Drafts","hint":"held by policy: saved to Drafts for James to review and send"}}`. On a terminal the command prints `held by policy, not sent: saved to Drafts <ref>`, then the blocked recipients and whether there were too many.
+- `draft.ref` is the saved draft's ref. On a server that does not say where it stored the draft, `ref` is empty and `draft.hint` says to search Drafts for `message_id`. `blocked` lists the recipients that are not allowed, as given. `too_many_recipients` is true when there were more than `max_recipients`.
+- Nothing was sent. Relay the hint to James and stop there. James sends, edits or deletes the draft from his own mail client. Do not try to get the message out another way, such as from another account or with fewer recipients per send. Running the same command again with the same idempotency key replays the held result and saves no second draft.
+
+### Destructive defaults
+
+`allow_expunge` and `allow_folder_delete` are both `false` unless the config says otherwise.
+
+- With `allow_expunge` off, `expunge` is refused with `POLICY_DENIED` (exit 3), the message `expunge is disabled by policy` and a hint naming the setting, before any IMAP work. `draft delete`, `draft update` and `draft send` then move the old draft to the account's Trash instead of deleting it for good. That stops an agent from moving any message into Drafts, or labelling a Gmail message `\Draft`, and then destroying it with `draft delete`.
+- With `allow_folder_delete` off, `folder delete` is refused the same way, with `folder delete is disabled by policy`.
+- With `allow_folder_delete` on, an agent can `folder delete --force` a folder that holds mail, and on accounts other than Google that deletes the mail with it, whether `allow_expunge` is on or not. Keep both settings `false` unless you really mean to let agents destroy mail.
+- `trash`, `move`, `copy`, `archive` and the flag and label commands are not gated. Mail in Trash can be got back until the server empties it.
+
+Every policy decision is audited. A send the policy passed records the decision `allowed`. A hold records `held`, with result `ok`, reason `HELD`, and as targets the draft's ref, its Message-ID, `blocked:<n>` with the number of blocked recipients, and `too_many` when that applied. A repeat of a held send records `duplicate`. A refused `expunge` or `folder delete` records `denied`, with result `error` and reason `POLICY_DENIED`. Audit rows never hold recipient addresses.
+
+## Reading the audit log
+
+`chainmail audit` lists audit rows, newest first. Rows hold no message content, recipients or secrets, so any user allowed on the socket may read them. Reading the log is not itself audited.
+
+```fish
+chainmail audit
+chainmail audit --since 1h --output table
+chainmail audit --account work --action send --limit 20
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--since` | `24h` | How far back to look, as a Go duration such as `90m` or `168h`. |
+| `--account` | all accounts | Only rows of this account. An unknown account fails with `INVALID_ARGUMENT`. |
+| `--action` | all actions | Only rows of this action, such as `send`, `expunge` or `folders.delete`. The actions are listed under [Security model](#security-model). |
+| `--limit` | `100` | Rows per page, up to 1000. |
+| `--before-id` | none | Only rows older than this id. Pass the previous page's `next_before_id`. |
+
+With JSON output the command prints `{"entries":[...],"next_before_id":...}` and exits 0. Each entry has `id`, `at`, `caller_uid`, `client`, `account`, `action`, `targets`, `decision`, `result` and `reason`. `next_before_id` is `"0"` on the last page. Like other 64-bit fields, `id` and `next_before_id` are JSON strings. On a terminal it prints one line per row and, when there are more, the `--before-id` to pass for the next page.
+
+## NixOS deployment
+
+The flake exports a NixOS module as `nixosModules.default`. It runs the daemon as the `chainmail` system user, with its state in `/var/lib/chainmail` and its vault key sealed with `systemd-creds`, and puts the `chainmail` CLI on `PATH`.
+
+```nix
+{
+  inputs.chainmail.url = "github:jamesainslie/chainmail";
+
+  outputs = { nixpkgs, chainmail, ... }: {
+    nixosConfigurations.incus = nixpkgs.lib.nixosSystem {
+      modules = [
+        chainmail.nixosModules.default
+        {
+          services.chainmail = {
+            enable = true;
+            clientUsers = [ "jamesainslie" ];
+            vaultKeyCredential = ./chainmail-vault-key.cred;
+            settings = {
+              policy.send_allow = [ "*@ainslies.us" ];
+              accounts.site = {
+                provider = "hostinger";
+                address = "me@example.com";
+              };
+            };
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+| Option | Type | Default | Meaning |
+|---|---|---|---|
+| `services.chainmail.enable` | bool | `false` | Runs the daemon. |
+| `services.chainmail.package` | package | this flake's package | Provides the daemon and the CLI. |
+| `services.chainmail.clientUsers` | list of strings | `[]` | Users added to the `chainmail-clients` group, who may use the socket. |
+| `services.chainmail.vaultKeyCredential` | path, or an absolute path string | required | A `systemd-creds` encrypted file holding the vault's age key, encrypted with the name `vault-key`. A Nix path is copied to the store, which is safe because it is encrypted. |
+| `services.chainmail.settings` | TOML attribute set | `{}` | The daemon config, written to `/etc/chainmail/config.toml` with mode `0444`. It must hold no secrets. |
+
+The module sets `settings.daemon.socket` to `/run/chainmail/chainmail.sock` and `settings.daemon.client_group` to `chainmail-clients` by default. It refuses another client group, and a socket outside `/run/chainmail/`. The daemon has no log level flag, so there is no log level option.
+
+It creates the `chainmail` user and group, the `chainmail-clients` group, and a hardened `chainmail.service`. The unit runs `chainmail daemon --config /etc/chainmail/config.toml` as `chainmail`, with `StateDirectory=chainmail` (mode `0700`), `RuntimeDirectory=chainmail` (mode `0755`, since the socket's own `0660` mode and group are the gate), `UMask=0077` and `LoadCredentialEncrypted=vault-key:<vaultKeyCredential>`. It restarts on failure and whenever the rendered config changes.
+
+Seal the vault key to the host's TPM on the host itself, then commit the `.cred` file with the host's config. Only that host's TPM can decrypt it.
+
+```fish
+sudo systemd-creds encrypt --with-key=tpm2 --name=vault-key ~/.config/chainmail-dev/vault-key chainmail-vault-key.cred
+```
+
+The first start creates `/var/lib/chainmail` with an empty vault. To move a dev daemon's state over, stop `chainmail.service`, copy `vault.age` and `state.db` into `/var/lib/chainmail/` owned by `chainmail:chainmail` with mode `0600`, and start it again. Client users then reach it through the default socket, so `chainmail accounts list` needs no `--socket`.
+
+On x86_64-linux, `nix flake check` also runs a NixOS VM test of the module, which starts the service and checks its user, directories, socket permissions, the policy table in the config, and that only client users can connect.
 
 ## Connection probing and pool sizing
 
@@ -654,13 +813,13 @@ Reasons and exit codes are a contract with agents and never change. They come fr
 | 0 | | Success |
 | 1 | `INTERNAL`, and any reason not listed here | A bug or an unexpected failure |
 | 2 | `USAGE`, `INVALID_ARGUMENT` | Bad invocation or a bad value |
-| 3 | `POLICY_DENIED`, `FORBIDDEN` | Refused. `FORBIDDEN` means your user may not use the socket. |
-| 4 | `HELD` | Held for approval (sub-project 4) |
+| 3 | `POLICY_DENIED`, `FORBIDDEN` | Refused. `POLICY_DENIED` means the policy forbids the action, such as `expunge` with `allow_expunge` off. `FORBIDDEN` means your user may not use the socket. |
+| 4 | `HELD` | The send policy held a send. It was not sent. It was saved to Drafts for James to review and send from his own mail client. The result is still printed on stdout (see [Policy](#policy)). |
 | 5 | `AUTH_REQUIRED`, `AUTH_REJECTED` | A human must set a secret or log in. The hint says what to run. |
 | 6 | `NOT_FOUND`, `STALE_REF` | No such account, pass entry, folder, message or attachment part, or a ref that went stale. A name that breaks the naming rules, such as `Work`, is `INVALID_ARGUMENT` instead. |
 | 7 | `SERVER_UNAVAILABLE`, `TIMEOUT`, `DAEMON_UNREACHABLE` | A mail server or the daemon could not be reached in time |
 | 8 | `SEND_OUTCOME_UNKNOWN` | A send may or may not have gone out. Check Sent before sending again (see [After a send](#after-a-send)). |
-| 9 | `TOTP_INVALID`, `TOTP_LOCKED` | Approval code refused (sub-project 4) |
+| 9 | `TOTP_INVALID`, `TOTP_LOCKED` | Approval code refused. Reserved for a later sub-project: nothing returns it yet. |
 
 Usage errors always exit 2 with `USAGE`. That covers a missing or extra argument, an unknown flag, a bad `--output` value, a group command such as `chainmail accounts` run on its own, an unknown subcommand, and `chainmail help <unknown>`. Shell completion is disabled, so `chainmail completion` is an unknown command too.
 
