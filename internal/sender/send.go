@@ -13,6 +13,7 @@ import (
 	"github.com/emersion/go-smtp"
 
 	"github.com/jamesainslie/chainmail/internal/auth"
+	"github.com/jamesainslie/chainmail/internal/mailaddr"
 	"github.com/jamesainslie/chainmail/internal/provider"
 )
 
@@ -95,6 +96,9 @@ func (e *SendError) Unwrap() error { return e.Err }
 var (
 	errNoRecipients = errors.New("no recipients")
 	errConnDone     = errors.New("connection already used or closed")
+	// The unsafe-address errors name no address: Error never does.
+	errUnsafeFrom = errors.New("the envelope sender is not a plain address that is safe to send")
+	errUnsafeRcpt = errors.New("an envelope recipient is not a plain address that is safe to send")
 )
 
 // Conn is an authenticated SMTP session ready to submit one message. It is
@@ -290,12 +294,19 @@ func failure(err error, afterDot bool, step string) *SendError {
 	return se
 }
 
-// checkEnvelope refuses what go-smtp would refuse locally, so that it counts
-// as permanent rather than as a lost connection.
+// checkEnvelope refuses an envelope it cannot write safely, before MAIL
+// FROM. go-smtp writes each address into its path as it is, so an address
+// that is not mailaddr.Safe could close the path early and pass the rest as
+// ESMTP parameters, reaching a recipient nobody checked. An empty from is
+// the null reverse-path. It also refuses what go-smtp would refuse locally.
+// Either way the refusal counts as permanent, not as a lost connection.
 func (c *Conn) checkEnvelope(from string, to []string, utf8 bool) error {
-	for _, addr := range append([]string{from}, to...) {
-		if strings.ContainsAny(addr, "\r\n") {
-			return errors.New("envelope address contains CR or LF")
+	if from != "" && !mailaddr.Safe(from) {
+		return errUnsafeFrom
+	}
+	for _, addr := range to {
+		if !mailaddr.Safe(addr) {
+			return errUnsafeRcpt
 		}
 	}
 	if ok, _ := c.client.Extension("SMTPUTF8"); utf8 && !ok {
