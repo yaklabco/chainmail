@@ -41,6 +41,13 @@ max_recipients = 2
 [accounts.gmail.policy]
 send_allow = ["pal@gmail.test", "*@club.test"]
 `
+	const mixedCase = accounts + `
+[policy]
+send_allow = ["*@MiXed.TEST"]
+
+[accounts.gmail.policy]
+send_allow = ["Pal@Upper.TEST"]
+`
 	tests := []struct {
 		name       string
 		config     string
@@ -145,6 +152,20 @@ send_allow = ["pal@gmail.test", "*@club.test"]
 			account:    "work",
 			recipients: []string{"a@x.com", "b@x.com"},
 			want:       SendDecision{Allowed: true},
+		},
+		{
+			name:       "mixed-case configured entries match lowercase recipients",
+			config:     mixedCase,
+			account:    "gmail",
+			recipients: []string{"bob@mixed.test", "pal@upper.test"},
+			want:       SendDecision{Allowed: true},
+		},
+		{
+			name:       "mixed-case wildcard does not match a lookalike domain",
+			config:     mixedCase,
+			account:    "gmail",
+			recipients: []string{"bob@mixed.test.evil", "bob@xmixed.test"},
+			want:       SendDecision{Blocked: []string{"bob@mixed.test.evil", "bob@xmixed.test"}},
 		},
 		{
 			name:       "too many and blocked",
