@@ -57,6 +57,17 @@ in
         assertion = lib.hasPrefix "/" (toString cfg.vaultKeyCredential);
         message = "services.chainmail.vaultKeyCredential must be a Nix path or an absolute path.";
       }
+      {
+        # The group, its members and the unit's SupplementaryGroups are
+        # fixed, so another client_group would lock clientUsers out.
+        assertion = cfg.settings.daemon.client_group == "chainmail-clients";
+        message = "services.chainmail.settings.daemon.client_group must be \"chainmail-clients\"; add users with services.chainmail.clientUsers.";
+      }
+      {
+        # ProtectSystem=strict leaves only the RuntimeDirectory writable.
+        assertion = lib.hasPrefix "/run/chainmail/" cfg.settings.daemon.socket;
+        message = "services.chainmail.settings.daemon.socket must be under /run/chainmail/.";
+      }
     ];
 
     services.chainmail.settings.daemon = {
