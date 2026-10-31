@@ -27,5 +27,12 @@
           packages = with pkgs; [ go buf golangci-lint gotestsum age ];
         };
       });
+
+      nixosModules.default = import ./nix/module.nix { inherit self; };
+
+      checks.x86_64-linux.nixos-module = import ./nix/test.nix {
+        inherit self;
+        pkgs = nixpkgs.legacyPackages.x86_64-linux;
+      };
     };
 }
