@@ -4,19 +4,14 @@
 let
   inherit (pkgs) lib;
 
-  # Set to true once sp4-policy has Task 1 (the [policy] config table) merged.
-  # Until then the daemon's strict TOML decoder rejects the unknown [policy]
-  # table and refuses to start, so the policy settings and their assert are off.
-  policyEnabled = false;
-
-  policySettings = lib.optionalAttrs policyEnabled {
+  policySettings = {
     policy = {
       allow_expunge = false;
       send_allow = [ "*@example.com" ];
     };
   };
 
-  policyAssert = lib.optionalString policyEnabled ''
+  policyAssert = ''
     machine.succeed("grep -q 'allow_expunge = false' /etc/chainmail/config.toml")
   '';
 in
