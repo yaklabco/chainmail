@@ -23,7 +23,43 @@ const (
 	// can trail a change by minutes, so a wait may run long, and the cap
 	// keeps it to a few searches a minute.
 	maxPoll = 15 * time.Second
+	// deliveryTimeout bounds the wait for the delivered copy of a message
+	// sent to self: the inbox copy, or on Google the All Mail message. The
+	// test finds it by searching, and Gmail's search, served from its
+	// search index, trailed real changes by 2 to 4 minutes in live runs.
+	deliveryTimeout = 6 * time.Minute
+	// searchTimeout bounds the wait for a message to show in a search of a
+	// folder after an organize call. The test searches only when it does
+	// not know the message's ref, as after a COPY or MOVE without COPYUID.
+	// Where it knows the ref, it reads it with Get, which needs no index.
+	searchTimeout = 6 * time.Minute
+	// settleTimeout is how long cleanup keeps looking for the delivered copy
+	// of a send the test never saw arrive, after the last send. It is longer
+	// than deliveryTimeout, so a send the test gave up on still gets time.
+	settleTimeout = deliveryTimeout + 2*time.Minute
+	// cleanupTimeout bounds each cleanup. It outlasts settleTimeout, so a
+	// cleanup that waited for a late send still has time to expunge.
+	cleanupTimeout = settleTimeout + 5*time.Minute
+	// cleanupReserve is the time no wait may use before go test's -timeout
+	// deadline. A test the deadline kills runs no cleanup and leaves its
+	// mail behind, so the waits stop early enough for the cleanup of the
+	// test under way to finish.
+	cleanupReserve = cleanupTimeout + 2*time.Minute
 )
+
+// capWait shortens a wait of want so it ends cleanupReserve before the
+// test deadline, when there is one. ok is false when the reserve leaves no
+// time at all, and the test must stop without starting anything new.
+func capWait(want time.Duration, deadline time.Time, hasDeadline bool, now time.Time) (time.Duration, bool) {
+	if !hasDeadline {
+		return want, true
+	}
+	left := deadline.Sub(now) - cleanupReserve
+	if left <= 0 {
+		return 0, false
+	}
+	return min(want, left), true
+}
 
 // backoff returns the pause before repeat n of a search, from 0: firstPoll,
 // doubling up to maxPoll.
@@ -168,15 +204,16 @@ func filedIn(m *chainmailv1.Message, google bool, folder string) bool {
 }
 
 // archived says m was archived from folder from. On Google archiving takes
-// the \Inbox label away and the message stays in All Mail. Elsewhere it is
-// in the folder with the archive role, or, since the account's
-// archive_folder setting can name any folder, in another folder with no
-// role.
+// the \Inbox label away and the message stays in All Mail. Elsewhere it has
+// left from for another folder. The account's archive_folder setting can
+// name any folder, one with another role such as Sent included, and the
+// API does not say which, so only the inbox and Trash are ruled out: no
+// archive lands there.
 func archived(m *chainmailv1.Message, google bool, roles map[string]string, from string) bool {
 	if google {
 		return inRole(m, roles, "all") && !slices.Contains(m.GetLabels(), `\Inbox`)
 	}
-	return inRole(m, roles, "archive") || (m.GetFolder() != from && roles[m.GetFolder()] == "")
+	return m.GetFolder() != from && !inRole(m, roles, "inbox") && !inRole(m, roles, "trash")
 }
 
 // isDraft says m is a draft: it has the \Draft flag, or on Google the
@@ -437,7 +474,7 @@ func TestFiledIn(t *testing.T) {
 func TestArchived(t *testing.T) {
 	const from = "INBOX.chainmail-test-x"
 	roles := map[string]string{
-		"INBOX": "inbox", "INBOX.Archive": "archive", "INBOX.Trash": "trash", "INBOX.Saved": "", from: "",
+		"INBOX": "inbox", "INBOX.Archive": "archive", "INBOX.Trash": "trash", "INBOX.Saved": "", "INBOX.Sent": "sent", from: "",
 		"[Gmail]/All Mail": "all", "[Gmail]/Trash": "trash",
 	}
 	for _, tc := range []struct {
@@ -450,6 +487,8 @@ func TestArchived(t *testing.T) {
 		// The account's archive_folder setting can name a folder without
 		// the archive role.
 		{"standard, in another plain folder", &chainmailv1.Message{Folder: "INBOX.Saved"}, false, true},
+		// It can also name a folder that has another role, such as Sent.
+		{"standard, in a folder with another role", &chainmailv1.Message{Folder: "INBOX.Sent"}, false, true},
 		{"standard, still where it was", &chainmailv1.Message{Folder: from}, false, false},
 		{"standard, in the inbox", &chainmailv1.Message{Folder: "INBOX"}, false, false},
 		{"standard, in Trash", &chainmailv1.Message{Folder: "INBOX.Trash"}, false, false},
@@ -502,4 +541,30 @@ func (s settle) String() string {
 		return "settleUnresolved"
 	}
 	return fmt.Sprintf("settle(%d)", int(s))
+}
+
+func TestCapWait(t *testing.T) {
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name        string
+		want        time.Duration
+		deadline    time.Time
+		hasDeadline bool
+		wantWait    time.Duration
+		wantOK      bool
+	}{
+		{"no deadline", 6 * time.Minute, time.Time{}, false, 6 * time.Minute, true},
+		{"plenty of time", 6 * time.Minute, now.Add(cleanupReserve + time.Hour), true, 6 * time.Minute, true},
+		{"cut short by the reserve", 6 * time.Minute, now.Add(cleanupReserve + 2*time.Minute), true, 2 * time.Minute, true},
+		{"only the reserve left", 6 * time.Minute, now.Add(cleanupReserve), true, 0, false},
+		{"past the deadline", 6 * time.Minute, now.Add(-time.Minute), true, 0, false},
+		{"a zero wait with time left", 0, now.Add(cleanupReserve + time.Minute), true, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := capWait(tc.want, tc.deadline, tc.hasDeadline, now)
+			if got != tc.wantWait || ok != tc.wantOK {
+				t.Errorf("capWait = %v, %v, want %v, %v", got, ok, tc.wantWait, tc.wantOK)
+			}
+		})
+	}
 }

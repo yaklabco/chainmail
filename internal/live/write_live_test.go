@@ -34,23 +34,6 @@ import (
 const (
 	// writesEnv opts in to the tests that send, organize and probe.
 	writesEnv = "CHAINMAIL_LIVE_WRITES"
-	// deliveryTimeout bounds the wait for the delivered copy of a message
-	// sent to self: the inbox copy, or on Google the All Mail message. The
-	// test finds it by searching, and Gmail's search, served from its
-	// search index, trailed real changes by 2 to 4 minutes in live runs.
-	deliveryTimeout = 6 * time.Minute
-	// searchTimeout bounds the wait for a message to show in a search of a
-	// folder after an organize call. The test searches only when it does
-	// not know the message's ref, as after a COPY or MOVE without COPYUID.
-	// Where it knows the ref, it reads it with Get, which needs no index.
-	searchTimeout = 6 * time.Minute
-	// settleTimeout is how long cleanup keeps looking for the delivered copy
-	// of a send the test never saw arrive, after the last send. It is longer
-	// than deliveryTimeout, so a send the test gave up on still gets time.
-	settleTimeout = deliveryTimeout + 2*time.Minute
-	// cleanupTimeout bounds each cleanup. It outlasts settleTimeout, so a
-	// cleanup that waited for a late send still has time to expunge.
-	cleanupTimeout = settleTimeout + 5*time.Minute
 	// testFolderPrefix starts the name of the folder or label the organize
 	// test creates.
 	testFolderPrefix = "chainmail-test-"
@@ -59,6 +42,19 @@ const (
 	// maxSweepRounds bounds how often cleanup expunges and searches again.
 	maxSweepRounds = 10
 )
+
+// waitBudget caps a wait of want with capWait against the -timeout
+// deadline, and stops the test when only cleanupReserve is left, so the
+// cleanups of the test under way still finish before go test kills it.
+func waitBudget(t *testing.T, want time.Duration) time.Duration {
+	t.Helper()
+	deadline, ok := t.Deadline()
+	got, left := capWait(want, deadline, ok, time.Now())
+	if !left {
+		t.Fatalf("out of time: under %v left before the -timeout deadline, which is kept for cleanup", cleanupReserve)
+	}
+	return got
+}
 
 // requireWrites skips a test that changes mail unless writesEnv is 1.
 func requireWrites(t *testing.T) {
@@ -160,6 +156,7 @@ func tokenMessages(ctx context.Context, c *client.Client, account, token, in str
 // message's ref.
 func findMessage(t *testing.T, c *client.Client, account, token, in, id string, within time.Duration, accept func(*chainmailv1.Message) bool) string {
 	t.Helper()
+	within = waitBudget(t, within)
 	start := time.Now()
 	for n := 0; ; n++ {
 		msgs, err := tokenMessages(t.Context(), c, account, token, in)
@@ -427,6 +424,7 @@ func TestEveryAccountSends(t *testing.T) {
 	c := liveClient(t)
 	for _, a := range liveAccounts(t, c) {
 		t.Run(a.GetName(), func(t *testing.T) {
+			waitBudget(t, 0)
 			token := "cmlive" + randomToken(16)
 			t.Logf("token %s", token)
 			roles := folderRoles(t, c, a.GetName())
@@ -605,6 +603,7 @@ func TestEveryAccountOrganizes(t *testing.T) {
 	c := liveClient(t)
 	for _, a := range liveAccounts(t, c) {
 		t.Run(a.GetName(), func(t *testing.T) {
+			waitBudget(t, 0)
 			google := isGoogle(a)
 			name := a.GetName()
 			generated := testFolderPrefix + randomToken(12)

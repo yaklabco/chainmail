@@ -62,7 +62,7 @@ func (Test) Unit() error {
 // search to catch up, so a full run takes far longer than go test's default
 // 10 minute timeout.
 func (Test) Live() error {
-	return sh.RunV("go", "test", "-tags", "live", "-count=1", "-timeout", "60m", "-v", "./internal/live/")
+	return sh.RunV("go", "test", "-tags", "live", "-count=1", "-timeout", "120m", "-v", "./internal/live/")
 }
 
 // Integration runs the integration suite: Dovecot in a Docker container and
