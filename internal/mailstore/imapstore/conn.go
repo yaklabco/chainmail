@@ -182,6 +182,10 @@ func (c *conn) kill() {
 	_ = c.sess.conn.Close() // shutting the socket is the point; its error says nothing new
 }
 
+// forget makes the next SelectFolder open its folder again, even if that is
+// the folder open now.
+func (c *conn) forget() { c.selected, c.writable, c.uidValidity = "", false, 0 }
+
 // SelectFolder opens folder, read-write with SELECT when writable and
 // read-only with EXAMINE otherwise, unless it is already open in a mode
 // that will do. A read accepts either mode; a write needs read-write, so a

@@ -1,6 +1,7 @@
 package imapstore
 
 import (
+	"errors"
 	"io"
 	"slices"
 	"testing"
@@ -180,5 +181,66 @@ func TestReusedFolderNoopsOncePerWindow(t *testing.T) {
 	}
 	if n := srv.sent("EXAMINE"); n != 1 {
 		t.Errorf("%d EXAMINEs, want 1: the connection should keep INBOX open", n)
+	}
+}
+
+// TestGetAfterTrashOnAnotherConnection: a connection that had Trash open
+// before another connection moved a message there reads the message at once
+// through the ref Trash gave. Gmail, like the fake under LateExists, tells a
+// session that kept a folder open of a message another session moved there
+// only after the command that follows its NOOP, so a NOOP before the read
+// is not enough. A SELECT or EXAMINE shows the message at once.
+func TestGetAfterTrashOnAnotherConnection(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	srv := fakegmail.StartWith(t, ca, fakegmail.Options{LateExists: true}, "gw@example.test", "pw",
+		fakegmail.Message{Raw: gwRaw("inbox"), Date: gmailDay(1), Labels: []string{`\Inbox`}},
+		fakegmail.Message{Raw: gwRaw("trashed"), Date: gmailDay(4), Trash: true},
+	)
+	clock := &testClock{t: time.Unix(0, 0)}
+	s := New(testAccount("gmail", srv.Endpoint, true), passwordCreds("gw@example.test", "pw"),
+		Options{RootCAs: ca.Pool, Backoff: noBackoff, PoolSize: 2, Now: clock.now})
+	t.Cleanup(func() { _ = s.Close() })
+	w := gmailWrites{store: s, srv: srv, ca: ca}
+
+	// A stream holds one connection in Trash while the other trashes the message.
+	_, rc, err := s.StreamPart(t.Context(), w.ref(t, gmailTrash, 301), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := one(t, s.Trash(t.Context(), []ref.Ref{w.ref(t, allMail, 1)}))
+	if err := rc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if res.Err != nil || res.Ref.Folder != gmailTrash {
+		t.Fatalf("Trash = %+v, want a ref in Trash", res)
+	}
+	got := s.FetchMessages(t.Context(), []ref.Ref{res.Ref})[0]
+	if got.Err != nil || got.Message.Summary.Subject != "inbox" {
+		t.Errorf("get of the trashed message = %+v, want the message", got)
+	}
+}
+
+// TestReopenAfterAWriteSeesANewUIDValidity: the SELECT that reopens a
+// folder after a write takes the UIDVALIDITY it answers, so a ref issued
+// before the folder was rebuilt reads as stale rather than naming whatever
+// now has its UID.
+func TestReopenAfterAWriteSeesANewUIDValidity(t *testing.T) {
+	t.Parallel()
+	srv := startWriteServer(t, &writeServer{folders: []*wsFolder{wsMailbox("INBOX", "", 7, 1)}})
+	clock := &testClock{t: time.Unix(0, 0)}
+	s := writeStore(t, srv, Options{PoolSize: 1, Now: clock.now})
+	r := hostRef("INBOX", 7, 1)
+	if got := one(t, s.StoreFlags(t.Context(), []ref.Ref{r}, []string{`\Seen`}, nil)); got.Err != nil {
+		t.Fatal(got.Err)
+	}
+	srv.mu.Lock()
+	srv.folder("INBOX").validity = 8
+	srv.mu.Unlock()
+	if got := s.FetchMessages(t.Context(), []ref.Ref{r})[0]; !errors.Is(got.Err, mailstore.ErrStaleRef) {
+		t.Errorf("get under the old UIDVALIDITY = %+v, want %v", got, mailstore.ErrStaleRef)
+	}
+	if n := srv.sent("SELECT"); n != 2 {
+		t.Errorf("%d SELECTs, want 2: one for the write and one for the read after it; commands %q", n, srv.received())
 	}
 }
