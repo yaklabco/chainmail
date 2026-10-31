@@ -36,7 +36,10 @@ type conn struct {
 	// writeGen is the Store.writeGen as of this connection's last SELECT,
 	// EXAMINE or NOOP.
 	writeGen uint64
-	dead     atomic.Bool
+	// synced is when this connection sent its last SELECT, EXAMINE or NOOP
+	// that was answered, so it knows of every message its folder held then.
+	synced time.Time
+	dead   atomic.Bool
 }
 
 func newConn(sess *Session, timeout time.Duration, now func() time.Time) *conn {
@@ -57,10 +60,20 @@ func (c *conn) Dead() bool { return c.dead.Load() }
 // Close logs out, bounded by the session's close timeout.
 func (c *conn) Close() error { return c.sess.Close() }
 
-// Noop checks that an idle connection still answers.
+// Noop checks that an idle connection still answers. The answer also tells
+// it of changes to its folder.
 func (c *conn) Noop(ctx context.Context) error {
-	return c.do(ctx, func() error { return c.client().Noop().Wait() })
+	sent := c.now()
+	err := c.do(ctx, func() error { return c.client().Noop().Wait() })
+	if err == nil {
+		c.synced = sent
+	}
+	return err
 }
+
+// stale reports whether the server last told c of its folder more than
+// freshFor ago.
+func (c *conn) stale() bool { return c.now().Sub(c.synced) > freshFor }
 
 // errCommandTimeout marks a command the server did not answer within the
 // command timeout. It always comes wrapped with errConnLost, since the
@@ -178,6 +191,7 @@ func (c *conn) SelectFolder(ctx context.Context, folder string, writable bool) e
 		return nil
 	}
 	var data *imap.SelectData
+	sent := c.now()
 	err := c.do(ctx, func() error {
 		var err error
 		data, err = c.client().Select(folder, &imap.SelectOptions{ReadOnly: !writable}).Wait()
@@ -191,7 +205,7 @@ func (c *conn) SelectFolder(ctx context.Context, folder string, writable bool) e
 		}
 		return err
 	}
-	c.selected, c.writable, c.uidValidity = folder, writable, data.UIDValidity
+	c.selected, c.writable, c.uidValidity, c.synced = folder, writable, data.UIDValidity, sent
 	return nil
 }
 
