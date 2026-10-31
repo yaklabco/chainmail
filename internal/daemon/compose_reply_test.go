@@ -718,12 +718,12 @@ func TestPostSendFailuresKeepServerTextOutOfLogs(t *testing.T) {
 		t.Fatalf("Forward: %v", err)
 	}
 	old := e.createDraft(t, hostSpec())
-	e.host.FailWrite("Expunge", serverErr)
+	e.host.FailWrite("Trash", serverErr)
 	if _, err := e.updateDraft(t, old.GetRef(), hostSpec()); err == nil {
 		t.Fatal("UpdateDraft with a failed removal succeeded")
 	}
 	d := e.createDraft(t, hostSpec())
-	e.host.FailWrite("Expunge", serverErr)
+	e.host.FailWrite("Trash", serverErr)
 	if _, err := e.sendDraft(t, d.GetRef(), "draft-log"); err != nil {
 		t.Fatalf("SendDraft: %v", err)
 	}

@@ -20,7 +20,6 @@ import (
 	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
 	"github.com/jamesainslie/chainmail/internal/ref"
 	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
-	"github.com/jamesainslie/chainmail/internal/testutil/smtptest"
 )
 
 // gmailAllMail is where the fake Gmail account keeps its messages.
@@ -924,46 +923,4 @@ func TestOrganizeDestructivePolicySettings(t *testing.T) {
 		_, err := m.Client.Organize.Expunge(t.Context(), connect.NewRequest(&chainmailv1.ExpungeRequest{Refs: strs(r)}))
 		checkPolicyDenied(t, err, expungeDenied, expungeHint)
 	})
-}
-
-// The draft calls remove only the draft chainmail replaced or sent, so
-// they expunge whatever the policy says. sendConfig sets no policy, so
-// allow_expunge is false.
-func TestDraftsExpungeWhenThePolicyDeniesExpunge(t *testing.T) {
-	t.Parallel()
-	e := startSend(t)
-	srv := e.smtp(t, smtptest.Options{})
-	_, err := e.Client.Organize.Expunge(t.Context(), connect.NewRequest(&chainmailv1.ExpungeRequest{Refs: []string{e.original(t).String()}}))
-	checkPolicyDenied(t, err, expungeDenied, expungeHint)
-
-	d := e.createDraft(t, hostSpec())
-	if err := e.deleteDraft(t, d.GetRef()); err != nil {
-		t.Fatalf("DeleteDraft: %v", err)
-	}
-	if !gone(t, e.host, parseRef(t, d.GetRef())) {
-		t.Error("DeleteDraft left the draft")
-	}
-
-	// A draft to the account's own address, which every send policy allows.
-	raw := []byte("From: Me Myself <me@example.com>\r\n" +
-		"To: me@example.com\r\n" +
-		"Subject: note to self\r\n" +
-		"Message-ID: <self.1@example.com>\r\n" +
-		"\r\n" + "body\r\n")
-	dr, err := e.host.Append(t.Context(), "Drafts", []string{`\Draft`, `\Seen`}, time.Time{}, raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.sendDraft(t, dr.String(), "self-send"); err != nil {
-		t.Fatalf("SendDraft: %v", err)
-	}
-	if len(srv.Messages()) != 1 {
-		t.Errorf("sent %d messages, want 1", len(srv.Messages()))
-	}
-	if !gone(t, e.host, dr) {
-		t.Error("SendDraft left the draft")
-	}
-	if n := countOps(e.host, "Expunge"); n != 2 {
-		t.Errorf("store Expunge ran %d times, want one per draft call", n)
-	}
 }

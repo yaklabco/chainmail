@@ -83,6 +83,13 @@ type sendEnv struct {
 // startSend starts the daemon. Each opt adjusts its harness options.
 func startSend(t *testing.T, opts ...func(*daemontest.Options)) sendEnv {
 	t.Helper()
+	return startSendPolicy(t, "", opts...)
+}
+
+// startSendPolicy starts the daemon as startSend does, with policy, TOML
+// lines, added to sendConfig's [policy] table.
+func startSendPolicy(t *testing.T, policy string, opts ...func(*daemontest.Options)) sendEnv {
+	t.Helper()
 	e := sendEnv{
 		ca:    tlstest.New(t),
 		proxy: startProxy(t),
@@ -107,7 +114,7 @@ func startSend(t *testing.T, opts ...func(*daemontest.Options)) sendEnv {
 	for _, o := range opts {
 		o(&hopts)
 	}
-	e.Harness = daemontest.Start(t, fmt.Sprintf(sendConfig, e.proxy.port()), hopts)
+	e.Harness = daemontest.Start(t, fmt.Sprintf(sendConfig, e.proxy.port())+policy+"\n", hopts)
 	for _, name := range []string{"host", "gmail", "small"} {
 		setSecret(t, e.Harness, "accounts/"+name, "pw")
 	}
@@ -1150,6 +1157,7 @@ type hookStore struct {
 	fetch   func(ctx context.Context, refs []ref.Ref) []mailstore.MessageResult
 	stream  func(ctx context.Context, r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error)
 	expunge func(ctx context.Context, refs []ref.Ref) []mailstore.RefResult
+	trash   func(ctx context.Context, refs []ref.Ref) []mailstore.RefResult
 	find    func(ctx context.Context, folder, messageID string) ([]ref.Ref, error)
 }
 
@@ -1179,6 +1187,13 @@ func (h *hookStore) Expunge(ctx context.Context, refs []ref.Ref) []mailstore.Ref
 		return h.expunge(ctx, refs)
 	}
 	return h.Store.Expunge(ctx, refs)
+}
+
+func (h *hookStore) Trash(ctx context.Context, refs []ref.Ref) []mailstore.RefResult {
+	if h.trash != nil {
+		return h.trash(ctx, refs)
+	}
+	return h.Store.Trash(ctx, refs)
 }
 
 func (h *hookStore) FindByMessageID(ctx context.Context, folder, messageID string) ([]ref.Ref, error) {

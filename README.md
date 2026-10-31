@@ -503,7 +503,7 @@ chainmail forward $ref --to ann@example.com --body "FYI"
 - `draft create` saves a new draft. It takes the options of `send` except `--draft`, `--dry-run` and `--idempotency-key`, and prints `{"draft":{...}}`.
 - `draft update <ref>` replaces a draft with a new version. It takes the same options as `draft create` except `--account`, since the draft's account is used. The whole message is replaced, so give the recipients, subject and body again. The new version has a new ref, which it prints. The old ref is gone. A reply saved as a draft stays a reply.
 - `draft send <ref>` sends a draft and removes it from Drafts. It keeps the draft's Message-ID and sets its Date to the time of sending. If removing the draft fails, the send still succeeds and the draft stays. Sending a reply draft does not mark the original `\Answered`.
-- `draft delete <ref>` deletes a draft for good.
+- `draft delete <ref>` deletes a draft. While `policy.allow_expunge` is off, the default, the draft goes to the account's Trash. With it on, the draft is deleted for good. `draft update` and `draft send` remove the old version and the sent draft the same way.
 
 ```fish
 set draft (chainmail draft create --account work --to ann@example.com --subject "Q3" --body-file q3.md | jq -r .draft.ref)
