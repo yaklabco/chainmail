@@ -238,7 +238,7 @@ func newDraftSendCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 func newDraftDeleteCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete <ref>",
-		Short: "Delete a draft for good",
+		Short: "Delete a draft (moved to Trash unless policy allows expunge)",
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, err := parseRef(cmd, args[0])

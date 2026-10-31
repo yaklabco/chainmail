@@ -61,9 +61,9 @@ func (c *composeService) UpdateDraft(ctx context.Context, req *connect.Request[c
 	return connect.NewResponse(&chainmailv1.UpdateDraftResponse{Draft: d}), nil
 }
 
-// updateDraft appends the new version to Drafts, then expunges the old one.
-// The new version keeps the old one's In-Reply-To and References, so a
-// reply draft stays a reply.
+// updateDraft appends the new version to Drafts, then removes the old one
+// with removeDraft. The new version keeps the old one's In-Reply-To and
+// References, so a reply draft stays a reply.
 func (c *composeService) updateDraft(ctx context.Context, req *chainmailv1.UpdateDraftRequest, entry *audit.Entry) (*chainmailv1.Draft, error) {
 	old, acct, err := c.draftTarget(req.GetRef(), entry)
 	if err != nil {
@@ -109,7 +109,7 @@ func (c *composeService) updateDraft(ctx context.Context, req *chainmailv1.Updat
 		return nil, err
 	}
 	entry.Targets = appendTargets(entry.Targets, d.GetRef(), msg.MessageID)
-	if err := expungeOne(ctx, st, old); err != nil {
+	if err := c.removeDraft(ctx, st, old); err != nil {
 		c.s.opts.Logger.Warn("removing the old version of a draft", "account", acct.Name, "ref", old.String(), "reason", errReason(err))
 		cerr := composeErr(err)
 		return nil, api.New(cerr.Code(), api.Detail(cerr).GetReason(),
@@ -154,10 +154,11 @@ func (c *composeService) SendDraft(ctx context.Context, req *connect.Request[cha
 }
 
 // sendDraft sends a draft as SendRaw sends bytes, dated now and keeping
-// its Message-ID, then expunges the draft. A key that is done, failed or
-// unknown is replayed before the draft is read or the request hashed, so
-// a repeat returns the first outcome even with another ref. The draft is
-// read inside build, after the key is claimed.
+// its Message-ID, then removes the draft with removeDraft. A draft the
+// send policy holds stays in Drafts as it is. A key that is done, failed
+// or unknown is replayed before the draft is read or the request hashed,
+// so a repeat returns the first outcome even with another ref. The draft
+// is read inside build, after the key is claimed.
 func (c *composeService) sendDraft(ctx context.Context, cl caller, req *chainmailv1.SendDraftRequest) (*chainmailv1.ComposeResult, error) {
 	const action = "draft.send"
 	entry := audit.Entry{Action: action}
@@ -198,7 +199,7 @@ func (c *composeService) sendDraft(ctx context.Context, cl caller, req *chainmai
 		return prepareRaw(acct, raw, nil)
 	}
 	after := func(ctx context.Context) {
-		if err := expungeOne(ctx, st, r); err != nil {
+		if err := c.removeDraft(ctx, st, r); err != nil {
 			c.s.opts.Logger.Warn("removing a sent draft", "account", acct.Name, "ref", r.String(), "reason", errReason(err))
 		}
 	}
@@ -206,6 +207,8 @@ func (c *composeService) sendDraft(ctx context.Context, cl caller, req *chainmai
 		acct: acct, key: req.GetIdempotencyKey(), hash: hash, build: build, after: after,
 		action: action, targets: []string{r.String()}, caller: cl,
 		notSentCopy: func() ref.Ref { return draft },
+		// A hold leaves the draft where it is and names it.
+		existingDraftRef: r.String(),
 	})
 }
 
@@ -234,7 +237,7 @@ func (c *composeService) deleteDraft(ctx context.Context, req *chainmailv1.Delet
 	if _, err := fetchDraft(ctx, st, acct, r); err != nil {
 		return err
 	}
-	return expungeOne(ctx, st, r)
+	return c.removeDraft(ctx, st, r)
 }
 
 // draftTarget parses a draft ref and resolves its account, recording both
@@ -284,11 +287,19 @@ func fetchDraft(ctx context.Context, st mailstore.Store, acct config.ResolvedAcc
 	return msg, nil
 }
 
-// expungeOne permanently deletes r.
-func expungeOne(ctx context.Context, st mailstore.Store, r ref.Ref) error {
-	res := st.Expunge(ctx, []ref.Ref{r})
+// removeDraft removes the draft r for SendDraft, UpdateDraft and
+// DeleteDraft. It expunges r when the policy allows expunge. Otherwise it
+// moves r to Trash, as OrganizeService.Trash does: a client can put any
+// message in Drafts, or on Gmail label it \Draft, so a draft call must not
+// delete mail for good while expunge is disabled.
+func (c *composeService) removeDraft(ctx context.Context, st mailstore.Store, r ref.Ref) error {
+	remove, what := st.Expunge, "expunge"
+	if !c.s.policy.AllowExpunge() {
+		remove, what = st.Trash, "move to Trash"
+	}
+	res := remove(ctx, []ref.Ref{r})
 	if len(res) != 1 {
-		return fmt.Errorf("%w: the expunge gave no result", mailstore.ErrUnavailable)
+		return fmt.Errorf("%w: the %s gave no result", mailstore.ErrUnavailable, what)
 	}
 	return res[0].Err
 }

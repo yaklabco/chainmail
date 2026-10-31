@@ -1,18 +1,22 @@
 package daemon_test
 
 import (
+	"errors"
 	"os"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/api"
+	"github.com/jamesainslie/chainmail/internal/audit"
 	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/daemon"
 	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
@@ -329,5 +333,176 @@ func TestSetSecretRejectsOversizedRequest(t *testing.T) {
 	}
 	if names := h.Vault.Names(); len(names) != 0 {
 		t.Errorf("vault names = %v, want none", names)
+	}
+}
+
+// seedAudit writes rows straight into the harness's audit table.
+func seedAudit(t *testing.T, h *daemontest.Harness, entries ...audit.Entry) {
+	t.Helper()
+	w := audit.NewWriter(h.DB, nil)
+	for _, e := range entries {
+		if e.Result == "" {
+			e.Result = audit.ResultOK
+		}
+		if err := w.Record(t.Context(), e); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func readAudit(t *testing.T, h *daemontest.Harness, req *chainmailv1.ReadAuditRequest) (*chainmailv1.ReadAuditResponse, error) {
+	t.Helper()
+	resp, err := h.Client.Admin.ReadAudit(t.Context(), connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+func TestReadAuditLimitBounds(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	h := daemontest.Start(t, hostingerConfig, daemontest.Options{Now: func() time.Time { return now }})
+	entries := make([]audit.Entry, 101)
+	for i := range entries {
+		entries[i] = audit.Entry{At: now.Add(-time.Hour), Action: "x"}
+	}
+	seedAudit(t, h, entries...)
+	for _, limit := range []int32{-1, 1001} {
+		_, err := readAudit(t, h, &chainmailv1.ReadAuditRequest{Limit: limit})
+		if connect.CodeOf(err) != connect.CodeInvalidArgument || api.Detail(err).GetReason() != api.ReasonInvalidArgument {
+			t.Errorf("limit %d: err = %v, want INVALID_ARGUMENT", limit, err)
+			continue
+		}
+		var cerr *connect.Error
+		if errors.As(err, &cerr) && cerr.Message() != "limit must be 0 to 1000" {
+			t.Errorf("limit %d: message = %q", limit, cerr.Message())
+		}
+	}
+	resp, err := readAudit(t, h, &chainmailv1.ReadAuditRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(resp.GetEntries()); n != 100 || resp.GetNextBeforeId() == 0 {
+		t.Errorf("limit 0: %d entries, next %d, want 100 and a next page", n, resp.GetNextBeforeId())
+	}
+	resp, err = readAudit(t, h, &chainmailv1.ReadAuditRequest{Limit: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(resp.GetEntries()); n != 101 || resp.GetNextBeforeId() != 0 {
+		t.Errorf("limit 1000: %d entries, next %d, want 101 and no next page", n, resp.GetNextBeforeId())
+	}
+}
+
+func TestReadAuditUnknownAccount(t *testing.T) {
+	t.Parallel()
+	h := daemontest.Start(t, hostingerConfig, daemontest.Options{})
+	for _, account := range []string{"nope", "../x", strings.Repeat("a", 10<<10)} {
+		_, err := readAudit(t, h, &chainmailv1.ReadAuditRequest{Account: account})
+		if connect.CodeOf(err) != connect.CodeInvalidArgument || api.Detail(err).GetReason() != api.ReasonInvalidArgument {
+			t.Errorf("%.20q: err = %.200v, want INVALID_ARGUMENT", account, err)
+			continue
+		}
+		var cerr *connect.Error
+		if errors.As(err, &cerr) && cerr.Message() != "unknown account" {
+			t.Errorf("%.20q: message = %.200q, want fixed text", account, cerr.Message())
+		}
+	}
+	if _, err := readAudit(t, h, &chainmailv1.ReadAuditRequest{Account: "host"}); err != nil {
+		t.Errorf("a configured account was refused: %v", err)
+	}
+}
+
+func TestReadAuditDefaultSince(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	h := daemontest.Start(t, hostingerConfig, daemontest.Options{Now: func() time.Time { return now }})
+	seedAudit(t, h,
+		audit.Entry{At: now.Add(-25 * time.Hour), Action: "old"},
+		audit.Entry{At: now.Add(-23 * time.Hour), Action: "recent"},
+	)
+	resp, err := readAudit(t, h, &chainmailv1.ReadAuditRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actions []string
+	for _, e := range resp.GetEntries() {
+		actions = append(actions, e.GetAction())
+	}
+	if !slices.Equal(actions, []string{"recent"}) {
+		t.Errorf("actions = %v, want only the row from 23 hours ago", actions)
+	}
+	resp, err = readAudit(t, h, &chainmailv1.ReadAuditRequest{Since: timestamppb.New(now.Add(-26 * time.Hour))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(resp.GetEntries()); n != 2 {
+		t.Errorf("an explicit since gave %d entries, want 2", n)
+	}
+}
+
+func TestReadAuditMapsEntries(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	h := daemontest.Start(t, hostingerConfig, daemontest.Options{Now: func() time.Time { return now }})
+	at := now.Add(-time.Minute)
+	seedAudit(t, h,
+		audit.Entry{
+			At: at, CallerUID: 501, Client: "mcp", Account: "host", Action: "mail.send",
+			Targets: []string{"blocked:2", "too_many"}, Decision: "held", Result: audit.ResultOK,
+		},
+		audit.Entry{At: at, Client: "cli", Account: "host", Action: "mail.read", Result: audit.ResultError, Reason: api.ReasonNotFound},
+	)
+	resp, err := readAudit(t, h, &chainmailv1.ReadAuditRequest{Account: "host", Action: "mail.send", Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.GetEntries()) != 1 {
+		t.Fatalf("entries = %v", resp.GetEntries())
+	}
+	want := &chainmailv1.AuditEntry{
+		Id: 1, At: timestamppb.New(at), CallerUid: 501, Client: "mcp", Account: "host", Action: "mail.send",
+		Targets: []string{"blocked:2", "too_many"}, Decision: "held", Result: "ok",
+	}
+	if got := resp.GetEntries()[0]; !proto.Equal(got, want) {
+		t.Errorf("entry = %v, want %v", got, want)
+	}
+	// The read itself is not audited, as GetStatus is not.
+	if rows := h.AuditRows(t); len(rows) != 2 {
+		t.Errorf("audit rows = %d, want only the 2 seeded", len(rows))
+	}
+}
+
+func TestReadAuditPagesByBeforeID(t *testing.T) {
+	t.Parallel()
+	h := daemontest.Start(t, hostingerConfig, daemontest.Options{})
+	seedAudit(t, h, audit.Entry{Action: "a"}, audit.Entry{Action: "b"}, audit.Entry{Action: "c"})
+	var actions []string
+	req := &chainmailv1.ReadAuditRequest{Limit: 2}
+	for range 3 {
+		resp, err := readAudit(t, h, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range resp.GetEntries() {
+			actions = append(actions, e.GetAction())
+		}
+		if resp.GetNextBeforeId() == 0 {
+			break
+		}
+		req.BeforeId = resp.GetNextBeforeId()
+	}
+	if !slices.Equal(actions, []string{"c", "b", "a"}) {
+		t.Errorf("paged actions = %v, want c b a", actions)
+	}
+}
+
+func TestReadAuditRejectsInvalidSince(t *testing.T) {
+	t.Parallel()
+	h := daemontest.Start(t, hostingerConfig, daemontest.Options{})
+	_, err := readAudit(t, h, &chainmailv1.ReadAuditRequest{Since: &timestamppb.Timestamp{Seconds: 1 << 62}})
+	if connect.CodeOf(err) != connect.CodeInvalidArgument || api.Detail(err).GetReason() != api.ReasonInvalidArgument {
+		t.Errorf("err = %v, want INVALID_ARGUMENT", err)
 	}
 }

@@ -718,12 +718,12 @@ func TestPostSendFailuresKeepServerTextOutOfLogs(t *testing.T) {
 		t.Fatalf("Forward: %v", err)
 	}
 	old := e.createDraft(t, hostSpec())
-	e.host.FailWrite("Expunge", serverErr)
+	e.host.FailWrite("Trash", serverErr)
 	if _, err := e.updateDraft(t, old.GetRef(), hostSpec()); err == nil {
 		t.Fatal("UpdateDraft with a failed removal succeeded")
 	}
 	d := e.createDraft(t, hostSpec())
-	e.host.FailWrite("Expunge", serverErr)
+	e.host.FailWrite("Trash", serverErr)
 	if _, err := e.sendDraft(t, d.GetRef(), "draft-log"); err != nil {
 		t.Fatalf("SendDraft: %v", err)
 	}
@@ -821,4 +821,103 @@ func TestForwardSizeCheckedBeforeStreaming(t *testing.T) {
 	if len(srv.Messages()) != 0 {
 		t.Error("a refused forward was sent")
 	}
+}
+
+// Reply-all and Forward are gated on the recipients they build: a held one
+// sends nothing and leaves the original unflagged.
+func TestReplyAndForwardHeldByPolicy(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		action string
+		call   func(t *testing.T, e sendEnv, orig string) (*chainmailv1.ComposeResult, error)
+		flag   string
+	}{
+		{
+			name: "reply-all adding a blocked Cc", action: "reply", flag: `\Answered`,
+			call: func(t *testing.T, e sendEnv, orig string) (*chainmailv1.ComposeResult, error) {
+				return e.reply(t, &chainmailv1.ReplyRequest{
+					Ref: orig, All: true, Content: replyContent("All of you"),
+					Cc: []string{"Stranger <" + blocked + ">"}, IdempotencyKey: "reply-held",
+				})
+			},
+		},
+		{
+			name: "forward to a blocked address", action: "forward", flag: "$Forwarded",
+			call: func(t *testing.T, e sendEnv, orig string) (*chainmailv1.ComposeResult, error) {
+				return e.forward(t, &chainmailv1.ForwardRequest{
+					Ref: orig, To: []string{blocked}, Content: replyContent("FYI"), IdempotencyKey: "fwd-held",
+				})
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := startSend(t)
+			srv := e.smtp(t, smtptest.Options{})
+			orig := e.original(t)
+			res, err := tt.call(t, e, orig.String())
+			if err != nil {
+				t.Fatalf("call: %v", err)
+			}
+			held := res.GetHeld()
+			if held == nil || !slices.Equal(held.GetBlocked(), []string{blocked}) {
+				t.Fatalf("result = %+v, want held with %s blocked", res, blocked)
+			}
+			if n := len(srv.Messages()); n != 0 {
+				t.Errorf("captured %d messages, want none", n)
+			}
+			if raw := draftOf(t, e.host, held); !bytes.Contains(raw, []byte(blocked)) {
+				t.Errorf("the draft lost the blocked recipient:\n%s", raw)
+			}
+			if slices.Contains(e.host.Flags(orig), tt.flag) {
+				t.Errorf("original flags = %v, want no %s", e.host.Flags(orig), tt.flag)
+			}
+			e.checkHeldAudit(t, tt.action, held, orig.String(), "blocked:1")
+		})
+	}
+}
+
+// Reply-all gates the recipients it inherits from the original, not only
+// those the request names: an original Cc off the allowlist holds the
+// reply even when the request adds no recipient.
+func TestReplyAllHoldsAnInheritedBlockedCc(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	orig := e.host.Add(fake.Message{
+		Folder:    "INBOX",
+		Date:      time.Date(2026, 10, 29, 9, 30, 0, 0, time.UTC),
+		From:      []mailstore.Address{{Name: "Alice", Email: "alice@example.net"}},
+		To:        []mailstore.Address{{Email: "me@example.com"}},
+		Cc:        []mailstore.Address{{Name: "Stranger", Email: blocked}},
+		Subject:   "Plans",
+		Body:      "Original line\r\n",
+		MessageID: "<inherited@example.net>",
+	})
+	res, err := e.reply(t, &chainmailv1.ReplyRequest{
+		Ref: orig.String(), All: true, Content: replyContent("All of you"), IdempotencyKey: "reply-inherited",
+	})
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	held := res.GetHeld()
+	if held == nil || !slices.Equal(held.GetBlocked(), []string{blocked}) {
+		t.Fatalf("result = %+v, want held with %s blocked", res, blocked)
+	}
+	if n := len(srv.Messages()); n != 0 {
+		t.Errorf("captured %d messages, want none", n)
+	}
+	h := header(t, draftOf(t, e.host, held))
+	if to := h.Get("To"); !strings.Contains(to, "alice@example.net") {
+		t.Errorf("draft To = %q, want alice", to)
+	}
+	if cc := h.Get("Cc"); !strings.Contains(cc, blocked) {
+		t.Errorf("draft Cc = %q, want the inherited %s", cc, blocked)
+	}
+	if slices.Contains(e.host.Flags(orig), `\Answered`) {
+		t.Errorf("original flags = %v, want no \\Answered", e.host.Flags(orig))
+	}
+	e.checkHeldAudit(t, "reply", held, orig.String(), "blocked:1")
 }

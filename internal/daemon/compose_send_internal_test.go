@@ -1,25 +1,36 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
+	"net/mail"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	gomail "github.com/emersion/go-message/mail"
 	"google.golang.org/protobuf/proto"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/compose"
+	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/idempotency"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
+	"github.com/jamesainslie/chainmail/internal/mailstore/imapstore"
 	"github.com/jamesainslie/chainmail/internal/provider"
 	"github.com/jamesainslie/chainmail/internal/sender"
+	"github.com/jamesainslie/chainmail/internal/testutil/imaptest"
 	"github.com/jamesainslie/chainmail/internal/testutil/smtptest"
 	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
 	"github.com/jamesainslie/chainmail/internal/upload"
@@ -30,7 +41,7 @@ import (
 // run at the same time.
 func TestRunDialsWhileBuilding(t *testing.T) {
 	t.Parallel()
-	s, _ := newTestServer(t)
+	s, _ := newTestServerConfig(t, allowConfig)
 	ctx := peerContext(t.Context())
 	if err := setSecretDirect(ctx, s, auth.PasswordSecret("host"), []byte("pw")); err != nil {
 		t.Fatal(err)
@@ -162,7 +173,7 @@ func TestRunLeftoverKeys(t *testing.T) {
 // key settles as retryable.
 func TestRunCancelledWhileBuildingDoesNotSend(t *testing.T) {
 	t.Parallel()
-	s, _ := newTestServer(t)
+	s, _ := newTestServerConfig(t, allowConfig)
 	ca := tlstest.New(t)
 	srv := smtptest.StartWith(t, ca, provider.SecurityStartTLS, smtptest.Options{},
 		smtptest.User{Username: "me@example.com", Password: "pw"})
@@ -426,5 +437,298 @@ func TestSendReplaysWithoutReadingUploads(t *testing.T) {
 	}
 	if dups != 1 {
 		t.Errorf("duplicate audit rows = %d, want 1", dups)
+	}
+}
+
+// allowConfig is passwordConfig with every example.net address allowed.
+const allowConfig = passwordConfig + `
+[policy]
+send_allow = ["*@example.net"]
+`
+
+// TestHeldBuildCancelsTheDial holds a send while its dial still runs. The
+// hold cancels the dial instead of waiting for it, and the draft is the
+// built message with the envelope recipients missing from To and Cc as its
+// Bcc, or the built message as it is when there are none.
+func TestHeldBuildCancelsTheDial(t *testing.T) {
+	t.Parallel()
+	const raw = "From: me@example.com\r\nTo: you@blocked.invalid\r\nCc: Ann <ann@blocked.invalid>\r\n" +
+		"Subject: hi\r\nMessage-ID: <h@example.com>\r\n\r\nhi\r\n"
+	withBcc, err := editHeader([]byte(raw), func(h *gomail.Header) {
+		h.SetAddressList("Bcc", []*mail.Address{{Address: "extra@blocked.invalid"}})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name     string
+		envelope []string
+		want     []byte
+	}{
+		{"recipients beyond the header", []string{"you@blocked.invalid", "ANN@blocked.invalid", "extra@blocked.invalid"}, withBcc},
+		{"only the header's recipients", []string{"you@blocked.invalid", "ann@blocked.invalid"}, []byte(raw)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s, _ := newTestServer(t)
+			st := fake.New("host", false)
+			s.newStore = func(config.ResolvedAccount, storeParams) mailstore.Store { return st }
+			ctx := peerContext(t.Context())
+			if err := setSecretDirect(ctx, s, auth.PasswordSecret("host"), []byte("pw")); err != nil {
+				t.Fatal(err)
+			}
+			acct, err := s.opts.Config.Account("host")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dialing := make(chan struct{})
+			dialErr := make(chan error, 1)
+			c := newComposeService(s)
+			c.dial = func(ctx context.Context, _ provider.Endpoint, _ auth.Credentials, _ sender.DialOptions) (*sender.Conn, error) {
+				close(dialing)
+				select {
+				case <-ctx.Done():
+					dialErr <- ctx.Err()
+				case <-time.After(time.Minute):
+					dialErr <- errors.New("the dial was never cancelled")
+				}
+				return nil, errors.New("the test dial stops here")
+			}
+			job := sendJob{
+				acct: acct, key: "held", hash: sha256.Sum256([]byte("held")), action: "send",
+				caller: caller{uid: 1, client: "test"},
+				build: func(context.Context) (compose.Message, error) {
+					<-dialing
+					return compose.Message{Raw: []byte(raw), MessageID: "h@example.com", EnvelopeFrom: acct.Address, EnvelopeTo: tt.envelope}, nil
+				},
+			}
+			start := time.Now()
+			res, err := c.run(ctx, job)
+			if err != nil || res.GetHeld() == nil {
+				t.Fatalf("run = %+v, %v, want held", res, err)
+			}
+			if time.Since(start) > 10*time.Second {
+				t.Error("the hold waited for the dial")
+			}
+			if err := <-dialErr; !errors.Is(err, context.Canceled) {
+				t.Errorf("dial ctx: %v, want cancelled", err)
+			}
+			if got := st.Appended(); len(got) != 1 || !bytes.Equal(got[0], tt.want) {
+				t.Errorf("draft = %q, want %q", got, tt.want)
+			}
+			if row, ok, err := s.idem.Lookup(t.Context(), "host", "held"); err != nil || !ok || row.State != idempotency.Done {
+				t.Errorf("key = %+v, %v, %v, want done", row, ok, err)
+			}
+		})
+	}
+}
+
+// TestDialFailureDuringASlowBuild fails the SMTP dial at once while the
+// build still runs. The dial failure does not cancel the build, and the
+// call ends with what the build decided: a hold wins over the dial error,
+// so a blocked message still reaches Drafts while SMTP is down; a failed
+// build reports its own error; an allowed message reports the dial error.
+// Each case runs in a synctest bubble, so the build can wait until the
+// dial's goroutine has finished, with nothing left to cancel it, instead
+// of sleeping in case a cancellation is still on its way.
+func TestDialFailureDuringASlowBuild(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		to         string
+		buildErr   error
+		wantReason string // empty means held
+		wantState  idempotency.State
+		wantDrafts int
+	}{
+		{name: "a held build wins", to: "you@blocked.invalid", wantState: idempotency.Done, wantDrafts: 1},
+		{name: "an allowed build gets the dial error", to: "you@example.net", wantReason: api.ReasonServerUnavailable, wantState: idempotency.Retryable},
+		{
+			name: "a failed build gets its own error", to: "you@blocked.invalid",
+			buildErr:   errors.Join(compose.ErrInvalid, errors.New("bad header")),
+			wantReason: api.ReasonInvalidArgument, wantState: idempotency.Retryable,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				s, _ := newTestServerConfig(t, allowConfig)
+				st := fake.New("host", false)
+				s.newStore = func(config.ResolvedAccount, storeParams) mailstore.Store { return st }
+				ctx := peerContext(t.Context())
+				if err := setSecretDirect(ctx, s, auth.PasswordSecret("host"), []byte("pw")); err != nil {
+					t.Fatal(err)
+				}
+				acct, err := s.opts.Config.Account("host")
+				if err != nil {
+					t.Fatal(err)
+				}
+				// dialReturning closes as the failing dial returns its error.
+				dialReturning := make(chan struct{})
+				c := newComposeService(s)
+				c.dial = func(context.Context, provider.Endpoint, auth.Credentials, sender.DialOptions) (*sender.Conn, error) {
+					defer close(dialReturning)
+					return nil, errors.New("the mail server is down")
+				}
+				raw := "From: me@example.com\r\nTo: " + tt.to + "\r\nSubject: hi\r\nMessage-ID: <slow@example.com>\r\n\r\nhi\r\n"
+				job := sendJob{
+					acct: acct, key: "slow", hash: sha256.Sum256([]byte("slow")), action: "send",
+					caller: caller{uid: 1, client: "test"},
+					// The build reads, as Reply and Forward read IMAP, with
+					// ctx: it fails if the dial failure cancelled it.
+					build: func(ctx context.Context) (compose.Message, error) {
+						<-dialReturning
+						// Every other goroutine in the bubble is now blocked:
+						// the dial's has handled the error and ended, and run
+						// waits for this build. Any cancellation the dial
+						// failure caused has happened.
+						synctest.Wait()
+						if err := ctx.Err(); err != nil {
+							return compose.Message{}, err
+						}
+						if tt.buildErr != nil {
+							return compose.Message{}, tt.buildErr
+						}
+						return compose.Message{Raw: []byte(raw), MessageID: "slow@example.com", EnvelopeFrom: acct.Address, EnvelopeTo: []string{tt.to}}, nil
+					},
+				}
+				res, err := c.run(ctx, job)
+				if tt.wantReason == "" {
+					if err != nil || res.GetHeld() == nil || !slices.Equal(res.GetHeld().GetBlocked(), []string{tt.to}) {
+						t.Fatalf("run = %+v, %v, want held with %s blocked", res, err, tt.to)
+					}
+				} else if got := api.Detail(err).GetReason(); got != tt.wantReason {
+					t.Fatalf("run = %+v, %v, want %s", res, err, tt.wantReason)
+				}
+				if got := st.Appended(); len(got) != tt.wantDrafts || (tt.wantDrafts == 1 && !bytes.Equal(got[0], []byte(raw))) {
+					t.Errorf("appended %q, want %d drafts", got, tt.wantDrafts)
+				}
+				if row, ok, err := s.idem.Lookup(t.Context(), "host", "slow"); err != nil || !ok || row.State != tt.wantState {
+					t.Errorf("key = %+v, %v, %v, want %v", row, ok, err, tt.wantState)
+				}
+			})
+		})
+	}
+}
+
+// fixedCredentials issues the same password credentials every time and
+// ignores refusals, so a test can read the IMAP server with a store of its
+// own whatever the daemon's auth manager has parked.
+type fixedCredentials auth.Credentials
+
+func (f fixedCredentials) Credentials(context.Context, string) (auth.Credentials, error) {
+	return auth.Credentials(f), nil
+}
+
+func (fixedCredentials) Rejected(string, auth.Credentials) {}
+
+// TestSMTPAuthRejectionAndHolds runs a send whose SMTP server refuses the
+// account's credentials while its IMAP server takes them, through the real
+// dial, auth manager and IMAP store. The build waits until the dial has
+// been refused. A held build still saves its draft, through a new IMAP
+// connection, and leaves the credentials unparked: the hold wins whatever
+// the dial did. An allowed build gets AUTH_REJECTED with its hint, and the
+// account is parked as before.
+func TestSMTPAuthRejectionAndHolds(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		to         string
+		wantHeld   bool
+		wantState  idempotency.State
+		wantParked bool
+		wantDrafts int
+	}{
+		{name: "a held build saves its draft", to: "you@blocked.invalid", wantHeld: true, wantState: idempotency.Done, wantDrafts: 1},
+		{name: "an allowed build parks the account", to: "you@example.net", wantState: idempotency.Retryable, wantParked: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			const user, password = "me@example.test", "pw"
+			ca := tlstest.New(t)
+			imapEP := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{Username: user, Password: password, Folders: []string{"Drafts"}})
+			smtpSrv := smtptest.StartWith(t, ca, provider.SecurityStartTLS, smtptest.Options{}, smtptest.User{Username: user, Password: "not-" + password})
+			cfg := fmt.Sprintf(`
+[accounts.local]
+provider = "custom"
+address = "me@example.test"
+imap = { host = "127.0.0.1", port = %d, security = "tls" }
+smtp = { host = "127.0.0.1", port = %d, security = "starttls" }
+
+[policy]
+send_allow = ["*@example.net"]
+`, imapEP.Port, smtpSrv.Endpoint().Port)
+			s, _ := newTestServerOptions(t, cfg, Options{RootCAs: ca.Pool})
+			// Stop the background probe the store's first use starts, then log
+			// out of the IMAP server and stop the pool's idle timers, as the
+			// daemon does at shutdown.
+			t.Cleanup(s.drain)
+			ctx := peerContext(t.Context())
+			if err := setSecretDirect(ctx, s, auth.PasswordSecret("local"), []byte(password)); err != nil {
+				t.Fatal(err)
+			}
+			acct, err := s.opts.Config.Account("local")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dialed := make(chan struct{})
+			var dialErr error
+			c := newComposeService(s)
+			c.dial = func(ctx context.Context, ep provider.Endpoint, creds auth.Credentials, opts sender.DialOptions) (*sender.Conn, error) {
+				defer close(dialed)
+				conn, err := sender.Dial(ctx, ep, creds, opts)
+				dialErr = err
+				return conn, err
+			}
+			const msgID = "refused@example.test"
+			raw := "From: me@example.test\r\nTo: " + tt.to + "\r\nSubject: hi\r\nMessage-ID: <" + msgID + ">\r\n\r\nhi\r\n"
+			job := sendJob{
+				acct: acct, key: "refused", hash: sha256.Sum256([]byte("refused")), action: "send",
+				caller: caller{uid: 1, client: "test"},
+				build: func(ctx context.Context) (compose.Message, error) {
+					select {
+					case <-dialed:
+					case <-ctx.Done():
+						return compose.Message{}, ctx.Err()
+					}
+					return compose.Message{Raw: []byte(raw), MessageID: msgID, EnvelopeFrom: acct.Address, EnvelopeTo: []string{tt.to}}, nil
+				},
+			}
+			res, err := c.run(ctx, job)
+			if !errors.Is(dialErr, auth.ErrRejected) {
+				t.Fatalf("dial err = %v, want the SMTP server to refuse the credentials", dialErr)
+			}
+			if tt.wantHeld {
+				if err != nil || res.GetHeld() == nil {
+					t.Errorf("run = %+v, %v, want held", res, err)
+				}
+			} else {
+				d := api.Detail(err)
+				wantHint := "the server rejected the password; run: chainmail secret set " + auth.PasswordSecret("local")
+				if d.GetReason() != api.ReasonAuthRejected || d.GetHint() != wantHint {
+					t.Errorf("run = %+v, %v, detail %+v, want AUTH_REJECTED with hint %q", res, err, d, wantHint)
+				}
+			}
+			if row, ok, err := s.idem.Lookup(t.Context(), "local", "refused"); err != nil || !ok || row.State != tt.wantState {
+				t.Errorf("key = %+v, %v, %v, want %v", row, ok, err, tt.wantState)
+			}
+			if st, err := s.auth.State("local"); err != nil || st.Required != tt.wantParked {
+				t.Errorf("auth state = %+v, %v, want parked %v", st, err, tt.wantParked)
+			}
+			if got := smtpSrv.Messages(); len(got) != 0 {
+				t.Errorf("SMTP got %d messages, want none", len(got))
+			}
+			// A store of the test's own, which the IMAP server lets in with
+			// the same credentials, counts the drafts.
+			check := imapstore.New(acct, fixedCredentials{Method: provider.AuthPassword, Username: user, Secret: password}, imapstore.Options{RootCAs: ca.Pool})
+			t.Cleanup(func() { _ = check.Close() }) // nothing to do about a close error at test end
+			refs, err := findIn(t.Context(), check, mailstore.RoleDrafts, msgID)
+			if err != nil || len(refs) != tt.wantDrafts {
+				t.Errorf("drafts = %v, %v, want %d", refs, err, tt.wantDrafts)
+			}
+		})
 	}
 }

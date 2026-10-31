@@ -209,7 +209,7 @@ func TestSendDraftByRef(t *testing.T) {
 	if len(srv.Messages()) != 1 {
 		t.Errorf("captured %d messages, want 1", len(srv.Messages()))
 	}
-	if d := e.decisions(t, "draft.send"); !slices.Equal(d, []string{"", "duplicate"}) {
+	if d := e.decisions(t, "draft.send"); !slices.Equal(d, []string{"allowed", "duplicate"}) {
 		t.Errorf("decisions = %v", d)
 	}
 	e.checkAuditPrivate(t)
@@ -357,7 +357,7 @@ func TestGmailDrafts(t *testing.T) {
 // append to [Gmail]/Drafts returns a ref in that folder, without
 // X-GM-MSGID, while the message itself is in All Mail with the Drafts
 // label. Refs into Drafts are served from All Mail. FindByMessageID returns
-// refs without X-GM-MSGID, as a SEARCH does. Expunge waits until a
+// refs without X-GM-MSGID, as a SEARCH does. Expunge and Trash wait until a
 // FindByMessageID has returned, so a lookup runs while the draft is still
 // there.
 func gmailDraftsFolder(t *testing.T, h *hookStore) {
@@ -405,18 +405,24 @@ func gmailDraftsFolder(t *testing.T, h *hookStore) {
 		}
 		return refs, err
 	}
-	h.expunge = func(ctx context.Context, refs []ref.Ref) []mailstore.RefResult {
-		select {
-		case <-looked:
-		case <-time.After(5 * time.Second):
-			t.Error("Expunge ran without a FindByMessageID")
+	removal := func(name string, remove func(context.Context, []ref.Ref) []mailstore.RefResult) func(context.Context, []ref.Ref) []mailstore.RefResult {
+		return func(ctx context.Context, refs []ref.Ref) []mailstore.RefResult {
+			select {
+			case <-looked:
+			case <-time.After(5 * time.Second):
+				t.Error(name + " ran without a FindByMessageID")
+			}
+			mapped := make([]ref.Ref, len(refs))
+			for i, r := range refs {
+				mapped[i] = toAllMail(r)
+			}
+			return remove(ctx, mapped)
 		}
-		mapped := make([]ref.Ref, len(refs))
-		for i, r := range refs {
-			mapped[i] = toAllMail(r)
-		}
-		return h.Store.Expunge(ctx, mapped)
 	}
+	// h.Store is read at call time: hooked sets it when the daemon first
+	// asks for the store.
+	h.expunge = removal("Expunge", func(ctx context.Context, refs []ref.Ref) []mailstore.RefResult { return h.Store.Expunge(ctx, refs) })
+	h.trash = removal("Trash", func(ctx context.Context, refs []ref.Ref) []mailstore.RefResult { return h.Store.Trash(ctx, refs) })
 }
 
 // filedRef is the ref a read gives for r, a ref Append returned, with the
@@ -512,7 +518,7 @@ func TestUpdateDraftWithoutAnAppendedRef(t *testing.T) {
 		t.Errorf("new version in Drafts: %v, %v, want one", refs, err)
 	}
 
-	e.host.FailWrite("Expunge", fmt.Errorf("%w: lost", mailstore.ErrUnavailable))
+	e.host.FailWrite("Trash", fmt.Errorf("%w: lost", mailstore.ErrUnavailable))
 	_, err = e.updateDraft(t, second.GetRef(), hostSpec())
 	if hint := api.Detail(err).GetHint(); err == nil || !strings.Contains(hint, "Drafts folder") || strings.Contains(hint, "cm1:") {
 		t.Errorf("UpdateDraft with a failed removal: err = %v, hint %q, want a hint to search the Drafts folder", err, hint)
@@ -620,6 +626,218 @@ func TestDraftHintOnlyWithoutARef(t *testing.T) {
 		}
 		if want := "search the Drafts folder for Message-ID <" + d.GetMessageId() + ">"; d.GetRef() != "" || d.GetMessageId() == "" || d.GetHint() != want {
 			t.Errorf("%s: draft = %+v, want no ref and hint %q", name, d, want)
+		}
+	}
+}
+
+// SendDraft to a blocked recipient holds the draft where it is: nothing is
+// appended or expunged, and the result names the draft.
+func TestSendDraftHeldByPolicy(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	spec := hostSpec()
+	spec.To = []string{blocked}
+	d := e.createDraft(t, spec)
+	res, err := e.sendDraft(t, d.GetRef(), "draft-held")
+	if err != nil {
+		t.Fatalf("SendDraft: %v", err)
+	}
+	held := res.GetHeld()
+	if held == nil || held.GetDraft().GetRef() != d.GetRef() || held.GetDraft().GetMessageId() != d.GetMessageId() {
+		t.Fatalf("result = %+v, want held naming draft %+v", res, d)
+	}
+	if !slices.Equal(held.GetBlocked(), []string{blocked}) || held.GetHint() != heldHintText {
+		t.Errorf("held = %+v", held)
+	}
+	if n := len(srv.Messages()); n != 0 {
+		t.Errorf("captured %d messages, want none", n)
+	}
+	if n := len(e.host.Appended()); n != 1 {
+		t.Errorf("appended %d messages, want only the draft", n)
+	}
+	if n := countOps(e.host, "Expunge"); n != 0 {
+		t.Errorf("expunged %d times, want none", n)
+	}
+	if gone(t, e.host, parseRef(t, d.GetRef())) {
+		t.Error("the held draft is gone")
+	}
+	e.checkHeldAudit(t, "draft.send", held, "blocked:1")
+	if last := lastAudit(t, e.Harness); strings.Count(last.Targets, d.GetRef()) != 1 {
+		t.Errorf("targets = %s, want the draft ref once", last.Targets)
+	}
+}
+
+// inFolder reports whether folder of st holds a message with Message-ID id.
+func inFolder(t *testing.T, st *fake.Store, folder, id string) bool {
+	t.Helper()
+	refs, err := st.FindByMessageID(t.Context(), folder, id)
+	if err != nil {
+		t.Fatalf("FindByMessageID(%q, %q): %v", folder, id, err)
+	}
+	return len(refs) > 0
+}
+
+// checkTrashedNotExpunged checks that the message with Message-ID id is in
+// folder, st's Trash, and that st was never asked to expunge.
+func checkTrashedNotExpunged(t *testing.T, st *fake.Store, folder, id string) {
+	t.Helper()
+	if !inFolder(t, st, folder, id) {
+		t.Errorf("<%s> is not in %s", id, folder)
+	}
+	if n := countOps(st, "Expunge"); n != 0 {
+		t.Errorf("store Expunge ran %d times, want none while expunge is disabled", n)
+	}
+}
+
+// A message moved into Drafts is not mail chainmail wrote, so DeleteDraft
+// must not destroy it while expunge is disabled: it goes to Trash.
+func TestDeleteDraftOfAMessageMovedIntoDraftsTrashesIt(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	orig := e.original(t)
+	_, err := e.Client.Organize.Expunge(t.Context(), connect.NewRequest(&chainmailv1.ExpungeRequest{Refs: []string{orig.String()}}))
+	checkPolicyDenied(t, err, expungeDenied, expungeHint)
+	resp, err := e.Client.Organize.Move(t.Context(), connect.NewRequest(&chainmailv1.MoveRequest{Refs: []string{orig.String()}, Folder: "Drafts"}))
+	if err != nil {
+		t.Fatalf("Move: %v", err)
+	}
+	moved := resp.Msg.GetOutcomes()[0].GetNewRef()
+	if moved == "" {
+		t.Fatalf("Move outcome = %+v, want a new ref", resp.Msg.GetOutcomes()[0])
+	}
+	if err := e.deleteDraft(t, moved); err != nil {
+		t.Fatalf("DeleteDraft: %v", err)
+	}
+	if !gone(t, e.host, parseRef(t, moved)) {
+		t.Error("the message is still in Drafts")
+	}
+	checkTrashedNotExpunged(t, e.host, "Trash", "orig@example.net")
+	if last := lastAudit(t, e.Harness); last.Action != "draft.delete" || last.Result != "ok" || !strings.Contains(last.Targets, moved) {
+		t.Errorf("audit = %+v", last)
+	}
+}
+
+// On Gmail a client can label any message \Draft. DeleteDraft then moves
+// it to Trash rather than expunging it while expunge is disabled.
+func TestGmailDeleteDraftOfALabelledMessageTrashesIt(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	other := e.gmail.Add(fake.Message{Folder: "[Gmail]/All Mail", Subject: "x", Body: "x", MessageID: "<x@example.net>", Labels: []string{`\Inbox`}})
+	resp, err := e.Client.Organize.SetLabels(t.Context(), connect.NewRequest(&chainmailv1.SetLabelsRequest{Refs: []string{other.String()}, Add: []string{`\Draft`}}))
+	if err != nil {
+		t.Fatalf("SetLabels: %v", err)
+	}
+	if out := resp.Msg.GetOutcomes()[0]; out.GetError() != nil {
+		t.Fatalf("SetLabels outcome = %+v", out)
+	}
+	if err := e.deleteDraft(t, other.String()); err != nil {
+		t.Fatalf("DeleteDraft: %v", err)
+	}
+	if inFolder(t, e.gmail, "[Gmail]/All Mail", "x@example.net") {
+		t.Error("the message is still in All Mail")
+	}
+	checkTrashedNotExpunged(t, e.gmail, "[Gmail]/Trash", "x@example.net")
+}
+
+// With expunge disabled, UpdateDraft moves the old version to Trash and
+// keeps the new one in Drafts.
+func TestUpdateDraftTrashesTheOldVersion(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	old := e.createDraft(t, hostSpec())
+	spec := hostSpec()
+	spec.Subject = "Quarterly numbers, revised"
+	d, err := e.updateDraft(t, old.GetRef(), spec)
+	if err != nil {
+		t.Fatalf("UpdateDraft: %v", err)
+	}
+	if !gone(t, e.host, parseRef(t, old.GetRef())) {
+		t.Error("the old version is still in Drafts")
+	}
+	if newRef := parseRef(t, d.GetRef()); newRef.Folder != "Drafts" || gone(t, e.host, newRef) {
+		t.Errorf("new version %v is not in Drafts", newRef)
+	}
+	checkTrashedNotExpunged(t, e.host, "Trash", old.GetMessageId())
+}
+
+// With expunge disabled, SendDraft sends the draft and moves it to Trash.
+func TestSendDraftTrashesTheSentDraft(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	dr := e.selfDraft(t)
+	if _, err := e.sendDraft(t, dr.String(), "self-send"); err != nil {
+		t.Fatalf("SendDraft: %v", err)
+	}
+	if len(srv.Messages()) != 1 {
+		t.Errorf("sent %d messages, want 1", len(srv.Messages()))
+	}
+	if !gone(t, e.host, dr) {
+		t.Error("the sent draft is still in Drafts")
+	}
+	checkTrashedNotExpunged(t, e.host, "Trash", "self.1@example.com")
+}
+
+// selfDraft appends a draft to the account's own address, which every send
+// policy allows, and returns its ref.
+func (e sendEnv) selfDraft(t *testing.T) ref.Ref {
+	t.Helper()
+	raw := []byte("From: Me Myself <me@example.com>\r\n" +
+		"To: me@example.com\r\n" +
+		"Subject: note to self\r\n" +
+		"Message-ID: <self.1@example.com>\r\n" +
+		"\r\n" + "body\r\n")
+	dr, err := e.host.Append(t.Context(), "Drafts", []string{`\Draft`, `\Seen`}, time.Time{}, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dr
+}
+
+// With allow_expunge on, the draft calls expunge the draft they remove, as
+// before the policy existed, and nothing goes to Trash.
+func TestDraftsExpungeWhenThePolicyAllowsExpunge(t *testing.T) {
+	t.Parallel()
+	e := startSendPolicy(t, "allow_expunge = true")
+	srv := e.smtp(t, smtptest.Options{})
+
+	d := e.createDraft(t, hostSpec())
+	if err := e.deleteDraft(t, d.GetRef()); err != nil {
+		t.Fatalf("DeleteDraft: %v", err)
+	}
+	if !gone(t, e.host, parseRef(t, d.GetRef())) {
+		t.Error("DeleteDraft left the draft")
+	}
+
+	old := e.createDraft(t, hostSpec())
+	if _, err := e.updateDraft(t, old.GetRef(), hostSpec()); err != nil {
+		t.Fatalf("UpdateDraft: %v", err)
+	}
+	if !gone(t, e.host, parseRef(t, old.GetRef())) {
+		t.Error("UpdateDraft left the old version")
+	}
+
+	dr := e.selfDraft(t)
+	if _, err := e.sendDraft(t, dr.String(), "self-send"); err != nil {
+		t.Fatalf("SendDraft: %v", err)
+	}
+	if len(srv.Messages()) != 1 {
+		t.Errorf("sent %d messages, want 1", len(srv.Messages()))
+	}
+	if !gone(t, e.host, dr) {
+		t.Error("SendDraft left the draft")
+	}
+
+	if n := countOps(e.host, "Expunge"); n != 3 {
+		t.Errorf("store Expunge ran %d times, want one per draft call", n)
+	}
+	if n := countOps(e.host, "Trash"); n != 0 {
+		t.Errorf("store Trash ran %d times, want none", n)
+	}
+	for _, id := range []string{d.GetMessageId(), old.GetMessageId(), "self.1@example.com"} {
+		if inFolder(t, e.host, "Trash", id) {
+			t.Errorf("<%s> is in Trash, want it expunged", id)
 		}
 	}
 }

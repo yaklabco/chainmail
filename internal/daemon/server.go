@@ -23,6 +23,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/idempotency"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/mailstore/imapstore"
+	"github.com/jamesainslie/chainmail/internal/policy"
 	"github.com/jamesainslie/chainmail/internal/upload"
 	"github.com/jamesainslie/chainmail/internal/vault"
 )
@@ -82,6 +83,8 @@ type Server struct {
 	audit   *audit.Writer
 	started time.Time
 	httpSrv *http.Server
+	// auditReader reads the rows audit writes, for ReadAudit.
+	auditReader *audit.Reader
 	// accountLocks serializes account tests, one account at a time.
 	accountLocks keyedLock
 	handlers     inflight
@@ -95,6 +98,9 @@ type Server struct {
 	newStore func(config.ResolvedAccount, storeParams) mailstore.Store
 	// lim keeps connection limits and runs background probes.
 	lim *limitState
+	// policy decides which sends are held and which destructive actions
+	// are refused.
+	policy *policy.Policy
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -108,12 +114,18 @@ func New(opts Options) (*Server, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
+	pol, err := policy.New(opts.Config)
+	if err != nil {
+		return nil, fmt.Errorf("daemon: policy: %w", err)
+	}
 	authOpts := append([]auth.Option{auth.WithClock(opts.Now)}, opts.AuthOptions...)
 	s := &Server{
-		opts:    opts,
-		auth:    auth.NewManager(opts.Config, opts.Vault, authOpts...),
-		audit:   audit.NewWriter(opts.StateDB, opts.Now),
-		started: opts.Now(),
+		opts:        opts,
+		auth:        auth.NewManager(opts.Config, opts.Vault, authOpts...),
+		audit:       audit.NewWriter(opts.StateDB, opts.Now),
+		auditReader: audit.NewReader(opts.StateDB),
+		started:     opts.Now(),
+		policy:      pol,
 	}
 	s.lim = newLimitState(opts.StateDB, opts.Now)
 	s.newStore = func(acct config.ResolvedAccount, p storeParams) mailstore.Store {

@@ -22,6 +22,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/client"
 )
 
@@ -209,10 +210,23 @@ type dryRunJSON struct {
 	} `json:"result"`
 }
 
-// writeComposeResult prints the result of a send-type call. A dry run is
+// writeComposeResult prints the result of a send-type call. A result the
+// send policy held is printed too, then returned as a HELD error, so the
+// command reports it on stderr and exits 4.
+func writeComposeResult(env Env, g *globals, jsonOut bool, resp proto.Message, res *chainmailv1.ComposeResult) error {
+	if err := printComposeResult(env, g, jsonOut, resp, res); err != nil {
+		return err
+	}
+	if h := res.GetHeld(); h != nil {
+		return &exitError{reason: api.ReasonHeld, msg: "held by policy: saved to Drafts", hint: h.GetHint()}
+	}
+	return nil
+}
+
+// printComposeResult writes the result of a send-type call. A dry run is
 // raw MIME, or a JSON string with jsonOut. Otherwise JSON output is resp,
 // and text is a line or two about what was sent or saved.
-func writeComposeResult(env Env, g *globals, jsonOut bool, resp proto.Message, res *chainmailv1.ComposeResult) error {
+func printComposeResult(env Env, g *globals, jsonOut bool, resp proto.Message, res *chainmailv1.ComposeResult) error {
 	if d := res.GetDryRun(); d != nil {
 		if !jsonOut {
 			if _, err := env.Stdout.Write(d.GetRaw()); err != nil {
@@ -245,10 +259,41 @@ func writeComposeResult(env Env, g *globals, jsonOut bool, resp proto.Message, r
 		if s.GetDuplicate() {
 			b.WriteString("duplicate: already sent\n")
 		}
+	case res.GetHeld() != nil:
+		b.WriteString(heldText(res.GetHeld()))
 	default:
 		return errors.New("the daemon returned no result")
 	}
 	return writeString(env.Stdout, b.String())
+}
+
+// heldText says that policy held a send: where the draft went, the blocked
+// recipients and whether there were too many. Every value is cleaned for
+// the terminal.
+func heldText(h *chainmailv1.Held) string {
+	var b strings.Builder
+	d := h.GetDraft()
+	switch {
+	case d.GetRef() != "":
+		fmt.Fprintf(&b, "held by policy, not sent: saved to Drafts %s\n", termText(d.GetRef()))
+	case d.GetHint() != "":
+		fmt.Fprintf(&b, "held by policy, not sent: %s\n", termText(d.GetHint()))
+	case h.GetHint() != "":
+		fmt.Fprintf(&b, "held by policy, not sent: %s\n", termText(h.GetHint()))
+	default:
+		fmt.Fprintf(&b, "held by policy, not sent: search the Drafts folder for Message-ID <%s>\n", termText(d.GetMessageId()))
+	}
+	if blocked := h.GetBlocked(); len(blocked) > 0 {
+		clean := make([]string, len(blocked))
+		for i, r := range blocked {
+			clean[i] = termText(r)
+		}
+		fmt.Fprintf(&b, "blocked: %s\n", strings.Join(clean, ", "))
+	}
+	if h.GetTooManyRecipients() {
+		b.WriteString("too many recipients\n")
+	}
+	return b.String()
 }
 
 // contentFlags are the body, attachment and option flags of every command

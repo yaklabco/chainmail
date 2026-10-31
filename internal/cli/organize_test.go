@@ -127,7 +127,7 @@ func TestOrganizeCommandsGolden(t *testing.T) {
 			name := tt.name + "_" + output
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
-				m := startCLIMail(t)
+				m := startCLIMailConfig(t, cliDestructiveConfig)
 				for _, s := range tt.setup {
 					if got := m.run(t, Env{}, s...); got.code != 0 {
 						t.Fatalf("setup %v: %+v", s, got)
@@ -168,7 +168,7 @@ func TestOrganizeChangesTheStore(t *testing.T) {
 
 func TestOrganizeExitCodes(t *testing.T) {
 	t.Parallel()
-	m := startCLIMail(t)
+	m := startCLIMailConfig(t, cliDestructiveConfig)
 	tests := []struct {
 		name   string
 		args   []string
@@ -611,5 +611,47 @@ func TestFolderCommandsPrintTheServersName(t *testing.T) {
 				t.Errorf("folder rename: exit %d, stdout %q, want %q; stderr %s", got.code, got.stdout, tc.rename, got.stderr)
 			}
 		})
+	}
+}
+
+// The help of the actions the policy gates says so.
+func TestDestructiveHelpNamesThePolicy(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{{"expunge", "--help"}, {"folder", "delete", "--help"}} {
+		got := runCLI(t, Env{}, args...)
+		if got.code != 0 || !strings.Contains(got.stdout, "(disabled unless policy allows it)") {
+			t.Errorf("%q: code %d, stdout %q, want the policy named", args, got.code, got.stdout)
+		}
+	}
+}
+
+// cliDestructiveConfig is cliMailConfig with expunge and folder delete
+// allowed.
+const cliDestructiveConfig = cliMailConfig + `
+[policy]
+allow_expunge = true
+allow_folder_delete = true
+`
+
+// By default the policy refuses expunge and folder delete, and the CLI
+// exits 3.
+func TestDestructiveCommandsDeniedByDefault(t *testing.T) {
+	t.Parallel()
+	m := startCLIMail(t)
+	for _, args := range [][]string{
+		{"expunge", m.invoice.String()},
+		{"folder", "delete", "--account", "host", "Archive", "--force"},
+	} {
+		got := m.run(t, Env{}, args...)
+		if got.code != api.ExitDenied {
+			t.Errorf("%q: exit %d, want %d; stderr %s", args, got.code, api.ExitDenied, got.stderr)
+			continue
+		}
+		if r := errorReason(t, got.stderr); r != api.ReasonPolicyDenied {
+			t.Errorf("%q: reason %s, want %s", args, r, api.ReasonPolicyDenied)
+		}
+	}
+	if n := m.host.Calls("Expunge") + m.host.Calls("DeleteFolder"); n != 0 {
+		t.Errorf("store called %d times for refused commands", n)
 	}
 }

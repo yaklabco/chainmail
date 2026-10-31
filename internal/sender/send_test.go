@@ -435,20 +435,44 @@ func TestSendRefusesBadEnvelopeLocally(t *testing.T) {
 		{name: "CRLF in a recipient", from: user.Username, to: []string{"a@example.com", "b@example.com\r\nRCPT TO:<x@example.com>"}},
 		{name: "CRLF in the sender", from: "me@example.com\r\nRSET", to: rcpts},
 		{name: "non-ASCII without SMTPUTF8", from: user.Username, to: []string{"ü@example.com"}},
+		{name: "a recipient that closes the path", from: user.Username, to: []string{"a@example.com", "victim@blocked.invalid> ORCPT=rfc822;x@example.net"}},
+		{name: "a recipient with a space", from: user.Username, to: []string{"john smith@example.com"}},
+		{name: "a quoted recipient", from: user.Username, to: []string{`"q"@example.com`}},
+		{name: "a sender that closes the path", from: "me@example.com> SIZE=1", to: rcpts},
+		{name: "a sender with an address literal", from: "me@[127.0.0.1]", to: rcpts},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			srv, ca := startSMTP(t, provider.SecurityTLS, smtptest.Options{})
+			// The server offers DSN, so it would read anything after a
+			// closed path as ESMTP parameters.
+			srv, ca := startSMTP(t, provider.SecurityTLS, smtptest.Options{EnableDSN: true})
 			conn := dialT(t, srv, ca, DialOptions{})
 			se := asSendError(t, conn.Send(t.Context(), tt.from, tt.to, msg))
 			if se.Outcome != NotSentPermanent || se.Code != 0 {
 				t.Errorf("Outcome = %v code %d, want NotSentPermanent code 0 (err %v)", se.Outcome, se.Code, se)
 			}
+			if got := srv.MailFroms(); len(got) != 0 {
+				t.Errorf("MAIL FROM = %q, want none", got)
+			}
 			if n := len(srv.Messages()); n != 0 {
 				t.Errorf("captured %d messages, want none", n)
 			}
 		})
+	}
+}
+
+// An empty sender is the null reverse-path, which SMTP allows: only a
+// non-empty sender must be a safe address.
+func TestSendAllowsTheNullSender(t *testing.T) {
+	t.Parallel()
+	srv, ca := startSMTP(t, provider.SecurityTLS, smtptest.Options{})
+	conn := dialT(t, srv, ca, DialOptions{})
+	if err := conn.Send(t.Context(), "", rcpts, msg); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if got := srv.Messages(); len(got) != 1 || got[0].From != "" {
+		t.Errorf("captured %+v, want one message from <>", got)
 	}
 }
 

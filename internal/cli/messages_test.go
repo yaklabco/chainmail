@@ -41,8 +41,14 @@ type cliMail struct {
 
 func startCLIMail(t *testing.T) cliMail {
 	t.Helper()
+	return startCLIMailConfig(t, cliMailConfig)
+}
+
+// startCLIMailConfig is startCLIMail with the given config TOML.
+func startCLIMailConfig(t *testing.T, configTOML string) cliMail {
+	t.Helper()
 	m := cliMail{host: fake.New("host", false), gmail: fake.New("gmail", true)}
-	h := daemontest.Start(t, cliMailConfig, daemontest.Options{
+	h := daemontest.Start(t, configTOML, daemontest.Options{
 		NewStore: func(a config.ResolvedAccount) mailstore.Store {
 			if a.Name == "gmail" {
 				return m.gmail
