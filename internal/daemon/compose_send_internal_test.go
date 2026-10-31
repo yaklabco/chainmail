@@ -8,6 +8,7 @@ import (
 	"net/mail"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -514,6 +515,86 @@ func TestHeldBuildCancelsTheDial(t *testing.T) {
 			}
 			if row, ok, err := s.idem.Lookup(t.Context(), "host", "held"); err != nil || !ok || row.State != idempotency.Done {
 				t.Errorf("key = %+v, %v, %v, want done", row, ok, err)
+			}
+		})
+	}
+}
+
+// TestDialFailureDuringASlowBuild fails the SMTP dial at once while the
+// build still runs. The dial failure does not cancel the build, and the
+// call ends with what the build decided: a hold wins over the dial error,
+// so a blocked message still reaches Drafts while SMTP is down; a failed
+// build reports its own error; an allowed message reports the dial error.
+func TestDialFailureDuringASlowBuild(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		to         string
+		buildErr   error
+		wantReason string // empty means held
+		wantState  idempotency.State
+		wantDrafts int
+	}{
+		{name: "a held build wins", to: "you@blocked.invalid", wantState: idempotency.Done, wantDrafts: 1},
+		{name: "an allowed build gets the dial error", to: "you@example.net", wantReason: api.ReasonServerUnavailable, wantState: idempotency.Retryable},
+		{
+			name: "a failed build gets its own error", to: "you@blocked.invalid",
+			buildErr:   errors.Join(compose.ErrInvalid, errors.New("bad header")),
+			wantReason: api.ReasonInvalidArgument, wantState: idempotency.Retryable,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s, _ := newTestServerConfig(t, allowConfig)
+			st := fake.New("host", false)
+			s.newStore = func(config.ResolvedAccount, storeParams) mailstore.Store { return st }
+			ctx := peerContext(t.Context())
+			if err := setSecretDirect(ctx, s, auth.PasswordSecret("host"), []byte("pw")); err != nil {
+				t.Fatal(err)
+			}
+			acct, err := s.opts.Config.Account("host")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dialFailed := make(chan struct{})
+			c := newComposeService(s)
+			c.dial = func(context.Context, provider.Endpoint, auth.Credentials, sender.DialOptions) (*sender.Conn, error) {
+				defer close(dialFailed)
+				return nil, errors.New("the mail server is down")
+			}
+			raw := "From: me@example.com\r\nTo: " + tt.to + "\r\nSubject: hi\r\nMessage-ID: <slow@example.com>\r\n\r\nhi\r\n"
+			job := sendJob{
+				acct: acct, key: "slow", hash: sha256.Sum256([]byte("slow")), action: "send",
+				caller: caller{uid: 1, client: "test"},
+				// The build reads, as Reply and Forward read IMAP, with
+				// ctx: it fails if the dial failure cancelled it.
+				build: func(ctx context.Context) (compose.Message, error) {
+					<-dialFailed
+					select {
+					case <-ctx.Done():
+						return compose.Message{}, ctx.Err()
+					case <-time.After(100 * time.Millisecond):
+					}
+					if tt.buildErr != nil {
+						return compose.Message{}, tt.buildErr
+					}
+					return compose.Message{Raw: []byte(raw), MessageID: "slow@example.com", EnvelopeFrom: acct.Address, EnvelopeTo: []string{tt.to}}, nil
+				},
+			}
+			res, err := c.run(ctx, job)
+			if tt.wantReason == "" {
+				if err != nil || res.GetHeld() == nil || !slices.Equal(res.GetHeld().GetBlocked(), []string{tt.to}) {
+					t.Fatalf("run = %+v, %v, want held with %s blocked", res, err, tt.to)
+				}
+			} else if got := api.Detail(err).GetReason(); got != tt.wantReason {
+				t.Fatalf("run = %+v, %v, want %s", res, err, tt.wantReason)
+			}
+			if got := st.Appended(); len(got) != tt.wantDrafts || (tt.wantDrafts == 1 && !bytes.Equal(got[0], []byte(raw))) {
+				t.Errorf("appended %q, want %d drafts", got, tt.wantDrafts)
+			}
+			if row, ok, err := s.idem.Lookup(t.Context(), "host", "slow"); err != nil || !ok || row.State != tt.wantState {
+				t.Errorf("key = %+v, %v, %v, want %v", row, ok, err, tt.wantState)
 			}
 		})
 	}

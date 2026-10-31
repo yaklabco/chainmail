@@ -298,66 +298,69 @@ func heldDraft(msg compose.Message) (compose.Message, error) {
 	return msg, err
 }
 
-// prepare builds the message while it dials, and returns both. A failure of
-// either cancels the other and closes the connection if one was made. So
-// does the end of the caller's ctx while either still runs: once both are
-// done, a cancelled call never reaches Send. A build the send policy holds
-// fails with a heldError, which carries the built message.
+// prepare builds the message while it dials, and returns both. A build that
+// fails, or that the send policy holds, cancels the dial. A dial failure
+// does not cancel the build: the build decides first, so a hold still
+// reaches Drafts while SMTP is down. The caller's ctx bounds both. Once
+// both are done, the result is, in order: a hold, as a heldError carrying
+// the built message; the build's error; the dial's error; the end of the
+// caller's ctx. Any of these closes a connection that was made, so a
+// cancelled call never reaches Send.
 func (c *composeService) prepare(parent context.Context, job sendJob) (compose.Message, *sender.Conn, error) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	var (
-		once     sync.Once
-		firstErr error
 		msg      compose.Message
+		buildErr error
 		conn     *sender.Conn
+		dialErr  error
 		wg       sync.WaitGroup
 	)
-	fail := func(err error) {
-		once.Do(func() {
-			firstErr = err
-			cancel()
-		})
-	}
 	wg.Go(func() {
-		m, err := job.build(ctx)
-		if err == nil {
-			err = checkSize(job.acct, int64(len(m.Raw)))
+		msg, buildErr = c.buildChecked(ctx, job)
+		if buildErr != nil {
+			cancel() // the connection will not be used
 		}
-		if err == nil {
-			if d := c.s.policy.CheckSend(job.acct.Name, m.EnvelopeTo); !d.Allowed {
-				err = &heldError{msg: m, decision: d}
-			}
-		}
-		if err != nil {
-			fail(err)
-			return
-		}
-		msg = m
 	})
 	wg.Go(func() {
-		cn, err := c.connect(ctx, job.acct)
-		if err != nil {
-			fail(err)
-			return
-		}
-		conn = cn
+		conn, dialErr = c.connect(ctx, job.acct)
 	})
 	wg.Wait()
-	if firstErr == nil {
+	err := buildErr // a heldError is a build error, so it comes first
+	if err == nil {
+		err = dialErr
+	}
+	if err == nil {
 		// The build does not watch ctx, so the caller may have gone while
 		// it ran after a successful dial.
-		firstErr = parent.Err()
+		err = parent.Err()
 	}
-	if firstErr != nil {
+	if err != nil {
 		if conn != nil {
-			if err := conn.Close(); err != nil {
+			if cerr := conn.Close(); cerr != nil {
 				c.s.opts.Logger.Debug("closing an unused SMTP connection failed", "account", job.acct.Name)
 			}
 		}
-		return compose.Message{}, nil, firstErr
+		return compose.Message{}, nil, err
 	}
 	return msg, conn, nil
+}
+
+// buildChecked builds the message, checks its size and checks its
+// recipients against the send policy. A held message fails with a
+// heldError.
+func (c *composeService) buildChecked(ctx context.Context, job sendJob) (compose.Message, error) {
+	m, err := job.build(ctx)
+	if err != nil {
+		return compose.Message{}, err
+	}
+	if err := checkSize(job.acct, int64(len(m.Raw))); err != nil {
+		return compose.Message{}, err
+	}
+	if d := c.s.policy.CheckSend(job.acct.Name, m.EnvelopeTo); !d.Allowed {
+		return compose.Message{}, &heldError{msg: m, decision: d}
+	}
+	return m, nil
 }
 
 // connect fetches the account's credentials and dials its SMTP server. A
