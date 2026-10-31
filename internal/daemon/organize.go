@@ -43,6 +43,19 @@ var storableFlags = []string{`\Seen`, `\Flagged`, `\Answered`, `\Draft`}
 // keywordRE matches the keywords a client may add or remove.
 var keywordRE = regexp.MustCompile(`^[A-Za-z0-9$_.-]{1,64}$`)
 
+// The policy's refusals of the destructive actions. Each hint names the
+// setting that allows the action.
+var (
+	errExpungeDenied = &deniedError{
+		msg:  "expunge is disabled by policy",
+		hint: "set policy.allow_expunge in the chainmail NixOS config",
+	}
+	errFolderDeleteDenied = &deniedError{
+		msg:  "folder delete is disabled by policy",
+		hint: "set policy.allow_folder_delete in the chainmail NixOS config",
+	}
+)
+
 // organizeService moves, copies, flags, labels and deletes messages, and
 // manages folders.
 type organizeService struct {
@@ -130,7 +143,11 @@ func (o *organizeService) Trash(ctx context.Context, req *connect.Request[chainm
 
 // Expunge implements chainmailv1connect.OrganizeServiceHandler.
 func (o *organizeService) Expunge(ctx context.Context, req *connect.Request[chainmailv1.ExpungeRequest]) (*connect.Response[chainmailv1.ExpungeResponse], error) {
-	outs, err := o.batch(ctx, req.Header(), batchCall{action: "expunge", refs: req.Msg.GetRefs(), run: refsOnly(mailstore.Writer.Expunge)})
+	c := batchCall{action: "expunge", refs: req.Msg.GetRefs(), run: refsOnly(mailstore.Writer.Expunge)}
+	if !o.s.policy.AllowExpunge() {
+		return nil, o.refuseBatch(ctx, req.Header(), c, errExpungeDenied)
+	}
+	outs, err := o.batch(ctx, req.Header(), c)
 	if err != nil {
 		return nil, err
 	}
@@ -212,17 +229,41 @@ func (o *organizeService) batch(ctx context.Context, h http.Header, c batchCall)
 			for i := range errs {
 				errs[i] = cmp.Or(errs[i], err)
 			}
-			if aerr := o.recordBatch(ctx, who, c, groups, errs); aerr != nil {
+			if aerr := o.recordBatch(ctx, who, c, "", groups, errs); aerr != nil {
 				return nil, aerr
 			}
 			return nil, toConnectError(err)
 		}
 	}
 	o.runBatch(ctx, c, outs, errs, groups)
-	if err := o.recordBatch(ctx, who, c, groups, errs); err != nil {
+	if err := o.recordBatch(ctx, who, c, "", groups, errs); err != nil {
 		return nil, err
 	}
 	return outs, nil
+}
+
+// refuseBatch records a batch call the policy refuses, and returns the
+// refusal. Nothing runs and no account is touched. The rows are the ones
+// a call refused for its arguments records, with decision denied: one per
+// account, or one that tallies the refs when there are too few or too many
+// to attribute. The policy refuses before the refs are counted.
+func (o *organizeService) refuseBatch(ctx context.Context, h http.Header, c batchCall, denied error) error {
+	who, err := callerOf(ctx, h)
+	if err != nil {
+		return err
+	}
+	if checkRefCount(c) != nil {
+		entry := audit.Entry{Action: c.action, Decision: decisionDenied, Targets: append([]string{tally("refs", len(c.refs))}, c.targets...)}
+		return o.s.record(ctx, who, entry, denied)
+	}
+	_, errs, groups := groupRefs(c)
+	for i := range errs {
+		errs[i] = denied
+	}
+	if err := o.recordBatch(ctx, who, c, decisionDenied, groups, errs); err != nil {
+		return err
+	}
+	return toConnectError(denied)
 }
 
 // checkRefCount refuses a call with no refs or too many refs.
@@ -332,12 +373,13 @@ func (o *organizeService) runBatch(ctx context.Context, c batchCall, outs []*cha
 
 // recordBatch writes one audit row per account: its refs, then the call's
 // own targets, ok when every ref succeeded, else the first failure's
-// reason. Refs that did not parse are recorded as invalidTarget. Every row
-// is attempted, and the first failed write fails the call.
-func (o *organizeService) recordBatch(ctx context.Context, who caller, c batchCall, groups []*refGroup, errs []error) error {
+// reason, and decision. Refs that did not parse are recorded as
+// invalidTarget. Every row is attempted, and the first failed write fails
+// the call.
+func (o *organizeService) recordBatch(ctx context.Context, who caller, c batchCall, decision string, groups []*refGroup, errs []error) error {
 	var firstErr error
 	for _, g := range groups {
-		entry := audit.Entry{Action: c.action, Account: g.account, Result: audit.ResultOK}
+		entry := audit.Entry{Action: c.action, Account: g.account, Decision: decision, Result: audit.ResultOK}
 		for _, i := range g.idx {
 			target := invalidTarget
 			if g.account != "" {
@@ -393,6 +435,9 @@ func (o *organizeService) DeleteFolder(ctx context.Context, req *connect.Request
 	if force {
 		extra = []string{"force"}
 	}
+	if !o.s.policy.AllowFolderDelete() {
+		return nil, o.refuseFolderCall(ctx, req.Header(), "folders.delete", req.Msg.GetAccount(), []string{name}, extra, errFolderDeleteDenied)
+	}
 	err := o.folderCall(ctx, req.Header(), "folders.delete", req.Msg.GetAccount(), []string{name}, extra,
 		func(ctx context.Context, w mailstore.Writer) error { return w.DeleteFolder(ctx, name, force) })
 	if err != nil {
@@ -412,6 +457,30 @@ func (o *organizeService) folderCall(ctx context.Context, h http.Header, action,
 	}
 	ctx, cancel := withDeadline(ctx, organizeTimeout)
 	defer cancel()
+	entry, callErr := folderEntry(action, account, names, extra)
+	if callErr == nil {
+		callErr = o.runFolderCall(ctx, account, run)
+	}
+	return o.s.record(ctx, who, entry, callErr)
+}
+
+// refuseFolderCall records a folder call the policy refuses, with decision
+// denied and the targets folderCall records, and returns the refusal. The
+// policy refuses before the account and names are checked.
+func (o *organizeService) refuseFolderCall(ctx context.Context, h http.Header, action, account string, names, extra []string, denied error) error {
+	who, err := callerOf(ctx, h)
+	if err != nil {
+		return err
+	}
+	entry, _ := folderEntry(action, account, names, extra)
+	entry.Decision = decisionDenied
+	return o.s.record(ctx, who, entry, denied)
+}
+
+// folderEntry is a folder call's audit row: its account, then its names,
+// each valid one as given and each invalid one as invalidTarget, then
+// extra. It also returns the first problem with the account or a name.
+func folderEntry(action, account string, names, extra []string) (audit.Entry, error) {
 	entry := audit.Entry{Action: action}
 	var callErr error
 	entry.Account, callErr = accountTarget(account)
@@ -424,10 +493,7 @@ func (o *organizeService) folderCall(ctx context.Context, h http.Header, action,
 		entry.Targets = append(entry.Targets, target)
 	}
 	entry.Targets = append(entry.Targets, extra...)
-	if callErr == nil {
-		callErr = o.runFolderCall(ctx, account, run)
-	}
-	return o.s.record(ctx, who, entry, callErr)
+	return entry, callErr
 }
 
 // runFolderCall runs a checked folder call on account's store.

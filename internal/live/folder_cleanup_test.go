@@ -162,6 +162,9 @@ const cleanupConfig = `
 [accounts.host]
 provider = "hostinger"
 address = "me@example.com"
+
+[policy]
+allow_folder_delete = true
 `
 
 // lostCreate is a fake store on a server with the personal namespace

@@ -113,7 +113,7 @@ func newOrganizeCmds(ctx context.Context, env Env, g *globals) []*cobra.Command 
 			wrap: func(o []*chainmailv1.RefOutcome) proto.Message { return &chainmailv1.TrashResponse{Outcomes: o} },
 		}),
 		newBatchCmd(ctx, env, g, batchCmd{
-			use: "expunge <ref>...", short: "Delete messages for good", verb: "expunged",
+			use: "expunge <ref>...", short: "Delete messages for good (disabled unless policy allows it)", verb: "expunged",
 			call: func(ctx context.Context, c *client.Client, refs []string) ([]*chainmailv1.RefOutcome, error) {
 				resp, err := c.Organize.Expunge(ctx, connect.NewRequest(&chainmailv1.ExpungeRequest{Refs: refs}))
 				return outcomes(resp, err)
@@ -347,7 +347,7 @@ func newFolderCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	}
 	del := &cobra.Command{
 		Use:   "delete <name> --account <account> [--force]",
-		Short: "Delete a folder; INBOX and role folders are refused",
+		Short: "Delete a folder; INBOX and role folders are refused (disabled unless policy allows it)",
 		Args:  exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			done := func(proto.Message) string { return "deleted folder " + args[0] }

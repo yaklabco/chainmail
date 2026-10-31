@@ -29,6 +29,7 @@ func toConnectError(err error) *connect.Error {
 		rejected  *auth.RejectedError
 		badName   *secretNameError
 		badArg    *argError
+		denied    *deniedError
 		syntaxErr *query.SyntaxError
 	)
 	switch {
@@ -47,6 +48,8 @@ func toConnectError(err error) *connect.Error {
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, badName.hint, err)
 	case errors.As(err, &badArg):
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, badArg.hint, err)
+	case errors.As(err, &denied):
+		return api.New(connect.CodePermissionDenied, api.ReasonPolicyDenied, denied.hint, err)
 	case errors.As(err, &syntaxErr):
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, queryHint, err)
 	case errors.Is(err, mailstore.ErrUnsupportedQuery):
@@ -100,6 +103,15 @@ type argError struct {
 }
 
 func (e *argError) Error() string { return e.msg }
+
+// deniedError is a call the policy refuses, with a hint naming the setting
+// that allows it.
+type deniedError struct {
+	msg  string
+	hint string
+}
+
+func (e *deniedError) Error() string { return e.msg }
 
 // queryHint points at the query language reference.
 const queryHint = "the query language is described in: chainmail search --help"
