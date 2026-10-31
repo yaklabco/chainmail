@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -1647,6 +1648,7 @@ func TestSendHeldDraftSaveFailure(t *testing.T) {
 	if e.idemState(t, "host", "held-save-fails") != "retryable" {
 		t.Errorf("idempotency state = %q, want retryable", e.idemState(t, "host", "held-save-fails"))
 	}
+	checkFailedHoldAudit(t, e.Harness, "send")
 	res, err := e.send(t, req)
 	if err != nil || res.GetHeld() == nil {
 		t.Fatalf("repeat = %+v, %v, want a new attempt that holds", res, err)
@@ -1658,6 +1660,53 @@ func TestSendHeldDraftSaveFailure(t *testing.T) {
 		t.Errorf("captured %d messages, want none", n)
 	}
 	e.checkAuditPrivate(t, "stranger@")
+}
+
+// heldMessageID matches a Message-ID the daemon made for the host account.
+var heldMessageID = regexp.MustCompile(`^[0-9A-Z]{10}\.[0-9A-Z]{10}@example\.com$`)
+
+// checkFailedHoldAudit checks, through ReadAudit, the newest row for
+// action: a hold whose draft was not saved. It keeps the held decision, the
+// Message-ID and the blocked count, with the error's result and reason,
+// and no recipient address.
+func checkFailedHoldAudit(t *testing.T, h *daemontest.Harness, action string) {
+	t.Helper()
+	resp, err := readAudit(t, h, &chainmailv1.ReadAuditRequest{Action: action, Limit: 1})
+	if err != nil {
+		t.Fatalf("ReadAudit: %v", err)
+	}
+	if len(resp.GetEntries()) != 1 {
+		t.Fatalf("entries = %v, want one", resp.GetEntries())
+	}
+	row := resp.GetEntries()[0]
+	if row.GetDecision() != "held" || row.GetResult() != "error" || row.GetReason() != api.ReasonServerUnavailable {
+		t.Errorf("row = %+v, want held error SERVER_UNAVAILABLE", row)
+	}
+	targets := row.GetTargets()
+	if !slices.Contains(targets, "blocked:1") {
+		t.Errorf("targets = %q, want blocked:1 in them", targets)
+	}
+	ids := 0
+	for _, tg := range targets {
+		switch {
+		case heldMessageID.MatchString(tg):
+			ids++
+		case strings.Contains(tg, "@"):
+			t.Errorf("target %q holds an address", tg)
+		}
+	}
+	if ids != 1 {
+		t.Errorf("targets = %q, want one Message-ID", targets)
+	}
+	js, err := json.Marshal(targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, addr := range []string{blocked, "stranger@", "you@", "cc@", "hidden@"} {
+		if strings.Contains(string(js), addr) {
+			t.Errorf("targets %s hold %q", js, addr)
+		}
+	}
 }
 
 // injected is an RFC 5322 address with a quoted local part. Its decoded

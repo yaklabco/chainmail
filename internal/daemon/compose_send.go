@@ -230,9 +230,19 @@ func (e *heldError) Error() string { return "held by policy" }
 
 // hold settles a send the policy held: it saves the built message to
 // Drafts, or for SendDraft names the draft already there, and returns the
-// held result. Nothing is sent. The audit row gets the draft ref, the
-// Message-ID and the count of blocked recipients, never an address.
+// held result. Nothing is sent. The audit row gets the Message-ID and the
+// count of blocked recipients, never an address, and the draft ref once
+// the draft is in Drafts. A failure to make or save the draft keeps the
+// held decision in the row, with the error's result and reason.
 func (c *composeService) hold(ctx context.Context, job sendJob, held *heldError, entry *audit.Entry) (*chainmailv1.ComposeResult, idempotency.State, error) {
+	entry.Decision = decisionHeld
+	entry.Targets = append(entry.Targets, held.msg.MessageID)
+	if n := len(held.decision.Blocked); n > 0 {
+		entry.Targets = append(entry.Targets, fmt.Sprintf("blocked:%d", n))
+	}
+	if held.decision.TooMany {
+		entry.Targets = append(entry.Targets, "too_many")
+	}
 	var d *chainmailv1.Draft
 	if job.existingDraft != nil {
 		d = proto.Clone(job.existingDraft).(*chainmailv1.Draft)
@@ -250,17 +260,9 @@ func (c *composeService) hold(ctx context.Context, job sendJob, held *heldError,
 				&fixedTextError{msg: "held by policy, but saving the draft failed; nothing was sent", err: err})
 		}
 	}
-	entry.Decision = decisionHeld
 	entry.Reason = api.ReasonHeld
 	if r := d.GetRef(); r != "" && !slices.Contains(entry.Targets, r) {
 		entry.Targets = append(entry.Targets, r)
-	}
-	entry.Targets = append(entry.Targets, d.GetMessageId())
-	if n := len(held.decision.Blocked); n > 0 {
-		entry.Targets = append(entry.Targets, fmt.Sprintf("blocked:%d", n))
-	}
-	if held.decision.TooMany {
-		entry.Targets = append(entry.Targets, "too_many")
 	}
 	return &chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Held{Held: &chainmailv1.Held{
 		Draft: d, Blocked: held.decision.Blocked, TooManyRecipients: held.decision.TooMany, Hint: heldHint,
