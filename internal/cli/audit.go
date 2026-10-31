@@ -55,7 +55,7 @@ func newAuditCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	}
 	cmd.Flags().DurationVar(&since, "since", 24*time.Hour, "how far back to look, as a Go duration such as 2h or 30m")
 	cmd.Flags().StringVar(&account, "account", "", "only this account (default: all)")
-	cmd.Flags().StringVar(&action, "action", "", "only this action, such as mail.send (default: all)")
+	cmd.Flags().StringVar(&action, "action", "", "only this action, such as send or expunge (default: all)")
 	cmd.Flags().Int32Var(&limit, "limit", 0, "rows per page, up to 1000 (default: the daemon's 100)")
 	cmd.Flags().Int64Var(&beforeID, "before-id", 0, "only rows older than this id, from next_before_id")
 	return cmd

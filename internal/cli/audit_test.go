@@ -87,13 +87,13 @@ func TestAuditFlagsPassThrough(t *testing.T) {
 
 	before := time.Now()
 	got := runCLI(t, Env{}, "--socket", socket, "audit",
-		"--since", "2h", "--account", "host", "--action", "mail.send", "--limit", "7", "--before-id", "42")
+		"--since", "2h", "--account", "host", "--action", "send", "--limit", "7", "--before-id", "42")
 	after := time.Now()
 	if got.code != 0 {
 		t.Fatalf("audit: %+v", got)
 	}
 	req := f.last(t)
-	if req.GetAccount() != "host" || req.GetAction() != "mail.send" || req.GetLimit() != 7 || req.GetBeforeId() != 42 {
+	if req.GetAccount() != "host" || req.GetAction() != "send" || req.GetLimit() != 7 || req.GetBeforeId() != 42 {
 		t.Errorf("request = %v", req)
 	}
 	since := req.GetSince().AsTime()
@@ -146,12 +146,12 @@ func TestAuditJSON(t *testing.T) {
 	h := daemontest.Start(t, twoAccounts, daemontest.Options{NewStore: offlineStores})
 	now := time.Now()
 	seedCLIAudit(t, h,
-		audit.Entry{At: now.Add(-3 * time.Hour), Client: "cli", Account: "host", Action: "mail.send", Result: audit.ResultOK},
+		audit.Entry{At: now.Add(-3 * time.Hour), Client: "cli", Account: "host", Action: "send", Result: audit.ResultOK},
 		audit.Entry{
-			At: now.Add(-time.Hour), Client: "mcp", Account: "host", Action: "mail.send",
+			At: now.Add(-time.Hour), Client: "mcp", Account: "host", Action: "send",
 			Targets: []string{"blocked:1"}, Decision: "held", Result: audit.ResultOK,
 		},
-		audit.Entry{At: now.Add(-time.Hour), Client: "cli", Account: "icloud", Action: "mail.send", Result: audit.ResultOK},
+		audit.Entry{At: now.Add(-time.Hour), Client: "cli", Account: "icloud", Action: "send", Result: audit.ResultOK},
 	)
 	got := runCLI(t, Env{}, "--socket", h.Socket, "--output", "json", "audit", "--since", "2h", "--account", "host")
 	if got.code != 0 {
@@ -182,7 +182,7 @@ func TestAuditTable(t *testing.T) {
 	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Minute)
 	seedCLIAudit(t, h,
 		audit.Entry{
-			At: at, Client: "cli", Account: "host", Action: "mail.send",
+			At: at, Client: "cli", Account: "host", Action: "send",
 			Targets: []string{"blocked:2", "too_many"}, Decision: "held", Result: audit.ResultOK,
 		},
 		audit.Entry{
@@ -204,7 +204,7 @@ func TestAuditTable(t *testing.T) {
 	for i, want := range [][]string{
 		{"AT", "ACTION", "ACCOUNT", "DECISION", "RESULT", "REASON", "TARGETS"},
 		{at.Add(time.Minute).Format("2006-01-02 15:04"), "icloud", "error", "NOT_FOUND"},
-		{at.Format("2006-01-02 15:04"), "mail.send", "host", "held", "ok", "blocked:2,too_many"},
+		{at.Format("2006-01-02 15:04"), "send", "host", "held", "ok", "blocked:2,too_many"},
 	} {
 		for _, field := range want {
 			if !strings.Contains(lines[i], field) {
