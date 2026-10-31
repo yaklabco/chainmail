@@ -164,6 +164,7 @@ provider = "hostinger"
 address = "me@example.com"
 
 [policy]
+allow_expunge = true
 allow_folder_delete = true
 `
 

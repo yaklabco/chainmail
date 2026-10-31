@@ -207,4 +207,7 @@ const gmailCleanupConfig = `
 provider = "gmail"
 address = "me@gmail.example"
 auth = "password"
+
+[policy]
+allow_expunge = true
 `
