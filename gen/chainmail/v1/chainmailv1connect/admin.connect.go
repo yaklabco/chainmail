@@ -43,6 +43,8 @@ const (
 	AdminServiceFinishAuthLoginProcedure = "/chainmail.v1.AdminService/FinishAuthLogin"
 	// AdminServiceGetStatusProcedure is the fully-qualified name of the AdminService's GetStatus RPC.
 	AdminServiceGetStatusProcedure = "/chainmail.v1.AdminService/GetStatus"
+	// AdminServiceReadAuditProcedure is the fully-qualified name of the AdminService's ReadAudit RPC.
+	AdminServiceReadAuditProcedure = "/chainmail.v1.AdminService/ReadAudit"
 )
 
 // AdminServiceClient is a client for the chainmail.v1.AdminService service.
@@ -55,6 +57,8 @@ type AdminServiceClient interface {
 	FinishAuthLogin(context.Context, *connect.Request[v1.FinishAuthLoginRequest]) (*connect.Response[v1.FinishAuthLoginResponse], error)
 	// GetStatus reports daemon version, uptime and stored secret names.
 	GetStatus(context.Context, *connect.Request[v1.GetStatusRequest]) (*connect.Response[v1.GetStatusResponse], error)
+	// ReadAudit returns audit rows, newest first, paged by before_id.
+	ReadAudit(context.Context, *connect.Request[v1.ReadAuditRequest]) (*connect.Response[v1.ReadAuditResponse], error)
 }
 
 // NewAdminServiceClient constructs a client for the chainmail.v1.AdminService service. By default,
@@ -92,6 +96,12 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(adminServiceMethods.ByName("GetStatus")),
 			connect.WithClientOptions(opts...),
 		),
+		readAudit: connect.NewClient[v1.ReadAuditRequest, v1.ReadAuditResponse](
+			httpClient,
+			baseURL+AdminServiceReadAuditProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("ReadAudit")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -101,6 +111,7 @@ type adminServiceClient struct {
 	beginAuthLogin  *connect.Client[v1.BeginAuthLoginRequest, v1.BeginAuthLoginResponse]
 	finishAuthLogin *connect.Client[v1.FinishAuthLoginRequest, v1.FinishAuthLoginResponse]
 	getStatus       *connect.Client[v1.GetStatusRequest, v1.GetStatusResponse]
+	readAudit       *connect.Client[v1.ReadAuditRequest, v1.ReadAuditResponse]
 }
 
 // SetSecret calls chainmail.v1.AdminService.SetSecret.
@@ -123,6 +134,11 @@ func (c *adminServiceClient) GetStatus(ctx context.Context, req *connect.Request
 	return c.getStatus.CallUnary(ctx, req)
 }
 
+// ReadAudit calls chainmail.v1.AdminService.ReadAudit.
+func (c *adminServiceClient) ReadAudit(ctx context.Context, req *connect.Request[v1.ReadAuditRequest]) (*connect.Response[v1.ReadAuditResponse], error) {
+	return c.readAudit.CallUnary(ctx, req)
+}
+
 // AdminServiceHandler is an implementation of the chainmail.v1.AdminService service.
 type AdminServiceHandler interface {
 	// SetSecret stores a secret in the vault. Secrets can be written but never read back.
@@ -133,6 +149,8 @@ type AdminServiceHandler interface {
 	FinishAuthLogin(context.Context, *connect.Request[v1.FinishAuthLoginRequest]) (*connect.Response[v1.FinishAuthLoginResponse], error)
 	// GetStatus reports daemon version, uptime and stored secret names.
 	GetStatus(context.Context, *connect.Request[v1.GetStatusRequest]) (*connect.Response[v1.GetStatusResponse], error)
+	// ReadAudit returns audit rows, newest first, paged by before_id.
+	ReadAudit(context.Context, *connect.Request[v1.ReadAuditRequest]) (*connect.Response[v1.ReadAuditResponse], error)
 }
 
 // NewAdminServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -166,6 +184,12 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(adminServiceMethods.ByName("GetStatus")),
 		connect.WithHandlerOptions(opts...),
 	)
+	adminServiceReadAuditHandler := connect.NewUnaryHandler(
+		AdminServiceReadAuditProcedure,
+		svc.ReadAudit,
+		connect.WithSchema(adminServiceMethods.ByName("ReadAudit")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/chainmail.v1.AdminService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case AdminServiceSetSecretProcedure:
@@ -176,6 +200,8 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 			adminServiceFinishAuthLoginHandler.ServeHTTP(w, r)
 		case AdminServiceGetStatusProcedure:
 			adminServiceGetStatusHandler.ServeHTTP(w, r)
+		case AdminServiceReadAuditProcedure:
+			adminServiceReadAuditHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -199,4 +225,8 @@ func (UnimplementedAdminServiceHandler) FinishAuthLogin(context.Context, *connec
 
 func (UnimplementedAdminServiceHandler) GetStatus(context.Context, *connect.Request[v1.GetStatusRequest]) (*connect.Response[v1.GetStatusResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chainmail.v1.AdminService.GetStatus is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) ReadAudit(context.Context, *connect.Request[v1.ReadAuditRequest]) (*connect.Response[v1.ReadAuditResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("chainmail.v1.AdminService.ReadAudit is not implemented"))
 }

@@ -331,3 +331,13 @@ func TestSetSecretRejectsOversizedRequest(t *testing.T) {
 		t.Errorf("vault names = %v, want none", names)
 	}
 }
+
+// ReadAudit is declared ahead of its reader. Until then it says so.
+func TestReadAuditIsUnimplemented(t *testing.T) {
+	t.Parallel()
+	h := daemontest.Start(t, hostingerConfig, daemontest.Options{})
+	_, err := h.Client.Admin.ReadAudit(t.Context(), connect.NewRequest(&chainmailv1.ReadAuditRequest{}))
+	if connect.CodeOf(err) != connect.CodeUnimplemented {
+		t.Errorf("code = %v, want Unimplemented (err %v)", connect.CodeOf(err), err)
+	}
+}

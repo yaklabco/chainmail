@@ -147,3 +147,8 @@ func (a *adminService) GetStatus(_ context.Context, _ *connect.Request[chainmail
 		SecretNames: a.s.opts.Vault.Names(),
 	}), nil
 }
+
+// ReadAudit is a stub until the audit reader lands.
+func (a *adminService) ReadAudit(_ context.Context, _ *connect.Request[chainmailv1.ReadAuditRequest]) (*connect.Response[chainmailv1.ReadAuditResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("ReadAudit is not implemented yet"))
+}

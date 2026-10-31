@@ -609,3 +609,66 @@ func TestDraftWithoutARefPrintsTheHint(t *testing.T) {
 		t.Errorf("output = %q, want the hint without control characters", got)
 	}
 }
+
+// A held send prints where the draft went, the blocked recipients and
+// whether there were too many, each cleaned for the terminal.
+func TestComposeResultHeldTable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		held *chainmailv1.Held
+		want string
+	}{
+		{
+			name: "with a ref",
+			held: &chainmailv1.Held{Draft: &chainmailv1.Draft{Ref: "cm1:a:Drafts:1:2", MessageId: "h.1@example.com"}},
+			want: "held by policy, not sent: saved to Drafts cm1:a:Drafts:1:2\n",
+		},
+		{
+			name: "empty ref prints the hint",
+			held: &chainmailv1.Held{
+				Draft: &chainmailv1.Draft{MessageId: "h.1@example.com"},
+				Hint:  "held by policy: saved to Drafts for James to review and send\x1b]0;x\x07",
+			},
+			// termText drops the control bytes and keeps the printable rest.
+			want: "held by policy, not sent: held by policy: saved to Drafts for James to review and send]0;x\n",
+		},
+		{
+			name: "empty ref prints the draft's own hint first",
+			held: &chainmailv1.Held{
+				Draft: &chainmailv1.Draft{MessageId: "h.1@example.com", Hint: "search the Drafts folder for h.1@example.com"},
+				Hint:  "held by policy: saved to Drafts for James to review and send",
+			},
+			want: "held by policy, not sent: search the Drafts folder for h.1@example.com\n",
+		},
+		{
+			name: "no ref and no hint names the Message-ID",
+			held: &chainmailv1.Held{Draft: &chainmailv1.Draft{MessageId: "h.1@example.com"}},
+			want: "held by policy, not sent: search the Drafts folder for Message-ID <h.1@example.com>\n",
+		},
+		{
+			name: "blocked and too many recipients",
+			held: &chainmailv1.Held{
+				Draft:             &chainmailv1.Draft{Ref: "cm1:a:Drafts:1:3"},
+				Blocked:           []string{"x@evil.example", "Y <y@other.example>\u202e"},
+				TooManyRecipients: true,
+			},
+			want: "held by policy, not sent: saved to Drafts cm1:a:Drafts:1:3\n" +
+				"blocked: x@evil.example, Y <y@other.example>\n" +
+				"too many recipients\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			res := &chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Held{Held: tt.held}}
+			if err := writeComposeResult(Env{Stdout: &out, StdoutTerminal: true}, &globals{output: "table"}, false, &chainmailv1.SendResponse{Result: res}, res); err != nil {
+				t.Fatal(err)
+			}
+			if got := out.String(); got != tt.want {
+				t.Errorf("output = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

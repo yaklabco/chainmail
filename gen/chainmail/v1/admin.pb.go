@@ -403,6 +403,253 @@ func (x *GetStatusResponse) GetSecretNames() []string {
 	return nil
 }
 
+// ReadAuditRequest selects audit rows, newest first.
+type ReadAuditRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Since         *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=since,proto3" json:"since,omitempty"`                        // unset: 24 hours before now
+	Account       string                 `protobuf:"bytes,2,opt,name=account,proto3" json:"account,omitempty"`                    // empty: all accounts
+	Action        string                 `protobuf:"bytes,3,opt,name=action,proto3" json:"action,omitempty"`                      // empty: all actions
+	Limit         int32                  `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`                       // 0 means 100; maximum 1000
+	BeforeId      int64                  `protobuf:"varint,5,opt,name=before_id,json=beforeId,proto3" json:"before_id,omitempty"` // paging: only rows with id < before_id; 0 means no bound
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadAuditRequest) Reset() {
+	*x = ReadAuditRequest{}
+	mi := &file_chainmail_v1_admin_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadAuditRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadAuditRequest) ProtoMessage() {}
+
+func (x *ReadAuditRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_chainmail_v1_admin_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadAuditRequest.ProtoReflect.Descriptor instead.
+func (*ReadAuditRequest) Descriptor() ([]byte, []int) {
+	return file_chainmail_v1_admin_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ReadAuditRequest) GetSince() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Since
+	}
+	return nil
+}
+
+func (x *ReadAuditRequest) GetAccount() string {
+	if x != nil {
+		return x.Account
+	}
+	return ""
+}
+
+func (x *ReadAuditRequest) GetAction() string {
+	if x != nil {
+		return x.Action
+	}
+	return ""
+}
+
+func (x *ReadAuditRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *ReadAuditRequest) GetBeforeId() int64 {
+	if x != nil {
+		return x.BeforeId
+	}
+	return 0
+}
+
+// ReadAuditResponse is one page of audit rows.
+type ReadAuditResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Entries       []*AuditEntry          `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`                                  // newest first
+	NextBeforeId  int64                  `protobuf:"varint,2,opt,name=next_before_id,json=nextBeforeId,proto3" json:"next_before_id,omitempty"` // 0 when there are no more rows
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadAuditResponse) Reset() {
+	*x = ReadAuditResponse{}
+	mi := &file_chainmail_v1_admin_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadAuditResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadAuditResponse) ProtoMessage() {}
+
+func (x *ReadAuditResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_chainmail_v1_admin_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadAuditResponse.ProtoReflect.Descriptor instead.
+func (*ReadAuditResponse) Descriptor() ([]byte, []int) {
+	return file_chainmail_v1_admin_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ReadAuditResponse) GetEntries() []*AuditEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+func (x *ReadAuditResponse) GetNextBeforeId() int64 {
+	if x != nil {
+		return x.NextBeforeId
+	}
+	return 0
+}
+
+// AuditEntry is one audit row. It holds no content, recipients or secrets.
+type AuditEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	At            *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=at,proto3" json:"at,omitempty"`
+	CallerUid     uint32                 `protobuf:"varint,3,opt,name=caller_uid,json=callerUid,proto3" json:"caller_uid,omitempty"`
+	Client        string                 `protobuf:"bytes,4,opt,name=client,proto3" json:"client,omitempty"`
+	Account       string                 `protobuf:"bytes,5,opt,name=account,proto3" json:"account,omitempty"`
+	Action        string                 `protobuf:"bytes,6,opt,name=action,proto3" json:"action,omitempty"`
+	Targets       []string               `protobuf:"bytes,7,rep,name=targets,proto3" json:"targets,omitempty"`
+	Decision      string                 `protobuf:"bytes,8,opt,name=decision,proto3" json:"decision,omitempty"`
+	Result        string                 `protobuf:"bytes,9,opt,name=result,proto3" json:"result,omitempty"`
+	Reason        string                 `protobuf:"bytes,10,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AuditEntry) Reset() {
+	*x = AuditEntry{}
+	mi := &file_chainmail_v1_admin_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AuditEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AuditEntry) ProtoMessage() {}
+
+func (x *AuditEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_chainmail_v1_admin_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AuditEntry.ProtoReflect.Descriptor instead.
+func (*AuditEntry) Descriptor() ([]byte, []int) {
+	return file_chainmail_v1_admin_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *AuditEntry) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *AuditEntry) GetAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.At
+	}
+	return nil
+}
+
+func (x *AuditEntry) GetCallerUid() uint32 {
+	if x != nil {
+		return x.CallerUid
+	}
+	return 0
+}
+
+func (x *AuditEntry) GetClient() string {
+	if x != nil {
+		return x.Client
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetAccount() string {
+	if x != nil {
+		return x.Account
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetAction() string {
+	if x != nil {
+		return x.Action
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetTargets() []string {
+	if x != nil {
+		return x.Targets
+	}
+	return nil
+}
+
+func (x *AuditEntry) GetDecision() string {
+	if x != nil {
+		return x.Decision
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetResult() string {
+	if x != nil {
+		return x.Result
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 var File_chainmail_v1_admin_proto protoreflect.FileDescriptor
 
 const file_chainmail_v1_admin_proto_rawDesc = "" +
@@ -429,12 +676,36 @@ const file_chainmail_v1_admin_proto_rawDesc = "" +
 	"\n" +
 	"started_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12\x19\n" +
 	"\bdev_mode\x18\x03 \x01(\bR\adevMode\x12!\n" +
-	"\fsecret_names\x18\x04 \x03(\tR\vsecretNames2\xe7\x02\n" +
+	"\fsecret_names\x18\x04 \x03(\tR\vsecretNames\"\xa9\x01\n" +
+	"\x10ReadAuditRequest\x120\n" +
+	"\x05since\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x05since\x12\x18\n" +
+	"\aaccount\x18\x02 \x01(\tR\aaccount\x12\x16\n" +
+	"\x06action\x18\x03 \x01(\tR\x06action\x12\x14\n" +
+	"\x05limit\x18\x04 \x01(\x05R\x05limit\x12\x1b\n" +
+	"\tbefore_id\x18\x05 \x01(\x03R\bbeforeId\"m\n" +
+	"\x11ReadAuditResponse\x122\n" +
+	"\aentries\x18\x01 \x03(\v2\x18.chainmail.v1.AuditEntryR\aentries\x12$\n" +
+	"\x0enext_before_id\x18\x02 \x01(\x03R\fnextBeforeId\"\x97\x02\n" +
+	"\n" +
+	"AuditEntry\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\x12*\n" +
+	"\x02at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12\x1d\n" +
+	"\n" +
+	"caller_uid\x18\x03 \x01(\rR\tcallerUid\x12\x16\n" +
+	"\x06client\x18\x04 \x01(\tR\x06client\x12\x18\n" +
+	"\aaccount\x18\x05 \x01(\tR\aaccount\x12\x16\n" +
+	"\x06action\x18\x06 \x01(\tR\x06action\x12\x18\n" +
+	"\atargets\x18\a \x03(\tR\atargets\x12\x1a\n" +
+	"\bdecision\x18\b \x01(\tR\bdecision\x12\x16\n" +
+	"\x06result\x18\t \x01(\tR\x06result\x12\x16\n" +
+	"\x06reason\x18\n" +
+	" \x01(\tR\x06reason2\xb5\x03\n" +
 	"\fAdminService\x12L\n" +
 	"\tSetSecret\x12\x1e.chainmail.v1.SetSecretRequest\x1a\x1f.chainmail.v1.SetSecretResponse\x12[\n" +
 	"\x0eBeginAuthLogin\x12#.chainmail.v1.BeginAuthLoginRequest\x1a$.chainmail.v1.BeginAuthLoginResponse\x12^\n" +
 	"\x0fFinishAuthLogin\x12$.chainmail.v1.FinishAuthLoginRequest\x1a%.chainmail.v1.FinishAuthLoginResponse\x12L\n" +
-	"\tGetStatus\x12\x1e.chainmail.v1.GetStatusRequest\x1a\x1f.chainmail.v1.GetStatusResponseB\xaf\x01\n" +
+	"\tGetStatus\x12\x1e.chainmail.v1.GetStatusRequest\x1a\x1f.chainmail.v1.GetStatusResponse\x12L\n" +
+	"\tReadAudit\x12\x1e.chainmail.v1.ReadAuditRequest\x1a\x1f.chainmail.v1.ReadAuditResponseB\xaf\x01\n" +
 	"\x10com.chainmail.v1B\n" +
 	"AdminProtoP\x01Z>github.com/jamesainslie/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
 
@@ -450,7 +721,7 @@ func file_chainmail_v1_admin_proto_rawDescGZIP() []byte {
 	return file_chainmail_v1_admin_proto_rawDescData
 }
 
-var file_chainmail_v1_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_chainmail_v1_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_chainmail_v1_admin_proto_goTypes = []any{
 	(*SetSecretRequest)(nil),        // 0: chainmail.v1.SetSecretRequest
 	(*SetSecretResponse)(nil),       // 1: chainmail.v1.SetSecretResponse
@@ -460,24 +731,32 @@ var file_chainmail_v1_admin_proto_goTypes = []any{
 	(*FinishAuthLoginResponse)(nil), // 5: chainmail.v1.FinishAuthLoginResponse
 	(*GetStatusRequest)(nil),        // 6: chainmail.v1.GetStatusRequest
 	(*GetStatusResponse)(nil),       // 7: chainmail.v1.GetStatusResponse
-	(*timestamppb.Timestamp)(nil),   // 8: google.protobuf.Timestamp
+	(*ReadAuditRequest)(nil),        // 8: chainmail.v1.ReadAuditRequest
+	(*ReadAuditResponse)(nil),       // 9: chainmail.v1.ReadAuditResponse
+	(*AuditEntry)(nil),              // 10: chainmail.v1.AuditEntry
+	(*timestamppb.Timestamp)(nil),   // 11: google.protobuf.Timestamp
 }
 var file_chainmail_v1_admin_proto_depIdxs = []int32{
-	8, // 0: chainmail.v1.BeginAuthLoginResponse.expires_at:type_name -> google.protobuf.Timestamp
-	8, // 1: chainmail.v1.GetStatusResponse.started_at:type_name -> google.protobuf.Timestamp
-	0, // 2: chainmail.v1.AdminService.SetSecret:input_type -> chainmail.v1.SetSecretRequest
-	2, // 3: chainmail.v1.AdminService.BeginAuthLogin:input_type -> chainmail.v1.BeginAuthLoginRequest
-	4, // 4: chainmail.v1.AdminService.FinishAuthLogin:input_type -> chainmail.v1.FinishAuthLoginRequest
-	6, // 5: chainmail.v1.AdminService.GetStatus:input_type -> chainmail.v1.GetStatusRequest
-	1, // 6: chainmail.v1.AdminService.SetSecret:output_type -> chainmail.v1.SetSecretResponse
-	3, // 7: chainmail.v1.AdminService.BeginAuthLogin:output_type -> chainmail.v1.BeginAuthLoginResponse
-	5, // 8: chainmail.v1.AdminService.FinishAuthLogin:output_type -> chainmail.v1.FinishAuthLoginResponse
-	7, // 9: chainmail.v1.AdminService.GetStatus:output_type -> chainmail.v1.GetStatusResponse
-	6, // [6:10] is the sub-list for method output_type
-	2, // [2:6] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	11, // 0: chainmail.v1.BeginAuthLoginResponse.expires_at:type_name -> google.protobuf.Timestamp
+	11, // 1: chainmail.v1.GetStatusResponse.started_at:type_name -> google.protobuf.Timestamp
+	11, // 2: chainmail.v1.ReadAuditRequest.since:type_name -> google.protobuf.Timestamp
+	10, // 3: chainmail.v1.ReadAuditResponse.entries:type_name -> chainmail.v1.AuditEntry
+	11, // 4: chainmail.v1.AuditEntry.at:type_name -> google.protobuf.Timestamp
+	0,  // 5: chainmail.v1.AdminService.SetSecret:input_type -> chainmail.v1.SetSecretRequest
+	2,  // 6: chainmail.v1.AdminService.BeginAuthLogin:input_type -> chainmail.v1.BeginAuthLoginRequest
+	4,  // 7: chainmail.v1.AdminService.FinishAuthLogin:input_type -> chainmail.v1.FinishAuthLoginRequest
+	6,  // 8: chainmail.v1.AdminService.GetStatus:input_type -> chainmail.v1.GetStatusRequest
+	8,  // 9: chainmail.v1.AdminService.ReadAudit:input_type -> chainmail.v1.ReadAuditRequest
+	1,  // 10: chainmail.v1.AdminService.SetSecret:output_type -> chainmail.v1.SetSecretResponse
+	3,  // 11: chainmail.v1.AdminService.BeginAuthLogin:output_type -> chainmail.v1.BeginAuthLoginResponse
+	5,  // 12: chainmail.v1.AdminService.FinishAuthLogin:output_type -> chainmail.v1.FinishAuthLoginResponse
+	7,  // 13: chainmail.v1.AdminService.GetStatus:output_type -> chainmail.v1.GetStatusResponse
+	9,  // 14: chainmail.v1.AdminService.ReadAudit:output_type -> chainmail.v1.ReadAuditResponse
+	10, // [10:15] is the sub-list for method output_type
+	5,  // [5:10] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_chainmail_v1_admin_proto_init() }
@@ -491,7 +770,7 @@ func file_chainmail_v1_admin_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chainmail_v1_admin_proto_rawDesc), len(file_chainmail_v1_admin_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

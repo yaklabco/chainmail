@@ -245,10 +245,41 @@ func writeComposeResult(env Env, g *globals, jsonOut bool, resp proto.Message, r
 		if s.GetDuplicate() {
 			b.WriteString("duplicate: already sent\n")
 		}
+	case res.GetHeld() != nil:
+		b.WriteString(heldText(res.GetHeld()))
 	default:
 		return errors.New("the daemon returned no result")
 	}
 	return writeString(env.Stdout, b.String())
+}
+
+// heldText says that policy held a send: where the draft went, the blocked
+// recipients and whether there were too many. Every value is cleaned for
+// the terminal.
+func heldText(h *chainmailv1.Held) string {
+	var b strings.Builder
+	d := h.GetDraft()
+	switch {
+	case d.GetRef() != "":
+		fmt.Fprintf(&b, "held by policy, not sent: saved to Drafts %s\n", termText(d.GetRef()))
+	case d.GetHint() != "":
+		fmt.Fprintf(&b, "held by policy, not sent: %s\n", termText(d.GetHint()))
+	case h.GetHint() != "":
+		fmt.Fprintf(&b, "held by policy, not sent: %s\n", termText(h.GetHint()))
+	default:
+		fmt.Fprintf(&b, "held by policy, not sent: search the Drafts folder for Message-ID <%s>\n", termText(d.GetMessageId()))
+	}
+	if blocked := h.GetBlocked(); len(blocked) > 0 {
+		clean := make([]string, len(blocked))
+		for i, r := range blocked {
+			clean[i] = termText(r)
+		}
+		fmt.Fprintf(&b, "blocked: %s\n", strings.Join(clean, ", "))
+	}
+	if h.GetTooManyRecipients() {
+		b.WriteString("too many recipients\n")
+	}
+	return b.String()
 }
 
 // contentFlags are the body, attachment and option flags of every command
