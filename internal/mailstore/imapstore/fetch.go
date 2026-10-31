@@ -71,12 +71,33 @@ func (s *Store) resolveUID(ctx context.Context, c *conn, r ref.Ref) (uint32, err
 	return uid, nil
 }
 
-func (s *Store) fetchGroup(ctx context.Context, c *conn, folder string, refs []ref.Ref, idx []int, out []mailstore.MessageResult) error {
-	if err := s.open(ctx, c, folder); err != nil {
-		return err
+// fetchRef opens r's folder on c and fetches items of the message r names,
+// as readIn does. It returns the message's UID there and the answer, or
+// ErrStaleRef when the message is gone.
+func (s *Store) fetchRef(ctx context.Context, c *conn, r ref.Ref, items *imap.FetchOptions) (uint32, *imapclient.FetchMessageBuffer, error) {
+	var uid uint32
+	var bufs []*imapclient.FetchMessageBuffer
+	err := s.readIn(ctx, c, r.Folder, func() (bool, error) {
+		var err error
+		if uid, err = s.resolveUID(ctx, c, r); err != nil {
+			return false, err
+		}
+		bufs, err = c.fetch(ctx, imap.UIDSetNum(imap.UID(uid)), items)
+		return len(bufs) == 0, err
+	})
+	if err != nil {
+		return 0, nil, err
 	}
-	// want maps each UID to the refs that name it: a batch may name one message twice.
-	want := map[uint32][]int{}
+	if len(bufs) == 0 {
+		return 0, nil, fmt.Errorf("%w: the message is gone; search again", mailstore.ErrStaleRef)
+	}
+	return uid, bufs[0], nil
+}
+
+// resolveRefs adds the UID of each ref refs[idx[j]] names in the folder
+// open on c to want, mapped to j: a batch may name one message twice. A
+// stale ref fails in out on its own.
+func (s *Store) resolveRefs(ctx context.Context, c *conn, refs []ref.Ref, idx []int, want map[uint32][]int, out []mailstore.MessageResult) error {
 	for j, i := range idx {
 		uid, err := s.resolveUID(ctx, c, refs[i])
 		switch {
@@ -88,18 +109,54 @@ func (s *Store) fetchGroup(ctx context.Context, c *conn, folder string, refs []r
 		}
 		want[uid] = append(want[uid], j)
 	}
-	if len(want) == 0 {
-		return nil
+	return nil
+}
+
+// missingUIDs returns the UIDs of want that got holds no answer for, in order.
+func missingUIDs(want map[uint32][]int, got map[uint32]*imapclient.FetchMessageBuffer) []uint32 {
+	var out []uint32
+	for uid := range want {
+		if got[uid] == nil {
+			out = append(out, uid)
+		}
 	}
-	uids := slices.Sorted(maps.Keys(want))
-	bufs, err := c.fetch(ctx, uidSet(uids), s.summaryItems(false, true))
-	if err != nil {
+	slices.Sort(out)
+	return out
+}
+
+func (s *Store) fetchGroup(ctx context.Context, c *conn, folder string, refs []ref.Ref, idx []int, out []mailstore.MessageResult) error {
+	// want maps each UID to the refs that name it, and got each UID the
+	// server answered for to its answer. A second run, after readIn opened
+	// the folder again, asks only for the UIDs left out, unless the folder
+	// now has another UIDVALIDITY and every ref is resolved again.
+	var want map[uint32][]int
+	var got map[uint32]*imapclient.FetchMessageBuffer
+	var validity uint32
+	err := s.readIn(ctx, c, folder, func() (bool, error) {
+		if want == nil || c.uidValidity != validity {
+			clear(out)
+			want, got, validity = map[uint32][]int{}, map[uint32]*imapclient.FetchMessageBuffer{}, c.uidValidity
+			if err := s.resolveRefs(ctx, c, refs, idx, want, out); err != nil {
+				return false, err
+			}
+		}
+		missing := missingUIDs(want, got)
+		if len(missing) == 0 {
+			return false, nil
+		}
+		bufs, err := c.fetch(ctx, uidSet(missing), s.summaryItems(false, true))
+		if err != nil {
+			return false, err
+		}
+		for _, b := range bufs {
+			got[uint32(b.UID)] = b
+		}
+		return len(missingUIDs(want, got)) > 0, nil
+	})
+	if err != nil || len(want) == 0 {
 		return err
 	}
-	got := make(map[uint32]*imapclient.FetchMessageBuffer, len(bufs))
-	for _, b := range bufs {
-		got[uint32(b.UID)] = b
-	}
+	uids := slices.Sorted(maps.Keys(want))
 	for uid, js := range want {
 		if got[uid] == nil {
 			for _, j := range js {

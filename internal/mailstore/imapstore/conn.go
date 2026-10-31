@@ -182,12 +182,22 @@ func (c *conn) kill() {
 	_ = c.sess.conn.Close() // shutting the socket is the point; its error says nothing new
 }
 
+// forget makes the next SelectFolder open its folder again, even if that is
+// the folder open now.
+func (c *conn) forget() { c.selected, c.writable, c.uidValidity = "", false, 0 }
+
+// holds reports whether c has folder open in a mode that will do:
+// read-write when writable, either mode otherwise.
+func (c *conn) holds(folder string, writable bool) bool {
+	return folder != "" && c.selected == folder && (c.writable || !writable)
+}
+
 // SelectFolder opens folder, read-write with SELECT when writable and
 // read-only with EXAMINE otherwise, unless it is already open in a mode
 // that will do. A read accepts either mode; a write needs read-write, so a
 // folder open read-only is opened again.
 func (c *conn) SelectFolder(ctx context.Context, folder string, writable bool) error {
-	if folder != "" && c.selected == folder && (c.writable || !writable) {
+	if c.holds(folder, writable) {
 		return nil
 	}
 	var data *imap.SelectData

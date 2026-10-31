@@ -291,6 +291,65 @@ func TestFakeGmailLateArrivals(t *testing.T) {
 	}
 }
 
+// TestFakeGmailLateExists checks Options.LateExists: a session already in
+// Trash does not learn of a message another session moved there at its
+// NOOP, nor see it at the UID FETCH after, which instead announces it, so
+// only the command after that sees it. A SELECT sees it at once.
+func TestFakeGmailLateExists(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	s := StartWith(t, ca, Options{LateExists: true}, "me@gmail.example", "pw",
+		Message{Raw: raw1, Date: time.Now(), Labels: []string{`\Inbox`}},
+		Message{Raw: rawTwo, Date: time.Now(), Labels: []string{`\Inbox`}},
+	)
+	watcher := dial(t, s, ca)
+	selectRW(t, watcher, "[Gmail]/Trash")
+	if err := watcher.Noop().Wait(); err != nil {
+		t.Fatal(err)
+	}
+	writer := dial(t, s, ca)
+	selectRW(t, writer, "INBOX")
+	moved, err := writer.Move(imap.UIDSetNum(101), "[Gmail]/Trash").Wait()
+	if err != nil || moved.DestUIDs == nil {
+		t.Fatalf("MOVE = %+v, %v", moved, err)
+	}
+	set := moved.DestUIDs
+
+	if err := watcher.Noop().Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if n := watcher.Mailbox().NumMessages; n != 0 {
+		t.Errorf("Trash count after a NOOP = %d, want 0", n)
+	}
+	msgs, err := watcher.Fetch(set, &imap.FetchOptions{UID: true}).Collect()
+	if err != nil || len(msgs) != 0 {
+		t.Errorf("UID FETCH after the NOOP = %v, %v; want nothing", msgs, err)
+	}
+	if n := watcher.Mailbox().NumMessages; n != 1 {
+		t.Errorf("Trash count after the UID FETCH = %d, want 1", n)
+	}
+	msgs, err = watcher.Fetch(set, &imap.FetchOptions{UID: true}).Collect()
+	if err != nil || len(msgs) != 1 {
+		t.Errorf("UID FETCH after it was announced = %v, %v; want the moved message", msgs, err)
+	}
+
+	// Another arrival, which a SELECT sees at once.
+	moved, err = writer.Move(imap.UIDSetNum(102), "[Gmail]/Trash").Wait()
+	if err != nil || moved.DestUIDs == nil {
+		t.Fatalf("MOVE = %+v, %v", moved, err)
+	}
+	if err := watcher.Noop().Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if data := selectRW(t, watcher, "[Gmail]/Trash"); data.NumMessages != 2 {
+		t.Errorf("Trash count at a SELECT = %d, want 2", data.NumMessages)
+	}
+	msgs, err = watcher.Fetch(moved.DestUIDs, &imap.FetchOptions{UID: true}).Collect()
+	if err != nil || len(msgs) != 1 {
+		t.Errorf("UID FETCH after a SELECT = %v, %v; want the moved message", msgs, err)
+	}
+}
+
 // startLabelled runs a fake with one message per label set, in order, so
 // message i has All Mail UID i+1.
 func startLabelled(t *testing.T, labels ...[]string) (*Server, *tlstest.CA) {

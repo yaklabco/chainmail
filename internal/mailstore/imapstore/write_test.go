@@ -900,9 +900,9 @@ func TestWriteReselectsAFolderOpenReadOnly(t *testing.T) {
 	mu.Lock()
 	got := slices.Clone(selects)
 	mu.Unlock()
-	want := []string{"INBOX read-only=true", "INBOX read-only=false"}
+	want := []string{"INBOX read-only=true", "INBOX read-only=false", "INBOX read-only=false"}
 	if !slices.Equal(got, want) {
-		t.Errorf("selects = %q, want %q: EXAMINE for the read, SELECT for the write, and the read after reusing it", got, want)
+		t.Errorf("selects = %q, want %q: EXAMINE for the read, SELECT for the write, and SELECT again for the read after it, keeping the mode", got, want)
 	}
 }
 
@@ -1209,10 +1209,11 @@ func meetAtDial(s *Store, n int32) *atomic.Bool {
 }
 
 // TestReadAfterAWriteSyncsAReusedFolder: a connection that had the
-// destination open before another connection moved mail into it sends NOOP
-// before it reads, so the server tells it of the new message. Dovecot
+// destination open before another connection moved mail into it opens it
+// again before it reads, so the server tells it of the new message. Dovecot
 // answers a UID FETCH or SEARCH only for messages the session has been told
-// of, so without it a ref a move just gave reads as gone. Reads with no
+// of, so without it a ref a move just gave reads as gone, and Gmail can tell
+// of a moved message only after the command after a NOOP. Reads with no
 // write since pay nothing.
 func TestReadAfterAWriteSyncsAReusedFolder(t *testing.T) {
 	t.Parallel()
@@ -1271,7 +1272,7 @@ func TestReadAfterAWriteSyncsAReusedFolder(t *testing.T) {
 	}
 	cmds := srv.received()
 	after := cmds[slices.IndexFunc(cmds, func(c string) bool { return strings.HasPrefix(c, "UID MOVE") })+1:]
-	if !slices.Equal(after, []string{"NOOP", `UID SEARCH HEADER "Message-ID" "<1@x>"`}) {
-		t.Errorf("commands after the move %q, want NOOP on the connection with Archive open, then the search", after)
+	if !slices.Equal(after, []string{`EXAMINE "Archive"`, `UID SEARCH HEADER "Message-ID" "<1@x>"`}) {
+		t.Errorf("commands after the move %q, want EXAMINE on the connection with Archive open, then the search", after)
 	}
 }

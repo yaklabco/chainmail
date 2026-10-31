@@ -151,7 +151,7 @@ type Store struct {
 	// a folder before the latest one opens it again rather than trust it.
 	folderGen atomic.Uint64
 	// writeGen counts writes sent through this store. A connection that has
-	// not looked at its folder since the latest one sends NOOP before it
+	// not looked at its folder since the latest one opens it again before it
 	// reuses it, even within freshFor, so the server tells it of mail
 	// another connection changed.
 	writeGen atomic.Uint64
@@ -455,25 +455,43 @@ func (s *Store) open(ctx context.Context, c *conn, folder string) error {
 // openMode is open, read-write when writable. A connection that opened its
 // folder before a rename or delete opens it again, since a server keeps the
 // old mailbox open under its new name, or none. One that reuses its open
-// folder sends NOOP first, so it sees what changed there, unless the server
-// told it of the folder within freshFor and no write went through this
-// store since.
+// folder after a write through this store opens it again, so it sees what
+// the write changed there. Otherwise it sends NOOP first, so it sees what
+// changed elsewhere, unless the server told it of the folder within
+// freshFor.
 func (s *Store) openMode(ctx context.Context, c *conn, folder string, writable bool) error {
+	_, err := s.openFresh(ctx, c, folder, writable)
+	return err
+}
+
+// openFresh is openMode, and reports whether it sent SELECT or EXAMINE
+// rather than reuse the folder open on c.
+func (s *Store) openFresh(ctx context.Context, c *conn, folder string, writable bool) (bool, error) {
 	if gen := s.folderGen.Load(); c.folderGen != gen {
-		c.selected, c.writable, c.uidValidity, c.folderGen = "", false, 0, gen
+		c.forget()
+		c.folderGen = gen
 	}
 	writes := s.writeGen.Load()
-	reuse := folder != "" && c.selected == folder && (c.writable || !writable)
-	if reuse && (c.writeGen != writes || c.stale()) {
-		// New mail, another mail client or another of this store's
-		// connections may have changed mail here. A server tells a session
-		// of new mail only in answer to a command, and Gmail and Dovecot
-		// answer a UID FETCH, STORE or SEARCH only for messages they have
-		// told the session of.
+	reuse := c.holds(folder, writable)
+	switch {
+	case reuse && c.writeGen != writes:
+		// Another of this store's connections may have changed mail here,
+		// or moved a message in. Gmail tells a session that kept the folder
+		// open of a message moved in only some time after it answers a
+		// NOOP, while a SELECT or EXAMINE shows it at once. A read takes
+		// either mode, so a folder open read-write stays so.
+		writable = writable || c.writable
+		c.forget()
+	case reuse && c.stale():
+		// New mail or another mail client may have changed mail here. A
+		// server tells a session of new mail only in answer to a command,
+		// and Gmail and Dovecot answer a UID FETCH, STORE or SEARCH only for
+		// messages they have told the session of.
 		if err := c.Noop(ctx); err != nil {
-			return err
+			return false, err
 		}
 	}
+	fresh := !c.holds(folder, writable)
 	err := c.SelectFolder(ctx, folder, writable)
 	switch {
 	case err == nil:
@@ -481,6 +499,32 @@ func (s *Store) openMode(ctx context.Context, c *conn, folder string, writable b
 	case errors.Is(err, mailstore.ErrNotFound):
 		s.forgetFolders()
 	}
+	return fresh, err
+}
+
+// readIn opens folder on c for reading and runs read, which reports whether
+// the server's answer left out a message read asked for. When it did and c
+// reused the folder it had open, readIn opens the folder again, in the same
+// mode, and runs read once more, so a message is reported gone only from a
+// fresh view of the folder. A server may tell a session that keeps a folder
+// open of a message late: Gmail tells of one another session moved there
+// only some time after the NOOP that asks, while a SELECT or EXAMINE shows
+// it at once. read must be safe to run again.
+func (s *Store) readIn(ctx context.Context, c *conn, folder string, read func() (missed bool, err error)) error {
+	fresh, err := s.openFresh(ctx, c, folder, false)
+	if err != nil {
+		return err
+	}
+	missed, err := read()
+	if err != nil || !missed || fresh {
+		return err
+	}
+	writable := c.writable
+	c.forget()
+	if err := s.openMode(ctx, c, folder, writable); err != nil {
+		return err
+	}
+	_, err = read()
 	return err
 }
 

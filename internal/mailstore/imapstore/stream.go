@@ -68,24 +68,14 @@ func (s *Store) tryOpenPart(ctx context.Context, r ref.Ref, path []int) (mailsto
 // openPart locates the part and fetches its first chunk, so a failure before
 // any byte reaches the caller can still be retried.
 func (s *Store) openPart(ctx context.Context, c *conn, r ref.Ref, path []int) (mailstore.PartInfo, *partReader, error) {
-	if err := s.open(ctx, c, r.Folder); err != nil {
-		return mailstore.PartInfo{}, nil, err
-	}
-	uid, err := s.resolveUID(ctx, c, r)
+	uid, b, err := s.fetchRef(ctx, c, r, &imap.FetchOptions{UID: true, RFC822Size: true, BodyStructure: &imap.FetchItemBodyStructure{Extended: true}})
 	if err != nil {
 		return mailstore.PartInfo{}, nil, err
 	}
-	bufs, err := c.fetch(ctx, imap.UIDSetNum(imap.UID(uid)), &imap.FetchOptions{UID: true, RFC822Size: true, BodyStructure: &imap.FetchItemBodyStructure{Extended: true}})
-	if err != nil {
-		return mailstore.PartInfo{}, nil, err
-	}
-	if len(bufs) == 0 {
-		return mailstore.PartInfo{}, nil, fmt.Errorf("%w: the message is gone; search again", mailstore.ErrStaleRef)
-	}
-	info := mailstore.PartInfo{ContentType: "message/rfc822", Size: bufs[0].RFC822Size}
+	info := mailstore.PartInfo{ContentType: "message/rfc822", Size: b.RFC822Size}
 	encoding := ""
 	if path != nil {
-		sp := findPart(bufs[0].BodyStructure, path)
+		sp := findPart(b.BodyStructure, path)
 		if sp == nil {
 			return mailstore.PartInfo{}, nil, fmt.Errorf("%w: the message has no part %s", mailstore.ErrNotFound, partString(path))
 		}
