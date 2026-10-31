@@ -35,17 +35,22 @@ const (
 	// writesEnv opts in to the tests that send, organize and probe.
 	writesEnv = "CHAINMAIL_LIVE_WRITES"
 	// deliveryTimeout bounds the wait for the delivered copy of a message
-	// sent to self: the inbox copy, or on Google the All Mail message.
-	deliveryTimeout = 60 * time.Second
-	// searchTimeout bounds the wait for a message to show in a folder after
-	// an organize call.
-	searchTimeout = 3 * time.Minute
+	// sent to self: the inbox copy, or on Google the All Mail message. The
+	// test finds it by searching, and Gmail's search, served from its
+	// search index, trailed real changes by 2 to 4 minutes in live runs.
+	deliveryTimeout = 6 * time.Minute
+	// searchTimeout bounds the wait for a message to show in a search of a
+	// folder after an organize call. The test searches only when it does
+	// not know the message's ref, as after a COPY or MOVE without COPYUID.
+	// Where it knows the ref, it reads it with Get, which needs no index.
+	searchTimeout = 6 * time.Minute
 	// settleTimeout is how long cleanup keeps looking for the delivered copy
 	// of a send the test never saw arrive, after the last send. It is longer
 	// than deliveryTimeout, so a send the test gave up on still gets time.
-	settleTimeout = 3 * time.Minute
-	// cleanupTimeout bounds each cleanup.
-	cleanupTimeout = 5 * time.Minute
+	settleTimeout = deliveryTimeout + 2*time.Minute
+	// cleanupTimeout bounds each cleanup. It outlasts settleTimeout, so a
+	// cleanup that waited for a late send still has time to expunge.
+	cleanupTimeout = settleTimeout + 5*time.Minute
 	// testFolderPrefix starts the name of the folder or label the organize
 	// test creates.
 	testFolderPrefix = "chainmail-test-"
@@ -197,7 +202,9 @@ func folderRoles(t *testing.T, c *client.Client, account string) map[string]stri
 // wherever it is: the Inbox, Sent and Drafts and every other folder, with
 // All Mail, Trash and Spam on Google. It touches nothing else. Before it
 // removes anything it waits for the delivered copy of every send, so a
-// message cannot arrive after cleanup has finished.
+// message cannot arrive after cleanup has finished. It removes the refs the
+// test tracked as well as what a search for the token finds, since Gmail's
+// search can miss a message for minutes after a change.
 type sweeper struct {
 	c       *client.Client
 	account string
@@ -205,6 +212,7 @@ type sweeper struct {
 	google  bool
 	roles   map[string]string
 	deliveries
+	tracked
 }
 
 // newSweeper registers a cleanup that expunges every message of account a
@@ -243,12 +251,17 @@ func (s *sweeper) waitDelivered(t *testing.T, id string) string {
 	t.Helper()
 	ref := findMessage(t, s.c, s.account, s.token, deliveryScope(s.google), id, deliveryTimeout, s.isDelivered)
 	s.delivered(id)
+	s.track(ref)
 	return ref
 }
 
-// gone says a ref no longer names a message, which cleanup takes as done.
-func gone(e *chainmailv1.ItemError) bool {
-	return e.GetReason() == api.ReasonNotFound || e.GetReason() == api.ReasonStaleRef
+// sentOf checks a send-type result and returns what was sent. It tracks
+// the Sent copy's ref, when there is one.
+func (s *sweeper) sentOf(t *testing.T, call string, res *chainmailv1.ComposeResult) *chainmailv1.Sent {
+	t.Helper()
+	sent := sentOf(t, call, res)
+	s.track(sent.GetSentRef())
+	return sent
 }
 
 // sweep waits for the sends not yet seen delivered, then expunges the
@@ -256,11 +269,11 @@ func gone(e *chainmailv1.ItemError) bool {
 // arrived, since that one may still arrive after cleanup.
 func (s *sweeper) sweep(ctx context.Context, t *testing.T) error {
 	missing, waitErr := s.await(ctx)
-	removed, err := s.expunge(ctx)
+	byRef, found, err := s.expunge(ctx)
 	if err := errors.Join(waitErr, err); err != nil {
 		return err
 	}
-	t.Logf("cleanup on %s: expunged %d messages", s.account, removed)
+	t.Logf("cleanup on %s: expunged %d tracked messages by ref and %d found by search", s.account, byRef, found)
 	if missing > 0 {
 		return fmt.Errorf("%d sends were never seen delivered within %v of the last send, so a message may still arrive after cleanup", missing, settleTimeout)
 	}
@@ -297,9 +310,21 @@ func (s *sweeper) await(ctx context.Context) (int, error) {
 	}
 }
 
-// expunge removes every message whose subject holds the token, searching
-// again until none is left, and returns how many it removed.
-func (s *sweeper) expunge(ctx context.Context) (int, error) {
+// expunge removes the tracked refs' messages, then every message a search
+// finds whose subject holds the token. It returns how many it removed
+// each way. It tries both even when one fails.
+func (s *sweeper) expunge(ctx context.Context) (byRef, found int, err error) {
+	byRef, refErr := expungeTracked(ctx, s.c, s.token, s.refs)
+	if refErr != nil {
+		refErr = fmt.Errorf("expunging tracked refs: %w", refErr)
+	}
+	found, err = s.expungeFound(ctx)
+	return byRef, found, errors.Join(refErr, err)
+}
+
+// expungeFound removes every message whose subject holds the token,
+// searching again until none is left, and returns how many it removed.
+func (s *sweeper) expungeFound(ctx context.Context) (int, error) {
 	removed := 0
 	for range maxSweepRounds {
 		rows, err := tokenRows(ctx, s.c, s.account, s.token, "anywhere")
@@ -325,6 +350,35 @@ func (s *sweeper) expunge(ctx context.Context) (int, error) {
 		removed += len(refs)
 	}
 	return removed, fmt.Errorf("messages still found after %d rounds of expunging", maxSweepRounds)
+}
+
+// left returns the refs of the test's messages that are still there: the
+// tracked refs, and the rows a search for the token in folder in lists,
+// that still read and that keep says count. Gmail's search trails changes
+// by minutes, so it can miss a message, which a tracked ref still names, or
+// list one already removed, which no longer reads. Neither hides a message
+// that is really left.
+func (s *sweeper) left(ctx context.Context, in string, keep func(*chainmailv1.Message) bool) ([]string, error) {
+	rows, err := tokenRows(ctx, s.c, s.account, s.token, in)
+	if err != nil {
+		return nil, err
+	}
+	var k tracked
+	k.track(s.refs...)
+	for _, r := range rows {
+		k.track(r.GetRef())
+	}
+	items, err := readable(ctx, s.c, k.refs)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, it := range items {
+		if keep == nil || keep(it.GetMessage()) {
+			out = append(out, it.GetRef())
+		}
+	}
+	return out, nil
 }
 
 // selfSpec is a Markdown message from the account to its own address.
@@ -399,7 +453,7 @@ func TestEveryAccountSends(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Send: %v (%s)", err, hint(err))
 			}
-			sent := sentOf(t, "Send", resp.Msg.GetResult())
+			sent := sw.sentOf(t, "Send", resp.Msg.GetResult())
 			if sent.GetDuplicate() {
 				t.Fatal("Send: the first send is marked duplicate")
 			}
@@ -427,7 +481,7 @@ func TestEveryAccountSends(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Reply: %v (%s)", err, hint(err))
 				}
-				s := sentOf(t, "Reply", resp.Msg.GetResult())
+				s := sw.sentOf(t, "Reply", resp.Msg.GetResult())
 				got := sw.waitDelivered(t, s.GetMessageId())
 				m := getOne(t, c, got, false)
 				if irt := m.GetInReplyTo(); len(irt) != 1 || trimID(irt[0].GetUntrusted()) != trimID(sent.GetMessageId()) {
@@ -447,7 +501,7 @@ func TestEveryAccountSends(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Forward: %v (%s)", err, hint(err))
 				}
-				s := sentOf(t, "Forward", resp.Msg.GetResult())
+				s := sw.sentOf(t, "Forward", resp.Msg.GetResult())
 				sw.waitDelivered(t, s.GetMessageId())
 				if !hasFlag(t, c, orig, "$Forwarded") {
 					t.Errorf("the original %s is not $Forwarded after the forward", orig)
@@ -462,6 +516,7 @@ func TestEveryAccountSends(t *testing.T) {
 					t.Fatalf("CreateDraft: %v (%s)", err, hint(err))
 				}
 				first := created.Msg.GetDraft()
+				sw.track(first.GetRef())
 				t.Logf("draft created: %s", first.GetRef())
 
 				updated, err := c.Compose.UpdateDraft(t.Context(), connect.NewRequest(&chainmailv1.UpdateDraftRequest{
@@ -471,6 +526,7 @@ func TestEveryAccountSends(t *testing.T) {
 					t.Fatalf("UpdateDraft %s: %v (%s)", first.GetRef(), err, hint(err))
 				}
 				second := updated.Msg.GetDraft()
+				sw.track(second.GetRef())
 				if second.GetRef() == "" || second.GetRef() == first.GetRef() {
 					t.Fatalf("UpdateDraft: new ref %q, want a new ref", second.GetRef())
 				}
@@ -483,7 +539,7 @@ func TestEveryAccountSends(t *testing.T) {
 				if err != nil {
 					t.Fatalf("SendDraft %s: %v (%s)", second.GetRef(), err, hint(err))
 				}
-				s := sentOf(t, "SendDraft", sendResp.Msg.GetResult())
+				s := sw.sentOf(t, "SendDraft", sendResp.Msg.GetResult())
 				sw.waitDelivered(t, s.GetMessageId())
 
 				doomed, err := c.Compose.CreateDraft(t.Context(), connect.NewRequest(&chainmailv1.CreateDraftRequest{
@@ -493,15 +549,19 @@ func TestEveryAccountSends(t *testing.T) {
 					t.Fatalf("CreateDraft: %v (%s)", err, hint(err))
 				}
 				dref := doomed.Msg.GetDraft().GetRef()
+				sw.track(dref)
 				if _, err := c.Compose.DeleteDraft(t.Context(), connect.NewRequest(&chainmailv1.DeleteDraftRequest{Ref: dref})); err != nil {
 					t.Fatalf("DeleteDraft %s: %v (%s)", dref, err, hint(err))
 				}
-				left, err := tokenRows(t.Context(), c, a.GetName(), token, "drafts")
+				// The drafts' refs are read as well as Drafts searched, since
+				// Gmail's search may still list a draft just removed, or not
+				// yet list one.
+				left, err := sw.left(t.Context(), "drafts", func(m *chainmailv1.Message) bool { return isDraft(m, roles) })
 				if err != nil {
-					t.Fatalf("searching Drafts: %v", err)
+					t.Fatalf("looking for drafts left: %v", err)
 				}
 				if len(left) != 0 {
-					t.Errorf("%d drafts left after sending one and deleting the other", len(left))
+					t.Errorf("drafts %q left after sending one and deleting the other", left)
 				}
 			})
 		})
@@ -578,7 +638,7 @@ func TestEveryAccountOrganizes(t *testing.T) {
 					if sw == nil {
 						return nil
 					}
-					_, err := sw.expunge(ctx)
+					_, _, err := sw.expunge(ctx)
 					return err
 				}
 				if err := removeTestFolder(ctx, c, name, generated, serverName, resweep); err != nil {
@@ -613,28 +673,41 @@ func TestEveryAccountOrganizes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Send: %v (%s)", err, hint(err))
 			}
-			id := sentOf(t, "Send", resp.Msg.GetResult()).GetMessageId()
+			id := sw.sentOf(t, "Send", resp.Msg.GetResult()).GetMessageId()
 			m := sw.waitDelivered(t, id)
 
-			// next is the message's ref after a call: new_ref when set, the
-			// same ref on Google when the call only edits labels, or else
-			// the copy found by searching in.
+			// next is the message's ref after a call, which cleanup tracks:
+			// new_ref when set, the same ref on Google when the call only
+			// edits labels, or else the copy found by searching in. Only the
+			// last waits on Gmail's search index.
 			next := func(o *chainmailv1.RefOutcome, in string, exclude ...string) string {
 				t.Helper()
-				if o.GetNewRef() != "" {
-					return o.GetNewRef()
+				r := o.GetNewRef()
+				switch {
+				case r != "":
+				case google && in != "trash":
+					r = o.GetRef()
+				default:
+					r = findMessage(t, c, name, token, in, id, searchTimeout, func(m *chainmailv1.Message) bool {
+						return !slices.Contains(exclude, m.GetRef())
+					})
 				}
-				if google && in != "trash" {
-					return o.GetRef()
+				sw.track(r)
+				return r
+			}
+			// confirm reads ref and fails the test unless the message is
+			// where call should have left it. Get reads the server, so
+			// unlike a search it does not trail the change.
+			confirm := func(call, ref, want string, where func(*chainmailv1.Message) bool) {
+				t.Helper()
+				if got := getOne(t, c, ref, false); !where(got) {
+					t.Fatalf("after %s, %s is in %q with labels %q, not %s", call, ref, got.GetFolder(), got.GetLabels(), want)
 				}
-				return findMessage(t, c, name, token, in, id, searchTimeout, func(m *chainmailv1.Message) bool {
-					return !slices.Contains(exclude, m.GetRef())
-				})
 			}
 
 			cpOuts, err := outcomesOf(c.Organize.Copy(t.Context(), connect.NewRequest(&chainmailv1.CopyRequest{Refs: []string{m}, Folder: folder})))
 			cp := next(outcome(t, "Copy", cpOuts, err), folder)
-			findMessage(t, c, name, token, folder, id, searchTimeout, nil)
+			confirm("Copy", cp, folder, func(got *chainmailv1.Message) bool { return filedIn(got, google, folder) })
 
 			for _, step := range []struct {
 				name        string
@@ -687,6 +760,7 @@ func TestEveryAccountOrganizes(t *testing.T) {
 			mvOuts, err := outcomesOf(c.Organize.Move(t.Context(), connect.NewRequest(&chainmailv1.MoveRequest{Refs: []string{m}, Folder: folder})))
 			mv := outcome(t, "Move", mvOuts, err)
 			moved := next(mv, folder, cp)
+			confirm("Move", moved, folder, func(got *chainmailv1.Message) bool { return filedIn(got, google, folder) })
 			if !google {
 				msgs, err := getMessages(t.Context(), c, []string{m})
 				if err != nil {
@@ -709,11 +783,14 @@ func TestEveryAccountOrganizes(t *testing.T) {
 				t.Logf("Archive: the account has no archive folder; set archive_folder to test it")
 			} else {
 				current = next(outcome(t, "Archive", arOuts, err), "archive", cp)
+				confirm("Archive", current, "archived", func(got *chainmailv1.Message) bool { return archived(got, google, roles, folder) })
 			}
 
+			// Trash's new_ref names the message in Trash, so it is read
+			// there rather than searched for.
 			trOuts, err := outcomesOf(c.Organize.Trash(t.Context(), connect.NewRequest(&chainmailv1.TrashRequest{Refs: []string{current}})))
-			next(outcome(t, "Trash", trOuts, err), "trash")
-			findMessage(t, c, name, token, "trash", id, searchTimeout, nil)
+			trashed := next(outcome(t, "Trash", trOuts, err), "trash")
+			confirm("Trash", trashed, "in Trash", func(got *chainmailv1.Message) bool { return inRole(got, roles, "trash") })
 
 			// Expunge every message of the test, the copy and the trashed
 			// original, then check nothing is left.
@@ -722,12 +799,12 @@ func TestEveryAccountOrganizes(t *testing.T) {
 			if err := sw.sweep(ctx, t); err != nil {
 				t.Fatalf("Expunge: %v", err)
 			}
-			left, err := tokenRows(t.Context(), c, name, token, "anywhere")
+			left, err := sw.left(t.Context(), "anywhere", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if len(left) != 0 {
-				t.Errorf("%d messages left after expunging", len(left))
+				t.Errorf("messages %q left after expunging", left)
 			}
 
 			if _, err := c.Organize.DeleteFolder(t.Context(), connect.NewRequest(&chainmailv1.DeleteFolderRequest{Account: name, Name: folder})); err != nil {
