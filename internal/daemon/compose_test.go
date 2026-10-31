@@ -1659,3 +1659,111 @@ func TestSendHeldDraftSaveFailure(t *testing.T) {
 	}
 	e.checkAuditPrivate(t, "stranger@")
 }
+
+// injected is an RFC 5322 address with a quoted local part. Its decoded
+// form passes *@example.net, but written into RCPT TO it closes the path at
+// the first > and hands the rest to a DSN server as an ORCPT parameter, so
+// the server would deliver to victim@blocked.invalid.
+const (
+	injected        = `"victim@blocked.invalid> ORCPT=rfc822;x"@example.net`
+	injectedDecoded = "victim@blocked.invalid> ORCPT=rfc822;x@example.net"
+)
+
+// injectedRaw is a raw message from the host account to to.
+func injectedRaw(to string) []byte {
+	return []byte("From: me@example.com\r\n" +
+		"To: " + to + "\r\n" +
+		"Message-ID: <review@example.com>\r\n" +
+		"Subject: review\r\n" +
+		"\r\n" + "secret body\r\n")
+}
+
+// A recipient whose decoded address is not safe in an SMTP path is held,
+// whatever the allowlist says, on every path that can submit an envelope
+// built from it. The server, which offers DSN, sees no mail at all. A new
+// draft keeps the recipient in its header, quoted again, and SendDraft
+// leaves its draft as it was.
+func TestSendUnsafeRecipientIsHeld(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		action  string
+		blocked string
+		call    func(t *testing.T, e sendEnv) (*chainmailv1.ComposeResult, error)
+	}{
+		{
+			name: "SendRaw explicit envelope", action: "send_raw", blocked: injectedDecoded,
+			call: func(t *testing.T, e sendEnv) (*chainmailv1.ComposeResult, error) {
+				return e.sendRaw(t, &chainmailv1.SendRawRequest{
+					Account: "host", Raw: injectedRaw("you@example.net"), EnvelopeTo: []string{injected}, IdempotencyKey: "inject",
+				})
+			},
+		},
+		{
+			name: "SendRaw header-derived envelope", action: "send_raw", blocked: injectedDecoded,
+			call: func(t *testing.T, e sendEnv) (*chainmailv1.ComposeResult, error) {
+				return e.sendRaw(t, &chainmailv1.SendRawRequest{Account: "host", Raw: injectedRaw(injected), IdempotencyKey: "inject"})
+			},
+		},
+		{
+			name: "SendDraft", action: "draft.send", blocked: injectedDecoded,
+			call: func(t *testing.T, e sendEnv) (*chainmailv1.ComposeResult, error) {
+				dr, err := e.host.Append(t.Context(), "Drafts", []string{`\Draft`, `\Seen`}, time.Time{}, injectedRaw(injected))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return e.sendDraft(t, dr.String(), "inject")
+			},
+		},
+		{
+			name: "a legitimate quoted local part", action: "send_raw", blocked: "john smith@example.net",
+			call: func(t *testing.T, e sendEnv) (*chainmailv1.ComposeResult, error) {
+				return e.sendRaw(t, &chainmailv1.SendRawRequest{Account: "host", Raw: injectedRaw(`"john smith"@example.net`), IdempotencyKey: "inject"})
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := startSend(t)
+			srv := e.smtp(t, smtptest.Options{EnableDSN: true})
+			res, err := tt.call(t, e)
+			for _, m := range srv.Messages() {
+				t.Errorf("the server received a message: MAIL FROM %s, RCPT TO %q", m.From, m.To)
+			}
+			if got := srv.MailFroms(); len(got) != 0 {
+				t.Errorf("MAIL FROM = %q, want none", got)
+			}
+			if err != nil {
+				t.Fatalf("call: %v, want held", err)
+			}
+			held := res.GetHeld()
+			if held == nil || !slices.Equal(held.GetBlocked(), []string{tt.blocked}) {
+				t.Fatalf("result = %+v, want held with %q blocked", res, tt.blocked)
+			}
+			if e.idemState(t, "host", "inject") != "done" {
+				t.Errorf("idempotency state = %q, want done", e.idemState(t, "host", "inject"))
+			}
+			// SendDraft appended its draft itself and saves nothing more.
+			if n := len(e.host.Appended()); n != 1 {
+				t.Errorf("appended %d messages, want 1", n)
+			}
+			h := header(t, draftOf(t, e.host, held))
+			var inDraft []string
+			for _, key := range []string{"To", "Cc", "Bcc"} {
+				list, err := h.AddressList(key)
+				if err != nil {
+					t.Errorf("draft %s: %v", key, err)
+				}
+				for _, a := range list {
+					inDraft = append(inDraft, a.Address)
+				}
+			}
+			if !slices.Contains(inDraft, tt.blocked) {
+				t.Errorf("draft recipients = %q, want %q among them", inDraft, tt.blocked)
+			}
+			e.checkHeldAudit(t, tt.action, held, "blocked:1")
+			e.checkAuditPrivate(t, "victim@", "john smith")
+		})
+	}
+}

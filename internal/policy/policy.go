@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/mailaddr"
 	"github.com/jamesainslie/chainmail/internal/policy/entry"
 )
 
@@ -91,19 +92,28 @@ func compile(where string, entries []string) (allowSet, error) {
 }
 
 // CheckSend checks the recipients of a send from account. An unknown account
-// gets only the global entries and the own addresses.
+// gets only the global entries and the own addresses. A recipient that is
+// not mailaddr.Safe is blocked whatever the allowlist says: the decoded form
+// of a quoted local part can carry SMTP path delimiters and parameters, so
+// the address SMTP would deliver to is not the one checked here.
 func (p *Policy) CheckSend(account string, recipients []string) SendDecision {
 	perAccount := p.accounts[account]
 	var d SendDecision
 	for _, r := range recipients {
-		addr := strings.ToLower(r)
-		if _, ok := p.own[addr]; !ok && !p.global.allows(addr) && !perAccount.allows(addr) {
+		if !mailaddr.Safe(r) || !p.allows(perAccount, strings.ToLower(r)) {
 			d.Blocked = append(d.Blocked, r)
 		}
 	}
 	d.TooMany = len(recipients) > p.maxRecipients
 	d.Allowed = len(d.Blocked) == 0 && !d.TooMany
 	return d
+}
+
+// allows reports whether the lowercased addr is an own address or matches
+// a global or perAccount entry.
+func (p *Policy) allows(perAccount allowSet, addr string) bool {
+	_, own := p.own[addr]
+	return own || p.global.allows(addr) || perAccount.allows(addr)
 }
 
 // AllowExpunge reports whether expunging messages is allowed.

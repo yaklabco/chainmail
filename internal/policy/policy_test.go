@@ -268,3 +268,61 @@ func TestOwnAddressIsNeverAPattern(t *testing.T) {
 		t.Errorf("bob@x.com: %+v, want blocked", got)
 	}
 }
+
+// A recipient that is not a plain address is blocked whatever the
+// allowlist says: its decoded form could carry SMTP path delimiters and
+// ESMTP parameters that reach a recipient the allowlist never saw.
+func TestCheckSendBlocksUnsafeAddresses(t *testing.T) {
+	t.Parallel()
+	const injected = "victim@blocked.invalid> ORCPT=rfc822;x@example.net"
+	// net/mail, and so config.Parse, accepts an address literal as an
+	// account address and as a bare entry, but it is not a plain address.
+	p := newPolicy(t, `
+[accounts.odd]
+provider = "hostinger"
+address = "me@[192.0.2.1]"
+
+[policy]
+send_allow = ["*@example.net", "pal@[192.0.2.2]", "friend@x.test"]
+`)
+	tests := []struct {
+		name       string
+		recipients []string
+		want       SendDecision
+	}{
+		{
+			name:       "the review payload allowed by a wildcard",
+			recipients: []string{"ok@example.net", injected},
+			want:       SendDecision{Blocked: []string{injected}},
+		},
+		{
+			name:       "a space allowed by a wildcard",
+			recipients: []string{"John Smith@Example.NET"},
+			want:       SendDecision{Blocked: []string{"John Smith@Example.NET"}},
+		},
+		{
+			name:       "an unsafe own address",
+			recipients: []string{"ME@[192.0.2.1]"},
+			want:       SendDecision{Blocked: []string{"ME@[192.0.2.1]"}},
+		},
+		{
+			name:       "an unsafe bare entry",
+			recipients: []string{"pal@[192.0.2.2]"},
+			want:       SendDecision{Blocked: []string{"pal@[192.0.2.2]"}},
+		},
+		{
+			name:       "plain addresses are still allowed",
+			recipients: []string{"ok@example.net", "Friend@X.test"},
+			want:       SendDecision{Allowed: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := p.CheckSend("odd", tt.recipients)
+			if got.Allowed != tt.want.Allowed || got.TooMany != tt.want.TooMany || !slices.Equal(got.Blocked, tt.want.Blocked) {
+				t.Errorf("CheckSend(%q) = %+v, want %+v", tt.recipients, got, tt.want)
+			}
+		})
+	}
+}
