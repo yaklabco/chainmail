@@ -242,6 +242,55 @@ func TestFakeGmailSeqSetBeforeExists(t *testing.T) {
 	}
 }
 
+// TestFakeGmailLateArrivals checks Options.LateArrivals: a session already
+// in a folder learns of a message another session added there only at a
+// NOOP, not at a UID SEARCH, UID FETCH or UID STORE, which until then do
+// not see it.
+func TestFakeGmailLateArrivals(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	s := StartWith(t, ca, Options{LateArrivals: true}, "me@gmail.example", "pw",
+		Message{Raw: raw1, Date: time.Now(), Labels: []string{`\Inbox`}},
+		Message{Raw: rawTwo, Date: time.Now(), Labels: []string{`\Inbox`}},
+	)
+	watcher := dial(t, s, ca)
+	selectRW(t, watcher, "INBOX")
+	writer := dial(t, s, ca)
+	uid := appendRaw(t, writer, "INBOX", "Subject: Late\r\n\r\nx\r\n").UID
+	set := imap.UIDSetNum(uid)
+
+	found, err := watcher.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
+	if err != nil || slices.Contains(found.AllUIDs(), uid) {
+		t.Errorf("UID SEARCH before a NOOP = %v, %v; want the arrival %d left out", found.AllUIDs(), err, uid)
+	}
+	msgs, err := watcher.Fetch(set, &imap.FetchOptions{UID: true}).Collect()
+	if err != nil || len(msgs) != 0 {
+		t.Errorf("UID FETCH before a NOOP = %v, %v; want nothing", msgs, err)
+	}
+	msgs, err = watcher.Store(set, &imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: []imap.Flag{imap.FlagFlagged}}, nil).Collect()
+	if err != nil || len(msgs) != 0 {
+		t.Errorf("UID STORE before a NOOP = %v, %v; want nothing", msgs, err)
+	}
+	if n := watcher.Mailbox().NumMessages; n != 2 {
+		t.Errorf("INBOX count before a NOOP = %d, want 2", n)
+	}
+
+	if err := watcher.Noop().Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if n := watcher.Mailbox().NumMessages; n != 3 {
+		t.Errorf("INBOX count after a NOOP = %d, want 3", n)
+	}
+	found, err = watcher.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
+	if err != nil || !slices.Contains(found.AllUIDs(), uid) {
+		t.Errorf("UID SEARCH after a NOOP = %v, %v; want the arrival %d", found.AllUIDs(), err, uid)
+	}
+	msgs, err = watcher.Fetch(set, &imap.FetchOptions{UID: true}).Collect()
+	if err != nil || len(msgs) != 1 {
+		t.Errorf("UID FETCH after a NOOP = %v, %v; want the arrival", msgs, err)
+	}
+}
+
 // startLabelled runs a fake with one message per label set, in order, so
 // message i has All Mail UID i+1.
 func startLabelled(t *testing.T, labels ...[]string) (*Server, *tlstest.CA) {

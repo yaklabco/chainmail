@@ -33,6 +33,9 @@ type session struct {
 	known int
 	// lastUID is the highest UID in view, so new arrivals are those above it.
 	lastUID imap.UID
+	// quiet marks a command ending that leaves new arrivals unlearned, under
+	// Options.LateArrivals: see endQuiet.
+	quiet bool
 }
 
 type viewEntry struct {
@@ -115,6 +118,21 @@ func (sess *session) addNewLocked() {
 			sess.lastUID = uid
 		}
 	}
+}
+
+// syncLocked runs addNewLocked before a command, unless Options.LateArrivals
+// leaves new arrivals for the session to learn of later.
+func (sess *session) syncLocked() {
+	if !sess.s.opts.LateArrivals {
+		sess.addNewLocked()
+	}
+}
+
+// endQuiet, deferred by FETCH, STORE and SEARCH, keeps a session under
+// Options.LateArrivals from learning of new arrivals in the Poll that ends
+// the command, when the command succeeded and so Poll runs.
+func (sess *session) endQuiet(err *error) {
+	sess.quiet = *err == nil && sess.s.opts.LateArrivals
 }
 
 // present reports whether the entry's message is still in the folder under
@@ -259,7 +277,7 @@ func (sess *session) Namespace() (*imap.NamespaceData, error) {
 // AppendLimit is Gmail's APPENDLIMIT.
 func (sess *session) AppendLimit() uint32 { return appendLimit }
 
-func (sess *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriteria, options *imap.SearchOptions) (*imap.SearchData, error) {
+func (sess *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriteria, options *imap.SearchOptions) (_ *imap.SearchData, err error) {
 	if kind != imapserver.NumKindUID {
 		return nil, &imap.Error{Type: imap.StatusResponseTypeBad, Text: "fakegmail answers UID SEARCH only"}
 	}
@@ -273,8 +291,9 @@ func (sess *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriter
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f := sess.selected
-	sess.addNewLocked()
-	criteria, err := staticCriteria(f, criteria)
+	sess.syncLocked()
+	defer sess.endQuiet(&err)
+	criteria, err = staticCriteria(f, criteria)
 	if err != nil {
 		return nil, err
 	}
@@ -293,6 +312,9 @@ func (sess *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriter
 	var all imap.UIDSet
 	data := &imap.SearchData{}
 	for _, m := range f.order {
+		if s.opts.LateArrivals && f.uids[m] > sess.lastUID {
+			break // an arrival the session has not learned of, and the rest are later
+		}
 		if matchCriteria(f, m, criteria) && slices.IndexFunc(trees, func(n *query.Node) bool { return !matchRaw(n, m) }) < 0 {
 			uid := f.uids[m]
 			all.AddNum(uid)
@@ -419,7 +441,7 @@ func staticRange[T ~uint32](start, stop *T, highest T) {
 	}
 }
 
-func (sess *session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
+func (sess *session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) (err error) {
 	if name, ok := unsupportedFetchItem(options, sess.s.opts); ok {
 		return &imap.Error{Type: imap.StatusResponseTypeBad, Text: "fakegmail: unsupported FETCH item " + name}
 	}
@@ -430,7 +452,8 @@ func (sess *session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, option
 		return err
 	}
 	f := sess.selected
-	sess.addNewLocked()
+	sess.syncLocked()
+	defer sess.endQuiet(&err)
 	idx, err := sess.messagesIn(numSet)
 	if err != nil {
 		return err
@@ -705,7 +728,10 @@ func (sess *session) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
 	if sess.selected == nil {
 		return nil
 	}
-	sess.addNewLocked()
+	if !sess.quiet {
+		sess.addNewLocked()
+	}
+	sess.quiet = false
 	if allowExpunge {
 		if err := sess.expungeGoneLocked(w.WriteExpunge); err != nil {
 			return err
@@ -897,7 +923,7 @@ func (sess *session) appendMessage(name string, raw []byte, options *imap.Append
 
 // Store changes flags. A set that names no current message answers OK with
 // no FETCH, as Gmail does for a stale UID.
-func (sess *session) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags *imap.StoreFlags, _ *imap.StoreOptions) error {
+func (sess *session) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags *imap.StoreFlags, _ *imap.StoreOptions) (err error) {
 	if err := sess.writable(); err != nil {
 		return err
 	}
@@ -905,7 +931,8 @@ func (sess *session) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f := sess.selected
-	sess.addNewLocked()
+	sess.syncLocked()
+	defer sess.endQuiet(&err)
 	idx, err := sess.messagesIn(numSet)
 	if err != nil {
 		return err
@@ -998,7 +1025,7 @@ func (sess *session) Copy(numSet imap.NumSet, dest string) (*imap.CopyData, erro
 	s := sess.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess.addNewLocked()
+	sess.syncLocked()
 	d := s.folderLocked(dest)
 	if d == nil {
 		return nil, tryCreate(dest)
@@ -1026,7 +1053,7 @@ func (sess *session) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest str
 	s := sess.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess.addNewLocked()
+	sess.syncLocked()
 	d := s.folderLocked(dest)
 	if d == nil {
 		return tryCreate(dest)
@@ -1060,7 +1087,7 @@ func (sess *session) Expunge(w *imapserver.ExpungeWriter, uids *imap.UIDSet) err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f := sess.selected
-	sess.addNewLocked()
+	sess.syncLocked()
 	var in imap.UIDSet
 	if uids != nil {
 		static, err := staticUIDSet(f, *uids)
@@ -1113,14 +1140,15 @@ func (sess *session) StoreGmailLabels(w *imapserver.FetchWriter, numSet imap.Num
 // does, and the folder names INBOX, Sent Mail and Drafts stand for their
 // labels. \Flagged follows \Starred. A set that names no current message
 // answers OK with no FETCH.
-func (sess *session) storeLabels(numSet imap.NumSet, op imap.StoreFlagsOp, labels []string) ([]labelUpdate, error) {
+func (sess *session) storeLabels(numSet imap.NumSet, op imap.StoreFlagsOp, labels []string) (_ []labelUpdate, err error) {
 	if err := sess.writable(); err != nil {
 		return nil, err
 	}
 	s := sess.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess.addNewLocked()
+	sess.syncLocked()
+	defer sess.endQuiet(&err)
 	idx, err := sess.messagesIn(numSet)
 	if err != nil || len(idx) == 0 {
 		return nil, err

@@ -68,7 +68,9 @@
 // EXPUNGE, but not of flag changes. Sequence sets reach only the messages
 // the last EXISTS announced, but a UID command can name a newer arrival, and
 // its FETCH answer then comes before the EXISTS: imapserver lets a session
-// write EXISTS only once the command is done.
+// write EXISTS only once the command is done. Options.LateArrivals makes it
+// stricter there, as Gmail can be: FETCH, STORE and SEARCH then neither see
+// nor announce a new arrival, and a NOOP does both.
 package fakegmail
 
 import (
@@ -118,6 +120,13 @@ type Options struct {
 	// Message.Preview. Gmail has no PREVIEW, so leave it off unless a test
 	// needs a server that does.
 	Preview bool
+	// LateArrivals makes a session learn of messages that reached its
+	// selected folder after it last looked only at SELECT, EXAMINE or the
+	// end of a command other than FETCH, STORE and SEARCH, such as NOOP.
+	// Until then a UID FETCH, UID STORE or UID SEARCH does not see them, as
+	// a Google Workspace account was seen to behave for a minute after a
+	// message reached Trash.
+	LateArrivals bool
 }
 
 // RawSearch is one X-GM-RAW string and the folder it was searched in.
