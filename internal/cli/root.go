@@ -92,6 +92,7 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 		newSecretCmd(ctx, env, g),
 		newAuthCmd(ctx, env, g),
 		newAdminCmd(ctx, env, g),
+		newAuditCmd(ctx, env, g),
 		newFoldersCmd(ctx, env, g),
 		newSearchCmd(ctx, env, g),
 		newGetCmd(ctx, env, g),
