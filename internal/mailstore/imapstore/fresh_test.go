@@ -125,6 +125,22 @@ func TestReusedFolderSeesMailFromElsewhere(t *testing.T) {
 				t.Parallel()
 				reusedFolderSeesMailFromElsewhere(t, mode.opts, tc.before, tc.run)
 			})
+			if !tc.rereads {
+				continue
+			}
+			// A ref from before the folder took another UIDVALIDITY names
+			// the message by X-GM-MSGID alone, and a lookup that comes back
+			// empty is a message left out too.
+			t.Run(tc.name+"/"+mode.name+"/by X-GM-MSGID", func(t *testing.T) {
+				t.Parallel()
+				reusedFolderSeesMailFromElsewhere(t, mode.opts, tc.before, func(t *testing.T, s *Store, r ref.Ref, srv *fakegmail.Server) error {
+					if r.GmailMsgID == 0 {
+						t.Fatalf("Append gave %v, want a ref with an X-GM-MSGID", r)
+					}
+					r.UIDValidity--
+					return tc.run(t, s, r, srv)
+				})
+			})
 		}
 	}
 }
@@ -404,6 +420,102 @@ func readsSince(srv *writeServer, from int) []string {
 		}
 	}
 	return out
+}
+
+// TestReadOfAMessageGmailCannotFindReopensOnce: on a Google account, a read
+// of a ref from before its folder took another UIDVALIDITY looks the
+// message up by X-GM-MSGID. A lookup that finds nothing on a reused folder
+// opens it again and looks once more before the ref reads as stale, since
+// the server may not yet have told the connection of the message. On a
+// folder the read opened itself the answer is final.
+func TestReadOfAMessageGmailCannotFindReopensOnce(t *testing.T) {
+	t.Parallel()
+	reads := []struct {
+		name string
+		read func(t *testing.T, s *Store, r ref.Ref) error
+	}{
+		{"get", func(t *testing.T, s *Store, r ref.Ref) error {
+			return s.FetchMessages(t.Context(), []ref.Ref{r})[0].Err
+		}},
+		{"attachment", func(t *testing.T, s *Store, r ref.Ref) error {
+			_, rc, err := s.StreamPart(t.Context(), r, "1")
+			if err == nil {
+				_ = rc.Close()
+			}
+			return err
+		}},
+		{"thread", func(t *testing.T, s *Store, r ref.Ref) error {
+			_, err := s.Thread(t.Context(), r)
+			return err
+		}},
+	}
+	for _, rd := range reads {
+		for _, reused := range []bool{true, false} {
+			name, want := rd.name+"/fresh", []string{"EXAMINE INBOX", "UID SEARCH"}
+			if reused {
+				name, want = rd.name+"/reused", []string{"UID SEARCH", "EXAMINE INBOX", "UID SEARCH"}
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				srv := startWriteServer(t, &writeServer{folders: []*wsFolder{wsMailbox("INBOX", "", 7, 1)}})
+				clock := &testClock{t: time.Unix(0, 0)}
+				s := writeStoreFor(t, srv, Options{PoolSize: 1, Now: clock.now}, true)
+				if reused {
+					if got := s.FetchMessages(t.Context(), []ref.Ref{gmailHostRef("INBOX", 7, 1, 1)})[0]; got.Err != nil {
+						t.Fatal(got.Err)
+					}
+				}
+				from := len(srv.received())
+				if err := rd.read(t, s, gmailHostRef("INBOX", 6, 1, 9)); !errors.Is(err, mailstore.ErrStaleRef) {
+					t.Errorf("%s of a gone message = %v, want %v", rd.name, err, mailstore.ErrStaleRef)
+				}
+				if got := readsSince(srv, from); !slices.Equal(got, want) {
+					t.Errorf("commands %q, want %q; all %q", got, want, srv.received())
+				}
+			})
+		}
+	}
+}
+
+// TestGetFindsByMsgIDAfterReopen: a batch read on a reused folder in which
+// the X-GM-MSGID lookup of one ref finds nothing, because the server has
+// not yet told the connection of the message, opens the folder again under
+// the same UIDVALIDITY, looks that ref up once more and returns them all.
+func TestGetFindsByMsgIDAfterReopen(t *testing.T) {
+	t.Parallel()
+	armed := false
+	srv := startWriteServer(t, &writeServer{
+		folders: []*wsFolder{wsMailbox("INBOX", "", 7, 1)},
+		// Message 2 shows just after the first lookup, as if the server
+		// told the connection of it late.
+		after: func(srv *writeServer, kind string) {
+			if armed && kind == "UID SEARCH" {
+				armed = false
+				f := srv.folder("INBOX")
+				f.msgs = append(f.msgs, wsMsg{uid: 2, id: "2@x"})
+			}
+		},
+	})
+	clock := &testClock{t: time.Unix(0, 0)}
+	s := writeStoreFor(t, srv, Options{PoolSize: 1, Now: clock.now}, true)
+	if got := s.FetchMessages(t.Context(), []ref.Ref{gmailHostRef("INBOX", 7, 1, 1)})[0]; got.Err != nil {
+		t.Fatal(got.Err)
+	}
+	srv.mu.Lock()
+	armed = true
+	srv.mu.Unlock()
+	from := len(srv.received())
+	refs := []ref.Ref{gmailHostRef("INBOX", 6, 5, 2), gmailHostRef("INBOX", 7, 1, 1)}
+	wantUIDs := []uint32{2, 1}
+	for i, got := range s.FetchMessages(t.Context(), refs) {
+		if got.Err != nil || got.Message.Summary.Ref.UIDValidity != 7 || got.Message.Summary.Ref.UID != wantUIDs[i] {
+			t.Errorf("ref %d: %+v, want the message with UID %d", i, got, wantUIDs[i])
+		}
+	}
+	want := []string{"UID SEARCH", "UID FETCH 1", "EXAMINE INBOX", "UID SEARCH", "UID FETCH 2"}
+	if got := readsSince(srv, from); !slices.Equal(got, want) {
+		t.Errorf("commands %q, want %q; all %q", got, want, srv.received())
+	}
 }
 
 // TestGetAfterUIDValidityChangesMidBatch: when a batch read's answer on a

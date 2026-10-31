@@ -52,6 +52,13 @@ func (s *Store) FetchMessages(ctx context.Context, refs []ref.Ref) []mailstore.M
 	return results
 }
 
+// errUnfound is the ErrStaleRef resolveUID returns when Gmail finds no
+// message with the ref's X-GM-MSGID in the open folder. A read on a reused
+// folder takes it as a message the server left out, since Gmail may not yet
+// have told the connection of the message, and looks again after opening
+// the folder afresh.
+var errUnfound = fmt.Errorf("%w: the message is gone; search again", mailstore.ErrStaleRef)
+
 // resolveUID finds r's UID in the folder open on c. A changed UIDVALIDITY
 // is recovered by X-GM-MSGID on Gmail, and is stale everywhere else.
 func (s *Store) resolveUID(ctx context.Context, c *conn, r ref.Ref) (uint32, error) {
@@ -66,50 +73,68 @@ func (s *Store) resolveUID(ctx context.Context, c *conn, r ref.Ref) (uint32, err
 		return 0, err
 	}
 	if uid == 0 {
-		return 0, fmt.Errorf("%w: the message is gone; search again", mailstore.ErrStaleRef)
+		return 0, errUnfound
 	}
 	return uid, nil
 }
 
 // fetchRef opens r's folder on c and fetches items of the message r names,
 // as readIn does. It returns the message's UID there and the answer, or
-// ErrStaleRef when the message is gone.
+// ErrStaleRef when the message is gone. A message Gmail cannot find by
+// X-GM-MSGID counts as left out, as one the FETCH leaves out does.
 func (s *Store) fetchRef(ctx context.Context, c *conn, r ref.Ref, items *imap.FetchOptions) (uint32, *imapclient.FetchMessageBuffer, error) {
 	var uid uint32
 	var bufs []*imapclient.FetchMessageBuffer
+	var unfound error
 	err := s.readIn(ctx, c, r.Folder, func() (bool, error) {
 		var err error
-		if uid, err = s.resolveUID(ctx, c, r); err != nil {
+		bufs, unfound = nil, nil
+		uid, err = s.resolveUID(ctx, c, r)
+		switch {
+		case errors.Is(err, errUnfound):
+			unfound = err
+			return true, nil
+		case err != nil:
 			return false, err
 		}
 		bufs, err = c.fetch(ctx, imap.UIDSetNum(imap.UID(uid)), items)
 		return len(bufs) == 0, err
 	})
-	if err != nil {
+	switch {
+	case err != nil:
 		return 0, nil, err
-	}
-	if len(bufs) == 0 {
+	case unfound != nil:
+		return 0, nil, unfound
+	case len(bufs) == 0:
 		return 0, nil, fmt.Errorf("%w: the message is gone; search again", mailstore.ErrStaleRef)
 	}
 	return uid, bufs[0], nil
 }
 
 // resolveRefs adds the UID of each ref refs[idx[j]] names in the folder
-// open on c to want, mapped to j: a batch may name one message twice. A
-// stale ref fails in out on its own.
-func (s *Store) resolveRefs(ctx context.Context, c *conn, refs []ref.Ref, idx []int, want map[uint32][]int, out []mailstore.MessageResult) error {
-	for j, i := range idx {
-		uid, err := s.resolveUID(ctx, c, refs[i])
+// open on c to want, mapped to j, for each j of js: a batch may name one
+// message twice. A stale ref fails in out on its own, and a ref succeeding
+// now clears the failure an earlier run left in out. It returns the js of
+// the refs Gmail found no message for by X-GM-MSGID, which fail in out
+// with errUnfound.
+func (s *Store) resolveRefs(ctx context.Context, c *conn, refs []ref.Ref, idx, js []int, want map[uint32][]int, out []mailstore.MessageResult) ([]int, error) {
+	var unfound []int
+	for _, j := range js {
+		uid, err := s.resolveUID(ctx, c, refs[idx[j]])
+		out[j].Err = nil
 		switch {
+		case errors.Is(err, errUnfound):
+			unfound = append(unfound, j)
+			fallthrough
 		case errors.Is(err, mailstore.ErrStaleRef):
 			out[j].Err = err
 			continue
 		case err != nil:
-			return err
+			return nil, err
 		}
 		want[uid] = append(want[uid], j)
 	}
-	return nil
+	return unfound, nil
 }
 
 // missingUIDs returns the UIDs of want that got holds no answer for, in order.
@@ -126,32 +151,39 @@ func missingUIDs(want map[uint32][]int, got map[uint32]*imapclient.FetchMessageB
 
 func (s *Store) fetchGroup(ctx context.Context, c *conn, folder string, refs []ref.Ref, idx []int, out []mailstore.MessageResult) error {
 	// want maps each UID to the refs that name it, and got each UID the
-	// server answered for to its answer. A second run, after readIn opened
-	// the folder again, asks only for the UIDs left out, unless the folder
-	// now has another UIDVALIDITY and every ref is resolved again.
+	// server answered for to its answer. unfound holds the refs Gmail found
+	// no message for by X-GM-MSGID. A second run, after readIn opened the
+	// folder again, looks those up once more and asks only for the UIDs
+	// left out, unless the folder now has another UIDVALIDITY and every ref
+	// is resolved again.
 	var want map[uint32][]int
 	var got map[uint32]*imapclient.FetchMessageBuffer
+	var unfound []int
 	var validity uint32
 	err := s.readIn(ctx, c, folder, func() (bool, error) {
+		pending := unfound
 		if want == nil || c.uidValidity != validity {
 			clear(out)
 			want, got, validity = map[uint32][]int{}, map[uint32]*imapclient.FetchMessageBuffer{}, c.uidValidity
-			if err := s.resolveRefs(ctx, c, refs, idx, want, out); err != nil {
-				return false, err
+			pending = make([]int, len(idx))
+			for j := range pending {
+				pending[j] = j
 			}
 		}
-		missing := missingUIDs(want, got)
-		if len(missing) == 0 {
-			return false, nil
-		}
-		bufs, err := c.fetch(ctx, uidSet(missing), s.summaryItems(false, true))
-		if err != nil {
+		var err error
+		if unfound, err = s.resolveRefs(ctx, c, refs, idx, pending, want, out); err != nil {
 			return false, err
 		}
-		for _, b := range bufs {
-			got[uint32(b.UID)] = b
+		if missing := missingUIDs(want, got); len(missing) > 0 {
+			bufs, err := c.fetch(ctx, uidSet(missing), s.summaryItems(false, true))
+			if err != nil {
+				return false, err
+			}
+			for _, b := range bufs {
+				got[uint32(b.UID)] = b
+			}
 		}
-		return len(missingUIDs(want, got)) > 0, nil
+		return len(unfound) > 0 || len(missingUIDs(want, got)) > 0, nil
 	})
 	if err != nil || len(want) == 0 {
 		return err
