@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,6 +16,9 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/emersion/go-message"
+	gomail "github.com/emersion/go-message/mail"
+	"github.com/emersion/go-message/textproto"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -25,6 +30,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/idempotency"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/policy"
 	"github.com/jamesainslie/chainmail/internal/provider"
 	"github.com/jamesainslie/chainmail/internal/ref"
 	"github.com/jamesainslie/chainmail/internal/sender"
@@ -123,6 +129,9 @@ type sendJob struct {
 	// copy. It is called after build. SendDraft returns the draft, which
 	// has the sent message's Message-ID, with the X-GM-MSGID build read.
 	notSentCopy func() ref.Ref
+	// existingDraft, when set, is the draft a SendDraft sends. A hold names
+	// it instead of saving a new draft.
+	existingDraft *chainmailv1.Draft
 }
 
 // run executes spec 6.1: idempotency, dial || build, one Send, outcome
@@ -165,9 +174,14 @@ func (c *composeService) claimAndSend(ctx context.Context, job sendJob, entry *a
 // settle the key with.
 func (c *composeService) attempt(ctx context.Context, job sendJob, entry *audit.Entry) (*chainmailv1.ComposeResult, idempotency.State, error) {
 	msg, conn, err := c.prepare(ctx, job)
+	var held *heldError
+	if errors.As(err, &held) {
+		return c.hold(ctx, job, held, entry)
+	}
 	if err != nil {
 		return nil, idempotency.Retryable, err
 	}
+	entry.Decision = decisionAllowed
 	entry.Targets = append(entry.Targets, msg.MessageID)
 
 	// From here the message goes out in full or not at all, whether or not
@@ -202,10 +216,93 @@ func (c *composeService) attempt(ctx context.Context, job sendJob, entry *audit.
 	return &chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Sent{Sent: sent}}, idempotency.Done, nil
 }
 
+// heldHint is Held.hint, fixed text for the agent to relay.
+const heldHint = "held by policy: saved to Drafts for James to review and send"
+
+// heldError ends prepare when policy holds the built message. It is not
+// a client error: attempt turns it into a held result.
+type heldError struct {
+	msg      compose.Message
+	decision policy.SendDecision
+}
+
+func (e *heldError) Error() string { return "held by policy" }
+
+// hold settles a send the policy held: it saves the built message to
+// Drafts, or for SendDraft names the draft already there, and returns the
+// held result. Nothing is sent. The audit row gets the draft ref, the
+// Message-ID and the count of blocked recipients, never an address.
+func (c *composeService) hold(ctx context.Context, job sendJob, held *heldError, entry *audit.Entry) (*chainmailv1.ComposeResult, idempotency.State, error) {
+	var d *chainmailv1.Draft
+	if job.existingDraft != nil {
+		d = proto.Clone(job.existingDraft).(*chainmailv1.Draft)
+		if d.GetMessageId() == "" {
+			d.MessageId = held.msg.MessageID
+		}
+	} else {
+		msg, err := heldDraft(held.msg)
+		if err != nil {
+			return nil, idempotency.Retryable, api.New(connect.CodeInternal, api.ReasonInternal, "",
+				&fixedTextError{msg: "held by policy, but making the draft failed; nothing was sent", err: err})
+		}
+		if d, err = c.saveDraft(ctx, job.acct, msg); err != nil {
+			return nil, idempotency.Retryable, api.New(connect.CodeUnavailable, api.ReasonServerUnavailable, "",
+				&fixedTextError{msg: "held by policy, but saving the draft failed; nothing was sent", err: err})
+		}
+	}
+	entry.Decision = decisionHeld
+	entry.Reason = api.ReasonHeld
+	if r := d.GetRef(); r != "" && !slices.Contains(entry.Targets, r) {
+		entry.Targets = append(entry.Targets, r)
+	}
+	entry.Targets = append(entry.Targets, d.GetMessageId())
+	if n := len(held.decision.Blocked); n > 0 {
+		entry.Targets = append(entry.Targets, fmt.Sprintf("blocked:%d", n))
+	}
+	if held.decision.TooMany {
+		entry.Targets = append(entry.Targets, "too_many")
+	}
+	return &chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Held{Held: &chainmailv1.Held{
+		Draft: d, Blocked: held.decision.Blocked, TooManyRecipients: held.decision.TooMany, Hint: heldHint,
+	}}}, idempotency.Done, nil
+}
+
+// heldDraft returns msg as a held send's draft: with a Bcc field listing
+// every envelope recipient not in its To or Cc fields, so sending the
+// draft from a mail client reaches them too. When there is none the
+// message is returned as it is. Repeated To and Cc fields are all read, as
+// prepareRaw reads them, and a field that does not parse counts as empty.
+func heldDraft(msg compose.Message) (compose.Message, error) {
+	th, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(msg.Raw)))
+	if err != nil {
+		return compose.Message{}, errRawUnparsable
+	}
+	h := gomail.Header{Header: message.Header{Header: th}}
+	inHeader := map[string]bool{}
+	for _, key := range []string{"To", "Cc"} {
+		list, _ := addressFields(h, key) // an unparsable field leaves its recipients to Bcc
+		for _, a := range list {
+			inHeader[strings.ToLower(a.Address)] = true
+		}
+	}
+	var extra []*gomail.Address
+	for _, a := range msg.EnvelopeTo {
+		if !inHeader[strings.ToLower(a)] {
+			extra = append(extra, &gomail.Address{Address: a})
+		}
+	}
+	if len(extra) == 0 {
+		return msg, nil
+	}
+	msg.Raw, err = editHeader(msg.Raw, func(h *gomail.Header) { h.SetAddressList("Bcc", extra) })
+	return msg, err
+}
+
 // prepare builds the message while it dials, and returns both. A failure of
 // either cancels the other and closes the connection if one was made. So
 // does the end of the caller's ctx while either still runs: once both are
-// done, a cancelled call never reaches Send.
+// done, a cancelled call never reaches Send. A build the send policy holds
+// fails with a heldError, which carries the built message.
 func (c *composeService) prepare(parent context.Context, job sendJob) (compose.Message, *sender.Conn, error) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -226,6 +323,11 @@ func (c *composeService) prepare(parent context.Context, job sendJob) (compose.M
 		m, err := job.build(ctx)
 		if err == nil {
 			err = checkSize(job.acct, int64(len(m.Raw)))
+		}
+		if err == nil {
+			if d := c.s.policy.CheckSend(job.acct.Name, m.EnvelopeTo); !d.Allowed {
+				err = &heldError{msg: m, decision: d}
+			}
 		}
 		if err != nil {
 			fail(err)

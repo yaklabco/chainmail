@@ -22,6 +22,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/client"
 )
 
@@ -209,10 +210,23 @@ type dryRunJSON struct {
 	} `json:"result"`
 }
 
-// writeComposeResult prints the result of a send-type call. A dry run is
+// writeComposeResult prints the result of a send-type call. A result the
+// send policy held is printed too, then returned as a HELD error, so the
+// command reports it on stderr and exits 4.
+func writeComposeResult(env Env, g *globals, jsonOut bool, resp proto.Message, res *chainmailv1.ComposeResult) error {
+	if err := printComposeResult(env, g, jsonOut, resp, res); err != nil {
+		return err
+	}
+	if h := res.GetHeld(); h != nil {
+		return &exitError{reason: api.ReasonHeld, msg: "held by policy: saved to Drafts", hint: h.GetHint()}
+	}
+	return nil
+}
+
+// printComposeResult writes the result of a send-type call. A dry run is
 // raw MIME, or a JSON string with jsonOut. Otherwise JSON output is resp,
 // and text is a line or two about what was sent or saved.
-func writeComposeResult(env Env, g *globals, jsonOut bool, resp proto.Message, res *chainmailv1.ComposeResult) error {
+func printComposeResult(env Env, g *globals, jsonOut bool, resp proto.Message, res *chainmailv1.ComposeResult) error {
 	if d := res.GetDryRun(); d != nil {
 		if !jsonOut {
 			if _, err := env.Stdout.Write(d.GetRaw()); err != nil {

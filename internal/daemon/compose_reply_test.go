@@ -822,3 +822,59 @@ func TestForwardSizeCheckedBeforeStreaming(t *testing.T) {
 		t.Error("a refused forward was sent")
 	}
 }
+
+// Reply-all and Forward are gated on the recipients they build: a held one
+// sends nothing and leaves the original unflagged.
+func TestReplyAndForwardHeldByPolicy(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		action string
+		call   func(t *testing.T, e sendEnv, orig string) (*chainmailv1.ComposeResult, error)
+		flag   string
+	}{
+		{
+			name: "reply-all adding a blocked Cc", action: "reply", flag: `\Answered`,
+			call: func(t *testing.T, e sendEnv, orig string) (*chainmailv1.ComposeResult, error) {
+				return e.reply(t, &chainmailv1.ReplyRequest{
+					Ref: orig, All: true, Content: replyContent("All of you"),
+					Cc: []string{"Stranger <" + blocked + ">"}, IdempotencyKey: "reply-held",
+				})
+			},
+		},
+		{
+			name: "forward to a blocked address", action: "forward", flag: "$Forwarded",
+			call: func(t *testing.T, e sendEnv, orig string) (*chainmailv1.ComposeResult, error) {
+				return e.forward(t, &chainmailv1.ForwardRequest{
+					Ref: orig, To: []string{blocked}, Content: replyContent("FYI"), IdempotencyKey: "fwd-held",
+				})
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := startSend(t)
+			srv := e.smtp(t, smtptest.Options{})
+			orig := e.original(t)
+			res, err := tt.call(t, e, orig.String())
+			if err != nil {
+				t.Fatalf("call: %v", err)
+			}
+			held := res.GetHeld()
+			if held == nil || !slices.Equal(held.GetBlocked(), []string{blocked}) {
+				t.Fatalf("result = %+v, want held with %s blocked", res, blocked)
+			}
+			if n := len(srv.Messages()); n != 0 {
+				t.Errorf("captured %d messages, want none", n)
+			}
+			if raw := draftOf(t, e.host, held); !bytes.Contains(raw, []byte(blocked)) {
+				t.Errorf("the draft lost the blocked recipient:\n%s", raw)
+			}
+			if slices.Contains(e.host.Flags(orig), tt.flag) {
+				t.Errorf("original flags = %v, want no %s", e.host.Flags(orig), tt.flag)
+			}
+			e.checkHeldAudit(t, tt.action, held, orig.String(), "blocked:1")
+		})
+	}
+}

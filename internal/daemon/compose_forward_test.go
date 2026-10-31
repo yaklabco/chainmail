@@ -125,6 +125,9 @@ address = "me@example.test"
 pool = 2
 imap = { host = "127.0.0.1", port = %d, security = "tls" }
 smtp = { host = "127.0.0.1", port = %d, security = "starttls" }
+
+[policy]
+send_allow = ["*@example.org"]
 `, imapEP.Port, srv.Endpoint().Port), daemontest.Options{RootCAs: ca.Pool})
 	setSecret(t, h, "accounts/local", "pw")
 	found, err := h.Client.Message.Search(t.Context(), connect.NewRequest(&chainmailv1.SearchRequest{QueryString: "subject:Chart"}))

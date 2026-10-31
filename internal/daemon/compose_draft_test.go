@@ -209,7 +209,7 @@ func TestSendDraftByRef(t *testing.T) {
 	if len(srv.Messages()) != 1 {
 		t.Errorf("captured %d messages, want 1", len(srv.Messages()))
 	}
-	if d := e.decisions(t, "draft.send"); !slices.Equal(d, []string{"", "duplicate"}) {
+	if d := e.decisions(t, "draft.send"); !slices.Equal(d, []string{"allowed", "duplicate"}) {
 		t.Errorf("decisions = %v", d)
 	}
 	e.checkAuditPrivate(t)
@@ -621,5 +621,43 @@ func TestDraftHintOnlyWithoutARef(t *testing.T) {
 		if want := "search the Drafts folder for Message-ID <" + d.GetMessageId() + ">"; d.GetRef() != "" || d.GetMessageId() == "" || d.GetHint() != want {
 			t.Errorf("%s: draft = %+v, want no ref and hint %q", name, d, want)
 		}
+	}
+}
+
+// SendDraft to a blocked recipient holds the draft where it is: nothing is
+// appended or expunged, and the result names the draft.
+func TestSendDraftHeldByPolicy(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	spec := hostSpec()
+	spec.To = []string{blocked}
+	d := e.createDraft(t, spec)
+	res, err := e.sendDraft(t, d.GetRef(), "draft-held")
+	if err != nil {
+		t.Fatalf("SendDraft: %v", err)
+	}
+	held := res.GetHeld()
+	if held == nil || held.GetDraft().GetRef() != d.GetRef() || held.GetDraft().GetMessageId() != d.GetMessageId() {
+		t.Fatalf("result = %+v, want held naming draft %+v", res, d)
+	}
+	if !slices.Equal(held.GetBlocked(), []string{blocked}) || held.GetHint() != heldHintText {
+		t.Errorf("held = %+v", held)
+	}
+	if n := len(srv.Messages()); n != 0 {
+		t.Errorf("captured %d messages, want none", n)
+	}
+	if n := len(e.host.Appended()); n != 1 {
+		t.Errorf("appended %d messages, want only the draft", n)
+	}
+	if n := countOps(e.host, "Expunge"); n != 0 {
+		t.Errorf("expunged %d times, want none", n)
+	}
+	if gone(t, e.host, parseRef(t, d.GetRef())) {
+		t.Error("the held draft is gone")
+	}
+	e.checkHeldAudit(t, "draft.send", held, "blocked:1")
+	if last := lastAudit(t, e.Harness); strings.Count(last.Targets, d.GetRef()) != 1 {
+		t.Errorf("targets = %s, want the draft ref once", last.Targets)
 	}
 }

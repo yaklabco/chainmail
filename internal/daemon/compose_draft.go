@@ -154,10 +154,11 @@ func (c *composeService) SendDraft(ctx context.Context, req *connect.Request[cha
 }
 
 // sendDraft sends a draft as SendRaw sends bytes, dated now and keeping
-// its Message-ID, then expunges the draft. A key that is done, failed or
-// unknown is replayed before the draft is read or the request hashed, so
-// a repeat returns the first outcome even with another ref. The draft is
-// read inside build, after the key is claimed.
+// its Message-ID, then expunges the draft. A draft the send policy holds
+// stays in Drafts as it is. A key that is done, failed or unknown is
+// replayed before the draft is read or the request hashed, so a repeat
+// returns the first outcome even with another ref. The draft is read
+// inside build, after the key is claimed.
 func (c *composeService) sendDraft(ctx context.Context, cl caller, req *chainmailv1.SendDraftRequest) (*chainmailv1.ComposeResult, error) {
 	const action = "draft.send"
 	entry := audit.Entry{Action: action}
@@ -206,6 +207,8 @@ func (c *composeService) sendDraft(ctx context.Context, cl caller, req *chainmai
 		acct: acct, key: req.GetIdempotencyKey(), hash: hash, build: build, after: after,
 		action: action, targets: []string{r.String()}, caller: cl,
 		notSentCopy: func() ref.Ref { return draft },
+		// A hold leaves the draft where it is and names it.
+		existingDraft: &chainmailv1.Draft{Ref: r.String()},
 	})
 }
 

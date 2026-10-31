@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,13 +13,17 @@ import (
 	"testing"
 	"time"
 
+	gomail "github.com/emersion/go-message/mail"
 	"google.golang.org/protobuf/proto"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/compose"
+	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/idempotency"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
 	"github.com/jamesainslie/chainmail/internal/provider"
 	"github.com/jamesainslie/chainmail/internal/sender"
 	"github.com/jamesainslie/chainmail/internal/testutil/smtptest"
@@ -30,7 +36,7 @@ import (
 // run at the same time.
 func TestRunDialsWhileBuilding(t *testing.T) {
 	t.Parallel()
-	s, _ := newTestServer(t)
+	s, _ := newTestServerConfig(t, allowConfig)
 	ctx := peerContext(t.Context())
 	if err := setSecretDirect(ctx, s, auth.PasswordSecret("host"), []byte("pw")); err != nil {
 		t.Fatal(err)
@@ -162,7 +168,7 @@ func TestRunLeftoverKeys(t *testing.T) {
 // key settles as retryable.
 func TestRunCancelledWhileBuildingDoesNotSend(t *testing.T) {
 	t.Parallel()
-	s, _ := newTestServer(t)
+	s, _ := newTestServerConfig(t, allowConfig)
 	ca := tlstest.New(t)
 	srv := smtptest.StartWith(t, ca, provider.SecurityStartTLS, smtptest.Options{},
 		smtptest.User{Username: "me@example.com", Password: "pw"})
@@ -426,5 +432,89 @@ func TestSendReplaysWithoutReadingUploads(t *testing.T) {
 	}
 	if dups != 1 {
 		t.Errorf("duplicate audit rows = %d, want 1", dups)
+	}
+}
+
+// allowConfig is passwordConfig with every example.net address allowed.
+const allowConfig = passwordConfig + `
+[policy]
+send_allow = ["*@example.net"]
+`
+
+// TestHeldBuildCancelsTheDial holds a send while its dial still runs. The
+// hold cancels the dial instead of waiting for it, and the draft is the
+// built message with the envelope recipients missing from To and Cc as its
+// Bcc, or the built message as it is when there are none.
+func TestHeldBuildCancelsTheDial(t *testing.T) {
+	t.Parallel()
+	const raw = "From: me@example.com\r\nTo: you@blocked.invalid\r\nCc: Ann <ann@blocked.invalid>\r\n" +
+		"Subject: hi\r\nMessage-ID: <h@example.com>\r\n\r\nhi\r\n"
+	withBcc, err := editHeader([]byte(raw), func(h *gomail.Header) {
+		h.SetAddressList("Bcc", []*mail.Address{{Address: "extra@blocked.invalid"}})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name     string
+		envelope []string
+		want     []byte
+	}{
+		{"recipients beyond the header", []string{"you@blocked.invalid", "ANN@blocked.invalid", "extra@blocked.invalid"}, withBcc},
+		{"only the header's recipients", []string{"you@blocked.invalid", "ann@blocked.invalid"}, []byte(raw)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s, _ := newTestServer(t)
+			st := fake.New("host", false)
+			s.newStore = func(config.ResolvedAccount, storeParams) mailstore.Store { return st }
+			ctx := peerContext(t.Context())
+			if err := setSecretDirect(ctx, s, auth.PasswordSecret("host"), []byte("pw")); err != nil {
+				t.Fatal(err)
+			}
+			acct, err := s.opts.Config.Account("host")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dialing := make(chan struct{})
+			dialErr := make(chan error, 1)
+			c := newComposeService(s)
+			c.dial = func(ctx context.Context, _ provider.Endpoint, _ auth.Credentials, _ sender.DialOptions) (*sender.Conn, error) {
+				close(dialing)
+				select {
+				case <-ctx.Done():
+					dialErr <- ctx.Err()
+				case <-time.After(time.Minute):
+					dialErr <- errors.New("the dial was never cancelled")
+				}
+				return nil, errors.New("the test dial stops here")
+			}
+			job := sendJob{
+				acct: acct, key: "held", hash: sha256.Sum256([]byte("held")), action: "send",
+				caller: caller{uid: 1, client: "test"},
+				build: func(context.Context) (compose.Message, error) {
+					<-dialing
+					return compose.Message{Raw: []byte(raw), MessageID: "h@example.com", EnvelopeFrom: acct.Address, EnvelopeTo: tt.envelope}, nil
+				},
+			}
+			start := time.Now()
+			res, err := c.run(ctx, job)
+			if err != nil || res.GetHeld() == nil {
+				t.Fatalf("run = %+v, %v, want held", res, err)
+			}
+			if time.Since(start) > 10*time.Second {
+				t.Error("the hold waited for the dial")
+			}
+			if err := <-dialErr; !errors.Is(err, context.Canceled) {
+				t.Errorf("dial ctx: %v, want cancelled", err)
+			}
+			if got := st.Appended(); len(got) != 1 || !bytes.Equal(got[0], tt.want) {
+				t.Errorf("draft = %q, want %q", got, tt.want)
+			}
+			if row, ok, err := s.idem.Lookup(t.Context(), "host", "held"); err != nil || !ok || row.State != idempotency.Done {
+				t.Errorf("key = %+v, %v, %v, want done", row, ok, err)
+			}
+		})
 	}
 }

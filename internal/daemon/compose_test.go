@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -23,6 +25,7 @@ import (
 	"github.com/emersion/go-message"
 	gomail "github.com/emersion/go-message/mail"
 	"github.com/emersion/go-smtp"
+	"google.golang.org/protobuf/proto"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/api"
@@ -56,6 +59,10 @@ provider = "hostinger"
 address = "small@example.com"
 max_message_size = "16KiB"
 smtp = { host = "127.0.0.1", port = %[1]d, security = "starttls" }
+
+# Tests send to these domains. blocked.invalid is never allowed.
+[policy]
+send_allow = ["*@example.net", "*@example.org", "*@example.com", "*@example.test"]
 `
 
 var smtpUsers = []smtptest.User{
@@ -448,7 +455,7 @@ func TestSendDuplicateKey(t *testing.T) {
 	if n := len(srv.Messages()); n != 1 {
 		t.Errorf("captured %d messages, want 1", n)
 	}
-	if d := e.decisions(t, "send"); !slices.Equal(d, []string{"", "duplicate"}) {
+	if d := e.decisions(t, "send"); !slices.Equal(d, []string{"allowed", "duplicate"}) {
 		t.Errorf("decisions = %v", d)
 	}
 
@@ -534,7 +541,7 @@ func TestSendRecipientRefused(t *testing.T) {
 	if e.proxy.accepts.Load() != conns || len(srv.Messages()) != 0 {
 		t.Error("the repeat connected again")
 	}
-	if d := e.decisions(t, "send"); !slices.Equal(d, []string{"", "duplicate"}) {
+	if d := e.decisions(t, "send"); !slices.Equal(d, []string{"allowed", "duplicate"}) {
 		t.Errorf("decisions = %v", d)
 	}
 	e.checkAuditPrivate(t)
@@ -1264,12 +1271,18 @@ func TestSendSizeBoundIsALowerBound(t *testing.T) {
 		if n := len(dry.GetDryRun().GetRaw()); n > 16<<10 {
 			t.Fatalf("%s: the finished message is %d bytes, over the limit; the test proves nothing", key, n)
 		}
-		if _, err := e.send(t, &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: key}); err != nil {
+		res, err := e.send(t, &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: key})
+		if err != nil {
 			t.Errorf("%s: Send: %v", key, err)
 		}
+		// 700 recipients are over max_recipients, so the send policy holds
+		// that one, which it does only once both size checks have passed.
+		if key == "many-bcc" && !res.GetHeld().GetTooManyRecipients() {
+			t.Errorf("%s: result = %+v, want held for too many recipients", key, res)
+		}
 	}
-	if n := len(srv.Messages()); n != 2 {
-		t.Errorf("captured %d messages, want 2", n)
+	if n := len(srv.Messages()); n != 1 {
+		t.Errorf("captured %d messages, want 1", n)
 	}
 }
 
@@ -1387,4 +1400,247 @@ func TestSendSizeCheckedBeforeReadingUploads(t *testing.T) {
 			t.Errorf("%s: err = %v, want INVALID_ARGUMENT for the size", name, err)
 		}
 	}
+}
+
+// blocked is a recipient no test config allows.
+const blocked = "stranger@blocked.invalid"
+
+// heldHintText is the fixed hint of a held send.
+const heldHintText = "held by policy: saved to Drafts for James to review and send"
+
+// checkHeldAudit checks the last audit row is a hold of action: ok, HELD,
+// with the draft ref, the Message-ID and the blocked count as its targets,
+// and no address in it but the Message-ID.
+func (e sendEnv) checkHeldAudit(t *testing.T, action string, held *chainmailv1.Held, wantTargets ...string) {
+	t.Helper()
+	last := lastAudit(t, e.Harness)
+	if last.Action != action || last.Result != "ok" || last.Reason != api.ReasonHeld {
+		t.Errorf("audit = %+v, want %s ok HELD", last, action)
+	}
+	if d := e.decisions(t, action); len(d) == 0 || d[len(d)-1] != "held" {
+		t.Errorf("decisions = %v, want the last held", d)
+	}
+	var targets []string
+	if err := json.Unmarshal([]byte(last.Targets), &targets); err != nil {
+		t.Fatalf("targets %q: %v", last.Targets, err)
+	}
+	id := held.GetDraft().GetMessageId()
+	for _, want := range append([]string{held.GetDraft().GetRef(), id}, wantTargets...) {
+		if want != "" && !slices.Contains(targets, want) {
+			t.Errorf("targets = %q, want %q in them", targets, want)
+		}
+	}
+	for _, tg := range targets {
+		if strings.Contains(tg, "@") && tg != id {
+			t.Errorf("target %q holds an address", tg)
+		}
+	}
+	for _, b := range held.GetBlocked() {
+		if strings.Contains(last.Targets, b) {
+			t.Errorf("targets %q hold the blocked recipient %q", last.Targets, b)
+		}
+	}
+}
+
+// draftOf returns the bytes of the held result's draft in st.
+func draftOf(t *testing.T, st *fake.Store, held *chainmailv1.Held) []byte {
+	t.Helper()
+	r := parseRef(t, held.GetDraft().GetRef())
+	if r.Folder != "Drafts" {
+		t.Errorf("draft folder = %q, want Drafts", r.Folder)
+	}
+	if f := st.Flags(r); !slices.Contains(f, `\Draft`) || !slices.Contains(f, `\Seen`) {
+		t.Errorf("draft flags = %v", f)
+	}
+	return st.RawMessage(r)
+}
+
+func TestSendPolicyAllowedTransmits(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	res, err := e.send(t, &chainmailv1.SendRequest{Spec: hostSpec(), IdempotencyKey: "allowed"})
+	if err != nil || res.GetSent() == nil {
+		t.Fatalf("Send = %+v, %v", res, err)
+	}
+	if n := len(srv.Messages()); n != 1 {
+		t.Errorf("captured %d messages, want 1", n)
+	}
+	if d := e.decisions(t, "send"); !slices.Equal(d, []string{"allowed"}) {
+		t.Errorf("decisions = %v, want [allowed]", d)
+	}
+}
+
+func TestSendHeldByPolicy(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	spec := hostSpec()
+	spec.Cc = []string{"Stranger <" + blocked + ">"}
+	spec.Bcc = []string{"secret@blocked.invalid"}
+	res, err := e.send(t, &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: "held"})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	held := res.GetHeld()
+	if held == nil {
+		t.Fatalf("result = %+v, want held", res)
+	}
+	if want := []string{blocked, "secret@blocked.invalid"}; !slices.Equal(held.GetBlocked(), want) {
+		t.Errorf("blocked = %v, want %v", held.GetBlocked(), want)
+	}
+	if held.GetTooManyRecipients() || held.GetHint() != heldHintText || held.GetDraft().GetRef() == "" {
+		t.Errorf("held = %+v", held)
+	}
+	if n := len(srv.Messages()); n != 0 {
+		t.Errorf("captured %d messages, want none", n)
+	}
+	if got := e.host.Appended(); len(got) != 1 {
+		t.Fatalf("appended %d messages, want the draft once", len(got))
+	}
+	raw := draftOf(t, e.host, held)
+	h := header(t, raw)
+	if id, _ := h.MessageID(); id != held.GetDraft().GetMessageId() {
+		t.Errorf("draft Message-ID = %q, result says %q", id, held.GetDraft().GetMessageId())
+	}
+	bcc, err := h.AddressList("Bcc")
+	if err != nil || len(bcc) != 1 || bcc[0].Address != "secret@blocked.invalid" {
+		t.Errorf("draft Bcc = %v, %v, want secret@blocked.invalid", bcc, err)
+	}
+	if subj, _ := h.Subject(); subj != "Quarterly numbers" {
+		t.Errorf("draft Subject = %q", subj)
+	}
+	if e.idemState(t, "host", "held") != "done" {
+		t.Errorf("idempotency state = %q, want done", e.idemState(t, "host", "held"))
+	}
+	e.checkHeldAudit(t, "send", held, "blocked:2")
+	e.checkAuditPrivate(t, "stranger@", "secret@", "blocked.invalid")
+}
+
+// The draft of a hold carries as Bcc every envelope recipient not in To or
+// Cc, and no Bcc when there is none.
+func TestSendHeldDraftBcc(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+
+	spec := hostSpec()
+	spec.Cc = []string{blocked}
+	spec.Bcc = nil
+	res, err := e.send(t, &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: "held-no-bcc"})
+	if err != nil || res.GetHeld() == nil {
+		t.Fatalf("Send = %+v, %v, want held", res, err)
+	}
+	if h := header(t, draftOf(t, e.host, res.GetHeld())); h.Has("Bcc") {
+		t.Errorf("draft Bcc = %q, want none", h.Get("Bcc"))
+	}
+
+	raw := bytes.Replace(rawMessage("me@example.com", "raw"), []byte("Bcc: hidden@example.net\r\n"), nil, 1)
+	res, err = e.sendRaw(t, &chainmailv1.SendRawRequest{
+		Account: "host", Raw: raw, EnvelopeTo: []string{"you@example.net", blocked}, IdempotencyKey: "held-raw",
+	})
+	if err != nil || res.GetHeld() == nil {
+		t.Fatalf("SendRaw = %+v, %v, want held", res, err)
+	}
+	if !slices.Equal(res.GetHeld().GetBlocked(), []string{blocked}) {
+		t.Errorf("blocked = %v", res.GetHeld().GetBlocked())
+	}
+	h := header(t, draftOf(t, e.host, res.GetHeld()))
+	if bcc, err := h.AddressList("Bcc"); err != nil || len(bcc) != 1 || bcc[0].Address != blocked {
+		t.Errorf("SendRaw draft Bcc = %v, %v, want %s", bcc, err, blocked)
+	}
+	if n := len(srv.Messages()); n != 0 {
+		t.Errorf("captured %d messages, want none", n)
+	}
+	e.checkHeldAudit(t, "send_raw", res.GetHeld(), "blocked:1")
+}
+
+// A repeat of a held send's key replays the hold and saves no second draft.
+func TestSendHeldRepeatReplays(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	spec := hostSpec()
+	spec.To = []string{blocked}
+	req := &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: "held-again"}
+	first, err := e.send(t, req)
+	if err != nil || first.GetHeld() == nil {
+		t.Fatalf("first = %+v, %v, want held", first, err)
+	}
+	second, err := e.send(t, req)
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if !proto.Equal(first, second) {
+		t.Errorf("second = %+v, want the first %+v", second, first)
+	}
+	if n := len(e.host.Appended()); n != 1 {
+		t.Errorf("appended %d messages, want 1", n)
+	}
+	if n := len(srv.Messages()); n != 0 {
+		t.Errorf("captured %d messages, want none", n)
+	}
+	if d := e.decisions(t, "send"); !slices.Equal(d, []string{"held", "duplicate"}) {
+		t.Errorf("decisions = %v, want [held duplicate]", d)
+	}
+}
+
+// More recipients than max_recipients hold a send, every one allowed.
+func TestSendHeldTooManyRecipients(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	spec := hostSpec()
+	spec.To, spec.Cc, spec.Bcc = nil, nil, nil
+	for i := range 11 {
+		spec.To = append(spec.To, fmt.Sprintf("r%d@example.net", i))
+	}
+	res, err := e.send(t, &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: "too-many"})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	held := res.GetHeld()
+	if held == nil || !held.GetTooManyRecipients() || len(held.GetBlocked()) != 0 {
+		t.Fatalf("result = %+v, want held, too many, nothing blocked", res)
+	}
+	if n := len(srv.Messages()); n != 0 {
+		t.Errorf("captured %d messages, want none", n)
+	}
+	e.checkHeldAudit(t, "send", held, "too_many")
+	if last := lastAudit(t, e.Harness); strings.Contains(last.Targets, "blocked:") {
+		t.Errorf("targets = %s, want no blocked count", last.Targets)
+	}
+}
+
+// A hold whose draft cannot be saved fails, sends nothing, and leaves the
+// key free for a new attempt.
+func TestSendHeldDraftSaveFailure(t *testing.T) {
+	t.Parallel()
+	e := startSend(t)
+	srv := e.smtp(t, smtptest.Options{})
+	spec := hostSpec()
+	spec.To = []string{blocked}
+	req := &chainmailv1.SendRequest{Spec: spec, IdempotencyKey: "held-save-fails"}
+	e.host.FailWrite("Append", fmt.Errorf("%w: the server went away", mailstore.ErrUnavailable))
+	_, err := e.send(t, req)
+	if reasonOf(err) != api.ReasonServerUnavailable {
+		t.Fatalf("err = %v, want SERVER_UNAVAILABLE", err)
+	}
+	if cerr := new(connect.Error); !errors.As(err, &cerr) || cerr.Message() != "held by policy, but saving the draft failed; nothing was sent" {
+		t.Errorf("err = %v, want the fixed text", err)
+	}
+	if e.idemState(t, "host", "held-save-fails") != "retryable" {
+		t.Errorf("idempotency state = %q, want retryable", e.idemState(t, "host", "held-save-fails"))
+	}
+	res, err := e.send(t, req)
+	if err != nil || res.GetHeld() == nil {
+		t.Fatalf("repeat = %+v, %v, want a new attempt that holds", res, err)
+	}
+	if n := len(e.host.Appended()); n != 1 {
+		t.Errorf("appended %d messages, want 1", n)
+	}
+	if n := len(srv.Messages()); n != 0 {
+		t.Errorf("captured %d messages, want none", n)
+	}
+	e.checkAuditPrivate(t, "stranger@")
 }
