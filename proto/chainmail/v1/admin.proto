@@ -41,6 +41,35 @@ message GetStatusResponse {
   repeated string secret_names = 4;
 }
 
+// ReadAuditRequest selects audit rows, newest first.
+message ReadAuditRequest {
+  google.protobuf.Timestamp since = 1; // unset: 24 hours before now
+  string account = 2; // empty: all accounts
+  string action = 3; // empty: all actions
+  int32 limit = 4; // 0 means 100; maximum 1000
+  int64 before_id = 5; // paging: only rows with id < before_id; 0 means no bound
+}
+
+// ReadAuditResponse is one page of audit rows.
+message ReadAuditResponse {
+  repeated AuditEntry entries = 1; // newest first
+  int64 next_before_id = 2; // 0 when there are no more rows
+}
+
+// AuditEntry is one audit row. It holds no content, recipients or secrets.
+message AuditEntry {
+  int64 id = 1;
+  google.protobuf.Timestamp at = 2;
+  uint32 caller_uid = 3;
+  string client = 4;
+  string account = 5;
+  string action = 6;
+  repeated string targets = 7;
+  string decision = 8;
+  string result = 9;
+  string reason = 10;
+}
+
 // AdminService holds operations for a human. It is never exposed over MCP.
 service AdminService {
   // SetSecret stores a secret in the vault. Secrets can be written but never read back.
@@ -51,4 +80,6 @@ service AdminService {
   rpc FinishAuthLogin(FinishAuthLoginRequest) returns (FinishAuthLoginResponse);
   // GetStatus reports daemon version, uptime and stored secret names.
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  // ReadAudit returns audit rows, newest first, paged by before_id.
+  rpc ReadAudit(ReadAuditRequest) returns (ReadAuditResponse);
 }

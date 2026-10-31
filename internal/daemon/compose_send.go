@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,6 +16,9 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/emersion/go-message"
+	gomail "github.com/emersion/go-message/mail"
+	"github.com/emersion/go-message/textproto"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -25,6 +30,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/idempotency"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/policy"
 	"github.com/jamesainslie/chainmail/internal/provider"
 	"github.com/jamesainslie/chainmail/internal/ref"
 	"github.com/jamesainslie/chainmail/internal/sender"
@@ -54,9 +60,16 @@ const (
 	// flagSeen and flagDraft are the IMAP flags of a Sent copy and a draft.
 	flagSeen  = `\Seen`
 	flagDraft = `\Draft`
-	// decisionDuplicate and decisionDryRun go in the audit decision column.
+	// The decision column of the audit log. decisionAllowed is a transmit
+	// the send policy passed, decisionHeld a send the policy held as a
+	// draft, decisionDenied a refusal of a destructive action, and
+	// decisionNone a call no policy decided.
+	decisionNone      = ""
 	decisionDuplicate = "duplicate"
 	decisionDryRun    = "dry_run"
+	decisionAllowed   = "allowed"
+	decisionHeld      = "held"
+	decisionDenied    = "denied"
 )
 
 // sentCopyFailed is Sent.sent_copy_error when the copy could not be stored.
@@ -118,6 +131,9 @@ type sendJob struct {
 	// copy. It is called after build. SendDraft returns the draft, which
 	// has the sent message's Message-ID, with the X-GM-MSGID build read.
 	notSentCopy func() ref.Ref
+	// existingDraftRef, when set, is the ref of the draft a SendDraft sends.
+	// A hold names it instead of saving a new draft.
+	existingDraftRef string
 }
 
 // run executes spec 6.1: idempotency, dial || build, one Send, outcome
@@ -160,9 +176,14 @@ func (c *composeService) claimAndSend(ctx context.Context, job sendJob, entry *a
 // settle the key with.
 func (c *composeService) attempt(ctx context.Context, job sendJob, entry *audit.Entry) (*chainmailv1.ComposeResult, idempotency.State, error) {
 	msg, conn, err := c.prepare(ctx, job)
+	var held *heldError
+	if errors.As(err, &held) {
+		return c.hold(ctx, job, held, entry)
+	}
 	if err != nil {
 		return nil, idempotency.Retryable, err
 	}
+	entry.Decision = decisionAllowed
 	entry.Targets = append(entry.Targets, msg.MessageID)
 
 	// From here the message goes out in full or not at all, whether or not
@@ -197,64 +218,187 @@ func (c *composeService) attempt(ctx context.Context, job sendJob, entry *audit.
 	return &chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Sent{Sent: sent}}, idempotency.Done, nil
 }
 
-// prepare builds the message while it dials, and returns both. A failure of
-// either cancels the other and closes the connection if one was made. So
-// does the end of the caller's ctx while either still runs: once both are
-// done, a cancelled call never reaches Send.
+// heldHint is Held.hint, fixed text for the agent to relay.
+const heldHint = "held by policy: saved to Drafts for James to review and send"
+
+// heldError ends prepare when policy holds the built message. It is not
+// a client error: attempt turns it into a held result.
+type heldError struct {
+	msg      compose.Message
+	decision policy.SendDecision
+}
+
+func (e *heldError) Error() string { return "held by policy" }
+
+// hold settles a send the policy held: it saves the built message to
+// Drafts, or for SendDraft names the draft already there, and returns the
+// held result. Nothing is sent. The audit row gets the Message-ID and the
+// count of blocked recipients, never an address, and the draft ref once
+// the draft is in Drafts. A failure to make or save the draft keeps the
+// held decision in the row, with the error's result and reason.
+func (c *composeService) hold(ctx context.Context, job sendJob, held *heldError, entry *audit.Entry) (*chainmailv1.ComposeResult, idempotency.State, error) {
+	entry.Decision = decisionHeld
+	entry.Targets = append(entry.Targets, held.msg.MessageID)
+	if n := len(held.decision.Blocked); n > 0 {
+		entry.Targets = append(entry.Targets, fmt.Sprintf("blocked:%d", n))
+	}
+	if held.decision.TooMany {
+		entry.Targets = append(entry.Targets, "too_many")
+	}
+	var d *chainmailv1.Draft
+	if job.existingDraftRef != "" {
+		d = &chainmailv1.Draft{Ref: job.existingDraftRef, MessageId: held.msg.MessageID}
+	} else {
+		msg, err := heldDraft(held.msg)
+		if err != nil {
+			return nil, idempotency.Retryable, api.New(connect.CodeInternal, api.ReasonInternal, "",
+				&fixedTextError{msg: "held by policy, but making the draft failed; nothing was sent", err: err})
+		}
+		if d, err = c.saveDraft(ctx, job.acct, msg); err != nil {
+			return nil, idempotency.Retryable, api.New(connect.CodeUnavailable, api.ReasonServerUnavailable, "",
+				&fixedTextError{msg: "held by policy, but saving the draft failed; nothing was sent", err: err})
+		}
+	}
+	entry.Reason = api.ReasonHeld
+	if r := d.GetRef(); r != "" && !slices.Contains(entry.Targets, r) {
+		entry.Targets = append(entry.Targets, r)
+	}
+	return &chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Held{Held: &chainmailv1.Held{
+		Draft: d, Blocked: held.decision.Blocked, TooManyRecipients: held.decision.TooMany, Hint: heldHint,
+	}}}, idempotency.Done, nil
+}
+
+// heldDraft returns msg as a held send's draft: with a Bcc field listing
+// every envelope recipient not in its To or Cc fields, so sending the
+// draft from a mail client reaches them too. When there is none the
+// message is returned as it is. Repeated To and Cc fields are all read, as
+// prepareRaw reads them, and a field that does not parse counts as empty.
+func heldDraft(msg compose.Message) (compose.Message, error) {
+	th, err := textproto.ReadHeader(bufio.NewReader(bytes.NewReader(msg.Raw)))
+	if err != nil {
+		return compose.Message{}, errRawUnparsable
+	}
+	h := gomail.Header{Header: message.Header{Header: th}}
+	inHeader := map[string]bool{}
+	for _, key := range []string{"To", "Cc"} {
+		list, _ := addressFields(h, key) // an unparsable field leaves its recipients to Bcc
+		for _, a := range list {
+			inHeader[strings.ToLower(a.Address)] = true
+		}
+	}
+	var extra []*gomail.Address
+	for _, a := range msg.EnvelopeTo {
+		if !inHeader[strings.ToLower(a)] {
+			extra = append(extra, &gomail.Address{Address: a})
+		}
+	}
+	if len(extra) == 0 {
+		return msg, nil
+	}
+	msg.Raw, err = editHeader(msg.Raw, func(h *gomail.Header) { h.SetAddressList("Bcc", extra) })
+	return msg, err
+}
+
+// prepare builds the message while it dials, and returns both. A build that
+// fails, or that the send policy holds, cancels the dial. A dial failure
+// does not cancel the build: the build decides first, so a hold still
+// reaches Drafts while SMTP is down. The caller's ctx bounds both. Once
+// both are done, the result is, in order: a hold, as a heldError carrying
+// the built message; the build's error; the dial's error; the end of the
+// caller's ctx. Any of these closes a connection that was made, so a
+// cancelled call never reaches Send. An SMTP refusal of the credentials
+// parks them only when the call ends with it: a hold still needs them for
+// IMAP, to save its draft.
 func (c *composeService) prepare(parent context.Context, job sendJob) (compose.Message, *sender.Conn, error) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	var (
-		once     sync.Once
-		firstErr error
 		msg      compose.Message
+		buildErr error
 		conn     *sender.Conn
+		dialErr  error
 		wg       sync.WaitGroup
 	)
-	fail := func(err error) {
-		once.Do(func() {
-			firstErr = err
-			cancel()
-		})
-	}
 	wg.Go(func() {
-		m, err := job.build(ctx)
-		if err == nil {
-			err = checkSize(job.acct, int64(len(m.Raw)))
+		msg, buildErr = c.buildChecked(ctx, job)
+		if buildErr != nil {
+			cancel() // the connection will not be used
 		}
-		if err != nil {
-			fail(err)
-			return
-		}
-		msg = m
 	})
 	wg.Go(func() {
-		cn, err := c.connect(ctx, job.acct)
-		if err != nil {
-			fail(err)
-			return
-		}
-		conn = cn
+		conn, dialErr = c.connect(ctx, job.acct)
 	})
 	wg.Wait()
-	if firstErr == nil {
+	err := buildErr // a heldError is a build error, so it comes first
+	if err == nil {
+		err = c.dialOutcome(job.acct, dialErr)
+	}
+	if err == nil {
 		// The build does not watch ctx, so the caller may have gone while
 		// it ran after a successful dial.
-		firstErr = parent.Err()
+		err = parent.Err()
 	}
-	if firstErr != nil {
+	if err != nil {
 		if conn != nil {
-			if err := conn.Close(); err != nil {
+			if cerr := conn.Close(); cerr != nil {
 				c.s.opts.Logger.Debug("closing an unused SMTP connection failed", "account", job.acct.Name)
 			}
 		}
-		return compose.Message{}, nil, firstErr
+		return compose.Message{}, nil, err
 	}
 	return msg, conn, nil
 }
 
+// buildChecked builds the message, checks its size and checks its
+// recipients against the send policy. A held message fails with a
+// heldError.
+func (c *composeService) buildChecked(ctx context.Context, job sendJob) (compose.Message, error) {
+	m, err := job.build(ctx)
+	if err != nil {
+		return compose.Message{}, err
+	}
+	if err := checkSize(job.acct, int64(len(m.Raw))); err != nil {
+		return compose.Message{}, err
+	}
+	if d := c.s.policy.CheckSend(job.acct.Name, m.EnvelopeTo); !d.Allowed {
+		return compose.Message{}, &heldError{msg: m, decision: d}
+	}
+	return m, nil
+}
+
+// smtpRejectedError is connect's report that the SMTP server refused the
+// account's credentials. It carries the credentials refused, for
+// dialOutcome to park.
+type smtpRejectedError struct {
+	creds auth.Credentials
+	err   error
+}
+
+func (e *smtpRejectedError) Error() string { return "the SMTP server rejected the credentials" }
+
+func (e *smtpRejectedError) Unwrap() error { return e.err }
+
+// dialOutcome returns the error a call ends with when it ends with the
+// dial's err. A refusal of the credentials parks the account as SP1 does,
+// and becomes AUTH_REJECTED with the hint parking gives. Other errors are
+// returned as they are.
+func (c *composeService) dialOutcome(acct config.ResolvedAccount, err error) error {
+	var rejected *smtpRejectedError
+	if !errors.As(err, &rejected) {
+		return err
+	}
+	c.s.auth.Rejected(acct.Name, rejected.creds)
+	hint := ""
+	if st, serr := c.s.auth.State(acct.Name); serr == nil {
+		hint = st.Detail
+	}
+	return api.New(connect.CodeUnauthenticated, api.ReasonAuthRejected, hint,
+		&fixedTextError{msg: "the server rejected the credentials; nothing was sent", err: rejected.err})
+}
+
 // connect fetches the account's credentials and dials its SMTP server. A
-// refusal of the credentials parks the account as SP1 does.
+// refusal of the credentials is an smtpRejectedError, which parks nothing:
+// prepare decides, once the build is done, whether it parks the account.
 func (c *composeService) connect(ctx context.Context, acct config.ResolvedAccount) (*sender.Conn, error) {
 	creds, err := c.s.auth.Credentials(ctx, acct.Name)
 	if err != nil {
@@ -267,13 +411,7 @@ func (c *composeService) connect(ctx context.Context, acct config.ResolvedAccoun
 	switch {
 	case errors.Is(err, auth.ErrRejected):
 		c.s.opts.Logger.Debug("SMTP dial failed", "account", acct.Name, "step", "auth", "outcome", "rejected")
-		c.s.auth.Rejected(acct.Name, creds)
-		hint := ""
-		if st, serr := c.s.auth.State(acct.Name); serr == nil {
-			hint = st.Detail
-		}
-		return nil, api.New(connect.CodeUnauthenticated, api.ReasonAuthRejected, hint,
-			&fixedTextError{msg: "the server rejected the credentials; nothing was sent", err: err})
+		return nil, &smtpRejectedError{creds: creds, err: err}
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		c.s.opts.Logger.Debug("SMTP dial failed", "account", acct.Name, "step", "dial", "outcome", "cancelled")
 		return nil, err

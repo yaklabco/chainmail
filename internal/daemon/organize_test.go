@@ -3,6 +3,7 @@ package daemon_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -203,7 +204,7 @@ func TestOrganizeCopy(t *testing.T) {
 
 func TestOrganizeArchiveTrashExpunge(t *testing.T) {
 	t.Parallel()
-	m := startFakeMail(t)
+	m := startFakeMailConfig(t, destructiveConfig)
 	host := m.host.Add(fake.Message{Folder: "INBOX"})
 	gm := m.gmail.Add(fake.Message{Folder: gmailAllMail, Labels: []string{`\Inbox`}})
 
@@ -486,7 +487,7 @@ func TestOrganizeFailingAccountFailsOnlyItsRefs(t *testing.T) {
 
 func TestOrganizeFolders(t *testing.T) {
 	t.Parallel()
-	m := startFakeMail(t)
+	m := startFakeMailConfig(t, destructiveConfig)
 	org := m.Client.Organize
 	has := func(name string) bool {
 		t.Helper()
@@ -529,7 +530,7 @@ func TestOrganizeFolders(t *testing.T) {
 
 func TestOrganizeFolderErrors(t *testing.T) {
 	t.Parallel()
-	m := startFakeMail(t)
+	m := startFakeMailConfig(t, destructiveConfig)
 	org := m.Client.Organize
 	const secret = "SERVER-SAID-f3-do-not-leak"
 	tests := []struct {
@@ -715,7 +716,7 @@ func TestOrganizeFanOutIsBounded(t *testing.T) {
 // levels.
 func TestOrganizeFoldersReturnTheServersName(t *testing.T) {
 	t.Parallel()
-	m := startFakeMail(t)
+	m := startFakeMailConfig(t, destructiveConfig)
 	m.host.SetNamespace("INBOX.", ".")
 	org := m.Client.Organize
 	created, err := org.CreateFolder(t.Context(), connect.NewRequest(&chainmailv1.CreateFolderRequest{Account: "host", Name: "Projects/2026"}))
@@ -735,4 +736,191 @@ func TestOrganizeFoldersReturnTheServersName(t *testing.T) {
 	if _, err := org.DeleteFolder(t.Context(), connect.NewRequest(&chainmailv1.DeleteFolderRequest{Account: "host", Name: renamed.Msg.GetName()})); err != nil {
 		t.Errorf("DeleteFolder by the name RenameFolder gave: %v", err)
 	}
+}
+
+// destructiveConfig is fakeMailConfig with expunge and folder delete
+// allowed.
+const destructiveConfig = fakeMailConfig + `
+[policy]
+allow_expunge = true
+allow_folder_delete = true
+`
+
+const (
+	expungeDenied      = "expunge is disabled by policy"
+	expungeHint        = "set policy.allow_expunge in the chainmail NixOS config"
+	folderDeleteDenied = "folder delete is disabled by policy"
+	folderDeleteHint   = "set policy.allow_folder_delete in the chainmail NixOS config"
+)
+
+// checkPolicyDenied fails the test unless err is the policy's refusal with
+// text and hint.
+func checkPolicyDenied(t *testing.T, err error, text, hint string) {
+	t.Helper()
+	if code := connect.CodeOf(err); code != connect.CodePermissionDenied {
+		t.Errorf("code = %v, want PermissionDenied (err %v)", code, err)
+	}
+	if got := reasonOf(err); got != api.ReasonPolicyDenied {
+		t.Errorf("reason = %q, want %s", got, api.ReasonPolicyDenied)
+	}
+	if got := api.ExitCode(reasonOf(err)); got != api.ExitDenied {
+		t.Errorf("exit code = %d, want %d", got, api.ExitDenied)
+	}
+	var cerr *connect.Error
+	if !errors.As(err, &cerr) || cerr.Message() != text {
+		t.Errorf("message of %v, want %q", err, text)
+	}
+	if got := api.Detail(err).GetHint(); got != hint {
+		t.Errorf("hint = %q, want %q", got, hint)
+	}
+}
+
+// policyRow is the policy columns of an audit row.
+type policyRow struct {
+	account, targets, decision, result, reason string
+}
+
+// policyRows returns the audit rows of action, in insertion order.
+func policyRows(t *testing.T, h *daemontest.Harness, action string) []policyRow {
+	t.Helper()
+	rows, err := h.DB.QueryContext(t.Context(), "SELECT account, targets, decision, result, reason FROM audit WHERE action = ? ORDER BY id", action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }() // rows.Err below reports any iteration error
+	var out []policyRow
+	for rows.Next() {
+		var r policyRow
+		if err := rows.Scan(&r.account, &r.targets, &r.decision, &r.result, &r.reason); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// deniedRow is the audit row of a refusal by the policy.
+func deniedRow(account string, targets ...string) policyRow {
+	b, _ := json.Marshal(targets)
+	return policyRow{account: account, targets: string(b), decision: "denied", result: "error", reason: api.ReasonPolicyDenied}
+}
+
+func TestOrganizeExpungeDeniedByDefault(t *testing.T) {
+	t.Parallel()
+	m := startFakeMail(t)
+	host := m.host.Add(fake.Message{Folder: "Trash"})
+	gm := m.gmail.Add(fake.Message{Folder: gmailAllMail})
+
+	_, err := m.Client.Organize.Expunge(t.Context(), connect.NewRequest(&chainmailv1.ExpungeRequest{Refs: strs(host)}))
+	checkPolicyDenied(t, err, expungeDenied, expungeHint)
+	if got, want := policyRows(t, m.Harness, "expunge"), []policyRow{deniedRow("host", host.String())}; !slices.Equal(got, want) {
+		t.Errorf("audit = %+v, want %+v", got, want)
+	}
+
+	// A call over several accounts, with a ref that does not parse, is
+	// refused whole: one row per account, the bad ref left out.
+	_, err = m.Client.Organize.Expunge(t.Context(), connect.NewRequest(&chainmailv1.ExpungeRequest{Refs: []string{host.String(), "not a ref", gm.String()}}))
+	checkPolicyDenied(t, err, expungeDenied, expungeHint)
+	// The policy refuses before the refs are counted.
+	_, err = m.Client.Organize.Expunge(t.Context(), connect.NewRequest(&chainmailv1.ExpungeRequest{}))
+	checkPolicyDenied(t, err, expungeDenied, expungeHint)
+
+	want := []policyRow{
+		deniedRow("host", host.String()),
+		deniedRow("", "(invalid)"),
+		deniedRow("gmail", gm.String()),
+		deniedRow("host", host.String()),
+		deniedRow("", "refs=0"),
+	}
+	if got := policyRows(t, m.Harness, "expunge"); !slices.Equal(got, want) {
+		t.Errorf("audit = %+v, want %+v", got, want)
+	}
+	if n := m.host.Calls("Expunge") + m.gmail.Calls("Expunge"); n != 0 {
+		t.Errorf("store Expunge called %d times, want none", n)
+	}
+	if res := m.host.FetchMessages(t.Context(), []ref.Ref{host}); res[0].Err != nil {
+		t.Errorf("refused expunge removed the message: %v", res[0].Err)
+	}
+}
+
+func TestOrganizeDeleteFolderDeniedByDefault(t *testing.T) {
+	t.Parallel()
+	m := startFakeMail(t)
+	m.host.AddFolder("Projects", mailstore.RoleNone)
+	org := m.Client.Organize
+
+	_, err := org.DeleteFolder(t.Context(), connect.NewRequest(&chainmailv1.DeleteFolderRequest{Account: "host", Name: "Projects", Force: true}))
+	checkPolicyDenied(t, err, folderDeleteDenied, folderDeleteHint)
+	_, err = org.DeleteFolder(t.Context(), connect.NewRequest(&chainmailv1.DeleteFolderRequest{Account: "host", Name: "Projects"}))
+	checkPolicyDenied(t, err, folderDeleteDenied, folderDeleteHint)
+	// The policy refuses before the arguments are checked, and the audit
+	// row still leaves invalid names out.
+	_, err = org.DeleteFolder(t.Context(), connect.NewRequest(&chainmailv1.DeleteFolderRequest{Account: "Bad_Name", Name: "a\x01b"}))
+	checkPolicyDenied(t, err, folderDeleteDenied, folderDeleteHint)
+
+	want := []policyRow{
+		deniedRow("host", "Projects", "force"),
+		deniedRow("host", "Projects"),
+		deniedRow("(invalid)", "(invalid)"),
+	}
+	if got := policyRows(t, m.Harness, "folders.delete"); !slices.Equal(got, want) {
+		t.Errorf("audit = %+v, want %+v", got, want)
+	}
+	if n := m.host.Calls("DeleteFolder"); n != 0 {
+		t.Errorf("store DeleteFolder called %d times, want none", n)
+	}
+	folders, err := m.host.ListFolders(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(folders, func(f mailstore.Folder) bool { return f.Name == "Projects" }) {
+		t.Error("refused delete removed the folder")
+	}
+}
+
+// Each setting allows only its own action.
+func TestOrganizeDestructivePolicySettings(t *testing.T) {
+	t.Parallel()
+	t.Run("allow_expunge", func(t *testing.T) {
+		t.Parallel()
+		m := startFakeMailConfig(t, fakeMailConfig+"\n[policy]\nallow_expunge = true\n")
+		m.host.AddFolder("Projects", mailstore.RoleNone)
+		r := m.host.Add(fake.Message{Folder: "Trash"})
+		resp, err := m.Client.Organize.Expunge(t.Context(), connect.NewRequest(&chainmailv1.ExpungeRequest{Refs: strs(r)}))
+		if err != nil {
+			t.Fatalf("Expunge: %v", err)
+		}
+		checkOK(t, strs(r), resp.Msg.GetOutcomes())
+		if n := m.host.Calls("Expunge"); n != 1 {
+			t.Errorf("store Expunge called %d times, want 1", n)
+		}
+		if res := m.host.FetchMessages(t.Context(), []ref.Ref{r}); res[0].Err == nil {
+			t.Error("expunged message still readable")
+		}
+		if got := policyRows(t, m.Harness, "expunge"); len(got) != 1 || got[0].result != "ok" || got[0].decision != "" {
+			t.Errorf("audit = %+v", got)
+		}
+		_, err = m.Client.Organize.DeleteFolder(t.Context(), connect.NewRequest(&chainmailv1.DeleteFolderRequest{Account: "host", Name: "Projects"}))
+		checkPolicyDenied(t, err, folderDeleteDenied, folderDeleteHint)
+	})
+	t.Run("allow_folder_delete", func(t *testing.T) {
+		t.Parallel()
+		m := startFakeMailConfig(t, fakeMailConfig+"\n[policy]\nallow_folder_delete = true\n")
+		m.host.AddFolder("Projects", mailstore.RoleNone)
+		r := m.host.Add(fake.Message{Folder: "Trash"})
+		if _, err := m.Client.Organize.DeleteFolder(t.Context(), connect.NewRequest(&chainmailv1.DeleteFolderRequest{Account: "host", Name: "Projects"})); err != nil {
+			t.Fatalf("DeleteFolder: %v", err)
+		}
+		if n := m.host.Calls("DeleteFolder"); n != 1 {
+			t.Errorf("store DeleteFolder called %d times, want 1", n)
+		}
+		if got := policyRows(t, m.Harness, "folders.delete"); len(got) != 1 || got[0].result != "ok" || got[0].decision != "" {
+			t.Errorf("audit = %+v", got)
+		}
+		_, err := m.Client.Organize.Expunge(t.Context(), connect.NewRequest(&chainmailv1.ExpungeRequest{Refs: strs(r)}))
+		checkPolicyDenied(t, err, expungeDenied, expungeHint)
+	})
 }

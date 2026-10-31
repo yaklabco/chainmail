@@ -45,8 +45,14 @@ type fakeMail struct {
 
 func startFakeMail(t *testing.T) fakeMail {
 	t.Helper()
+	return startFakeMailConfig(t, fakeMailConfig)
+}
+
+// startFakeMailConfig is startFakeMail with the given config TOML.
+func startFakeMailConfig(t *testing.T, configTOML string) fakeMail {
+	t.Helper()
 	m := fakeMail{host: fake.New("host", false), gmail: fake.New("gmail", true)}
-	m.Harness = daemontest.Start(t, fakeMailConfig, daemontest.Options{
+	m.Harness = daemontest.Start(t, configTOML, daemontest.Options{
 		NewStore: func(a config.ResolvedAccount) mailstore.Store {
 			if a.Name == "gmail" {
 				return m.gmail

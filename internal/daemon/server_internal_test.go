@@ -36,7 +36,21 @@ address = "me@example.com"
 // handlers and helpers directly.
 func newTestServer(t *testing.T) (*Server, *sql.DB) {
 	t.Helper()
-	cfg, err := config.Parse([]byte(passwordConfig))
+	return newTestServerConfig(t, passwordConfig)
+}
+
+// newTestServerConfig is newTestServer with the given config TOML.
+func newTestServerConfig(t *testing.T, configTOML string) (*Server, *sql.DB) {
+	t.Helper()
+	return newTestServerOptions(t, configTOML, Options{})
+}
+
+// newTestServerOptions is newTestServerConfig with opts as the base of the
+// Server's Options, such as RootCAs for in-process mail servers. The
+// config, vault, state database, listener and authorizer are the test's.
+func newTestServerOptions(t *testing.T, configTOML string, opts Options) (*Server, *sql.DB) {
+	t.Helper()
+	cfg, err := config.Parse([]byte(configTOML))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,13 +73,9 @@ func newTestServer(t *testing.T) (*Server, *sql.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	s, err := New(Options{
-		Config:     cfg,
-		Vault:      v,
-		StateDB:    stateDB,
-		Listener:   ln,
-		Authorizer: NewAuthorizer(uint32(os.Getuid()), -1),
-	})
+	opts.Config, opts.Vault, opts.StateDB, opts.Listener = cfg, v, stateDB, ln
+	opts.Authorizer = NewAuthorizer(uint32(os.Getuid()), -1)
+	s, err := New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,5 +297,28 @@ func TestToConnectErrorWriteTextIsFixed(t *testing.T) {
 		if !errors.Is(got, tt.sentinel) || !errors.Is(got, err) {
 			t.Errorf("toConnectError(%v) dropped its cause", tt.sentinel)
 		}
+	}
+}
+
+func TestServerBuildsPolicyFromConfig(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServerConfig(t, passwordConfig+"\n[policy]\nallow_expunge = true\n")
+	if !s.policy.AllowExpunge() {
+		t.Error("s.policy.AllowExpunge() = false, want true from allow_expunge = true")
+	}
+	if s.policy.AllowFolderDelete() {
+		t.Error("s.policy.AllowFolderDelete() = true, want the default false")
+	}
+}
+
+func TestNewFailsOnInvalidPolicy(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServer(t)
+	opts := s.opts
+	cfg := *opts.Config
+	cfg.Policy.SendAllow = []string{"*@*"}
+	opts.Config = &cfg
+	if _, err := New(opts); err == nil {
+		t.Error("New: want an error for an invalid send_allow entry")
 	}
 }

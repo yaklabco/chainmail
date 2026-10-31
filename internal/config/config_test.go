@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -437,5 +438,135 @@ func TestMaxMessageSizeUnparsedFallsBackToPreset(t *testing.T) {
 	}
 	if got.MaxMessageSize != 35<<20 {
 		t.Errorf("MaxMessageSize = %d, want the preset's %d", got.MaxMessageSize, 35<<20)
+	}
+}
+
+const policyAccount = "[accounts.x]\nprovider = \"hostinger\"\naddress = \"a@b.c\"\n"
+
+func TestPolicyTables(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse([]byte(`
+[policy]
+send_allow = ["*@ainslies.us", "someone@example.com"]
+max_recipients = 25
+allow_expunge = true
+allow_folder_delete = true
+
+[accounts.gmail]
+provider = "hostinger"
+address = "me@example.com"
+
+[accounts.gmail.policy]
+send_allow = ["friend@gmail.com"]
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := Policy{
+		SendAllow:         []string{"*@ainslies.us", "someone@example.com"},
+		MaxRecipients:     25,
+		AllowExpunge:      true,
+		AllowFolderDelete: true,
+	}
+	if !slices.Equal(cfg.Policy.SendAllow, want.SendAllow) || cfg.Policy.MaxRecipients != want.MaxRecipients ||
+		cfg.Policy.AllowExpunge != want.AllowExpunge || cfg.Policy.AllowFolderDelete != want.AllowFolderDelete {
+		t.Errorf("policy = %+v, want %+v", cfg.Policy, want)
+	}
+	if got := cfg.Accounts["gmail"].Policy.SendAllow; !slices.Equal(got, []string{"friend@gmail.com"}) {
+		t.Errorf("gmail send_allow = %q", got)
+	}
+}
+
+func TestPolicyDefaults(t *testing.T) {
+	t.Parallel()
+	for name, config := range map[string]string{
+		"no policy table":  policyAccount,
+		"max_recipients 0": policyAccount + "[policy]\nmax_recipients = 0\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := Parse([]byte(config))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if cfg.Policy.MaxRecipients != DefaultMaxRecipients {
+				t.Errorf("max_recipients = %d, want %d", cfg.Policy.MaxRecipients, DefaultMaxRecipients)
+			}
+			if cfg.Policy.AllowExpunge || cfg.Policy.AllowFolderDelete || len(cfg.Policy.SendAllow) != 0 {
+				t.Errorf("policy = %+v, want defaults", cfg.Policy)
+			}
+		})
+	}
+}
+
+func TestPolicyMaxRecipientsBounds(t *testing.T) {
+	t.Parallel()
+	for n, ok := range map[int]bool{1: true, 500: true, 501: false, -1: false} {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(policyAccount + "[policy]\nmax_recipients = " + strconv.Itoa(n) + "\n"))
+			if ok {
+				if err != nil {
+					t.Errorf("Parse: %v", err)
+				}
+				return
+			}
+			var ve *ValidationError
+			if !errors.As(err, &ve) || !slices.Contains(ve.Problems, "policy.max_recipients must be 1 to 500") {
+				t.Errorf("err = %v, want policy.max_recipients must be 1 to 500", err)
+			}
+		})
+	}
+}
+
+func TestPolicyInvalidEntries(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		config  string
+		problem string
+	}{
+		{
+			name:    "global",
+			config:  policyAccount + "[policy]\nsend_allow = [\"ok@x.com\", \"*@*\"]\n",
+			problem: `policy.send_allow: invalid entry "*@*"`,
+		},
+		{
+			name:    "per account",
+			config:  policyAccount + "[accounts.x.policy]\nsend_allow = [\"bob@*\"]\n",
+			problem: `accounts.x.policy.send_allow: invalid entry "bob@*"`,
+		},
+		{
+			name:    "per account with unknown provider",
+			config:  "[accounts.y]\nprovider = \"aol\"\naddress = \"a@b.c\"\n[accounts.y.policy]\nsend_allow = [\"*.example.com\"]\n",
+			problem: `accounts.y.policy.send_allow: invalid entry "*.example.com"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(tt.config))
+			var ve *ValidationError
+			if !errors.As(err, &ve) || !slices.Contains(ve.Problems, tt.problem) {
+				t.Errorf("err = %v, want a problem %q", err, tt.problem)
+			}
+		})
+	}
+}
+
+func TestPolicyRejectsUnknownKeys(t *testing.T) {
+	t.Parallel()
+	for name, config := range map[string]string{
+		"global":      policyAccount + "[policy]\nfoo = 1\n",
+		"per account": policyAccount + "[accounts.x.policy]\nmax_recipients = 3\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(config))
+			var strict *toml.StrictMissingError
+			if !errors.As(err, &strict) {
+				t.Errorf("err = %v, want *toml.StrictMissingError", err)
+			}
+		})
 	}
 }

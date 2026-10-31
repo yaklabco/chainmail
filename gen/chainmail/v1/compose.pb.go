@@ -573,8 +573,8 @@ func (x *Draft) GetHint() string {
 	return ""
 }
 
-// ComposeResult is what a send-type call did: sent, built as a dry run, or
-// saved as a draft.
+// ComposeResult is what a send-type call did: sent, built as a dry run,
+// saved as a draft, or held by policy.
 type ComposeResult struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Result:
@@ -582,6 +582,7 @@ type ComposeResult struct {
 	//	*ComposeResult_Sent
 	//	*ComposeResult_DryRun
 	//	*ComposeResult_Draft
+	//	*ComposeResult_Held
 	Result        isComposeResult_Result `protobuf_oneof:"result"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -651,6 +652,15 @@ func (x *ComposeResult) GetDraft() *Draft {
 	return nil
 }
 
+func (x *ComposeResult) GetHeld() *Held {
+	if x != nil {
+		if x, ok := x.Result.(*ComposeResult_Held); ok {
+			return x.Held
+		}
+	}
+	return nil
+}
+
 type isComposeResult_Result interface {
 	isComposeResult_Result()
 }
@@ -670,11 +680,93 @@ type ComposeResult_Draft struct {
 	Draft *Draft `protobuf:"bytes,3,opt,name=draft,proto3,oneof"`
 }
 
+type ComposeResult_Held struct {
+	// Policy held the message. It was not sent. It was saved to Drafts
+	// for James to review and send from his own mail client.
+	Held *Held `protobuf:"bytes,4,opt,name=held,proto3,oneof"`
+}
+
 func (*ComposeResult_Sent) isComposeResult_Result() {}
 
 func (*ComposeResult_DryRun) isComposeResult_Result() {}
 
 func (*ComposeResult_Draft) isComposeResult_Result() {}
+
+func (*ComposeResult_Held) isComposeResult_Result() {}
+
+// Held is a message the send policy held instead of sending.
+type Held struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The saved draft: its ref, Message-ID, and a hint when the ref is empty.
+	Draft *Draft `protobuf:"bytes,1,opt,name=draft,proto3" json:"draft,omitempty"`
+	// Recipients not on the allowlist, as given.
+	Blocked []string `protobuf:"bytes,2,rep,name=blocked,proto3" json:"blocked,omitempty"`
+	// The message had more recipients than max_recipients.
+	TooManyRecipients bool `protobuf:"varint,3,opt,name=too_many_recipients,json=tooManyRecipients,proto3" json:"too_many_recipients,omitempty"`
+	// Fixed text for the agent to relay, such as
+	// "held by policy: saved to Drafts for James to review and send".
+	Hint          string `protobuf:"bytes,4,opt,name=hint,proto3" json:"hint,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Held) Reset() {
+	*x = Held{}
+	mi := &file_chainmail_v1_compose_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Held) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Held) ProtoMessage() {}
+
+func (x *Held) ProtoReflect() protoreflect.Message {
+	mi := &file_chainmail_v1_compose_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Held.ProtoReflect.Descriptor instead.
+func (*Held) Descriptor() ([]byte, []int) {
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *Held) GetDraft() *Draft {
+	if x != nil {
+		return x.Draft
+	}
+	return nil
+}
+
+func (x *Held) GetBlocked() []string {
+	if x != nil {
+		return x.Blocked
+	}
+	return nil
+}
+
+func (x *Held) GetTooManyRecipients() bool {
+	if x != nil {
+		return x.TooManyRecipients
+	}
+	return false
+}
+
+func (x *Held) GetHint() string {
+	if x != nil {
+		return x.Hint
+	}
+	return ""
+}
 
 // SendRequest sends a new message.
 type SendRequest struct {
@@ -704,7 +796,7 @@ type SendRequest struct {
 
 func (x *SendRequest) Reset() {
 	*x = SendRequest{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[8]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -716,7 +808,7 @@ func (x *SendRequest) String() string {
 func (*SendRequest) ProtoMessage() {}
 
 func (x *SendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[8]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -729,7 +821,7 @@ func (x *SendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendRequest.ProtoReflect.Descriptor instead.
 func (*SendRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{8}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *SendRequest) GetSpec() *ComposeSpec {
@@ -763,7 +855,7 @@ func (x *SendRequest) GetIdempotencyKey() string {
 // SendResponse is the result of Send.
 type SendResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Sent, dry run or draft.
+	// Sent, dry run, draft, or held by policy.
 	Result        *ComposeResult `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -771,7 +863,7 @@ type SendResponse struct {
 
 func (x *SendResponse) Reset() {
 	*x = SendResponse{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[9]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -783,7 +875,7 @@ func (x *SendResponse) String() string {
 func (*SendResponse) ProtoMessage() {}
 
 func (x *SendResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[9]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -796,7 +888,7 @@ func (x *SendResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendResponse.ProtoReflect.Descriptor instead.
 func (*SendResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{9}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *SendResponse) GetResult() *ComposeResult {
@@ -824,7 +916,7 @@ type SendRawRequest struct {
 
 func (x *SendRawRequest) Reset() {
 	*x = SendRawRequest{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[10]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -836,7 +928,7 @@ func (x *SendRawRequest) String() string {
 func (*SendRawRequest) ProtoMessage() {}
 
 func (x *SendRawRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[10]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -849,7 +941,7 @@ func (x *SendRawRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendRawRequest.ProtoReflect.Descriptor instead.
 func (*SendRawRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{10}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *SendRawRequest) GetAccount() string {
@@ -883,7 +975,7 @@ func (x *SendRawRequest) GetIdempotencyKey() string {
 // SendRawResponse is the result of SendRaw.
 type SendRawResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Always sent.
+	// Sent, or held by policy.
 	Result        *ComposeResult `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -891,7 +983,7 @@ type SendRawResponse struct {
 
 func (x *SendRawResponse) Reset() {
 	*x = SendRawResponse{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[11]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -903,7 +995,7 @@ func (x *SendRawResponse) String() string {
 func (*SendRawResponse) ProtoMessage() {}
 
 func (x *SendRawResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[11]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -916,7 +1008,7 @@ func (x *SendRawResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendRawResponse.ProtoReflect.Descriptor instead.
 func (*SendRawResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{11}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SendRawResponse) GetResult() *ComposeResult {
@@ -953,7 +1045,7 @@ type ReplyRequest struct {
 
 func (x *ReplyRequest) Reset() {
 	*x = ReplyRequest{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[12]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -965,7 +1057,7 @@ func (x *ReplyRequest) String() string {
 func (*ReplyRequest) ProtoMessage() {}
 
 func (x *ReplyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[12]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -978,7 +1070,7 @@ func (x *ReplyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplyRequest.ProtoReflect.Descriptor instead.
 func (*ReplyRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{12}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ReplyRequest) GetRef() string {
@@ -1047,7 +1139,7 @@ func (x *ReplyRequest) GetIdempotencyKey() string {
 // ReplyResponse is the result of Reply.
 type ReplyResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Sent, dry run or draft.
+	// Sent, dry run, draft, or held by policy.
 	Result        *ComposeResult `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1055,7 +1147,7 @@ type ReplyResponse struct {
 
 func (x *ReplyResponse) Reset() {
 	*x = ReplyResponse{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[13]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1067,7 +1159,7 @@ func (x *ReplyResponse) String() string {
 func (*ReplyResponse) ProtoMessage() {}
 
 func (x *ReplyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[13]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1080,7 +1172,7 @@ func (x *ReplyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplyResponse.ProtoReflect.Descriptor instead.
 func (*ReplyResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{13}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ReplyResponse) GetResult() *ComposeResult {
@@ -1117,7 +1209,7 @@ type ForwardRequest struct {
 
 func (x *ForwardRequest) Reset() {
 	*x = ForwardRequest{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[14]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1129,7 +1221,7 @@ func (x *ForwardRequest) String() string {
 func (*ForwardRequest) ProtoMessage() {}
 
 func (x *ForwardRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[14]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1142,7 +1234,7 @@ func (x *ForwardRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForwardRequest.ProtoReflect.Descriptor instead.
 func (*ForwardRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{14}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ForwardRequest) GetRef() string {
@@ -1211,7 +1303,7 @@ func (x *ForwardRequest) GetIdempotencyKey() string {
 // ForwardResponse is the result of Forward.
 type ForwardResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Sent, dry run or draft.
+	// Sent, dry run, draft, or held by policy.
 	Result        *ComposeResult `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1219,7 +1311,7 @@ type ForwardResponse struct {
 
 func (x *ForwardResponse) Reset() {
 	*x = ForwardResponse{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[15]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1231,7 +1323,7 @@ func (x *ForwardResponse) String() string {
 func (*ForwardResponse) ProtoMessage() {}
 
 func (x *ForwardResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[15]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1244,7 +1336,7 @@ func (x *ForwardResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForwardResponse.ProtoReflect.Descriptor instead.
 func (*ForwardResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{15}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ForwardResponse) GetResult() *ComposeResult {
@@ -1265,7 +1357,7 @@ type CreateDraftRequest struct {
 
 func (x *CreateDraftRequest) Reset() {
 	*x = CreateDraftRequest{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[16]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1277,7 +1369,7 @@ func (x *CreateDraftRequest) String() string {
 func (*CreateDraftRequest) ProtoMessage() {}
 
 func (x *CreateDraftRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[16]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1290,7 +1382,7 @@ func (x *CreateDraftRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateDraftRequest.ProtoReflect.Descriptor instead.
 func (*CreateDraftRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{16}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *CreateDraftRequest) GetSpec() *ComposeSpec {
@@ -1311,7 +1403,7 @@ type CreateDraftResponse struct {
 
 func (x *CreateDraftResponse) Reset() {
 	*x = CreateDraftResponse{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[17]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1323,7 +1415,7 @@ func (x *CreateDraftResponse) String() string {
 func (*CreateDraftResponse) ProtoMessage() {}
 
 func (x *CreateDraftResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[17]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1336,7 +1428,7 @@ func (x *CreateDraftResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateDraftResponse.ProtoReflect.Descriptor instead.
 func (*CreateDraftResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{17}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *CreateDraftResponse) GetDraft() *Draft {
@@ -1359,7 +1451,7 @@ type UpdateDraftRequest struct {
 
 func (x *UpdateDraftRequest) Reset() {
 	*x = UpdateDraftRequest{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[18]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1371,7 +1463,7 @@ func (x *UpdateDraftRequest) String() string {
 func (*UpdateDraftRequest) ProtoMessage() {}
 
 func (x *UpdateDraftRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[18]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1384,7 +1476,7 @@ func (x *UpdateDraftRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateDraftRequest.ProtoReflect.Descriptor instead.
 func (*UpdateDraftRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{18}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *UpdateDraftRequest) GetRef() string {
@@ -1412,7 +1504,7 @@ type UpdateDraftResponse struct {
 
 func (x *UpdateDraftResponse) Reset() {
 	*x = UpdateDraftResponse{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[19]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1424,7 +1516,7 @@ func (x *UpdateDraftResponse) String() string {
 func (*UpdateDraftResponse) ProtoMessage() {}
 
 func (x *UpdateDraftResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[19]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1437,7 +1529,7 @@ func (x *UpdateDraftResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateDraftResponse.ProtoReflect.Descriptor instead.
 func (*UpdateDraftResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{19}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *UpdateDraftResponse) GetDraft() *Draft {
@@ -1463,7 +1555,7 @@ type SendDraftRequest struct {
 
 func (x *SendDraftRequest) Reset() {
 	*x = SendDraftRequest{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[20]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1475,7 +1567,7 @@ func (x *SendDraftRequest) String() string {
 func (*SendDraftRequest) ProtoMessage() {}
 
 func (x *SendDraftRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[20]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1488,7 +1580,7 @@ func (x *SendDraftRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendDraftRequest.ProtoReflect.Descriptor instead.
 func (*SendDraftRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{20}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *SendDraftRequest) GetRef() string {
@@ -1508,7 +1600,7 @@ func (x *SendDraftRequest) GetIdempotencyKey() string {
 // SendDraftResponse is the result of SendDraft.
 type SendDraftResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Always sent.
+	// Sent, or held by policy.
 	Result        *ComposeResult `protobuf:"bytes,1,opt,name=result,proto3" json:"result,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1516,7 +1608,7 @@ type SendDraftResponse struct {
 
 func (x *SendDraftResponse) Reset() {
 	*x = SendDraftResponse{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[21]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1528,7 +1620,7 @@ func (x *SendDraftResponse) String() string {
 func (*SendDraftResponse) ProtoMessage() {}
 
 func (x *SendDraftResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[21]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1541,7 +1633,7 @@ func (x *SendDraftResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendDraftResponse.ProtoReflect.Descriptor instead.
 func (*SendDraftResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{21}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SendDraftResponse) GetResult() *ComposeResult {
@@ -1562,7 +1654,7 @@ type DeleteDraftRequest struct {
 
 func (x *DeleteDraftRequest) Reset() {
 	*x = DeleteDraftRequest{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[22]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1574,7 +1666,7 @@ func (x *DeleteDraftRequest) String() string {
 func (*DeleteDraftRequest) ProtoMessage() {}
 
 func (x *DeleteDraftRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[22]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1587,7 +1679,7 @@ func (x *DeleteDraftRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteDraftRequest.ProtoReflect.Descriptor instead.
 func (*DeleteDraftRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{22}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *DeleteDraftRequest) GetRef() string {
@@ -1606,7 +1698,7 @@ type DeleteDraftResponse struct {
 
 func (x *DeleteDraftResponse) Reset() {
 	*x = DeleteDraftResponse{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[23]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1618,7 +1710,7 @@ func (x *DeleteDraftResponse) String() string {
 func (*DeleteDraftResponse) ProtoMessage() {}
 
 func (x *DeleteDraftResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[23]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1631,7 +1723,7 @@ func (x *DeleteDraftResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteDraftResponse.ProtoReflect.Descriptor instead.
 func (*DeleteDraftResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{23}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{24}
 }
 
 // UploadHeader is the first part of an upload.
@@ -1650,7 +1742,7 @@ type UploadHeader struct {
 
 func (x *UploadHeader) Reset() {
 	*x = UploadHeader{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[24]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1662,7 +1754,7 @@ func (x *UploadHeader) String() string {
 func (*UploadHeader) ProtoMessage() {}
 
 func (x *UploadHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[24]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1675,7 +1767,7 @@ func (x *UploadHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UploadHeader.ProtoReflect.Descriptor instead.
 func (*UploadHeader) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{24}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *UploadHeader) GetFilename() string {
@@ -1714,7 +1806,7 @@ type UploadAttachmentRequest struct {
 
 func (x *UploadAttachmentRequest) Reset() {
 	*x = UploadAttachmentRequest{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[25]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1726,7 +1818,7 @@ func (x *UploadAttachmentRequest) String() string {
 func (*UploadAttachmentRequest) ProtoMessage() {}
 
 func (x *UploadAttachmentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[25]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1739,7 +1831,7 @@ func (x *UploadAttachmentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UploadAttachmentRequest.ProtoReflect.Descriptor instead.
 func (*UploadAttachmentRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{25}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *UploadAttachmentRequest) GetPart() isUploadAttachmentRequest_Part {
@@ -1800,7 +1892,7 @@ type UploadAttachmentResponse struct {
 
 func (x *UploadAttachmentResponse) Reset() {
 	*x = UploadAttachmentResponse{}
-	mi := &file_chainmail_v1_compose_proto_msgTypes[26]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1812,7 +1904,7 @@ func (x *UploadAttachmentResponse) String() string {
 func (*UploadAttachmentResponse) ProtoMessage() {}
 
 func (x *UploadAttachmentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_compose_proto_msgTypes[26]
+	mi := &file_chainmail_v1_compose_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1825,7 +1917,7 @@ func (x *UploadAttachmentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UploadAttachmentResponse.ProtoReflect.Descriptor instead.
 func (*UploadAttachmentResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{26}
+	return file_chainmail_v1_compose_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *UploadAttachmentResponse) GetHandle() string {
@@ -1894,12 +1986,18 @@ const file_chainmail_v1_compose_proto_rawDesc = "" +
 	"\x03ref\x18\x01 \x01(\tR\x03ref\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x02 \x01(\tR\tmessageId\x12\x12\n" +
-	"\x04hint\x18\x03 \x01(\tR\x04hint\"\xa1\x01\n" +
+	"\x04hint\x18\x03 \x01(\tR\x04hint\"\xcb\x01\n" +
 	"\rComposeResult\x12(\n" +
 	"\x04sent\x18\x01 \x01(\v2\x12.chainmail.v1.SentH\x00R\x04sent\x12/\n" +
 	"\adry_run\x18\x02 \x01(\v2\x14.chainmail.v1.DryRunH\x00R\x06dryRun\x12+\n" +
-	"\x05draft\x18\x03 \x01(\v2\x13.chainmail.v1.DraftH\x00R\x05draftB\b\n" +
-	"\x06result\"\x94\x01\n" +
+	"\x05draft\x18\x03 \x01(\v2\x13.chainmail.v1.DraftH\x00R\x05draft\x12(\n" +
+	"\x04held\x18\x04 \x01(\v2\x12.chainmail.v1.HeldH\x00R\x04heldB\b\n" +
+	"\x06result\"\x8f\x01\n" +
+	"\x04Held\x12)\n" +
+	"\x05draft\x18\x01 \x01(\v2\x13.chainmail.v1.DraftR\x05draft\x12\x18\n" +
+	"\ablocked\x18\x02 \x03(\tR\ablocked\x12.\n" +
+	"\x13too_many_recipients\x18\x03 \x01(\bR\x11tooManyRecipients\x12\x12\n" +
+	"\x04hint\x18\x04 \x01(\tR\x04hint\"\x94\x01\n" +
 	"\vSendRequest\x12-\n" +
 	"\x04spec\x18\x01 \x01(\v2\x19.chainmail.v1.ComposeSpecR\x04spec\x12\x17\n" +
 	"\adry_run\x18\x02 \x01(\bR\x06dryRun\x12\x14\n" +
@@ -1992,7 +2090,7 @@ func file_chainmail_v1_compose_proto_rawDescGZIP() []byte {
 	return file_chainmail_v1_compose_proto_rawDescData
 }
 
-var file_chainmail_v1_compose_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
+var file_chainmail_v1_compose_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_chainmail_v1_compose_proto_goTypes = []any{
 	(*ComposeBody)(nil),              // 0: chainmail.v1.ComposeBody
 	(*InlineImage)(nil),              // 1: chainmail.v1.InlineImage
@@ -2002,71 +2100,74 @@ var file_chainmail_v1_compose_proto_goTypes = []any{
 	(*DryRun)(nil),                   // 5: chainmail.v1.DryRun
 	(*Draft)(nil),                    // 6: chainmail.v1.Draft
 	(*ComposeResult)(nil),            // 7: chainmail.v1.ComposeResult
-	(*SendRequest)(nil),              // 8: chainmail.v1.SendRequest
-	(*SendResponse)(nil),             // 9: chainmail.v1.SendResponse
-	(*SendRawRequest)(nil),           // 10: chainmail.v1.SendRawRequest
-	(*SendRawResponse)(nil),          // 11: chainmail.v1.SendRawResponse
-	(*ReplyRequest)(nil),             // 12: chainmail.v1.ReplyRequest
-	(*ReplyResponse)(nil),            // 13: chainmail.v1.ReplyResponse
-	(*ForwardRequest)(nil),           // 14: chainmail.v1.ForwardRequest
-	(*ForwardResponse)(nil),          // 15: chainmail.v1.ForwardResponse
-	(*CreateDraftRequest)(nil),       // 16: chainmail.v1.CreateDraftRequest
-	(*CreateDraftResponse)(nil),      // 17: chainmail.v1.CreateDraftResponse
-	(*UpdateDraftRequest)(nil),       // 18: chainmail.v1.UpdateDraftRequest
-	(*UpdateDraftResponse)(nil),      // 19: chainmail.v1.UpdateDraftResponse
-	(*SendDraftRequest)(nil),         // 20: chainmail.v1.SendDraftRequest
-	(*SendDraftResponse)(nil),        // 21: chainmail.v1.SendDraftResponse
-	(*DeleteDraftRequest)(nil),       // 22: chainmail.v1.DeleteDraftRequest
-	(*DeleteDraftResponse)(nil),      // 23: chainmail.v1.DeleteDraftResponse
-	(*UploadHeader)(nil),             // 24: chainmail.v1.UploadHeader
-	(*UploadAttachmentRequest)(nil),  // 25: chainmail.v1.UploadAttachmentRequest
-	(*UploadAttachmentResponse)(nil), // 26: chainmail.v1.UploadAttachmentResponse
-	nil,                              // 27: chainmail.v1.Content.HeadersEntry
+	(*Held)(nil),                     // 8: chainmail.v1.Held
+	(*SendRequest)(nil),              // 9: chainmail.v1.SendRequest
+	(*SendResponse)(nil),             // 10: chainmail.v1.SendResponse
+	(*SendRawRequest)(nil),           // 11: chainmail.v1.SendRawRequest
+	(*SendRawResponse)(nil),          // 12: chainmail.v1.SendRawResponse
+	(*ReplyRequest)(nil),             // 13: chainmail.v1.ReplyRequest
+	(*ReplyResponse)(nil),            // 14: chainmail.v1.ReplyResponse
+	(*ForwardRequest)(nil),           // 15: chainmail.v1.ForwardRequest
+	(*ForwardResponse)(nil),          // 16: chainmail.v1.ForwardResponse
+	(*CreateDraftRequest)(nil),       // 17: chainmail.v1.CreateDraftRequest
+	(*CreateDraftResponse)(nil),      // 18: chainmail.v1.CreateDraftResponse
+	(*UpdateDraftRequest)(nil),       // 19: chainmail.v1.UpdateDraftRequest
+	(*UpdateDraftResponse)(nil),      // 20: chainmail.v1.UpdateDraftResponse
+	(*SendDraftRequest)(nil),         // 21: chainmail.v1.SendDraftRequest
+	(*SendDraftResponse)(nil),        // 22: chainmail.v1.SendDraftResponse
+	(*DeleteDraftRequest)(nil),       // 23: chainmail.v1.DeleteDraftRequest
+	(*DeleteDraftResponse)(nil),      // 24: chainmail.v1.DeleteDraftResponse
+	(*UploadHeader)(nil),             // 25: chainmail.v1.UploadHeader
+	(*UploadAttachmentRequest)(nil),  // 26: chainmail.v1.UploadAttachmentRequest
+	(*UploadAttachmentResponse)(nil), // 27: chainmail.v1.UploadAttachmentResponse
+	nil,                              // 28: chainmail.v1.Content.HeadersEntry
 }
 var file_chainmail_v1_compose_proto_depIdxs = []int32{
 	0,  // 0: chainmail.v1.Content.body:type_name -> chainmail.v1.ComposeBody
 	1,  // 1: chainmail.v1.Content.inline:type_name -> chainmail.v1.InlineImage
-	27, // 2: chainmail.v1.Content.headers:type_name -> chainmail.v1.Content.HeadersEntry
+	28, // 2: chainmail.v1.Content.headers:type_name -> chainmail.v1.Content.HeadersEntry
 	2,  // 3: chainmail.v1.ComposeSpec.content:type_name -> chainmail.v1.Content
 	4,  // 4: chainmail.v1.ComposeResult.sent:type_name -> chainmail.v1.Sent
 	5,  // 5: chainmail.v1.ComposeResult.dry_run:type_name -> chainmail.v1.DryRun
 	6,  // 6: chainmail.v1.ComposeResult.draft:type_name -> chainmail.v1.Draft
-	3,  // 7: chainmail.v1.SendRequest.spec:type_name -> chainmail.v1.ComposeSpec
-	7,  // 8: chainmail.v1.SendResponse.result:type_name -> chainmail.v1.ComposeResult
-	7,  // 9: chainmail.v1.SendRawResponse.result:type_name -> chainmail.v1.ComposeResult
-	2,  // 10: chainmail.v1.ReplyRequest.content:type_name -> chainmail.v1.Content
-	7,  // 11: chainmail.v1.ReplyResponse.result:type_name -> chainmail.v1.ComposeResult
-	2,  // 12: chainmail.v1.ForwardRequest.content:type_name -> chainmail.v1.Content
-	7,  // 13: chainmail.v1.ForwardResponse.result:type_name -> chainmail.v1.ComposeResult
-	3,  // 14: chainmail.v1.CreateDraftRequest.spec:type_name -> chainmail.v1.ComposeSpec
-	6,  // 15: chainmail.v1.CreateDraftResponse.draft:type_name -> chainmail.v1.Draft
-	3,  // 16: chainmail.v1.UpdateDraftRequest.spec:type_name -> chainmail.v1.ComposeSpec
-	6,  // 17: chainmail.v1.UpdateDraftResponse.draft:type_name -> chainmail.v1.Draft
-	7,  // 18: chainmail.v1.SendDraftResponse.result:type_name -> chainmail.v1.ComposeResult
-	24, // 19: chainmail.v1.UploadAttachmentRequest.header:type_name -> chainmail.v1.UploadHeader
-	8,  // 20: chainmail.v1.ComposeService.Send:input_type -> chainmail.v1.SendRequest
-	10, // 21: chainmail.v1.ComposeService.SendRaw:input_type -> chainmail.v1.SendRawRequest
-	12, // 22: chainmail.v1.ComposeService.Reply:input_type -> chainmail.v1.ReplyRequest
-	14, // 23: chainmail.v1.ComposeService.Forward:input_type -> chainmail.v1.ForwardRequest
-	16, // 24: chainmail.v1.ComposeService.CreateDraft:input_type -> chainmail.v1.CreateDraftRequest
-	18, // 25: chainmail.v1.ComposeService.UpdateDraft:input_type -> chainmail.v1.UpdateDraftRequest
-	20, // 26: chainmail.v1.ComposeService.SendDraft:input_type -> chainmail.v1.SendDraftRequest
-	22, // 27: chainmail.v1.ComposeService.DeleteDraft:input_type -> chainmail.v1.DeleteDraftRequest
-	25, // 28: chainmail.v1.ComposeService.UploadAttachment:input_type -> chainmail.v1.UploadAttachmentRequest
-	9,  // 29: chainmail.v1.ComposeService.Send:output_type -> chainmail.v1.SendResponse
-	11, // 30: chainmail.v1.ComposeService.SendRaw:output_type -> chainmail.v1.SendRawResponse
-	13, // 31: chainmail.v1.ComposeService.Reply:output_type -> chainmail.v1.ReplyResponse
-	15, // 32: chainmail.v1.ComposeService.Forward:output_type -> chainmail.v1.ForwardResponse
-	17, // 33: chainmail.v1.ComposeService.CreateDraft:output_type -> chainmail.v1.CreateDraftResponse
-	19, // 34: chainmail.v1.ComposeService.UpdateDraft:output_type -> chainmail.v1.UpdateDraftResponse
-	21, // 35: chainmail.v1.ComposeService.SendDraft:output_type -> chainmail.v1.SendDraftResponse
-	23, // 36: chainmail.v1.ComposeService.DeleteDraft:output_type -> chainmail.v1.DeleteDraftResponse
-	26, // 37: chainmail.v1.ComposeService.UploadAttachment:output_type -> chainmail.v1.UploadAttachmentResponse
-	29, // [29:38] is the sub-list for method output_type
-	20, // [20:29] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	8,  // 7: chainmail.v1.ComposeResult.held:type_name -> chainmail.v1.Held
+	6,  // 8: chainmail.v1.Held.draft:type_name -> chainmail.v1.Draft
+	3,  // 9: chainmail.v1.SendRequest.spec:type_name -> chainmail.v1.ComposeSpec
+	7,  // 10: chainmail.v1.SendResponse.result:type_name -> chainmail.v1.ComposeResult
+	7,  // 11: chainmail.v1.SendRawResponse.result:type_name -> chainmail.v1.ComposeResult
+	2,  // 12: chainmail.v1.ReplyRequest.content:type_name -> chainmail.v1.Content
+	7,  // 13: chainmail.v1.ReplyResponse.result:type_name -> chainmail.v1.ComposeResult
+	2,  // 14: chainmail.v1.ForwardRequest.content:type_name -> chainmail.v1.Content
+	7,  // 15: chainmail.v1.ForwardResponse.result:type_name -> chainmail.v1.ComposeResult
+	3,  // 16: chainmail.v1.CreateDraftRequest.spec:type_name -> chainmail.v1.ComposeSpec
+	6,  // 17: chainmail.v1.CreateDraftResponse.draft:type_name -> chainmail.v1.Draft
+	3,  // 18: chainmail.v1.UpdateDraftRequest.spec:type_name -> chainmail.v1.ComposeSpec
+	6,  // 19: chainmail.v1.UpdateDraftResponse.draft:type_name -> chainmail.v1.Draft
+	7,  // 20: chainmail.v1.SendDraftResponse.result:type_name -> chainmail.v1.ComposeResult
+	25, // 21: chainmail.v1.UploadAttachmentRequest.header:type_name -> chainmail.v1.UploadHeader
+	9,  // 22: chainmail.v1.ComposeService.Send:input_type -> chainmail.v1.SendRequest
+	11, // 23: chainmail.v1.ComposeService.SendRaw:input_type -> chainmail.v1.SendRawRequest
+	13, // 24: chainmail.v1.ComposeService.Reply:input_type -> chainmail.v1.ReplyRequest
+	15, // 25: chainmail.v1.ComposeService.Forward:input_type -> chainmail.v1.ForwardRequest
+	17, // 26: chainmail.v1.ComposeService.CreateDraft:input_type -> chainmail.v1.CreateDraftRequest
+	19, // 27: chainmail.v1.ComposeService.UpdateDraft:input_type -> chainmail.v1.UpdateDraftRequest
+	21, // 28: chainmail.v1.ComposeService.SendDraft:input_type -> chainmail.v1.SendDraftRequest
+	23, // 29: chainmail.v1.ComposeService.DeleteDraft:input_type -> chainmail.v1.DeleteDraftRequest
+	26, // 30: chainmail.v1.ComposeService.UploadAttachment:input_type -> chainmail.v1.UploadAttachmentRequest
+	10, // 31: chainmail.v1.ComposeService.Send:output_type -> chainmail.v1.SendResponse
+	12, // 32: chainmail.v1.ComposeService.SendRaw:output_type -> chainmail.v1.SendRawResponse
+	14, // 33: chainmail.v1.ComposeService.Reply:output_type -> chainmail.v1.ReplyResponse
+	16, // 34: chainmail.v1.ComposeService.Forward:output_type -> chainmail.v1.ForwardResponse
+	18, // 35: chainmail.v1.ComposeService.CreateDraft:output_type -> chainmail.v1.CreateDraftResponse
+	20, // 36: chainmail.v1.ComposeService.UpdateDraft:output_type -> chainmail.v1.UpdateDraftResponse
+	22, // 37: chainmail.v1.ComposeService.SendDraft:output_type -> chainmail.v1.SendDraftResponse
+	24, // 38: chainmail.v1.ComposeService.DeleteDraft:output_type -> chainmail.v1.DeleteDraftResponse
+	27, // 39: chainmail.v1.ComposeService.UploadAttachment:output_type -> chainmail.v1.UploadAttachmentResponse
+	31, // [31:40] is the sub-list for method output_type
+	22, // [22:31] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_chainmail_v1_compose_proto_init() }
@@ -2083,8 +2184,9 @@ func file_chainmail_v1_compose_proto_init() {
 		(*ComposeResult_Sent)(nil),
 		(*ComposeResult_DryRun)(nil),
 		(*ComposeResult_Draft)(nil),
+		(*ComposeResult_Held)(nil),
 	}
-	file_chainmail_v1_compose_proto_msgTypes[25].OneofWrappers = []any{
+	file_chainmail_v1_compose_proto_msgTypes[26].OneofWrappers = []any{
 		(*UploadAttachmentRequest_Header)(nil),
 		(*UploadAttachmentRequest_Data)(nil),
 	}
@@ -2094,7 +2196,7 @@ func file_chainmail_v1_compose_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chainmail_v1_compose_proto_rawDesc), len(file_chainmail_v1_compose_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   28,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

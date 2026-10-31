@@ -18,8 +18,10 @@ import (
 	"connectrpc.com/connect"
 	"github.com/emersion/go-message"
 	gomail "github.com/emersion/go-message/mail"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
@@ -35,6 +37,10 @@ provider = "hostinger"
 address = "me@example.com"
 display_name = "Me Myself"
 smtp = { host = "127.0.0.1", port = %d, security = "starttls" }
+
+# blocked.invalid is never allowed.
+[policy]
+send_allow = ["*@example.net", "*@example.org"]
 `
 
 // cliSend is a daemon whose host account submits to an smtptest server
@@ -607,5 +613,123 @@ func TestDraftWithoutARefPrintsTheHint(t *testing.T) {
 	got := out.String()
 	if !strings.HasPrefix(got, "draft saved; look in the Drafts folder") || strings.ContainsAny(got, "\x1b\x07") {
 		t.Errorf("output = %q, want the hint without control characters", got)
+	}
+}
+
+// A held send prints where the draft went, the blocked recipients and
+// whether there were too many, each cleaned for the terminal.
+func TestComposeResultHeldTable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		held *chainmailv1.Held
+		want string
+	}{
+		{
+			name: "with a ref",
+			held: &chainmailv1.Held{Draft: &chainmailv1.Draft{Ref: "cm1:a:Drafts:1:2", MessageId: "h.1@example.com"}},
+			want: "held by policy, not sent: saved to Drafts cm1:a:Drafts:1:2\n",
+		},
+		{
+			name: "empty ref prints the hint",
+			held: &chainmailv1.Held{
+				Draft: &chainmailv1.Draft{MessageId: "h.1@example.com"},
+				Hint:  "held by policy: saved to Drafts for James to review and send\x1b]0;x\x07",
+			},
+			// termText drops the control bytes and keeps the printable rest.
+			want: "held by policy, not sent: held by policy: saved to Drafts for James to review and send]0;x\n",
+		},
+		{
+			name: "empty ref prints the draft's own hint first",
+			held: &chainmailv1.Held{
+				Draft: &chainmailv1.Draft{MessageId: "h.1@example.com", Hint: "search the Drafts folder for h.1@example.com"},
+				Hint:  "held by policy: saved to Drafts for James to review and send",
+			},
+			want: "held by policy, not sent: search the Drafts folder for h.1@example.com\n",
+		},
+		{
+			name: "no ref and no hint names the Message-ID",
+			held: &chainmailv1.Held{Draft: &chainmailv1.Draft{MessageId: "h.1@example.com"}},
+			want: "held by policy, not sent: search the Drafts folder for Message-ID <h.1@example.com>\n",
+		},
+		{
+			name: "blocked and too many recipients",
+			held: &chainmailv1.Held{
+				Draft:             &chainmailv1.Draft{Ref: "cm1:a:Drafts:1:3"},
+				Blocked:           []string{"x@evil.example", "Y <y@other.example>\u202e"},
+				TooManyRecipients: true,
+			},
+			want: "held by policy, not sent: saved to Drafts cm1:a:Drafts:1:3\n" +
+				"blocked: x@evil.example, Y <y@other.example>\n" +
+				"too many recipients\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			res := &chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Held{Held: tt.held}}
+			err := writeComposeResult(Env{Stdout: &out, StdoutTerminal: true}, &globals{output: "table"}, false, &chainmailv1.SendResponse{Result: res}, res)
+			if err == nil {
+				t.Fatal("err = nil, want HELD")
+			}
+			if c := classify(err); c.code != api.ExitHeld || c.reason != api.ReasonHeld || c.hint != tt.held.GetHint() {
+				t.Errorf("err = %v (%+v), want HELD, exit 4 and the held hint", err, c)
+			}
+			if got := out.String(); got != tt.want {
+				t.Errorf("output = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// A send the policy holds prints its result as usual on stdout, and
+// reports HELD on stderr with exit code 4. So does sending a held draft.
+func TestSendHeldExitsFour(t *testing.T) {
+	t.Parallel()
+	e := startCLISend(t, smtptest.Options{})
+	args := []string{"send", "--account", "host", "--to", "stranger@blocked.invalid", "--subject", "Quarterly", "--body", "Hello"}
+
+	got := e.run(t, Env{}, append([]string{"--output", "json"}, args...)...)
+	if got.code != 4 {
+		t.Fatalf("exit code = %d, want 4: %+v", got.code, got)
+	}
+	var resp chainmailv1.SendResponse
+	if err := protojson.Unmarshal([]byte(got.stdout), &resp); err != nil {
+		t.Fatalf("stdout %q: %v", got.stdout, err)
+	}
+	held := resp.GetResult().GetHeld()
+	if held == nil || held.GetDraft().GetRef() == "" || strings.Join(held.GetBlocked(), ",") != "stranger@blocked.invalid" {
+		t.Fatalf("result = %+v, want held", resp.GetResult())
+	}
+	var report struct {
+		Error struct{ Reason, Message, Hint string }
+	}
+	if err := json.Unmarshal([]byte(got.stderr), &report); err != nil {
+		t.Fatalf("stderr %q: %v", got.stderr, err)
+	}
+	if report.Error.Reason != "HELD" || report.Error.Hint != held.GetHint() || report.Error.Hint == "" {
+		t.Errorf("stderr = %+v, want reason HELD with the result's hint", report)
+	}
+	if n := len(e.smtp.Messages()); n != 0 {
+		t.Errorf("captured %d messages, want none", n)
+	}
+
+	table := e.run(t, Env{}, append([]string{"--output", "table"}, args...)...)
+	if table.code != 4 || !strings.HasPrefix(table.stdout, "held by policy, not sent: saved to Drafts ") || !strings.Contains(table.stderr, "HELD") {
+		t.Errorf("table: %+v, want the held text, HELD and exit 4", table)
+	}
+
+	sent := e.run(t, Env{}, "--output", "json", "draft", "send", held.GetDraft().GetRef())
+	if sent.code != 4 || !strings.Contains(sent.stdout, `"held"`) || !strings.Contains(sent.stderr, `"HELD"`) {
+		t.Errorf("draft send: %+v, want held and exit 4", sent)
+	}
+
+	dry := e.run(t, Env{}, append([]string{"--output", "json"}, append(args, "--dry-run")...)...)
+	if dry.code != 0 || dry.stderr != "" {
+		t.Errorf("dry run: %+v, want exit 0", dry)
+	}
+	if n := len(e.smtp.Messages()); n != 0 {
+		t.Errorf("captured %d messages, want none", n)
 	}
 }

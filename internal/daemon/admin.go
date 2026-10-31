@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -146,4 +147,85 @@ func (a *adminService) GetStatus(_ context.Context, _ *connect.Request[chainmail
 		DevMode:     a.s.opts.DevMode,
 		SecretNames: a.s.opts.Vault.Names(),
 	}), nil
+}
+
+const (
+	// defaultAuditLimit is the page size when a ReadAudit request sets none.
+	defaultAuditLimit = 100
+	// maxAuditLimit is the largest ReadAudit page.
+	maxAuditLimit = 1000
+	// defaultAuditWindow is how far back ReadAudit looks without a since.
+	defaultAuditWindow = 24 * time.Hour
+)
+
+var (
+	errAuditLimit = &argError{msg: "limit must be 0 to 1000", hint: "0 means 100"}
+	// errAuditAccount has fixed text: the name is client-supplied bytes of any size.
+	errAuditAccount = &argError{msg: "unknown account", hint: "leave account empty for all accounts; run: chainmail accounts list"}
+	errAuditSince   = &argError{msg: "since is not a valid time", hint: "send a time between the years 1 and 9999"}
+)
+
+// ReadAudit returns audit rows newest first, paged by before_id. Like
+// GetStatus it is read-only and deliberately not audited: reading the log
+// would otherwise add to it on every poll. Audit rows hold no content,
+// recipients or secrets, so any peer the Authorizer allows may read them.
+func (a *adminService) ReadAudit(ctx context.Context, req *connect.Request[chainmailv1.ReadAuditRequest]) (*connect.Response[chainmailv1.ReadAuditResponse], error) {
+	q, err := a.s.auditQuery(req.Msg)
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	rows, next, err := a.s.auditReader.Read(ctx, q)
+	if err != nil {
+		a.s.opts.Logger.Error("audit read failed", "err", err)
+		return nil, toConnectError(&fixedTextError{msg: "the audit log could not be read", err: err})
+	}
+	resp := &chainmailv1.ReadAuditResponse{
+		Entries:      make([]*chainmailv1.AuditEntry, 0, len(rows)),
+		NextBeforeId: next,
+	}
+	for _, r := range rows {
+		resp.Entries = append(resp.Entries, &chainmailv1.AuditEntry{
+			Id:        r.ID,
+			At:        timestamppb.New(r.At),
+			CallerUid: r.CallerUID,
+			Client:    r.Client,
+			Account:   r.Account,
+			Action:    r.Action,
+			Targets:   r.Targets,
+			Decision:  r.Decision,
+			Result:    string(r.Result),
+			Reason:    r.Reason,
+		})
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// auditQuery validates a ReadAudit request and fills its defaults.
+func (s *Server) auditQuery(req *chainmailv1.ReadAuditRequest) (audit.Query, error) {
+	limit := int(req.GetLimit())
+	switch {
+	case limit < 0 || limit > maxAuditLimit:
+		return audit.Query{}, errAuditLimit
+	case limit == 0:
+		limit = defaultAuditLimit
+	}
+	if account := req.GetAccount(); account != "" {
+		if _, ok := s.opts.Config.Accounts[account]; !ok {
+			return audit.Query{}, errAuditAccount
+		}
+	}
+	since := s.opts.Now().Add(-defaultAuditWindow)
+	if ts := req.GetSince(); ts != nil {
+		if ts.CheckValid() != nil {
+			return audit.Query{}, errAuditSince
+		}
+		since = ts.AsTime()
+	}
+	return audit.Query{
+		Since:    since,
+		Account:  req.GetAccount(),
+		Action:   req.GetAction(),
+		Limit:    limit,
+		BeforeID: req.GetBeforeId(),
+	}, nil
 }

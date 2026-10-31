@@ -98,8 +98,8 @@ message Draft {
   string hint = 3;
 }
 
-// ComposeResult is what a send-type call did: sent, built as a dry run, or
-// saved as a draft.
+// ComposeResult is what a send-type call did: sent, built as a dry run,
+// saved as a draft, or held by policy.
 message ComposeResult {
   oneof result {
     // The message was sent.
@@ -108,7 +108,23 @@ message ComposeResult {
     DryRun dry_run = 2;
     // draft was set: the message was saved to Drafts and not sent.
     Draft draft = 3;
+    // Policy held the message. It was not sent. It was saved to Drafts
+    // for James to review and send from his own mail client.
+    Held held = 4;
   }
+}
+
+// Held is a message the send policy held instead of sending.
+message Held {
+  // The saved draft: its ref, Message-ID, and a hint when the ref is empty.
+  Draft draft = 1;
+  // Recipients not on the allowlist, as given.
+  repeated string blocked = 2;
+  // The message had more recipients than max_recipients.
+  bool too_many_recipients = 3;
+  // Fixed text for the agent to relay, such as
+  // "held by policy: saved to Drafts for James to review and send".
+  string hint = 4;
 }
 
 // SendRequest sends a new message.
@@ -136,7 +152,7 @@ message SendRequest {
 
 // SendResponse is the result of Send.
 message SendResponse {
-  // Sent, dry run or draft.
+  // Sent, dry run, draft, or held by policy.
   ComposeResult result = 1;
 }
 
@@ -155,7 +171,7 @@ message SendRawRequest {
 
 // SendRawResponse is the result of SendRaw.
 message SendRawResponse {
-  // Always sent.
+  // Sent, or held by policy.
   ComposeResult result = 1;
 }
 
@@ -183,7 +199,7 @@ message ReplyRequest {
 
 // ReplyResponse is the result of Reply.
 message ReplyResponse {
-  // Sent, dry run or draft.
+  // Sent, dry run, draft, or held by policy.
   ComposeResult result = 1;
 }
 
@@ -211,7 +227,7 @@ message ForwardRequest {
 
 // ForwardResponse is the result of Forward.
 message ForwardResponse {
-  // Sent, dry run or draft.
+  // Sent, dry run, draft, or held by policy.
   ComposeResult result = 1;
 }
 
@@ -254,7 +270,7 @@ message SendDraftRequest {
 
 // SendDraftResponse is the result of SendDraft.
 message SendDraftResponse {
-  // Always sent.
+  // Sent, or held by policy.
   ComposeResult result = 1;
 }
 

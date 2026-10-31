@@ -73,6 +73,11 @@ type Options struct {
 	// closes the connection without replying. The message is captured, as a
 	// server that queued it and then lost the connection would have it.
 	DropAfterDataEnd bool
+
+	// EnableDSN offers the DSN extension (RFC 3461). The server then reads
+	// ESMTP parameters such as ORCPT after a RCPT TO path, as a real
+	// submission server does.
+	EnableDSN bool
 }
 
 // Server is a running test server.
@@ -81,8 +86,9 @@ type Server struct {
 	opts  Options
 	users map[string]User
 
-	mu       sync.Mutex
-	messages []Envelope
+	mu        sync.Mutex
+	messages  []Envelope
+	mailFroms []string
 }
 
 // Endpoint is where the server listens.
@@ -97,6 +103,14 @@ func (s *Server) Messages() []Envelope {
 		out[i] = m.clone()
 	}
 	return out
+}
+
+// MailFroms returns the address of every MAIL FROM the server accepted so
+// far, oldest first, whether or not its transaction reached DATA.
+func (s *Server) MailFroms() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.mailFroms)
 }
 
 func (s *Server) capture(e Envelope) {
@@ -125,6 +139,7 @@ func StartWith(t testing.TB, ca *tlstest.CA, security provider.Security, opts Op
 	}
 	srv := smtp.NewServer(s)
 	srv.Domain = "localhost"
+	srv.EnableDSN = opts.EnableDSN
 	srv.TLSConfig = ca.Server
 	srv.ReadTimeout = 10 * time.Second
 	srv.WriteTimeout = 10 * time.Second
@@ -220,6 +235,9 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 		return e
 	}
 	s.from = from
+	s.srv.mu.Lock()
+	s.srv.mailFroms = append(s.srv.mailFroms, from)
+	s.srv.mu.Unlock()
 	return nil
 }
 
