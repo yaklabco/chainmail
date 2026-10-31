@@ -62,7 +62,9 @@ const (
 	flagDraft = `\Draft`
 	// The decision column of the audit log. decisionAllowed is a transmit
 	// the send policy passed, decisionHeld a send the policy held as a
-	// draft, and decisionDenied a refusal of a destructive action.
+	// draft, decisionDenied a refusal of a destructive action, and
+	// decisionNone a call no policy decided.
+	decisionNone      = ""
 	decisionDuplicate = "duplicate"
 	decisionDryRun    = "dry_run"
 	decisionAllowed   = "allowed"
@@ -129,9 +131,9 @@ type sendJob struct {
 	// copy. It is called after build. SendDraft returns the draft, which
 	// has the sent message's Message-ID, with the X-GM-MSGID build read.
 	notSentCopy func() ref.Ref
-	// existingDraft, when set, is the draft a SendDraft sends. A hold names
-	// it instead of saving a new draft.
-	existingDraft *chainmailv1.Draft
+	// existingDraftRef, when set, is the ref of the draft a SendDraft sends.
+	// A hold names it instead of saving a new draft.
+	existingDraftRef string
 }
 
 // run executes spec 6.1: idempotency, dial || build, one Send, outcome
@@ -244,11 +246,8 @@ func (c *composeService) hold(ctx context.Context, job sendJob, held *heldError,
 		entry.Targets = append(entry.Targets, "too_many")
 	}
 	var d *chainmailv1.Draft
-	if job.existingDraft != nil {
-		d = proto.Clone(job.existingDraft).(*chainmailv1.Draft)
-		if d.GetMessageId() == "" {
-			d.MessageId = held.msg.MessageID
-		}
+	if job.existingDraftRef != "" {
+		d = &chainmailv1.Draft{Ref: job.existingDraftRef, MessageId: held.msg.MessageID}
 	} else {
 		msg, err := heldDraft(held.msg)
 		if err != nil {

@@ -249,13 +249,6 @@ func TestNewZeroConfig(t *testing.T) {
 	}
 }
 
-func TestValidEntry(t *testing.T) {
-	t.Parallel()
-	if !ValidEntry("*@ainslies.us") || ValidEntry("*@*") {
-		t.Error("ValidEntry disagrees with entry.Valid")
-	}
-}
-
 func TestOwnAddressIsNeverAPattern(t *testing.T) {
 	t.Parallel()
 	// net/mail accepts * in a local part, so *@x.com is a valid account

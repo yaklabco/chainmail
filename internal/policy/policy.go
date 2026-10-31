@@ -14,9 +14,6 @@ import (
 	"github.com/jamesainslie/chainmail/internal/policy/entry"
 )
 
-// ValidEntry reports whether s is a bare address or *@domain.
-func ValidEntry(s string) bool { return entry.Valid(s) }
-
 // SendDecision is the outcome of checking a send's recipients.
 type SendDecision struct {
 	// Allowed is true when nothing is blocked and the count is within the limit.

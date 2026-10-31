@@ -229,14 +229,14 @@ func (o *organizeService) batch(ctx context.Context, h http.Header, c batchCall)
 			for i := range errs {
 				errs[i] = cmp.Or(errs[i], err)
 			}
-			if aerr := o.recordBatch(ctx, who, c, "", groups, errs); aerr != nil {
+			if aerr := o.recordBatch(ctx, who, c, decisionNone, groups, errs); aerr != nil {
 				return nil, aerr
 			}
 			return nil, toConnectError(err)
 		}
 	}
 	o.runBatch(ctx, c, outs, errs, groups)
-	if err := o.recordBatch(ctx, who, c, "", groups, errs); err != nil {
+	if err := o.recordBatch(ctx, who, c, decisionNone, groups, errs); err != nil {
 		return nil, err
 	}
 	return outs, nil
@@ -472,6 +472,8 @@ func (o *organizeService) refuseFolderCall(ctx context.Context, h http.Header, a
 	if err != nil {
 		return err
 	}
+	// The refusal is the error to report. A bad account or name still gets
+	// its invalidTarget placeholder in the row, so its error adds nothing.
 	entry, _ := folderEntry(action, account, names, extra)
 	entry.Decision = decisionDenied
 	return o.s.record(ctx, who, entry, denied)

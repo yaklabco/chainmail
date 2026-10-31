@@ -208,7 +208,7 @@ func (c *composeService) sendDraft(ctx context.Context, cl caller, req *chainmai
 		action: action, targets: []string{r.String()}, caller: cl,
 		notSentCopy: func() ref.Ref { return draft },
 		// A hold leaves the draft where it is and names it.
-		existingDraft: &chainmailv1.Draft{Ref: r.String()},
+		existingDraftRef: r.String(),
 	})
 }
 

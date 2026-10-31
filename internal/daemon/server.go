@@ -83,6 +83,8 @@ type Server struct {
 	audit   *audit.Writer
 	started time.Time
 	httpSrv *http.Server
+	// auditReader reads the rows audit writes, for ReadAudit.
+	auditReader *audit.Reader
 	// accountLocks serializes account tests, one account at a time.
 	accountLocks keyedLock
 	handlers     inflight
@@ -118,11 +120,12 @@ func New(opts Options) (*Server, error) {
 	}
 	authOpts := append([]auth.Option{auth.WithClock(opts.Now)}, opts.AuthOptions...)
 	s := &Server{
-		opts:    opts,
-		auth:    auth.NewManager(opts.Config, opts.Vault, authOpts...),
-		audit:   audit.NewWriter(opts.StateDB, opts.Now),
-		started: opts.Now(),
-		policy:  pol,
+		opts:        opts,
+		auth:        auth.NewManager(opts.Config, opts.Vault, authOpts...),
+		audit:       audit.NewWriter(opts.StateDB, opts.Now),
+		auditReader: audit.NewReader(opts.StateDB),
+		started:     opts.Now(),
+		policy:      pol,
 	}
 	s.lim = newLimitState(opts.StateDB, opts.Now)
 	s.newStore = func(acct config.ResolvedAccount, p storeParams) mailstore.Store {

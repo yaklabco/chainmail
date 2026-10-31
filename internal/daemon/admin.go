@@ -174,7 +174,7 @@ func (a *adminService) ReadAudit(ctx context.Context, req *connect.Request[chain
 	if err != nil {
 		return nil, toConnectError(err)
 	}
-	rows, next, err := audit.NewReader(a.s.opts.StateDB).Read(ctx, q)
+	rows, next, err := a.s.auditReader.Read(ctx, q)
 	if err != nil {
 		a.s.opts.Logger.Error("audit read failed", "err", err)
 		return nil, toConnectError(&fixedTextError{msg: "the audit log could not be read", err: err})
