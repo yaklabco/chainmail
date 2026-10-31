@@ -26,22 +26,12 @@ func (s *Store) gmailThread(ctx context.Context, r ref.Ref) ([]ref.Ref, error) {
 	var threadID uint64
 	seed := r
 	err := s.withConn(ctx, r.Folder, func(c *conn) error {
-		if err := s.open(ctx, c, r.Folder); err != nil {
-			return err
-		}
-		uid, err := s.resolveUID(ctx, c, r)
+		uid, b, err := s.fetchRef(ctx, c, r, &imap.FetchOptions{UID: true, GmailMsgID: true, GmailThreadID: true})
 		if err != nil {
 			return err
 		}
-		bufs, err := c.fetch(ctx, imap.UIDSetNum(imap.UID(uid)), &imap.FetchOptions{UID: true, GmailMsgID: true, GmailThreadID: true})
-		if err != nil {
-			return err
-		}
-		if len(bufs) == 0 {
-			return fmt.Errorf("%w: the message is gone; search again", mailstore.ErrStaleRef)
-		}
-		threadID = bufs[0].GmailThreadID
-		seed = ref.Ref{Account: s.acct.Name, Folder: r.Folder, UIDValidity: c.uidValidity, UID: uid, GmailMsgID: bufs[0].GmailMsgID}
+		threadID = b.GmailThreadID
+		seed = ref.Ref{Account: s.acct.Name, Folder: r.Folder, UIDValidity: c.uidValidity, UID: uid, GmailMsgID: b.GmailMsgID}
 		return nil
 	})
 	if err != nil {
@@ -83,23 +73,13 @@ func (s *Store) gmailThread(ctx context.Context, r ref.Ref) ([]ref.Ref, error) {
 func (s *Store) standardThread(ctx context.Context, r ref.Ref) ([]ref.Ref, error) {
 	var root string
 	err := s.withConn(ctx, r.Folder, func(c *conn) error {
-		if err := s.open(ctx, c, r.Folder); err != nil {
-			return err
-		}
-		uid, err := s.resolveUID(ctx, c, r)
-		if err != nil {
-			return err
-		}
-		bufs, err := c.fetch(ctx, imap.UIDSetNum(imap.UID(uid)), &imap.FetchOptions{
+		_, b, err := s.fetchRef(ctx, c, r, &imap.FetchOptions{
 			UID: true, Envelope: true, BodySection: []*imap.FetchItemBodySection{referencesSection},
 		})
 		if err != nil {
 			return err
 		}
-		if len(bufs) == 0 {
-			return fmt.Errorf("%w: the message is gone; search again", mailstore.ErrStaleRef)
-		}
-		root = rootOf(bufs[0])
+		root = rootOf(b)
 		return nil
 	})
 	if err != nil {

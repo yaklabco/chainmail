@@ -30,8 +30,9 @@ import (
 
 // writeServer is a scripted IMAP server for the write paths, over implicit
 // TLS. It answers just enough IMAP for the Store's writes: LOGIN, LIST,
-// STATUS, SELECT and EXAMINE, UID FETCH, UID SEARCH by Message-ID, UID
-// STORE, UID COPY, UID MOVE, UID EXPUNGE and APPEND. It reads commands as
+// STATUS, SELECT and EXAMINE, UID FETCH, UID SEARCH by Message-ID or
+// X-GM-MSGID, UID STORE, UID COPY, UID MOVE, UID EXPUNGE and APPEND. A
+// message whose Message-ID is <n@x> has X-GM-MSGID n. It reads commands as
 // they arrive, apart from answering them, and logs both, so a test can see
 // which commands a client pipelined.
 type writeServer struct {
@@ -134,6 +135,12 @@ func startWriteServer(t *testing.T, srv *writeServer) *writeServer {
 
 func writeStore(t *testing.T, srv *writeServer, opts Options) *Store {
 	t.Helper()
+	return writeStoreFor(t, srv, opts, false)
+}
+
+// writeStoreFor is writeStore, for a Google account when gmail is set.
+func writeStoreFor(t *testing.T, srv *writeServer, opts Options, gmail bool) *Store {
+	t.Helper()
 	opts.RootCAs = srv.ca.Pool
 	if opts.Backoff == nil {
 		opts.Backoff = noBackoff
@@ -141,7 +148,7 @@ func writeStore(t *testing.T, srv *writeServer, opts Options) *Store {
 	if opts.CommandTimeout == 0 {
 		opts.CommandTimeout = 2 * time.Second
 	}
-	s := New(testAccount("host", srv.ep, false), passwordCreds("host@example.test", "pw"), opts)
+	s := New(testAccount("host", srv.ep, gmail), passwordCreds("host@example.test", "pw"), opts)
 	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
@@ -342,7 +349,10 @@ func joinUIDs(uids []uint32) string {
 	return strings.Join(s, ",")
 }
 
-var wsHeaderSearch = regexp.MustCompile(`(?i)HEADER "?Message-ID"? "?<?([^">]*)>?"?`)
+var (
+	wsHeaderSearch = regexp.MustCompile(`(?i)HEADER "?Message-ID"? "?<?([^">]*)>?"?`)
+	wsMsgIDSearch  = regexp.MustCompile(`(?i)X-GM-MSGID (\d+)`)
+)
 
 // capability is the CAPABILITY list.
 func (srv *writeServer) capability() string {
@@ -444,6 +454,9 @@ func (srv *writeServer) reply(st *wsSession, c wsCmd) string {
 		return b.String() + ok
 	case "UID SEARCH":
 		m := wsHeaderSearch.FindStringSubmatch(c.rest)
+		if g := wsMsgIDSearch.FindStringSubmatch(c.rest); g != nil {
+			m = []string{g[0], g[1] + "@x"}
+		}
 		var hits []string
 		for _, msg := range src.msgs {
 			if m != nil && msg.id == m[1] {
@@ -900,9 +913,9 @@ func TestWriteReselectsAFolderOpenReadOnly(t *testing.T) {
 	mu.Lock()
 	got := slices.Clone(selects)
 	mu.Unlock()
-	want := []string{"INBOX read-only=true", "INBOX read-only=false"}
+	want := []string{"INBOX read-only=true", "INBOX read-only=false", "INBOX read-only=false"}
 	if !slices.Equal(got, want) {
-		t.Errorf("selects = %q, want %q: EXAMINE for the read, SELECT for the write, and the read after reusing it", got, want)
+		t.Errorf("selects = %q, want %q: EXAMINE for the read, SELECT for the write, and SELECT again for the read after it, keeping the mode", got, want)
 	}
 }
 
@@ -1209,10 +1222,11 @@ func meetAtDial(s *Store, n int32) *atomic.Bool {
 }
 
 // TestReadAfterAWriteSyncsAReusedFolder: a connection that had the
-// destination open before another connection moved mail into it sends NOOP
-// before it reads, so the server tells it of the new message. Dovecot
+// destination open before another connection moved mail into it opens it
+// again before it reads, so the server tells it of the new message. Dovecot
 // answers a UID FETCH or SEARCH only for messages the session has been told
-// of, so without it a ref a move just gave reads as gone. Reads with no
+// of, so without it a ref a move just gave reads as gone, and Gmail can tell
+// of a moved message only after the command after a NOOP. Reads with no
 // write since pay nothing.
 func TestReadAfterAWriteSyncsAReusedFolder(t *testing.T) {
 	t.Parallel()
@@ -1271,7 +1285,7 @@ func TestReadAfterAWriteSyncsAReusedFolder(t *testing.T) {
 	}
 	cmds := srv.received()
 	after := cmds[slices.IndexFunc(cmds, func(c string) bool { return strings.HasPrefix(c, "UID MOVE") })+1:]
-	if !slices.Equal(after, []string{"NOOP", `UID SEARCH HEADER "Message-ID" "<1@x>"`}) {
-		t.Errorf("commands after the move %q, want NOOP on the connection with Archive open, then the search", after)
+	if !slices.Equal(after, []string{`EXAMINE "Archive"`, `UID SEARCH HEADER "Message-ID" "<1@x>"`}) {
+		t.Errorf("commands after the move %q, want EXAMINE on the connection with Archive open, then the search", after)
 	}
 }

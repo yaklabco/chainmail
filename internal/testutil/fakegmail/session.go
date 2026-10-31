@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"regexp"
 	"slices"
@@ -33,6 +34,13 @@ type session struct {
 	known int
 	// lastUID is the highest UID in view, so new arrivals are those above it.
 	lastUID imap.UID
+	// quiet marks a command ending that leaves new arrivals unlearned, under
+	// Options.LateArrivals: see endQuiet.
+	quiet bool
+	// due, under Options.LateExists, is the highest UID of the arrivals a
+	// command ending has made due, for the end of the next command to tell
+	// of, or 0.
+	due imap.UID
 }
 
 type viewEntry struct {
@@ -90,6 +98,8 @@ func (sess *session) Select(name string, options *imap.SelectOptions) (*imap.Sel
 	}
 	sess.selected = f
 	sess.view, sess.lastUID = nil, 0
+	// Under Options.LateExists the Poll that ends the SELECT makes nothing due.
+	sess.quiet, sess.due = s.opts.LateExists, 0
 	sess.addNewLocked()
 	sess.known = len(sess.view)
 	return &imap.SelectData{
@@ -107,14 +117,44 @@ func noSuchFolder(name string) error {
 // runs before every command, as Gmail and Dovecot sync before answering, so a
 // UID command can name a message another session just added. The client hears
 // of them through EXISTS when the command ends.
-func (sess *session) addNewLocked() {
+func (sess *session) addNewLocked() { sess.addUpToLocked(math.MaxUint32) }
+
+// addUpToLocked is addNewLocked for the arrivals with UIDs up to limit.
+func (sess *session) addUpToLocked(limit imap.UID) {
 	f := sess.selected
 	for _, m := range f.order {
-		if uid := f.uids[m]; uid > sess.lastUID {
+		if uid := f.uids[m]; uid > sess.lastUID && uid <= limit {
 			sess.view = append(sess.view, viewEntry{m: m, uid: uid})
 			sess.lastUID = uid
 		}
 	}
+}
+
+// newestLocked returns the highest UID in the selected folder, or 0.
+func (sess *session) newestLocked() imap.UID {
+	f := sess.selected
+	var newest imap.UID
+	for _, m := range f.order {
+		newest = max(newest, f.uids[m])
+	}
+	return newest
+}
+
+// syncLocked runs addNewLocked before a command, unless Options.LateArrivals
+// or Options.LateExists leaves new arrivals for the session to learn of
+// later.
+func (sess *session) syncLocked() {
+	if !sess.s.opts.late() {
+		sess.addNewLocked()
+	}
+}
+
+// endQuiet, deferred by FETCH, STORE and SEARCH, keeps a session under
+// Options.LateArrivals or Options.LateExists from learning of new arrivals
+// in the Poll that ends the command, when the command succeeded and so Poll
+// runs, unless they are due.
+func (sess *session) endQuiet(err *error) {
+	sess.quiet = *err == nil && sess.s.opts.late()
 }
 
 // present reports whether the entry's message is still in the folder under
@@ -259,7 +299,7 @@ func (sess *session) Namespace() (*imap.NamespaceData, error) {
 // AppendLimit is Gmail's APPENDLIMIT.
 func (sess *session) AppendLimit() uint32 { return appendLimit }
 
-func (sess *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriteria, options *imap.SearchOptions) (*imap.SearchData, error) {
+func (sess *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriteria, options *imap.SearchOptions) (_ *imap.SearchData, err error) {
 	if kind != imapserver.NumKindUID {
 		return nil, &imap.Error{Type: imap.StatusResponseTypeBad, Text: "fakegmail answers UID SEARCH only"}
 	}
@@ -273,8 +313,9 @@ func (sess *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriter
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f := sess.selected
-	sess.addNewLocked()
-	criteria, err := staticCriteria(f, criteria)
+	sess.syncLocked()
+	defer sess.endQuiet(&err)
+	criteria, err = staticCriteria(f, criteria)
 	if err != nil {
 		return nil, err
 	}
@@ -293,6 +334,9 @@ func (sess *session) Search(kind imapserver.NumKind, criteria *imap.SearchCriter
 	var all imap.UIDSet
 	data := &imap.SearchData{}
 	for _, m := range f.order {
+		if s.opts.late() && f.uids[m] > sess.lastUID {
+			break // an arrival the session has not learned of, and the rest are later
+		}
 		if matchCriteria(f, m, criteria) && slices.IndexFunc(trees, func(n *query.Node) bool { return !matchRaw(n, m) }) < 0 {
 			uid := f.uids[m]
 			all.AddNum(uid)
@@ -419,7 +463,7 @@ func staticRange[T ~uint32](start, stop *T, highest T) {
 	}
 }
 
-func (sess *session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
+func (sess *session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) (err error) {
 	if name, ok := unsupportedFetchItem(options, sess.s.opts); ok {
 		return &imap.Error{Type: imap.StatusResponseTypeBad, Text: "fakegmail: unsupported FETCH item " + name}
 	}
@@ -430,7 +474,8 @@ func (sess *session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, option
 		return err
 	}
 	f := sess.selected
-	sess.addNewLocked()
+	sess.syncLocked()
+	defer sess.endQuiet(&err)
 	idx, err := sess.messagesIn(numSet)
 	if err != nil {
 		return err
@@ -697,7 +742,8 @@ func (sess *session) Unselect() error {
 
 // Poll tells the client what changed in the selected folder since its last
 // command: EXPUNGE for messages that left, when allowed, and EXISTS for new
-// arrivals.
+// arrivals. Under Options.LateExists a command other than FETCH, STORE and
+// SEARCH only makes new arrivals due, and the next command tells of them.
 func (sess *session) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
 	s := sess.s
 	s.mu.Lock()
@@ -705,7 +751,20 @@ func (sess *session) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
 	if sess.selected == nil {
 		return nil
 	}
-	sess.addNewLocked()
+	if sess.due > 0 {
+		sess.addUpToLocked(sess.due)
+		sess.due = 0
+	}
+	switch {
+	case sess.quiet:
+	case s.opts.LateExists:
+		if newest := sess.newestLocked(); newest > sess.lastUID {
+			sess.due = newest
+		}
+	default:
+		sess.addNewLocked()
+	}
+	sess.quiet = false
 	if allowExpunge {
 		if err := sess.expungeGoneLocked(w.WriteExpunge); err != nil {
 			return err
@@ -897,7 +956,7 @@ func (sess *session) appendMessage(name string, raw []byte, options *imap.Append
 
 // Store changes flags. A set that names no current message answers OK with
 // no FETCH, as Gmail does for a stale UID.
-func (sess *session) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags *imap.StoreFlags, _ *imap.StoreOptions) error {
+func (sess *session) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags *imap.StoreFlags, _ *imap.StoreOptions) (err error) {
 	if err := sess.writable(); err != nil {
 		return err
 	}
@@ -905,7 +964,8 @@ func (sess *session) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f := sess.selected
-	sess.addNewLocked()
+	sess.syncLocked()
+	defer sess.endQuiet(&err)
 	idx, err := sess.messagesIn(numSet)
 	if err != nil {
 		return err
@@ -998,7 +1058,7 @@ func (sess *session) Copy(numSet imap.NumSet, dest string) (*imap.CopyData, erro
 	s := sess.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess.addNewLocked()
+	sess.syncLocked()
 	d := s.folderLocked(dest)
 	if d == nil {
 		return nil, tryCreate(dest)
@@ -1026,7 +1086,7 @@ func (sess *session) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest str
 	s := sess.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess.addNewLocked()
+	sess.syncLocked()
 	d := s.folderLocked(dest)
 	if d == nil {
 		return tryCreate(dest)
@@ -1060,7 +1120,7 @@ func (sess *session) Expunge(w *imapserver.ExpungeWriter, uids *imap.UIDSet) err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f := sess.selected
-	sess.addNewLocked()
+	sess.syncLocked()
 	var in imap.UIDSet
 	if uids != nil {
 		static, err := staticUIDSet(f, *uids)
@@ -1113,14 +1173,15 @@ func (sess *session) StoreGmailLabels(w *imapserver.FetchWriter, numSet imap.Num
 // does, and the folder names INBOX, Sent Mail and Drafts stand for their
 // labels. \Flagged follows \Starred. A set that names no current message
 // answers OK with no FETCH.
-func (sess *session) storeLabels(numSet imap.NumSet, op imap.StoreFlagsOp, labels []string) ([]labelUpdate, error) {
+func (sess *session) storeLabels(numSet imap.NumSet, op imap.StoreFlagsOp, labels []string) (_ []labelUpdate, err error) {
 	if err := sess.writable(); err != nil {
 		return nil, err
 	}
 	s := sess.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess.addNewLocked()
+	sess.syncLocked()
+	defer sess.endQuiet(&err)
 	idx, err := sess.messagesIn(numSet)
 	if err != nil || len(idx) == 0 {
 		return nil, err

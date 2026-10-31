@@ -57,9 +57,12 @@ func (Test) Unit() error {
 	return sh.RunV("go", "test", "-race", "-p", parallelism(), "./...")
 }
 
-// Live runs the smoke test against real accounts through the daemon at $CHAINMAIL_SOCKET.
+// Live runs the smoke test against real accounts through the daemon at
+// $CHAINMAIL_SOCKET. The write tests wait minutes at a time for Gmail's
+// search to catch up, so a full run takes far longer than go test's default
+// 10 minute timeout.
 func (Test) Live() error {
-	return sh.RunV("go", "test", "-tags", "live", "-count=1", "-v", "./internal/live/")
+	return sh.RunV("go", "test", "-tags", "live", "-count=1", "-timeout", "120m", "-v", "./internal/live/")
 }
 
 // Integration runs the integration suite: Dovecot in a Docker container and
