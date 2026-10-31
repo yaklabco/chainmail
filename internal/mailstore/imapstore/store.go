@@ -73,6 +73,12 @@ const (
 	// operation retrying for hours.
 	maxRetries  = 10
 	dialTimeout = 30 * time.Second
+	// freshFor is how long a connection trusts what the server last told it
+	// of the folder it has open, at its last SELECT, EXAMINE or NOOP.
+	// Reusing the folder later, it sends NOOP first. So a change made
+	// elsewhere shows within freshFor, and a run of calls on one folder
+	// costs at most one NOOP per connection each freshFor.
+	freshFor = time.Second
 )
 
 func (o Options) withDefaults() Options {
@@ -146,7 +152,8 @@ type Store struct {
 	folderGen atomic.Uint64
 	// writeGen counts writes sent through this store. A connection that has
 	// not looked at its folder since the latest one sends NOOP before it
-	// reuses it, so the server tells it of mail another connection changed.
+	// reuses it, even within freshFor, so the server tells it of mail
+	// another connection changed.
 	writeGen atomic.Uint64
 
 	mu      sync.Mutex
@@ -447,19 +454,23 @@ func (s *Store) open(ctx context.Context, c *conn, folder string) error {
 
 // openMode is open, read-write when writable. A connection that opened its
 // folder before a rename or delete opens it again, since a server keeps the
-// old mailbox open under its new name, or none. One that has had its folder
-// open since a write through this store sends NOOP first, so it sees the
-// change.
+// old mailbox open under its new name, or none. One that reuses its open
+// folder sends NOOP first, so it sees what changed there, unless the server
+// told it of the folder within freshFor and no write went through this
+// store since.
 func (s *Store) openMode(ctx context.Context, c *conn, folder string, writable bool) error {
 	if gen := s.folderGen.Load(); c.folderGen != gen {
 		c.selected, c.writable, c.uidValidity, c.folderGen = "", false, 0, gen
 	}
 	writes := s.writeGen.Load()
-	if folder != "" && c.selected == folder && c.writeGen != writes {
-		// Another connection may have changed mail here. A server tells a
-		// session of new mail only between commands, and Dovecot answers a
-		// UID FETCH or SEARCH only for messages it has told the session of.
-		if err := c.do(ctx, func() error { return c.client().Noop().Wait() }); err != nil {
+	reuse := folder != "" && c.selected == folder && (c.writable || !writable)
+	if reuse && (c.writeGen != writes || c.stale()) {
+		// New mail, another mail client or another of this store's
+		// connections may have changed mail here. A server tells a session
+		// of new mail only in answer to a command, and Gmail and Dovecot
+		// answer a UID FETCH, STORE or SEARCH only for messages they have
+		// told the session of.
+		if err := c.Noop(ctx); err != nil {
 			return err
 		}
 	}
