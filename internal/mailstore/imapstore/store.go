@@ -460,12 +460,19 @@ func (s *Store) open(ctx context.Context, c *conn, folder string) error {
 // changed elsewhere, unless the server told it of the folder within
 // freshFor.
 func (s *Store) openMode(ctx context.Context, c *conn, folder string, writable bool) error {
+	_, err := s.openFresh(ctx, c, folder, writable)
+	return err
+}
+
+// openFresh is openMode, and reports whether it sent SELECT or EXAMINE
+// rather than reuse the folder open on c.
+func (s *Store) openFresh(ctx context.Context, c *conn, folder string, writable bool) (bool, error) {
 	if gen := s.folderGen.Load(); c.folderGen != gen {
 		c.forget()
 		c.folderGen = gen
 	}
 	writes := s.writeGen.Load()
-	reuse := folder != "" && c.selected == folder && (c.writable || !writable)
+	reuse := c.holds(folder, writable)
 	switch {
 	case reuse && c.writeGen != writes:
 		// Another of this store's connections may have changed mail here,
@@ -481,9 +488,10 @@ func (s *Store) openMode(ctx context.Context, c *conn, folder string, writable b
 		// and Gmail and Dovecot answer a UID FETCH, STORE or SEARCH only for
 		// messages they have told the session of.
 		if err := c.Noop(ctx); err != nil {
-			return err
+			return false, err
 		}
 	}
+	fresh := !c.holds(folder, writable)
 	err := c.SelectFolder(ctx, folder, writable)
 	switch {
 	case err == nil:
@@ -491,6 +499,32 @@ func (s *Store) openMode(ctx context.Context, c *conn, folder string, writable b
 	case errors.Is(err, mailstore.ErrNotFound):
 		s.forgetFolders()
 	}
+	return fresh, err
+}
+
+// readIn opens folder on c for reading and runs read, which reports whether
+// the server's answer left out a message read asked for. When it did and c
+// reused the folder it had open, readIn opens the folder again, in the same
+// mode, and runs read once more, so a message is reported gone only from a
+// fresh view of the folder. A server may tell a session that keeps a folder
+// open of a message late: Gmail tells of one another session moved there
+// only some time after the NOOP that asks, while a SELECT or EXAMINE shows
+// it at once. read must be safe to run again.
+func (s *Store) readIn(ctx context.Context, c *conn, folder string, read func() (missed bool, err error)) error {
+	fresh, err := s.openFresh(ctx, c, folder, false)
+	if err != nil {
+		return err
+	}
+	missed, err := read()
+	if err != nil || !missed || fresh {
+		return err
+	}
+	writable := c.writable
+	c.forget()
+	if err := s.openMode(ctx, c, folder, writable); err != nil {
+		return err
+	}
+	_, err = read()
 	return err
 }
 
