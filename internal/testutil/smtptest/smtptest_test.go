@@ -265,3 +265,40 @@ func TestDropAtRcptAnswersEarlierRecipients(t *testing.T) {
 		t.Errorf("RCPT b: %v, want a lost connection", err)
 	}
 }
+
+// EnableDSN offers the DSN extension, so the server reads ESMTP parameters
+// such as ORCPT after a RCPT TO path, as a real submission server does.
+func TestEnableDSN(t *testing.T) {
+	t.Parallel()
+	for _, dsn := range []bool{false, true} {
+		ca := tlstest.New(t)
+		srv := StartWith(t, ca, provider.SecurityStartTLS, Options{EnableDSN: dsn}, tester)
+		c := dial(t, ca, srv.Endpoint(), true)
+		if ok, _ := c.Extension("DSN"); ok != dsn {
+			t.Errorf("EnableDSN %v: DSN offered = %v", dsn, ok)
+		}
+	}
+}
+
+// MailFroms records every MAIL FROM the server accepted, whether or not
+// the transaction went on to DATA.
+func TestMailFroms(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	srv := StartWith(t, ca, provider.SecurityStartTLS, Options{
+		FailRcpt: map[string]*smtp.SMTPError{"no@example.com": {Code: 550, Message: "no"}},
+	}, tester)
+	if got := srv.MailFroms(); len(got) != 0 {
+		t.Fatalf("MailFroms() = %q before any mail", got)
+	}
+	c := dial(t, ca, srv.Endpoint(), true)
+	if _, err := submit(c, tester.Username, []string{"no@example.com"}, raw); err == nil {
+		t.Fatal("submit: want the RCPT refusal")
+	}
+	if got := srv.MailFroms(); !slices.Equal(got, []string{tester.Username}) {
+		t.Errorf("MailFroms() = %q, want [%s]", got, tester.Username)
+	}
+	if n := len(srv.Messages()); n != 0 {
+		t.Errorf("captured %d messages, want none", n)
+	}
+}
