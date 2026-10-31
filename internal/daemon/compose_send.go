@@ -54,9 +54,14 @@ const (
 	// flagSeen and flagDraft are the IMAP flags of a Sent copy and a draft.
 	flagSeen  = `\Seen`
 	flagDraft = `\Draft`
-	// decisionDuplicate and decisionDryRun go in the audit decision column.
+	// The decision column of the audit log. decisionAllowed is a transmit
+	// the send policy passed, decisionHeld a send the policy held as a
+	// draft, and decisionDenied a refusal of a destructive action.
 	decisionDuplicate = "duplicate"
 	decisionDryRun    = "dry_run"
+	decisionAllowed   = "allowed"
+	decisionHeld      = "held"
+	decisionDenied    = "denied"
 )
 
 // sentCopyFailed is Sent.sent_copy_error when the copy could not be stored.

@@ -15,6 +15,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
+	"github.com/jamesainslie/chainmail/internal/policy/entry"
 	"github.com/jamesainslie/chainmail/internal/provider"
 )
 
@@ -35,6 +36,36 @@ type Config struct {
 	Daemon       Daemon                 `toml:"daemon"`
 	OAuthClients map[string]OAuthClient `toml:"oauth_clients"`
 	Accounts     map[string]Account     `toml:"accounts"`
+	Policy       Policy                 `toml:"policy"`
+}
+
+// DefaultMaxRecipients is the most recipients a send may have unless
+// max_recipients says otherwise.
+const DefaultMaxRecipients = 10
+
+// Bounds of max_recipients.
+const (
+	minMaxRecipients = 1
+	maxMaxRecipients = 500
+)
+
+// Policy is the global [policy] table: what agents may do without James.
+type Policy struct {
+	// SendAllow lists the recipients every account may send to, each a bare
+	// address or *@domain.
+	SendAllow []string `toml:"send_allow"`
+	// MaxRecipients is the most recipients one send may have, 1 to 500.
+	MaxRecipients int `toml:"max_recipients"`
+	// AllowExpunge permits expunging messages.
+	AllowExpunge bool `toml:"allow_expunge"`
+	// AllowFolderDelete permits deleting folders.
+	AllowFolderDelete bool `toml:"allow_folder_delete"`
+}
+
+// AccountPolicy is an account's [accounts.<name>.policy] table.
+type AccountPolicy struct {
+	// SendAllow is added to the global send_allow for this account only.
+	SendAllow []string `toml:"send_allow"`
 }
 
 // Daemon configures the socket and how messages are rendered.
@@ -113,6 +144,8 @@ type Account struct {
 	Pool int `toml:"pool"`
 	// MaxMessageSize overrides the preset message size limit, such as "35MiB".
 	MaxMessageSize string `toml:"max_message_size"`
+	// Policy holds the account's own send allowlist.
+	Policy AccountPolicy `toml:"policy"`
 }
 
 // EndpointOverride replaces a preset's server address.
@@ -247,6 +280,9 @@ func (c *Config) applyDefaults() {
 	if c.Daemon.BodyLimit == "" {
 		c.Daemon.BodyLimit = DefaultBodyLimit
 	}
+	if c.Policy.MaxRecipients == 0 {
+		c.Policy.MaxRecipients = DefaultMaxRecipients
+	}
 	for name, a := range c.Accounts {
 		if a.Username == "" {
 			a.Username = a.Address
@@ -282,6 +318,10 @@ func (c *Config) validate() error {
 			add("%s: client_id is required", where)
 		}
 	}
+	if c.Policy.MaxRecipients < minMaxRecipients || c.Policy.MaxRecipients > maxMaxRecipients {
+		add("policy.max_recipients must be %d to %d", minMaxRecipients, maxMaxRecipients)
+	}
+	validateSendAllow("policy.send_allow", c.Policy.SendAllow, add)
 	for _, name := range c.AccountNames() {
 		c.validateAccount(name, add)
 	}
@@ -297,6 +337,7 @@ func (c *Config) validateAccount(name string, add func(string, ...any)) {
 	if !nameRE.MatchString(name) {
 		add("%s: name must be lowercase letters, digits and hyphens", where)
 	}
+	validateSendAllow(where+".policy.send_allow", a.Policy.SendAllow, add)
 	p, ok := provider.Lookup(a.Provider)
 	if !ok {
 		add("%s: unknown provider %q (known: %s)", where, a.Provider, strings.Join(provider.Names(), ", "))
@@ -358,4 +399,14 @@ func joinMethods(ms []provider.AuthMethod) string {
 		parts[i] = string(m)
 	}
 	return strings.Join(parts, " or ")
+}
+
+// validateSendAllow checks each entry with the matcher's own rules, so the
+// config check and the policy never disagree.
+func validateSendAllow(where string, entries []string, add func(string, ...any)) {
+	for _, e := range entries {
+		if !entry.Valid(e) {
+			add("%s: invalid entry %q", where, e)
+		}
+	}
 }
