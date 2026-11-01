@@ -21,6 +21,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/db"
+	"github.com/jamesainslie/chainmail/internal/testutil/ctxtest"
 	"github.com/jamesainslie/chainmail/internal/vault"
 )
 
@@ -31,9 +32,50 @@ type uploadDaemon struct {
 	uploads string
 }
 
-// serveUploads serves a daemon whose uploads end after idle without a
-// message, or after total in all, until the test ends.
-func serveUploads(t *testing.T, idle, total time.Duration) uploadDaemon {
+// uploadTimers stands in for an upload's timers, so a test ends the wait
+// for a message, or the whole upload, when it picks. Each wait the server
+// starts arrives on waits, in order: the n-th is the wait for message n.
+type uploadTimers struct {
+	waits  chan chan time.Time
+	expire chan struct{}
+	once   sync.Once
+}
+
+func newUploadTimers() *uploadTimers {
+	return &uploadTimers{waits: make(chan chan time.Time, 16), expire: make(chan struct{})}
+}
+
+func (u *uploadTimers) timer(time.Duration) (<-chan time.Time, func() bool) {
+	ch := make(chan time.Time, 1)
+	u.waits <- ch
+	return ch, func() bool { return true }
+}
+
+func (u *uploadTimers) deadline(ctx context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+	return ctxtest.Expiring(ctx, u.expire), func() {}
+}
+
+// expireUpload ends the whole upload's deadline.
+func (u *uploadTimers) expireUpload() { u.once.Do(func() { close(u.expire) }) }
+
+// wait returns the server's wait for message n, counting from 1. When it
+// returns, the server has received n-1 messages and reads nothing more.
+func (u *uploadTimers) wait(t *testing.T, n int) chan time.Time {
+	t.Helper()
+	var ch chan time.Time
+	for i := range n {
+		select {
+		case ch = <-u.waits:
+		case <-time.After(time.Minute):
+			t.Fatalf("the server started %d waits for a message, want %d", i, n)
+		}
+	}
+	return ch
+}
+
+// serveUploads serves a daemon whose upload timers are timers', until the
+// test ends. The real idle and total stay a minute, unused.
+func serveUploads(t *testing.T, timers *uploadTimers) uploadDaemon {
 	t.Helper()
 	cfg, err := config.Parse([]byte(passwordConfig))
 	if err != nil {
@@ -65,7 +107,8 @@ func serveUploads(t *testing.T, idle, total time.Duration) uploadDaemon {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.compose.uploadIdle, s.compose.uploadTimeout = idle, total
+	s.compose.uploadIdle, s.compose.uploadTimeout = time.Minute, time.Minute
+	s.compose.uploadTimer, s.compose.uploadDeadline = timers.timer, timers.deadline
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(ctx) }()
@@ -75,6 +118,7 @@ func serveUploads(t *testing.T, idle, total time.Duration) uploadDaemon {
 			t.Errorf("Serve: %v", err)
 		}
 	})
+	t.Cleanup(timers.expireUpload) // a failed test still ends a hooked upload before Serve stops
 	return uploadDaemon{db: stateDB, socket: socket, uploads: filepath.Join(dir, "uploads")}
 }
 
@@ -124,11 +168,14 @@ func (d uploadDaemon) waitUploadAudit(t *testing.T, n int) string {
 	return ""
 }
 
-// TestUploadTimesOutOnTheServer stalls uploads before their header, after a
-// data chunk, and trickles one past its total deadline, over HTTP/2 and
-// HTTP/1.1, never cancelling on the client side. Each handler ends with
-// TIMEOUT once the daemon's own deadline passes, leaves no partial file, and
-// the client then reads DEADLINE_EXCEEDED.
+// TestUploadTimesOutOnTheServer stalls uploads before their header and
+// after a data chunk, and runs one past its whole deadline while it still
+// sends, over HTTP/2 and HTTP/1.1, never cancelling on the client side.
+// The test ends the server's wait, or the whole upload, only once the
+// server has read every part sent, and the client reads the answer before
+// it closes its side, so over HTTP/1.1 it never writes to a connection the
+// server has answered on. Each handler ends with TIMEOUT, leaves no partial
+// file, and the client reads DEADLINE_EXCEEDED.
 func TestUploadTimesOutOnTheServer(t *testing.T) {
 	t.Parallel()
 	header := &chainmailv1.UploadAttachmentRequest{Part: &chainmailv1.UploadAttachmentRequest_Header{
@@ -136,32 +183,16 @@ func TestUploadTimesOutOnTheServer(t *testing.T) {
 	}}
 	chunk := &chainmailv1.UploadAttachmentRequest{Part: &chainmailv1.UploadAttachmentRequest_Data{Data: []byte("partial data")}}
 	tests := []struct {
-		name        string
-		idle, total time.Duration
-		// send runs on the client until the stream fails.
-		send func(stream *connect.ClientStreamForClient[chainmailv1.UploadAttachmentRequest, chainmailv1.UploadAttachmentResponse]) error
+		name string
+		// parts are what the client sends before it stops. With none it
+		// sends only the request headers.
+		parts []*chainmailv1.UploadAttachmentRequest
+		// total ends the whole upload, rather than the wait for the next part.
+		total bool
 	}{
-		{"stalled before its header", 200 * time.Millisecond, time.Minute, func(s *connect.ClientStreamForClient[chainmailv1.UploadAttachmentRequest, chainmailv1.UploadAttachmentResponse]) error {
-			return s.Send(nil)
-		}},
-		{"stalled after a chunk", 200 * time.Millisecond, time.Minute, func(s *connect.ClientStreamForClient[chainmailv1.UploadAttachmentRequest, chainmailv1.UploadAttachmentResponse]) error {
-			if err := s.Send(header); err != nil {
-				return err
-			}
-			return s.Send(chunk)
-		}},
-		{"trickling past its total", time.Minute, 400 * time.Millisecond, func(s *connect.ClientStreamForClient[chainmailv1.UploadAttachmentRequest, chainmailv1.UploadAttachmentResponse]) error {
-			if err := s.Send(header); err != nil {
-				return err
-			}
-			for range 200 {
-				if err := s.Send(chunk); err != nil {
-					return err
-				}
-				time.Sleep(20 * time.Millisecond)
-			}
-			return nil
-		}},
+		{name: "stalled before its header"},
+		{name: "stalled after a chunk", parts: []*chainmailv1.UploadAttachmentRequest{header, chunk}},
+		{name: "trickling past its total", total: true, parts: []*chainmailv1.UploadAttachmentRequest{header, chunk, chunk, chunk, chunk, chunk}},
 	}
 	for _, tt := range tests {
 		for _, http1 := range []bool{false, true} {
@@ -171,19 +202,41 @@ func TestUploadTimesOutOnTheServer(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
-				d := serveUploads(t, tt.idle, tt.total)
+				timers := newUploadTimers()
+				d := serveUploads(t, timers)
 				client, tr := d.composeClient(http1)
 				defer tr.CloseIdleConnections()
 				stream := client.UploadAttachment(t.Context())
 				stream.RequestHeader().Set(api.HeaderClient, "test")
-				var wg sync.WaitGroup
-				wg.Go(func() { _ = tt.send(stream) })
+				if len(tt.parts) == 0 {
+					if err := stream.Send(nil); err != nil {
+						t.Fatalf("sending the request headers: %v", err)
+					}
+				}
+				for i, p := range tt.parts {
+					if err := stream.Send(p); err != nil {
+						t.Fatalf("sending part %d: %v", i+1, err)
+					}
+				}
+				waiting := timers.wait(t, len(tt.parts)+1) // the server has read every part
+				if tt.total {
+					timers.expireUpload()
+				} else {
+					waiting <- time.Now()
+				}
+				conn, err := stream.Conn()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := conn.Receive(new(chainmailv1.UploadAttachmentResponse)); connect.CodeOf(err) != connect.CodeDeadlineExceeded {
+					t.Errorf("client err = %v, want DEADLINE_EXCEEDED", err)
+				}
+				// The answer is in. Closing may now meet a connection the
+				// server closed, which no longer matters.
+				_ = conn.CloseRequest()
+				_ = conn.CloseResponse()
 				if reason := d.waitUploadAudit(t, 1); reason != api.ReasonTimeout {
 					t.Errorf("audit reason = %q, want %s", reason, api.ReasonTimeout)
-				}
-				wg.Wait()
-				if _, err := stream.CloseAndReceive(); connect.CodeOf(err) != connect.CodeDeadlineExceeded {
-					t.Errorf("client err = %v, want DEADLINE_EXCEEDED", err)
 				}
 				entries, err := os.ReadDir(d.uploads)
 				if err != nil {

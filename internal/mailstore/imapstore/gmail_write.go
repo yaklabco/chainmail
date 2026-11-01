@@ -151,7 +151,7 @@ func (s *Store) gmailDest(ctx context.Context, name string) (gmailView, gmailFol
 			return v, f, nil
 		}
 	}
-	return gmailView{}, gmailFolder{}, fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, name)
+	return gmailView{}, gmailFolder{}, &mailstore.FolderNotFoundError{Name: name, Requested: name}
 }
 
 // find returns the folder called name, or else the one whose name is name
@@ -233,7 +233,7 @@ func (s *Store) gmailMove(ctx context.Context, refs []ref.Ref, folder string) []
 	case gmailAll, gmailBin:
 		// UID MOVE: into Trash or Spam, or back to All Mail. A ref already
 		// there is left as it is.
-		return s.transfer(ctx, refs, dest.name, false)
+		return s.transfer(ctx, refs, dest.name, folder, false)
 	case gmailOther:
 		return failAll(refs, otherFolder(dest.name))
 	}
@@ -253,7 +253,7 @@ func (s *Store) gmailCopy(ctx context.Context, refs []ref.Ref, folder string) []
 	case gmailBin:
 		// Gmail keeps one copy of a message, and answers a COPY into Trash
 		// or Spam by moving it there.
-		return s.transfer(ctx, refs, dest.name, false)
+		return s.transfer(ctx, refs, dest.name, folder, false)
 	case gmailOther:
 		return failAll(refs, otherFolder(dest.name))
 	case gmailAll:
@@ -280,7 +280,7 @@ func (s *Store) gmailTrash(ctx context.Context, refs []ref.Ref) []mailstore.RefR
 	if err != nil {
 		return failAll(refs, err)
 	}
-	return s.transfer(ctx, refs, trash, false)
+	return s.transfer(ctx, refs, trash, "", false)
 }
 
 // gmailExpunge moves each message to Trash, unless it is there, then marks
@@ -298,7 +298,7 @@ func (s *Store) gmailExpunge(ctx context.Context, refs []ref.Ref) []mailstore.Re
 		sent()
 		m, err := c.moveExisting(ctx, uidSet(g.uids), trash)
 		if err != nil {
-			return s.destError(err, trash)
+			return s.destError(err, trash, "")
 		}
 		pairs, ok := m.cu.pairs(len(g.uids))
 		if m.cu.validity == 0 || !ok {
@@ -527,7 +527,7 @@ func (s *Store) restoreThenLabel(ctx context.Context, c *conn, g *groupWrite, al
 	sent()
 	m, err := c.moveExisting(ctx, uidSet(g.uids), allMail)
 	if err != nil {
-		return s.destError(err, allMail)
+		return s.destError(err, allMail, "")
 	}
 	pairs, ok := m.cu.pairs(len(g.uids))
 	if m.cu.validity == 0 || !ok {

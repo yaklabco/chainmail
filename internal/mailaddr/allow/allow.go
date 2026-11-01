@@ -1,8 +1,9 @@
-// Package entry validates and matches send allowlist entries. It is a leaf
-// package so that both internal/config and internal/policy can use it
-// without an import cycle, and the config check and the matcher never
-// disagree.
-package entry
+// Package allow validates and matches send allowlist entries: a bare
+// address or *@domain. It is a leaf package next to mailaddr, so that
+// internal/config can check entries and internal/policy can match them
+// without either depending on the other's internals, and the check and the
+// matcher never disagree.
+package allow
 
 import (
 	"net/mail"

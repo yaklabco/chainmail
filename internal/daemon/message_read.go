@@ -94,12 +94,20 @@ func (e *fixedTextError) Error() string { return e.msg }
 func (e *fixedTextError) Unwrap() error { return e.err }
 
 // messageErr returns the error to report for a failure of one message, of
-// one search source or of a stream: err with its text replaced by
-// clientText for its reason, or err itself for INVALID_ARGUMENT. Every such
+// one search source, of a stream or of a whole MessageService call: err
+// with its text replaced by clientText for its reason, or err itself for
+// INVALID_ARGUMENT. Text the daemon already fixed, a fixedTextError in err's
+// chain, is kept, and any text wrapped around it is dropped. Every such
 // error passes through it before it reaches a client.
 func messageErr(err error) error {
 	if err == nil {
 		return nil
+	}
+	if fixed, ok := errors.AsType[*fixedTextError](err); ok {
+		return fixed
+	}
+	if nf, ok := errors.AsType[*mailstore.FolderNotFoundError](err); ok {
+		return &fixedTextError{msg: folderMissingText(nf), err: err}
 	}
 	reason := apiReason(err)
 	if reason == api.ReasonInvalidArgument {
@@ -188,7 +196,7 @@ func (m *messageService) Get(ctx context.Context, req *connect.Request[chainmail
 	ctx, cancel := withDeadline(ctx, callTimeout)
 	defer cancel()
 	resp, entry, getErr := m.get(ctx, req.Msg)
-	if err := m.s.record(ctx, c, entry, getErr); err != nil {
+	if err := m.s.record(ctx, c, entry, messageErr(getErr)); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(resp), nil
@@ -315,7 +323,7 @@ func (m *messageService) GetThread(ctx context.Context, req *connect.Request[cha
 	defer cancel()
 	entry := audit.Entry{Action: "thread"}
 	resp, threadErr := m.thread(ctx, req.Msg, &entry)
-	if err := m.s.record(ctx, c, entry, threadErr); err != nil {
+	if err := m.s.record(ctx, c, entry, messageErr(threadErr)); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(resp), nil

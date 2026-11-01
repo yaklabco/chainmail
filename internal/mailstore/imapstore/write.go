@@ -43,7 +43,7 @@ func (s *Store) Append(ctx context.Context, folder string, flags []string, date 
 		sent()
 		data, err := c.append(ctx, folder, fl, date, raw)
 		if err != nil {
-			return s.destError(err, folder)
+			return s.destError(err, folder, "")
 		}
 		if data.UID != 0 && data.UIDValidity != 0 {
 			out = ref.Ref{Account: s.acct.Name, Folder: folder, UIDValidity: data.UIDValidity, UID: uint32(data.UID)}
@@ -76,20 +76,115 @@ func (s *Store) appendedMsgID(ctx context.Context, c *conn, r ref.Ref) uint64 {
 	return ids[r.UID]
 }
 
-// Move implements mailstore.Writer.
+// Move implements mailstore.Writer. folder is found as RenameFolder finds
+// one (destination): as given when the server has a folder called that,
+// else as serverName writes it, the way CreateFolder writes a new name.
 func (s *Store) Move(ctx context.Context, refs []ref.Ref, folder string) []mailstore.RefResult {
 	if s.gmail() {
 		return s.gmailMove(ctx, refs, folder)
 	}
-	return s.transfer(ctx, refs, folder, false)
+	return s.transferNamed(ctx, refs, folder, false)
 }
 
-// Copy implements mailstore.Writer.
+// Copy implements mailstore.Writer. folder is found as Move finds it.
 func (s *Store) Copy(ctx context.Context, refs []ref.Ref, folder string) []mailstore.RefResult {
 	if s.gmail() {
 		return s.gmailCopy(ctx, refs, folder)
 	}
-	return s.transfer(ctx, refs, folder, true)
+	return s.transferNamed(ctx, refs, folder, true)
+}
+
+// transferNamed is transfer into the folder a caller names, found by
+// destination. Each folder group gets the namespace on its own connection
+// once that has dialed, so a first move still fans out. Only one of a first
+// write's groups asks the server, and the others wait for its answer
+// (namespace). Likewise one group finds the destination and the others
+// take its answer (destOnce), so the groups of one call never write to two
+// folders. An empty name is refused.
+func (s *Store) transferNamed(ctx context.Context, refs []ref.Ref, name string, keepOriginal bool) []mailstore.RefResult {
+	if name == "" {
+		return s.transfer(ctx, refs, "", "", keepOriginal)
+	}
+	dest := newDestOnce()
+	return s.transferTo(ctx, refs, keepOriginal, name, func(ctx context.Context, c *conn) (string, error) {
+		ns, err := s.namespace(ctx, c)
+		if err != nil {
+			return "", err
+		}
+		return dest.get(ctx, func() (string, error) { return destination(ctx, c, ns, name) })
+	})
+}
+
+// destination is the folder a caller's name for a move or copy target
+// means, found as lookup finds the folder a rename or delete names: name
+// itself when the server has a folder called that, such as a shared folder
+// outside the personal namespace or a top-level Keep beside INBOX.Keep,
+// else serverName(name) in ns. It asks the server on c only when the two
+// differ.
+func destination(ctx context.Context, c *conn, ns folderSpace, name string) (string, error) {
+	mapped := folderTree{prefix: ns.prefix, delim: ns.delim}.serverName(name)
+	if mapped == name {
+		return name, nil
+	}
+	exists, err := c.hasFolder(ctx, name)
+	switch {
+	case err != nil:
+		return "", err
+	case exists:
+		return name, nil
+	default:
+		return mapped, nil
+	}
+}
+
+// hasFolder reports whether the server has a folder called name, matched
+// as find matches. LIST takes name as a pattern, in which * and % match
+// other folders too, so only a folder of exactly that name counts.
+func (c *conn) hasFolder(ctx context.Context, name string) (bool, error) {
+	var list []*imap.ListData
+	if err := c.do(ctx, func() error {
+		var err error
+		list, err = c.client().List("", name, nil).Collect()
+		return err
+	}); err != nil {
+		return false, err
+	}
+	return folderTree{list: list}.find(name) >= 0, nil
+}
+
+// destOnce finds one write's destination once and gives every folder group
+// that answer, so one call sends at most one destination LIST. The server's
+// answer is kept even when it is a refusal. Only a lost connection is not
+// kept, since the group retries that on a fresh connection. Its gate holds
+// one token, taken while a group finds or reads the answer; it is a channel
+// rather than a mutex so a waiter can give up when its context ends.
+type destOnce struct {
+	gate  chan struct{}
+	dest  string
+	err   error
+	found bool
+}
+
+func newDestOnce() *destOnce { return &destOnce{gate: make(chan struct{}, 1)} }
+
+// get returns the destination, calling find for it unless an earlier
+// group found it.
+func (d *destOnce) get(ctx context.Context, find func() (string, error)) (string, error) {
+	select {
+	case d.gate <- struct{}{}:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	defer func() { <-d.gate }()
+	if d.found {
+		return d.dest, d.err
+	}
+	dest, err := find()
+	if errors.Is(err, errConnLost) {
+		return "", err
+	}
+	d.dest, d.err, d.found = dest, err, true
+	return dest, err
 }
 
 // Archive implements mailstore.Writer. The folder is Options.ArchiveFolder,
@@ -105,7 +200,7 @@ func (s *Store) Archive(ctx context.Context, refs []ref.Ref) []mailstore.RefResu
 			return failAll(refs, err)
 		}
 	}
-	return s.transfer(ctx, refs, folder, false)
+	return s.transfer(ctx, refs, folder, "", false)
 }
 
 // Trash implements mailstore.Writer. A ref already in Trash succeeds unchanged.
@@ -117,7 +212,7 @@ func (s *Store) Trash(ctx context.Context, refs []ref.Ref) []mailstore.RefResult
 	if err != nil {
 		return failAll(refs, err)
 	}
-	return s.transfer(ctx, refs, folder, false)
+	return s.transfer(ctx, refs, folder, "", false)
 }
 
 // Expunge implements mailstore.Writer: UID STORE +FLAGS.SILENT (\Deleted)
@@ -248,17 +343,29 @@ func (s *Store) findByID(ctx context.Context, c *conn, folder, id string) ([]ref
 // names it, so the original stays.
 var errCopyUnconfirmed = fmt.Errorf("%w: copied, but the original was kept: the server did not confirm the copy", mailstore.ErrUnavailable)
 
-// transfer moves, or with keepOriginal copies, refs into dest. Refs already
+// transfer moves, or with keepOriginal copies, refs into dest. requested is
+// the folder as the caller named it, or empty when the caller named none
+// (see mailstore.FolderNotFoundError). Refs already
 // in dest are left as they are by a move, if a UID FETCH finds them there,
 // and are otherwise gone. New refs come from COPYUID only.
 // Once the server has acknowledged the MOVE or COPY, every ref in it is a
 // success: with the new ref COPYUID maps it to, or else a zero ref, since
 // its new place is unknown.
-func (s *Store) transfer(ctx context.Context, refs []ref.Ref, dest string, keepOriginal bool) []mailstore.RefResult {
+func (s *Store) transfer(ctx context.Context, refs []ref.Ref, dest, requested string, keepOriginal bool) []mailstore.RefResult {
 	if dest == "" {
 		return failAll(refs, fmt.Errorf("%w: no folder named", mailstore.ErrNotFound))
 	}
+	return s.transferTo(ctx, refs, keepOriginal, requested, func(context.Context, *conn) (string, error) { return dest, nil })
+}
+
+// transferTo is transfer into the folder destOn gives on each group's
+// connection, before anything changes. requested is as in transfer.
+func (s *Store) transferTo(ctx context.Context, refs []ref.Ref, keepOriginal bool, requested string, destOn func(context.Context, *conn) (string, error)) []mailstore.RefResult {
 	return s.writeBatch(ctx, refs, func(ctx context.Context, c *conn, g *groupWrite, sent func()) error {
+		dest, err := destOn(ctx, c)
+		if err != nil {
+			return err
+		}
 		if !keepOriginal && c.Selected() == dest {
 			return keepPresent(ctx, c, g)
 		}
@@ -272,11 +379,10 @@ func (s *Store) transfer(ctx context.Context, refs []ref.Ref, dest string, keepO
 			g.failAll(fmt.Errorf("%w: the server has neither MOVE nor UID EXPUNGE (UIDPLUS)", mailstore.ErrUnsupported))
 			return nil
 		case !keepOriginal && !move:
-			return s.moveByCopy(ctx, c, g, dest, sent)
+			return s.moveByCopy(ctx, c, g, dest, requested, sent)
 		}
 		set := uidSet(g.uids)
 		var cu copyUID
-		var err error
 		sent()
 		if move {
 			cu, err = c.uidMove(ctx, set, dest)
@@ -284,7 +390,7 @@ func (s *Store) transfer(ctx context.Context, refs []ref.Ref, dest string, keepO
 			cu, err = c.uidCopy(ctx, set, dest)
 		}
 		if err != nil {
-			return s.destError(err, dest)
+			return s.destError(err, dest, requested)
 		}
 		g.setAll(mailstore.RefResult{})
 		if pairs, ok := cu.pairs(len(g.uids)); cu.validity != 0 && ok {
@@ -320,11 +426,11 @@ func keepPresent(ctx context.Context, c *conn, g *groupWrite) error {
 // fails, naming the kept original, if the STORE or EXPUNGE does not go
 // through. A ref COPYUID leaves out was not there to copy: a success with
 // no new ref.
-func (s *Store) moveByCopy(ctx context.Context, c *conn, g *groupWrite, dest string, sent func()) error {
+func (s *Store) moveByCopy(ctx context.Context, c *conn, g *groupWrite, dest, requested string, sent func()) error {
 	sent()
 	cu, err := c.uidCopy(ctx, uidSet(g.uids), dest)
 	if err != nil {
-		return s.destError(err, dest)
+		return s.destError(err, dest, requested)
 	}
 	pairs, ok := cu.pairs(len(g.uids))
 	if cu.validity == 0 || !ok {
@@ -371,11 +477,12 @@ func (s *Store) setPlaced(g *groupWrite, dest string, validity uint32, pairs map
 }
 
 // destError reports a write the server refused because dest is missing as
-// ErrNotFound, and drops the cached folder list.
-func (s *Store) destError(err error, dest string) error {
+// a FolderNotFoundError for requested, the caller's name for dest or
+// empty, and drops the cached folder list.
+func (s *Store) destError(err error, dest, requested string) error {
 	if missingFolder(err) {
 		s.forgetFolders()
-		return fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, dest)
+		return &mailstore.FolderNotFoundError{Name: dest, Requested: requested}
 	}
 	return err
 }

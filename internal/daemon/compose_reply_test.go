@@ -217,8 +217,8 @@ func TestReplyFailureLeavesOriginalUnanswered(t *testing.T) {
 	if reasonOf(err) != api.ReasonInvalidArgument {
 		t.Fatalf("err = %v, want INVALID_ARGUMENT", err)
 	}
-	if !strings.Contains(err.Error(), "alice@example.net") || strings.Contains(err.Error(), "Alice") || strings.Contains(err.Error(), "no such user") {
-		t.Errorf("err = %v, want the refused address only", err)
+	if !strings.Contains(err.Error(), "refused 1 recipient") || strings.Contains(err.Error(), "alice@example.net") || strings.Contains(err.Error(), "Alice") || strings.Contains(err.Error(), "no such user") {
+		t.Errorf("err = %v, want the count of refused recipients only", err)
 	}
 	if slices.Contains(e.host.Flags(orig), `\Answered`) {
 		t.Error("a failed reply marked the original answered")

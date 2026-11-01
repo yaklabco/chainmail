@@ -103,6 +103,7 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 		newReplyCmd(ctx, env, g),
 		newForwardCmd(ctx, env, g),
 		newDraftCmd(ctx, env, g),
+		newMCPCmd(ctx, env, g),
 	)
 	root.AddCommand(newOrganizeCmds(ctx, env, g)...)
 	return root

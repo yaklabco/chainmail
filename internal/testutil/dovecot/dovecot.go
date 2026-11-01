@@ -73,6 +73,11 @@ const (
 //go:embed dovecot.conf
 var config []byte
 
+// prefixedConfig is config with the personal namespace under "INBOX.", with
+// "." between levels, as Courier-style servers such as Hostinger's keep it.
+// Mailbox sections inside the namespace name folders without the prefix.
+var prefixedConfig = bytes.Replace(config, []byte("  separator = /\n"), []byte("  prefix = INBOX.\n  separator = .\n"), 1)
+
 // Server is a running Dovecot container.
 type Server struct {
 	Endpoint provider.Endpoint
@@ -85,10 +90,17 @@ type Server struct {
 // answers IMAPS. The caller must Stop it. It first removes containers and
 // directories from earlier runs whose lifetime has passed.
 func Start() (*Server, error) {
-	return start(Lifetime)
+	return start(Lifetime, config)
 }
 
-func start(lifetime time.Duration) (*Server, error) {
+// StartPrefixed is Start with the personal namespace under "INBOX.", with
+// "." between levels, as Hostinger's Dovecot keeps it. The caller must Stop it.
+func StartPrefixed() (*Server, error) {
+	return start(Lifetime, prefixedConfig)
+}
+
+// start runs a container whose Dovecot reads conf as its dovecot.conf.
+func start(lifetime time.Duration, conf []byte) (*Server, error) {
 	sweep(time.Now())
 	ca, err := tlstest.NewCA()
 	if err != nil {
@@ -108,7 +120,7 @@ func start(lifetime time.Duration) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	files := map[string][]byte{"dovecot.conf": config, "cert.pem": certPEM, "key.pem": keyPEM}
+	files := map[string][]byte{"dovecot.conf": conf, "cert.pem": certPEM, "key.pem": keyPEM}
 	for name, data := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
 			_ = os.RemoveAll(dir) // best effort; the write error is the one to report
@@ -226,7 +238,7 @@ func Main(m *testing.M) int {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigs)
-	return runMain(func() (*Server, error) { return start(lifetime) }, (*Server).Stop, m.Run, sigs, os.Exit)
+	return runMain(func() (*Server, error) { return start(lifetime, config) }, (*Server).Stop, m.Run, sigs, os.Exit)
 }
 
 // startupSlack covers the time between a container's start, when its
