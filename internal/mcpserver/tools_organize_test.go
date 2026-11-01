@@ -561,3 +561,79 @@ func TestDraftToolsFollowTheExpungePolicy(t *testing.T) {
 		}
 	}
 }
+
+// TestGateKeepsItsAnswerWhenTheListIsCancelled: a stale tools/list whose
+// own context ends while its check is at the daemon learns nothing about
+// policy, so the gated tools stay as they were and the check time is not
+// stamped, and the next tools/list asks again. A check the daemon itself
+// fails still hides the gated tools and counts as a check.
+func TestGateKeepsItsAnswerWhenTheListIsCancelled(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		cancelList bool
+		wantListed bool
+		wantStale  bool
+	}{
+		"the list is cancelled": {cancelList: true, wantListed: true, wantStale: true},
+		"the daemon fails":      {wantListed: false, wantStale: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int32
+			reached := make(chan struct{})
+			f := &fakeDaemon{ListAccounts: func(ctx context.Context, req *chainmailv1.ListAccountsRequest) (*chainmailv1.ListAccountsResponse, error) {
+				if calls.Add(1) != 2 {
+					return allowAll(ctx, req)
+				}
+				close(reached)
+				if !tc.cancelList {
+					return nil, connect.NewError(connect.CodeUnavailable, errors.New("daemon restarting"))
+				}
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}}
+			var mu sync.Mutex
+			now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+			e := newTestEnv(t, f, latest, func(o *Options) {
+				o.Now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+			})
+			mu.Lock()
+			now = now.Add(gateInterval)
+			mu.Unlock()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			next := func(context.Context, string, mcp.Request) (mcp.Result, error) { return nil, nil }
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_, _ = e.srv.gateOnList(next)(ctx, "tools/list", nil)
+			}()
+			<-reached
+			if tc.cancelList {
+				cancel()
+			}
+			<-done
+			e.srv.gate.mu.Lock()
+			expunge, folders := e.srv.gate.listed[toolExpunge], e.srv.gate.listed[toolDeleteFolder]
+			e.srv.gate.mu.Unlock()
+			if expunge != tc.wantListed || folders != tc.wantListed {
+				t.Errorf("expunge listed %t, delete_folder listed %t; want both %t", expunge, folders, tc.wantListed)
+			}
+			if stale := e.srv.gateStale(); stale != tc.wantStale {
+				t.Errorf("check stale after the list = %t, want %t", stale, tc.wantStale)
+			}
+			hints := destructiveHints(t, e.cs)
+			if tc.wantStale && calls.Load() != 3 {
+				t.Errorf("ListAccounts called %d times, want 3: the next tools/list did not ask again", calls.Load())
+			}
+			if _, ok := hints[toolExpunge]; ok != tc.wantListed {
+				t.Errorf("expunge in tools/list = %t, want %t", ok, tc.wantListed)
+			}
+			for _, n := range draftExpungers {
+				if hints[n] != tc.wantListed {
+					t.Errorf("%s destructiveHint = %t, want %t", n, hints[n], tc.wantListed)
+				}
+			}
+		})
+	}
+}

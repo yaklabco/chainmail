@@ -286,15 +286,23 @@ func (s *Server) refreshStaleGate(ctx context.Context) {
 // expunge is allowed (addDraftTools). AddTool and RemoveTools only update
 // the SDK registry here: the SDK sends notifications/tools/list_changed
 // later, from a timer, without its lock or s.gate.mu held.
+//
+// A check that fails once the caller's ctx has ended, as when the client
+// cancels its tools/list, says nothing about policy. It changes nothing and
+// leaves the check time alone, so the next tools/list asks again. Any other
+// failure, gateTimeout included, hides the gated tools until a later check.
 func (s *Server) checkGate(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, gateTimeout)
+	callCtx, cancel := context.WithTimeout(ctx, gateTimeout)
 	defer cancel()
 	want := map[string]bool{}
-	resp, err := s.daemon.Account.ListAccounts(ctx, connect.NewRequest(&chainmailv1.ListAccountsRequest{}))
+	resp, err := s.daemon.Account.ListAccounts(callCtx, connect.NewRequest(&chainmailv1.ListAccountsRequest{}))
 	if err != nil {
 		// Only the kind: the text of a transport or detail-less error can
 		// carry a backend's diagnostics or a secret (see errorKind).
 		s.opts.Logger.Warn("checking policy for the gated tools", "kind", errorKind(err))
+		if ctx.Err() != nil {
+			return
+		}
 	} else {
 		for _, a := range resp.Msg.GetAccounts() {
 			want[toolExpunge] = want[toolExpunge] || a.GetCapabilities().GetAllowExpunge()
