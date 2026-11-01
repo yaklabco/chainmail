@@ -4,14 +4,14 @@
 package policy
 
 import (
-	"fmt"
+	"errors"
 	"maps"
 	"slices"
 	"strings"
 
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/mailaddr"
-	"github.com/jamesainslie/chainmail/internal/policy/entry"
+	"github.com/jamesainslie/chainmail/internal/mailaddr/allow"
 )
 
 // SendDecision is the outcome of checking a send's recipients.
@@ -42,25 +42,24 @@ type Policy struct {
 type allowSet []string
 
 func (s allowSet) allows(addr string) bool {
-	return slices.ContainsFunc(s, func(e string) bool { return entry.Match(e, addr) })
+	return slices.ContainsFunc(s, func(e string) bool { return allow.Match(e, addr) })
 }
 
-// New compiles cfg.Policy, every account's policy and every account address.
-// It returns an error for an invalid entry. A max_recipients of 0, as in a
-// Config that never went through config.Parse, means the default.
+// New compiles cfg.Policy, every account's policy and every account
+// address. It applies Parse's defaults and entry check through the config
+// helpers, so a Config that never went through config.Parse, as in tests,
+// meets the same rules, and it returns Parse's error text for an invalid entry.
 func New(cfg *config.Config) (*Policy, error) {
+	pc := cfg.Policy.WithDefaults()
 	p := &Policy{
 		own:               make(map[string]struct{}, len(cfg.Accounts)),
 		accounts:          make(map[string]allowSet, len(cfg.Accounts)),
-		maxRecipients:     cfg.Policy.MaxRecipients,
-		allowExpunge:      cfg.Policy.AllowExpunge,
-		allowFolderDelete: cfg.Policy.AllowFolderDelete,
-	}
-	if p.maxRecipients <= 0 {
-		p.maxRecipients = config.DefaultMaxRecipients
+		maxRecipients:     pc.MaxRecipients,
+		allowExpunge:      pc.AllowExpunge,
+		allowFolderDelete: pc.AllowFolderDelete,
 	}
 	var err error
-	if p.global, err = compile("policy.send_allow", cfg.Policy.SendAllow); err != nil {
+	if p.global, err = compile("policy.send_allow", pc.SendAllow); err != nil {
 		return nil, err
 	}
 	for _, name := range slices.Sorted(maps.Keys(cfg.Accounts)) {
@@ -78,11 +77,11 @@ func New(cfg *config.Config) (*Policy, error) {
 }
 
 func compile(where string, entries []string) (allowSet, error) {
+	if problems := config.SendAllowProblems(where, entries); len(problems) > 0 {
+		return nil, errors.New(problems[0])
+	}
 	set := make(allowSet, 0, len(entries))
 	for _, e := range entries {
-		if !entry.Valid(e) {
-			return nil, fmt.Errorf("%s: invalid entry %q", where, e)
-		}
 		set = append(set, strings.ToLower(e))
 	}
 	return set, nil

@@ -570,3 +570,25 @@ func TestPolicyRejectsUnknownKeys(t *testing.T) {
 		})
 	}
 }
+
+func TestPolicyWithDefaults(t *testing.T) {
+	t.Parallel()
+	if got := (Policy{}).WithDefaults().MaxRecipients; got != DefaultMaxRecipients {
+		t.Errorf("unset max_recipients = %d, want %d", got, DefaultMaxRecipients)
+	}
+	if got := (Policy{MaxRecipients: 3}).WithDefaults().MaxRecipients; got != 3 {
+		t.Errorf("set max_recipients = %d, want 3", got)
+	}
+}
+
+func TestSendAllowProblems(t *testing.T) {
+	t.Parallel()
+	got := SendAllowProblems("policy.send_allow", []string{"a@b.test", "*@*", "*@x.test", "bob@*"})
+	want := []string{`policy.send_allow: invalid entry "*@*"`, `policy.send_allow: invalid entry "bob@*"`}
+	if !slices.Equal(got, want) {
+		t.Errorf("SendAllowProblems = %q, want %q", got, want)
+	}
+	if got := SendAllowProblems("x", nil); got != nil {
+		t.Errorf("no entries: %q, want nil", got)
+	}
+}
