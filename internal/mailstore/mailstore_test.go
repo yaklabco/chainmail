@@ -1,6 +1,8 @@
 package mailstore
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 	"testing"
 )
@@ -50,5 +52,20 @@ func TestMessageIDs(t *testing.T) {
 	got := MessageIDs([]string{"<a@x> <b@x>", "c@x", "(note) <d@x><e@x>", " ", "<>"})
 	if want := []string{"a@x", "b@x", "c@x", "d@x", "e@x"}; !slices.Equal(got, want) {
 		t.Errorf("MessageIDs = %q, want %q", got, want)
+	}
+}
+
+func TestFolderNotFoundError(t *testing.T) {
+	t.Parallel()
+	err := fmt.Errorf("moving: %w", &FolderNotFoundError{Name: "INBOX.Nope"})
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("errors.Is(%v, ErrNotFound) = false", err)
+	}
+	var nf *FolderNotFoundError
+	if !errors.As(err, &nf) || nf.Name != "INBOX.Nope" {
+		t.Errorf("errors.As = %+v", nf)
+	}
+	if got, want := (&FolderNotFoundError{Name: "INBOX.Nope"}).Error(), `not found: no folder "INBOX.Nope"`; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
 	}
 }

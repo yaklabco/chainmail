@@ -48,16 +48,17 @@ func (s *Store) CreateFolder(ctx context.Context, name string) (string, error) {
 
 // RenameFolder implements mailstore.Writer. It refuses INBOX, role folders
 // and Gmail's own folders, as the source or among its children, and a
-// folder moving under itself. to is written as the server has it
-// (serverName), and its missing parents are created first. The server
-// renames the children with the folder.
+// folder moving under itself. from is found as given, else as serverName
+// writes it. to is written as the server has it (serverName), and its
+// missing parents are created first. The server renames the children with
+// the folder.
 func (s *Store) RenameFolder(ctx context.Context, from, to string) (string, error) {
 	var renamed string
 	err := s.changeFolders(ctx, true, func(c *conn, t folderTree, sent func()) error {
 		to := t.serverName(to)
-		i := t.find(from)
+		i := t.lookup(from)
 		if i < 0 {
-			return fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, from)
+			return &mailstore.FolderNotFoundError{Name: t.serverName(from)}
 		}
 		if err := t.mutable(i); err != nil {
 			return err
@@ -101,13 +102,13 @@ func (s *Store) RenameFolder(ctx context.Context, from, to string) (string, erro
 
 // DeleteFolder implements mailstore.Writer. It refuses INBOX, role folders,
 // Gmail's own folders and a folder with folders under it, and, unless force,
-// one STATUS counts mail in. Deleting a Gmail label leaves its messages in
-// All Mail.
+// one STATUS counts mail in. name is found as given, else as serverName
+// writes it. Deleting a Gmail label leaves its messages in All Mail.
 func (s *Store) DeleteFolder(ctx context.Context, name string, force bool) error {
 	return s.changeFolders(ctx, true, func(c *conn, t folderTree, sent func()) error {
-		i := t.find(name)
+		i := t.lookup(name)
 		if i < 0 {
-			return fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, name)
+			return &mailstore.FolderNotFoundError{Name: t.serverName(name)}
 		}
 		if err := t.mutable(i); err != nil {
 			return err
@@ -143,9 +144,11 @@ func (s *Store) changeFolders(ctx context.Context, moves bool, f func(c *conn, t
 		}
 		// Gmail keeps its labels at the top level.
 		if !s.gmail() {
-			if t.prefix, err = s.personalPrefix(ctx, c); err != nil {
+			ns, err := s.namespace(ctx, c)
+			if err != nil {
 				return err
 			}
+			t.prefix = ns.prefix
 		}
 		return f(c, t, func() {
 			changed = true
@@ -175,18 +178,27 @@ type folderTree struct {
 	prefix string
 }
 
-// personalPrefix returns the prefix of the account's personal namespace.
-// The first call asks the server with NAMESPACE on c, and the store keeps
-// the answer with its folder list, for its whole life, since a server does
-// not move its namespaces. A server without NAMESPACE, or that refuses it,
-// has none.
-func (s *Store) personalPrefix(ctx context.Context, c *conn) (string, error) {
+// folderSpace is how the server names folders, for a name given without a
+// LIST at hand: its personal namespace prefix and hierarchy delimiter.
+type folderSpace struct {
+	prefix string
+	delim  rune // 0 on a server with flat names
+}
+
+// namespace returns the account's folderSpace. The first call asks the
+// server on c: NAMESPACE gives the personal prefix and its delimiter.
+// Without NAMESPACE, or when the server refuses it or has no personal
+// namespace, the prefix is "" and LIST "" "" gives the delimiter. The store
+// keeps the answer for its whole life, since a server does not move its
+// namespaces.
+func (s *Store) namespace(ctx context.Context, c *conn) (folderSpace, error) {
 	s.mu.Lock()
-	prefix, known := s.nsPrefix, s.nsKnown
+	ns, known := s.ns, s.nsKnown
 	s.mu.Unlock()
 	if known {
-		return prefix, nil
+		return ns, nil
 	}
+	found := false
 	if c.client().Caps().Has(imap.CapNamespace) {
 		var data *imap.NamespaceData
 		err := c.do(ctx, func() error {
@@ -198,15 +210,41 @@ func (s *Store) personalPrefix(ctx context.Context, c *conn) (string, error) {
 		switch {
 		case errors.As(err, &refusal):
 		case err != nil:
-			return "", err
+			return folderSpace{}, err
 		case len(data.Personal) > 0:
-			prefix = data.Personal[0].Prefix
+			ns, found = folderSpace{prefix: data.Personal[0].Prefix, delim: data.Personal[0].Delim}, true
 		}
 	}
+	if !found {
+		d, err := c.hierarchyDelim(ctx)
+		if err != nil {
+			return folderSpace{}, err
+		}
+		ns.delim = d
+	}
 	s.mu.Lock()
-	s.nsPrefix, s.nsKnown = prefix, true
+	s.ns, s.nsKnown = ns, true
 	s.mu.Unlock()
-	return prefix, nil
+	return ns, nil
+}
+
+// hierarchyDelim asks LIST "" "" for the server's hierarchy delimiter, or 0
+// on a server with flat names.
+func (c *conn) hierarchyDelim(ctx context.Context) (rune, error) {
+	var list []*imap.ListData
+	if err := c.do(ctx, func() error {
+		var err error
+		list, err = c.client().List("", "", nil).Collect()
+		return err
+	}); err != nil {
+		return 0, err
+	}
+	for _, l := range list {
+		if l.Delim != 0 {
+			return l.Delim, nil
+		}
+	}
+	return 0, nil
 }
 
 // serverName is name as the server has it: "/" written as the server's
@@ -277,6 +315,17 @@ func (t folderTree) same(a, b string) bool {
 // find returns the index of the folder called name, or -1.
 func (t folderTree) find(name string) int {
 	return slices.IndexFunc(t.list, func(l *imap.ListData) bool { return t.same(l.Mailbox, name) })
+}
+
+// lookup returns the index of the folder a caller names: the one called
+// name, else the one called serverName(name), so a name given without the
+// personal namespace prefix, or with "/" between levels, finds the server's
+// folder. It returns -1 when neither exists.
+func (t folderTree) lookup(name string) int {
+	if i := t.find(name); i >= 0 {
+		return i
+	}
+	return t.find(t.serverName(name))
 }
 
 // under reports whether name is below parent in the hierarchy.
@@ -404,7 +453,7 @@ func folderError(err error, name string) error {
 	case e.Code == imap.ResponseCodeAlreadyExists || strings.Contains(strings.ToLower(e.Text), "already exists"):
 		return fmt.Errorf("%w: folder %q", mailstore.ErrExists, name)
 	case missingFolder(err):
-		return fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, name)
+		return &mailstore.FolderNotFoundError{Name: name}
 	case e.Code == imap.ResponseCodeCannot || e.Code == imap.ResponseCodeNoPerm:
 		return fmt.Errorf("%w: the server refused to change %q", mailstore.ErrRefused, name)
 	}

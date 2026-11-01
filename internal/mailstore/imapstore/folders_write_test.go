@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/ref"
 	"github.com/jamesainslie/chainmail/internal/testutil/imaptest"
 )
 
@@ -332,5 +333,58 @@ func TestFolderNamesWithoutANamespacePrefix(t *testing.T) {
 				t.Errorf("commands = %q, want %s", srv.received(), tc.want)
 			}
 		})
+	}
+}
+
+// On a server that keeps every folder under "INBOX.", a move, copy, rename
+// or delete names a folder the way CreateFolder does: without the prefix,
+// with "/" between levels, or as the server has it.
+func TestFolderWritesFollowThePersonalNamespace(t *testing.T) {
+	t.Parallel()
+	srv := startWriteServer(t, &writeServer{caps: "NAMESPACE MOVE UIDPLUS", delim: ".", namespace: "INBOX.", folders: []*wsFolder{
+		wsMailbox("INBOX", "", 7, 1, 2), wsMailbox("INBOX.Projects.2026", "", 20),
+		wsMailbox("INBOX.Old", "", 21), wsMailbox("INBOX.Empty", "", 22),
+	}})
+	s := writeStore(t, srv, Options{})
+	ctx := t.Context()
+
+	if res := s.Move(ctx, []ref.Ref{hostRef("INBOX", 7, 1)}, "Projects/2026"); res[0].Err != nil || res[0].Ref.Folder != "INBOX.Projects.2026" {
+		t.Errorf("Move = %+v, want a ref in INBOX.Projects.2026", res[0])
+	}
+	if srv.sent(`UID MOVE 1 "INBOX.Projects.2026"`) != 1 {
+		t.Errorf("commands = %q, want UID MOVE into INBOX.Projects.2026", srv.received())
+	}
+	for _, name := range []string{"Old", "INBOX.Old"} {
+		if res := s.Copy(ctx, []ref.Ref{hostRef("INBOX", 7, 2)}, name); res[0].Err != nil || res[0].Ref.Folder != "INBOX.Old" {
+			t.Errorf("Copy to %q = %+v, want a ref in INBOX.Old", name, res[0])
+		}
+	}
+	if n := srv.sent(`UID COPY 2 "INBOX.Old"`); n != 2 {
+		t.Errorf("UID COPY into INBOX.Old sent %d times, want 2: commands %q", n, srv.received())
+	}
+	if got, err := s.RenameFolder(ctx, "Old", "New"); err != nil || got != "INBOX.New" {
+		t.Errorf("RenameFolder(Old, New) = %q, %v, want INBOX.New", got, err)
+	}
+	if srv.sent(`RENAME "INBOX.Old" "INBOX.New"`) != 1 {
+		t.Errorf("commands = %q, want INBOX.Old renamed", srv.received())
+	}
+	if err := s.DeleteFolder(ctx, "Empty", false); err != nil {
+		t.Errorf("DeleteFolder(Empty): %v", err)
+	}
+	if srv.sent(`DELETE "INBOX.Empty"`) != 1 {
+		t.Errorf("commands = %q, want INBOX.Empty deleted", srv.received())
+	}
+	var nf *mailstore.FolderNotFoundError
+	if res := s.Move(ctx, []ref.Ref{hostRef("INBOX", 7, 2)}, "Nope"); !errors.As(res[0].Err, &nf) || nf.Name != "INBOX.Nope" {
+		t.Errorf("Move to Nope = %+v, want FolderNotFoundError for INBOX.Nope", res[0])
+	}
+	if _, err := s.RenameFolder(ctx, "Nope", "X"); !errors.As(err, &nf) || nf.Name != "INBOX.Nope" {
+		t.Errorf("RenameFolder(Nope) = %v", err)
+	}
+	if err := s.DeleteFolder(ctx, "Nope", false); !errors.As(err, &nf) || nf.Name != "INBOX.Nope" {
+		t.Errorf("DeleteFolder(Nope) = %v", err)
+	}
+	if n := srv.sent("NAMESPACE"); n != 1 {
+		t.Errorf("NAMESPACE sent %d times, want once", n)
 	}
 }

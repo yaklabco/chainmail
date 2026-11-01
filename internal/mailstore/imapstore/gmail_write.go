@@ -151,7 +151,7 @@ func (s *Store) gmailDest(ctx context.Context, name string) (gmailView, gmailFol
 			return v, f, nil
 		}
 	}
-	return gmailView{}, gmailFolder{}, fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, name)
+	return gmailView{}, gmailFolder{}, &mailstore.FolderNotFoundError{Name: name}
 }
 
 // find returns the folder called name, or else the one whose name is name

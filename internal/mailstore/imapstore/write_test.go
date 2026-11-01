@@ -30,11 +30,11 @@ import (
 
 // writeServer is a scripted IMAP server for the write paths, over implicit
 // TLS. It answers just enough IMAP for the Store's writes: LOGIN, LIST,
-// STATUS, SELECT and EXAMINE, UID FETCH, UID SEARCH by Message-ID or
-// X-GM-MSGID, UID STORE, UID COPY, UID MOVE, UID EXPUNGE and APPEND. A
-// message whose Message-ID is <n@x> has X-GM-MSGID n. It reads commands as
-// they arrive, apart from answering them, and logs both, so a test can see
-// which commands a client pipelined.
+// NAMESPACE, CREATE, RENAME, DELETE, STATUS, SELECT and EXAMINE, UID FETCH,
+// UID SEARCH by Message-ID or X-GM-MSGID, UID STORE, UID COPY, UID MOVE,
+// UID EXPUNGE and APPEND. A message whose Message-ID is <n@x> has X-GM-MSGID
+// n. It reads commands as they arrive, apart from answering them, and logs
+// both, so a test can see which commands a client pipelined.
 type writeServer struct {
 	// caps follow IMAP4rev1 in CAPABILITY, such as "MOVE UIDPLUS".
 	caps    string
@@ -384,6 +384,14 @@ func (srv *writeServer) reply(st *wsSession, c wsCmd) string {
 			return c.tag + " NO [NONEXISTENT] no such mailbox\r\n"
 		}
 		fo.name = wsUnquote(f[2])
+		return ok
+	case "DELETE":
+		name := wsUnquote(f[1])
+		i := slices.IndexFunc(srv.folders, func(fo *wsFolder) bool { return fo.name == name })
+		if i < 0 {
+			return c.tag + " NO [NONEXISTENT] no such mailbox\r\n"
+		}
+		srv.folders = slices.Delete(srv.folders, i, i+1)
 		return ok
 	case "NAMESPACE":
 		return fmt.Sprintf("* NAMESPACE ((%q %q)) NIL NIL\r\n%s", srv.namespace, cmp.Or(srv.delim, "/"), ok)
