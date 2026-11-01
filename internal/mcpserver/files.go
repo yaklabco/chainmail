@@ -112,18 +112,18 @@ func (s *Server) outputDir(dir string) (*os.Root, string, error) {
 	}
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return nil, "", invalidArg("dir %s: %v", dir, err)
+		return nil, "", invalidArg("dir %s %s", dir, fsProblem(err))
 	}
 	pre, err := os.Stat(resolved)
 	switch {
 	case err != nil:
-		return nil, "", invalidArg("dir %s: %v", dir, err)
+		return nil, "", invalidArg("dir %s %s", dir, fsProblem(err))
 	case !pre.IsDir():
 		return nil, "", invalidArg("dir %s is not a directory", dir)
 	}
 	root, st, err := openDir(resolved)
 	if err != nil {
-		return nil, "", invalidArg("dir %s: %v", dir, err)
+		return nil, "", invalidArg("dir %s %s", dir, fsProblem(err))
 	}
 	var problem string
 	switch {
@@ -150,9 +150,9 @@ func openDefaultDir(def string) (*os.Root, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("checking %s: %w", def, err)
 	}
-	hint := "remove or fix " + def + ", or pass dir"
+	hint := defaultDirHint
 	if !pre.IsDir() { // Lstat: a symlink is not a directory here
-		return nil, "", hinted(api.ReasonInternal, hint, "the attachments directory %s is a symlink or not a directory", def)
+		return nil, "", hinted(api.ReasonInternal, hint, "the default attachments directory is a symlink or not a directory")
 	}
 	root, st, err := openDir(def)
 	if err != nil {
@@ -161,10 +161,10 @@ func openDefaultDir(def string) (*os.Root, string, error) {
 	var problem error
 	switch {
 	case !os.SameFile(pre, st):
-		problem = hinted(api.ReasonInternal, hint, "the attachments directory %s changed while it was opened", def)
+		problem = hinted(api.ReasonInternal, hint, "the default attachments directory changed while it was opened")
 	case !ownedByMe(st):
-		problem = hinted(api.ReasonInternal, hint, "the attachments directory %s is not owned by this user", def)
-	case st.Mode().Perm()&0o077 != 0:
+		problem = hinted(api.ReasonInternal, hint, "the default attachments directory is not owned by this user")
+	case st.Mode().Perm() != 0o700:
 		if err := root.Chmod(".", 0o700); err != nil {
 			problem = fmt.Errorf("making %s private: %w", def, err)
 		}
@@ -251,7 +251,7 @@ func linkUnique(root *os.Root, link func(oldname, newname string) error, tmp, di
 		case errors.Is(err, fs.ErrExist):
 			continue
 		case linkUnsupported(err):
-			return "", hinted(api.ReasonInvalidArgument, hardLinkHint, "cannot save in %s, whose filesystem does not support hard links: %v", dir, err)
+			return "", hinted(api.ReasonInvalidArgument, hardLinkHint, "cannot save here: the directory's filesystem does not support hard links")
 		default:
 			return "", fmt.Errorf("saving %s: %w", filepath.Join(dir, candidate), err)
 		}
@@ -284,13 +284,13 @@ func attachmentFile(p string) (*os.File, error) {
 	}
 	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
 	if err != nil {
-		return nil, invalidArg("attachment %s: %v", p, err)
+		return nil, invalidArg("attachment %s %s", p, fsProblem(err))
 	}
 	st, err := f.Stat()
 	switch {
 	case err != nil:
 		_ = f.Close() // read-only: a close error loses nothing
-		return nil, invalidArg("attachment %s: %v", p, err)
+		return nil, invalidArg("attachment %s %s", p, fsProblem(err))
 	case !st.Mode().IsRegular():
 		_ = f.Close() // as above
 		return nil, invalidArg("attachment %s is not a regular file", p)
@@ -366,4 +366,22 @@ func (s *Server) uploadOne(ctx context.Context, account string, file *os.File, f
 		return uploadedFile{}, err
 	}
 	return uploadedFile{Handle: resp.Msg.GetHandle(), SHA256: resp.Msg.GetSha256()}, nil
+}
+
+// defaultDirHint is how to repair the default attachments directory. It is
+// fixed text: the path comes from the environment, not from the agent.
+const defaultDirHint = "remove or fix the default attachments directory ($XDG_CACHE_HOME/chainmail/attachments, else ~/.cache/chainmail/attachments), or pass dir"
+
+// fsProblem explains a filesystem error in fixed words. The error's own
+// text can carry a resolved path or a name taken from mail, and file errors
+// reach the agent as trusted text, so it is never quoted.
+func fsProblem(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "does not exist"
+	case errors.Is(err, fs.ErrPermission):
+		return "is not accessible to this user"
+	default:
+		return "cannot be opened"
+	}
 }
