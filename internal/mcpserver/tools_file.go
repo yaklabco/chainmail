@@ -18,22 +18,22 @@ func (s *Server) registerFileTools() {
 	// The spec table: read only, not destructive, idempotent, open world.
 	fileHints := hints{readOnly: true, destructive: false, idempotent: true, openWorld: true}
 	addTool(s, "download_attachment", "Download an attachment",
-		"Save one attachment to a file and return its path. The file name comes from the message: it is sanitized, it is untrusted, and an existing file is never replaced (a clash gets a (2), (3) suffix). dir, when given, must be an absolute path to an existing directory.",
+		"Save one attachment to a file and return its path. The file name comes from the message: it is sanitized, it is untrusted, and an existing file is never replaced (a clash gets a (2), (3) suffix). dir, when given, must be an absolute path to an existing directory this user owns that no other user can write to.",
 		fileHints, s.downloadAttachment)
 	addTool(s, "save_raw_message", "Save the raw message",
-		"Save the original RFC 5322 bytes of a message to a .eml file and return its path. An existing file is never replaced. dir, when given, must be an absolute path to an existing directory.",
+		"Save the original RFC 5322 bytes of a message to a .eml file and return its path. An existing file is never replaced. dir, when given, must be an absolute path to an existing directory this user owns that no other user can write to.",
 		fileHints, s.saveRawMessage)
 }
 
 type downloadIn struct {
 	Ref  string `json:"ref" jsonschema:"the message, from search or get_message"`
 	Part string `json:"part" jsonschema:"an attachment part from get_message, such as 2 or 1.2"`
-	Dir  string `json:"dir,omitempty" jsonschema:"an existing directory as an absolute path; default ~/.cache/chainmail/attachments"`
+	Dir  string `json:"dir,omitempty" jsonschema:"an existing directory as an absolute path, owned by this user and writable by no other user; default ~/.cache/chainmail/attachments"`
 }
 
 type saveRawIn struct {
 	Ref string `json:"ref" jsonschema:"the message, from search or get_message"`
-	Dir string `json:"dir,omitempty" jsonschema:"an existing directory as an absolute path; default ~/.cache/chainmail/attachments"`
+	Dir string `json:"dir,omitempty" jsonschema:"an existing directory as an absolute path, owned by this user and writable by no other user; default ~/.cache/chainmail/attachments"`
 }
 
 type savedFileOut struct {
@@ -44,10 +44,11 @@ type savedFileOut struct {
 }
 
 func (s *Server) downloadAttachment(ctx context.Context, _ *mcp.CallToolRequest, in downloadIn) (*mcp.CallToolResult, savedFileOut, error) {
-	dir, err := s.outputDir(in.Dir)
+	root, dir, err := s.outputDir(in.Dir)
 	if err != nil {
 		return nil, savedFileOut{}, s.errorResult(err)
 	}
+	defer func() { _ = root.Close() }() // a directory handle: a close error loses nothing
 	stream, err := s.daemon.Message.DownloadAttachment(ctx, connect.NewRequest(&chainmailv1.DownloadAttachmentRequest{Ref: in.Ref, Part: in.Part}))
 	if err != nil {
 		return nil, savedFileOut{}, s.errorResult(err)
@@ -63,7 +64,7 @@ func (s *Server) downloadAttachment(ctx context.Context, _ *mcp.CallToolRequest,
 	if header == nil {
 		return nil, savedFileOut{}, s.errorResult(errors.New("the daemon's first message was not the attachment header"))
 	}
-	path, n, err := saveFile(dir, sanitizeName(header.GetFilename().GetUntrusted(), "attachment"), func(w io.Writer) (int64, error) {
+	path, n, err := saveFile(root, dir, sanitizeName(header.GetFilename().GetUntrusted(), "attachment"), func(w io.Writer) (int64, error) {
 		var n int64
 		for stream.Receive() {
 			k, err := w.Write(stream.Msg().GetData())
@@ -86,16 +87,17 @@ func (s *Server) downloadAttachment(ctx context.Context, _ *mcp.CallToolRequest,
 }
 
 func (s *Server) saveRawMessage(ctx context.Context, _ *mcp.CallToolRequest, in saveRawIn) (*mcp.CallToolResult, savedFileOut, error) {
-	dir, err := s.outputDir(in.Dir)
+	root, dir, err := s.outputDir(in.Dir)
 	if err != nil {
 		return nil, savedFileOut{}, s.errorResult(err)
 	}
+	defer func() { _ = root.Close() }() // a directory handle: a close error loses nothing
 	stream, err := s.daemon.Message.GetRaw(ctx, connect.NewRequest(&chainmailv1.GetRawRequest{Ref: in.Ref}))
 	if err != nil {
 		return nil, savedFileOut{}, s.errorResult(err)
 	}
 	defer func() { _ = stream.Close() }() // as in downloadAttachment
-	path, n, err := saveFile(dir, "message.eml", func(w io.Writer) (int64, error) {
+	path, n, err := saveFile(root, dir, "message.eml", func(w io.Writer) (int64, error) {
 		var n int64
 		for stream.Receive() {
 			k, err := w.Write(stream.Msg().GetData())
