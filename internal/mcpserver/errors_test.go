@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -116,7 +118,11 @@ func (b *syncBuffer) String() string {
 func TestErrorTextIsDenyByDefault(t *testing.T) {
 	t.Parallel()
 	errs := map[string]error{
-		"unknown":                         fmt.Errorf("open /tmp/%s.pdf: permission denied", sentinel),
+		"unknown":                         fmt.Errorf("saving %s.pdf: %w", sentinel, &fs.PathError{Op: "open", Path: "/tmp/" + sentinel + ".pdf", Err: syscall.EACCES}),
+		"connect-unavailable":             connect.NewError(connect.CodeUnavailable, errors.New("backend said "+sentinel)),
+		"connect-permission-denied":       connect.NewError(connect.CodePermissionDenied, errors.New("backend said "+sentinel)),
+		"connect-canceled":                connect.NewError(connect.CodeCanceled, errors.New("backend said "+sentinel)),
+		"connect-deadline":                connect.NewError(connect.CodeDeadlineExceeded, errors.New("backend said "+sentinel)),
 		"connect-internal-without-detail": connect.NewError(connect.CodeInternal, errors.New("backend said "+sentinel)),
 		"connect-unknown-without-detail":  connect.NewError(connect.CodeUnknown, errors.New("backend said "+sentinel)),
 		"daemon":                          api.New(connect.CodeNotFound, api.ReasonNotFound, "search again", errors.New("no such message")),
@@ -134,11 +140,19 @@ func TestErrorTextIsDenyByDefault(t *testing.T) {
 		})
 	e := &testEnv{fake: f, srv: s, cs: connectClient(t, s, latest)}
 
-	for _, c := range []string{"unknown", "connect-internal-without-detail", "connect-unknown-without-detail"} {
+	for c, reason := range map[string]string{
+		"unknown":                         api.ReasonInternal,
+		"connect-internal-without-detail": api.ReasonInternal,
+		"connect-unknown-without-detail":  api.ReasonInternal,
+		"connect-unavailable":             api.ReasonDaemonUnreachable,
+		"connect-permission-denied":       api.ReasonForbidden,
+		"connect-canceled":                api.ReasonTimeout,
+		"connect-deadline":                api.ReasonTimeout,
+	} {
 		t.Run(c, func(t *testing.T) {
 			res := e.call(t, "fails", map[string]any{"case": c})
-			body := wantError(t, res, api.ReasonInternal)
-			if body.Message != internalMessage {
+			body := wantError(t, res, reason)
+			if reason == api.ReasonInternal && body.Message != internalMessage {
 				t.Errorf("message = %q, want %q", body.Message, internalMessage)
 			}
 			wire, err := json.Marshal(res.StructuredContent)
@@ -148,8 +162,10 @@ func TestErrorTextIsDenyByDefault(t *testing.T) {
 			if strings.Contains(textOf(res), sentinel) || strings.Contains(string(wire), sentinel) {
 				t.Errorf("the error's text reached the agent: content %q, structured %s", textOf(res), wire)
 			}
-			if !strings.Contains(logs.String(), sentinel) {
-				t.Errorf("the full error is not in the stderr log: %q", logs.String())
+			// The log names what failed but never the error's text, which can
+			// hold a secret, a path or a name taken from mail.
+			if strings.Contains(logs.String(), sentinel) {
+				t.Errorf("the error's text reached the stderr log: %q", logs.String())
 			}
 		})
 	}
@@ -211,5 +227,24 @@ func TestErrorResultsCarryStructuredContent(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestErrorKindNamesTheFailureWithoutItsText pins what the stderr log may
+// say about an error: its Connect code, filesystem operation and errno.
+func TestErrorKindNamesTheFailureWithoutItsText(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("saving %s: %w", sentinel, &fs.PathError{Op: "open", Path: sentinel, Err: syscall.EACCES}), "fs open, errno permission denied"},
+		{connect.NewError(connect.CodeUnavailable, errors.New(sentinel)), "connect unavailable"},
+		{fmt.Errorf("%s: %w", sentinel, context.DeadlineExceeded), "deadline exceeded"},
+		{errors.New(sentinel), "*errors.errorString"},
+	} {
+		if got := errorKind(tt.err); got != tt.want {
+			t.Errorf("errorKind(%v) = %q, want %q", tt.err, got, tt.want)
+		}
 	}
 }

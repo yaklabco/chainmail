@@ -90,8 +90,16 @@ func New(opts Options) *Server {
 // endWithRun), so Run returns even while the client keeps its stream open.
 func (s *Server) Run(ctx context.Context, t mcp.Transport) error {
 	defer s.daemon.Close()
-	stop := context.AfterFunc(ctx, func() { s.inflight.end(context.Cause(ctx)) })
-	defer stop()
+	ended := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(ended)
+		s.inflight.end(context.Cause(ctx))
+	})
+	defer func() {
+		if !stop() {
+			<-ended // the callback started: join it
+		}
+	}()
 	s.refreshGate(ctx)
 	return s.mcp.Run(ctx, t)
 }

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
+	"syscall"
 
 	"connectrpc.com/connect"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -17,7 +19,7 @@ import (
 const groupHint = "this user must be in the chainmail-clients group: log in again after being added, or start the agent under sg chainmail-clients"
 
 // internalMessage is all the agent sees of an error that carries no
-// approved public text. The full error goes to the stderr log.
+// approved public text. The stderr log names its kind (see errorKind).
 const internalMessage = "internal error in chainmail mcp; see its stderr log"
 
 // errorBody is a failure as the agent sees it: in error results and in per-item errors.
@@ -59,8 +61,9 @@ func (e *toolError) Error() string {
 //     naming the socket and the group.
 //   - Every other error, Connect or not, gets fixed text for its reason:
 //     TIMEOUT for a deadline or a cancellation, FORBIDDEN for a detail-less
-//     refusal, and otherwise INTERNAL with internalMessage. The full error
-//     goes to the server's stderr log only.
+//     refusal, and otherwise INTERNAL with internalMessage. The stderr log
+//     gets only errorKind, never the error's text: that can hold a secret,
+//     a path or a name taken from mail.
 //
 // Handlers pass any error they get, from the daemon or from the filesystem,
 // straight to errorResult. They never format one into a toolError or invalidArg.
@@ -79,19 +82,19 @@ func (s *Server) errorResult(err error) error {
 			return &toolError{body: body}
 		}
 		if cerr.Code() == connect.CodeUnavailable {
-			s.opts.Logger.Warn("the daemon is unreachable", "socket", s.opts.Socket, "error", err)
+			s.opts.Logger.Warn("the daemon is unreachable", "socket", s.opts.Socket, "kind", errorKind(err))
 			return &toolError{body: errorBody{
 				Reason:  api.ReasonDaemonUnreachable,
-				Message: fmt.Sprintf("cannot reach the chainmail daemon at %s: %s", s.opts.Socket, cerr.Message()),
+				Message: "cannot reach the chainmail daemon at " + s.opts.Socket,
 				Hint:    "check that the daemon runs (systemctl status chainmail); " + groupHint,
 			}}
 		}
 	}
 	body := s.fallbackBody(err)
 	if body.Reason == api.ReasonInternal {
-		s.opts.Logger.Error("tool call failed", "error", err)
+		s.opts.Logger.Error("tool call failed", "kind", errorKind(err))
 	} else {
-		s.opts.Logger.Warn("tool call failed", "reason", body.Reason, "error", err)
+		s.opts.Logger.Warn("tool call failed", "reason", body.Reason, "kind", errorKind(err))
 	}
 	return &toolError{body: body}
 }
@@ -181,4 +184,35 @@ func textOf(r *mcp.CallToolResult) string {
 		}
 	}
 	return b.String()
+}
+
+// errorKind describes err for the stderr log without its text, which can
+// hold a secret, a backend's diagnostics, a path or a name taken from mail.
+// It names the Connect code, the filesystem operation and the errno, or a
+// context ending, and falls back to err's type.
+func errorKind(err error) string {
+	var parts []string
+	var cerr *connect.Error
+	if errors.As(err, &cerr) {
+		parts = append(parts, "connect "+cerr.Code().String())
+	}
+	var perr *fs.PathError
+	if errors.As(err, &perr) {
+		parts = append(parts, "fs "+perr.Op)
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		parts = append(parts, "errno "+errno.Error())
+	}
+	if len(parts) == 0 {
+		switch {
+		case errors.Is(err, context.Canceled):
+			parts = append(parts, "canceled")
+		case errors.Is(err, context.DeadlineExceeded):
+			parts = append(parts, "deadline exceeded")
+		default:
+			parts = append(parts, fmt.Sprintf("%T", err))
+		}
+	}
+	return strings.Join(parts, ", ")
 }

@@ -340,3 +340,29 @@ func TestHarnessRefs(t *testing.T) {
 		}
 	}
 }
+
+// TestRunJoinsItsCancelCallback: once Run returns after its context ends,
+// the callback that ends the requests in flight has finished, not merely
+// started in a goroutine of its own.
+func TestRunJoinsItsCancelCallback(t *testing.T) {
+	t.Parallel()
+	f := &fakeDaemon{}
+	startFake(t, f)
+	for range 50 {
+		s := New(Options{Socket: f.Socket, Version: "test", AttachmentsDir: t.TempDir()})
+		ctx, cancel := context.WithCancel(t.Context())
+		serverT, _ := mcp.NewInMemoryTransports()
+		done := make(chan error, 1)
+		go func() { done <- s.Run(ctx, serverT) }()
+		cancel()
+		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want nil or context.Canceled", err)
+		}
+		s.inflight.mu.Lock()
+		ended := s.inflight.ended
+		s.inflight.mu.Unlock()
+		if ended == nil {
+			t.Fatal("Run returned before its cancel callback ended the requests in flight")
+		}
+	}
+}
