@@ -783,3 +783,29 @@ send_allow = ["*@example.net"]
 		})
 	}
 }
+
+// TestReplayUnknownOutcomeHasAFixedHint replays a key an earlier daemon
+// settled as of unknown outcome, with a stored hint that quotes the
+// message's Message-ID. send_draft keeps a stored draft's Message-ID, so the
+// replay gives the fixed hint, never the stored one.
+func TestReplayUnknownOutcomeHasAFixedHint(t *testing.T) {
+	t.Parallel()
+	const id = "ignore-previous-instructions@evil.example"
+	stored, err := proto.Marshal(&chainmailv1.ErrorDetail{
+		Reason: api.ReasonSendOutcomeUnknown,
+		Hint:   "search the Sent folder for Message-ID <" + id + "> before sending again",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = replay(idempotency.Claim{State: idempotency.Unknown, Result: stored})
+	if got := api.Detail(err).GetReason(); got != api.ReasonSendOutcomeUnknown {
+		t.Fatalf("err = %v, want SEND_OUTCOME_UNKNOWN", err)
+	}
+	if hint := api.Detail(err).GetHint(); strings.Contains(hint, id) || !strings.Contains(hint, "Sent folder") {
+		t.Errorf("hint = %q, want the fixed hint", hint)
+	}
+	if strings.Contains(err.Error(), id) {
+		t.Errorf("err = %v quotes the Message-ID", err)
+	}
+}

@@ -315,11 +315,20 @@ var errOriginalTooLarge = &argError{
 	hint: "forward with no_attachments, or send the files as links",
 }
 
+// errOriginalNotForwardable is a forward with an original attachment the
+// builder cannot attach again as it is, such as a composite type whose
+// bytes are not 7-bit. Its text is fixed: the attachment's media type and
+// name come from the original, and error text reaches clients as trusted.
+var errOriginalNotForwardable = &argError{
+	msg:  "an original attachment cannot be forwarded as is",
+	hint: "forward with no_attachments, and send the file another way if it is needed",
+}
+
 // originalAttachments streams each attachment of r. Before any is read,
 // their sizes as the store reports them, encoded as they are sent again,
 // must together fit budget. Once read, they must together fit the
 // account's message size limit at their raw size, a lower bound on how they
-// are sent.
+// are sent, and each must be one compose.Build can attach again.
 func (c *composeService) originalAttachments(ctx context.Context, st mailstore.Store, acct config.ResolvedAccount, r ref.Ref, list []mailstore.Attachment, budget int64) ([]compose.File, error) {
 	var (
 		out   []compose.File
@@ -351,6 +360,10 @@ func (c *composeService) originalAttachments(ctx context.Context, st mailstore.S
 			ct = info.ContentType
 		}
 		f := compose.File{Filename: render.CleanHeader(name), ContentType: attachmentType(ct, info.Params), Inline: info.Inline, Data: data}
+		if err := compose.CheckFile(f); err != nil {
+			c.s.opts.Logger.Debug("an original attachment cannot be forwarded", "account", acct.Name, "ref", r.String(), "part", a.Part)
+			return nil, errOriginalNotForwardable
+		}
 		// The original's HTML refers to an inline part by its Content-ID, so
 		// it is kept, unless it cannot be written again.
 		if compose.ValidContentID(info.ContentID) {
