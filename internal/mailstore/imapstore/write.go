@@ -43,7 +43,7 @@ func (s *Store) Append(ctx context.Context, folder string, flags []string, date 
 		sent()
 		data, err := c.append(ctx, folder, fl, date, raw)
 		if err != nil {
-			return s.destError(err, folder)
+			return s.destError(err, folder, "")
 		}
 		if data.UID != 0 && data.UIDValidity != 0 {
 			out = ref.Ref{Account: s.acct.Name, Folder: folder, UIDValidity: data.UIDValidity, UID: uint32(data.UID)}
@@ -102,9 +102,9 @@ func (s *Store) Copy(ctx context.Context, refs []ref.Ref, folder string) []mails
 // refused.
 func (s *Store) transferNamed(ctx context.Context, refs []ref.Ref, name string, keepOriginal bool) []mailstore.RefResult {
 	if name == "" {
-		return s.transfer(ctx, refs, "", keepOriginal)
+		return s.transfer(ctx, refs, "", "", keepOriginal)
 	}
-	return s.transferTo(ctx, refs, keepOriginal, func(ctx context.Context, c *conn) (string, error) {
+	return s.transferTo(ctx, refs, keepOriginal, name, func(ctx context.Context, c *conn) (string, error) {
 		ns, err := s.namespace(ctx, c)
 		if err != nil {
 			return "", err
@@ -126,7 +126,7 @@ func (s *Store) Archive(ctx context.Context, refs []ref.Ref) []mailstore.RefResu
 			return failAll(refs, err)
 		}
 	}
-	return s.transfer(ctx, refs, folder, false)
+	return s.transfer(ctx, refs, folder, "", false)
 }
 
 // Trash implements mailstore.Writer. A ref already in Trash succeeds unchanged.
@@ -138,7 +138,7 @@ func (s *Store) Trash(ctx context.Context, refs []ref.Ref) []mailstore.RefResult
 	if err != nil {
 		return failAll(refs, err)
 	}
-	return s.transfer(ctx, refs, folder, false)
+	return s.transfer(ctx, refs, folder, "", false)
 }
 
 // Expunge implements mailstore.Writer: UID STORE +FLAGS.SILENT (\Deleted)
@@ -269,22 +269,24 @@ func (s *Store) findByID(ctx context.Context, c *conn, folder, id string) ([]ref
 // names it, so the original stays.
 var errCopyUnconfirmed = fmt.Errorf("%w: copied, but the original was kept: the server did not confirm the copy", mailstore.ErrUnavailable)
 
-// transfer moves, or with keepOriginal copies, refs into dest. Refs already
+// transfer moves, or with keepOriginal copies, refs into dest. requested is
+// the folder as the caller named it, or empty when the caller named none
+// (see mailstore.FolderNotFoundError). Refs already
 // in dest are left as they are by a move, if a UID FETCH finds them there,
 // and are otherwise gone. New refs come from COPYUID only.
 // Once the server has acknowledged the MOVE or COPY, every ref in it is a
 // success: with the new ref COPYUID maps it to, or else a zero ref, since
 // its new place is unknown.
-func (s *Store) transfer(ctx context.Context, refs []ref.Ref, dest string, keepOriginal bool) []mailstore.RefResult {
+func (s *Store) transfer(ctx context.Context, refs []ref.Ref, dest, requested string, keepOriginal bool) []mailstore.RefResult {
 	if dest == "" {
 		return failAll(refs, fmt.Errorf("%w: no folder named", mailstore.ErrNotFound))
 	}
-	return s.transferTo(ctx, refs, keepOriginal, func(context.Context, *conn) (string, error) { return dest, nil })
+	return s.transferTo(ctx, refs, keepOriginal, requested, func(context.Context, *conn) (string, error) { return dest, nil })
 }
 
 // transferTo is transfer into the folder destOn gives on each group's
-// connection, before anything changes.
-func (s *Store) transferTo(ctx context.Context, refs []ref.Ref, keepOriginal bool, destOn func(context.Context, *conn) (string, error)) []mailstore.RefResult {
+// connection, before anything changes. requested is as in transfer.
+func (s *Store) transferTo(ctx context.Context, refs []ref.Ref, keepOriginal bool, requested string, destOn func(context.Context, *conn) (string, error)) []mailstore.RefResult {
 	return s.writeBatch(ctx, refs, func(ctx context.Context, c *conn, g *groupWrite, sent func()) error {
 		dest, err := destOn(ctx, c)
 		if err != nil {
@@ -303,7 +305,7 @@ func (s *Store) transferTo(ctx context.Context, refs []ref.Ref, keepOriginal boo
 			g.failAll(fmt.Errorf("%w: the server has neither MOVE nor UID EXPUNGE (UIDPLUS)", mailstore.ErrUnsupported))
 			return nil
 		case !keepOriginal && !move:
-			return s.moveByCopy(ctx, c, g, dest, sent)
+			return s.moveByCopy(ctx, c, g, dest, requested, sent)
 		}
 		set := uidSet(g.uids)
 		var cu copyUID
@@ -314,7 +316,7 @@ func (s *Store) transferTo(ctx context.Context, refs []ref.Ref, keepOriginal boo
 			cu, err = c.uidCopy(ctx, set, dest)
 		}
 		if err != nil {
-			return s.destError(err, dest)
+			return s.destError(err, dest, requested)
 		}
 		g.setAll(mailstore.RefResult{})
 		if pairs, ok := cu.pairs(len(g.uids)); cu.validity != 0 && ok {
@@ -350,11 +352,11 @@ func keepPresent(ctx context.Context, c *conn, g *groupWrite) error {
 // fails, naming the kept original, if the STORE or EXPUNGE does not go
 // through. A ref COPYUID leaves out was not there to copy: a success with
 // no new ref.
-func (s *Store) moveByCopy(ctx context.Context, c *conn, g *groupWrite, dest string, sent func()) error {
+func (s *Store) moveByCopy(ctx context.Context, c *conn, g *groupWrite, dest, requested string, sent func()) error {
 	sent()
 	cu, err := c.uidCopy(ctx, uidSet(g.uids), dest)
 	if err != nil {
-		return s.destError(err, dest)
+		return s.destError(err, dest, requested)
 	}
 	pairs, ok := cu.pairs(len(g.uids))
 	if cu.validity == 0 || !ok {
@@ -401,11 +403,12 @@ func (s *Store) setPlaced(g *groupWrite, dest string, validity uint32, pairs map
 }
 
 // destError reports a write the server refused because dest is missing as
-// ErrNotFound, and drops the cached folder list.
-func (s *Store) destError(err error, dest string) error {
+// a FolderNotFoundError for requested, the caller's name for dest or
+// empty, and drops the cached folder list.
+func (s *Store) destError(err error, dest, requested string) error {
 	if missingFolder(err) {
 		s.forgetFolders()
-		return &mailstore.FolderNotFoundError{Name: dest}
+		return &mailstore.FolderNotFoundError{Name: dest, Requested: requested}
 	}
 	return err
 }

@@ -203,7 +203,7 @@ func (s *Store) folderLocked(name string) (mailstore.Folder, error) {
 func (s *Store) destLocked(name string) (mailstore.Folder, error) {
 	f, err := s.folderLocked(name)
 	if err != nil {
-		return mailstore.Folder{}, &mailstore.FolderNotFoundError{Name: name}
+		return mailstore.Folder{}, &mailstore.FolderNotFoundError{Name: name, Requested: name}
 	}
 	return f, nil
 }
@@ -731,7 +731,7 @@ func (s *Store) namedLocked(name string) (mailstore.Folder, error) {
 	if i := slices.IndexFunc(s.folders, func(f mailstore.Folder) bool { return s.sameName(f.Name, name) }); i >= 0 {
 		return s.folders[i], nil
 	}
-	return mailstore.Folder{}, &mailstore.FolderNotFoundError{Name: name}
+	return mailstore.Folder{}, &mailstore.FolderNotFoundError{Name: name, Requested: name}
 }
 
 // checkMutableLocked refuses changes to INBOX, role folders and, on Gmail,
