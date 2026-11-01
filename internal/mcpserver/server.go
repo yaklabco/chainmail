@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -50,6 +51,14 @@ type Server struct {
 	opts   Options
 	mcp    *mcp.Server
 	daemon *client.Client
+	gate   gateState
+}
+
+// gateState records which policy-gated tools are listed. refreshGate is its only writer.
+type gateState struct {
+	mu      sync.Mutex
+	listed  map[string]bool
+	checked time.Time // when refreshGate last ran; zero means never
 }
 
 // New builds a Server with every tool registered. It does not dial the
@@ -58,7 +67,7 @@ func New(opts Options) *Server {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
-	s := &Server{opts: opts, daemon: client.New(opts.Socket, clientKind)}
+	s := &Server{opts: opts, daemon: client.New(opts.Socket, clientKind), gate: gateState{listed: map[string]bool{}}}
 	s.mcp = mcp.NewServer(&mcp.Implementation{Name: "chainmail", Title: "chainmail", Version: opts.Version}, &mcp.ServerOptions{
 		Instructions: instructions,
 		Logger:       opts.Logger,
@@ -116,4 +125,19 @@ func DefaultAttachmentsDir(getenv func(string) string) (string, error) {
 		base = filepath.Join(home, ".cache")
 	}
 	return filepath.Join(base, "chainmail", "attachments"), nil
+}
+
+// gateStale reports whether the last check is older than gateInterval.
+func (s *Server) gateStale() bool {
+	s.gate.mu.Lock()
+	defer s.gate.mu.Unlock()
+	return s.now().Sub(s.gate.checked) >= gateInterval
+}
+
+// now is opts.Now, or time.Now when it is nil.
+func (s *Server) now() time.Time {
+	if s.opts.Now != nil {
+		return s.opts.Now()
+	}
+	return time.Now()
 }
