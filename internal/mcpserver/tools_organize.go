@@ -98,7 +98,11 @@ type outcomesOut struct {
 }
 
 // outcomes summarizes a batch. A batch where every ref failed is an error
-// result with the first failure's reason.
+// result with the first failure's reason. The text is plain: refs are the
+// agent's own or the daemon's, and each per-ref reason, message and hint
+// is the daemon's client text (messageErr in internal/daemon), which never
+// carries a store's or server's words: a missing folder is named only as
+// the agent gave it.
 func (s *Server) outcomes(verb string, outs []*chainmailv1.RefOutcome) (*mcp.CallToolResult, outcomesOut, error) {
 	out := outcomesOut{Outcomes: make([]outcomeOut, 0, len(outs))}
 	var first *errorBody

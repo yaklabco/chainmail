@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -50,6 +51,29 @@ func (s prefixedStore) CreateFolder(_ context.Context, name string) (string, err
 
 func (s prefixedStore) RenameFolder(_ context.Context, from, _ string) (string, error) {
 	return "", prefixMissing(from)
+}
+
+// archiveFailures are store errors whose text carries the server's words,
+// as an IMAP store's can, one per ref of an archive.
+var archiveFailures = []error{
+	fmt.Errorf("%w: NO %s", mailstore.ErrRefused, prefixHostile),
+	fmt.Errorf("%w: BYE %s", mailstore.ErrUnavailable, prefixHostile),
+	fmt.Errorf("%w: %s", mailstore.ErrUnsupported, prefixHostile),
+	fmt.Errorf("%w: %s", mailstore.ErrStaleRef, prefixHostile),
+	fmt.Errorf("the server said %q", prefixHostile),
+	&mailstore.FolderNotFoundError{Name: prefixHostile + "Archive"}, // a role folder no caller named
+}
+
+// Archive fails each ref with the archiveFailures error at its position,
+// and lets any later ref succeed.
+func (s prefixedStore) Archive(_ context.Context, refs []ref.Ref) []mailstore.RefResult {
+	out := make([]mailstore.RefResult, len(refs))
+	for i := range out {
+		if i < len(archiveFailures) {
+			out[i].Err = archiveFailures[i]
+		}
+	}
+	return out
 }
 
 // TestMissingFolderKeepsTheServersPrefixOut runs the organize tools against
@@ -111,6 +135,52 @@ func TestMissingFolderKeepsTheServersPrefixOut(t *testing.T) {
 				t.Errorf("outcome error = %+v", out.Outcomes[0].Error)
 			}
 			noPrefix(t, res.StructuredContent, textOf(res))
+		})
+	}
+}
+
+// TestBatchOutcomesCarryOnlyDaemonText: a batch's per-ref messages reach the
+// agent outside the untrusted markers, and an all-failed batch promotes the
+// first into a trusted error. Each store error here carries the server's
+// words, and the daemon replaces every one with its own text.
+func TestBatchOutcomesCarryOnlyDaemonText(t *testing.T) {
+	t.Parallel()
+	store := prefixedStore{fake.New("host", false)}
+	var refs []string
+	for range len(archiveFailures) + 1 {
+		refs = append(refs, store.Add(fake.Message{Folder: "INBOX"}).String())
+	}
+	h := daemontest.Start(t, prefixConfig, daemontest.Options{
+		NewStore: func(config.ResolvedAccount) mailstore.Store { return store },
+	})
+	s := New(Options{Socket: h.Socket, Version: "test", AttachmentsDir: t.TempDir()})
+	e := &testEnv{srv: s, cs: connectClient(t, s, latest)}
+	for _, tt := range []struct {
+		name string
+		refs []string
+	}{
+		{"partly failed", refs},
+		{"all failed", refs[:len(archiveFailures)]},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			res := e.call(t, "archive", map[string]any{"refs": tt.refs})
+			if tt.name == "all failed" {
+				wantError(t, res, api.ReasonInvalidArgument) // ErrRefused, the first failure
+			} else {
+				wantOK(t, res)
+				var out outcomesOut
+				decode(t, res, &out)
+				if out.Succeeded != 1 || out.Failed != len(archiveFailures) {
+					t.Fatalf("out = %+v", out)
+				}
+			}
+			wire, err := json.Marshal(res.StructuredContent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if text := textOf(res); strings.Contains(text, "Ignore previous") || strings.Contains(string(wire), "Ignore previous") {
+				t.Errorf("the server's words reached the agent: text %q, structured %s", text, wire)
+			}
 		})
 	}
 }
