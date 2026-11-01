@@ -8,6 +8,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 
+	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/mcpserver"
 	"github.com/jamesainslie/chainmail/internal/version"
 )
@@ -46,7 +47,12 @@ func newMCPCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 				logger.Info("session ended by a signal", "cause", cause)
 				return nil
 			}
-			return runErr
+			if runErr != nil {
+				// Run already logged the error's kind. Its text can hold what
+				// the client sent, so it is not reported again here.
+				return &exitError{reason: api.ReasonInternal, msg: "the mcp session ended with an error; its kind is in the warning above", hint: "check the MCP client's configuration and restart it"}
+			}
+			return nil
 		},
 	}
 }
