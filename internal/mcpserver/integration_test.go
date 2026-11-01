@@ -184,9 +184,11 @@ func TestMCPAgainstDovecot(t *testing.T) {
 
 	// 3. a draft, then a send off the allowlist comes back held and lands in Drafts.
 	var draft, held struct {
-		Status   string   `json:"status"`
-		DraftRef string   `json:"draft_ref"`
-		Blocked  []string `json:"blocked"`
+		Status   string `json:"status"`
+		DraftRef string `json:"draft_ref"`
+		Blocked  []struct {
+			Untrusted string `json:"untrusted"`
+		} `json:"blocked"`
 	}
 	s.call("create_draft", map[string]any{
 		"account": "dove", "to": []string{"a@allowed.test"}, "subject": "Notes", "body": "wip",
@@ -197,7 +199,7 @@ func TestMCPAgainstDovecot(t *testing.T) {
 	s.call("send_email", map[string]any{
 		"account": "dove", "to": []string{"b@blocked.test"}, "subject": "Held for James", "body": "Please review.",
 	}, &held)
-	if held.Status != "held" || held.DraftRef == "" || len(held.Blocked) != 1 || held.Blocked[0] != "b@blocked.test" {
+	if held.Status != "held" || held.DraftRef == "" || len(held.Blocked) != 1 || held.Blocked[0].Untrusted != "b@blocked.test" {
 		t.Fatalf("send_email = %+v, want held", held)
 	}
 	if n := len(sink.Messages()); n != 0 {
