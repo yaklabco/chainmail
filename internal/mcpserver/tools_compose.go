@@ -33,14 +33,15 @@ const (
 var (
 	composeHints = hints{openWorld: true}
 	heldNote     = "Policy may hold a send: then status is held, the message was NOT sent, it was saved to the account's Drafts for James, and it must not be retried."
-	keyNote      = "Repeating the same input within 7 days replays the first result instead of sending twice."
+	keyNote      = "Repeating the same send within 7 days replays the first result instead of sending twice."
+	draftNote    = "With draft, nothing is sent and each call saves a new draft."
 )
 
 // registerComposeTools adds send_email, reply, forward and the draft tools.
 func (s *Server) registerComposeTools() {
 	addTool(s, "send_email", "Send an email", "Send a new message from an account. "+heldNote+" "+keyNote, composeHints, s.sendEmail)
-	addTool(s, "reply", "Reply to a message", "Reply to a message, quoting it under the new text. all replies to everyone. draft saves the reply to Drafts instead. "+heldNote+" "+keyNote, composeHints, s.reply)
-	addTool(s, "forward", "Forward a message", "Forward a message with its attachments unless no_attachments. draft saves it to Drafts instead. "+heldNote+" "+keyNote, composeHints, s.forward)
+	addTool(s, "reply", "Reply to a message", "Reply to a message, quoting it under the new text. With all, it replies to everyone. "+draftNote+" "+heldNote+" "+keyNote, composeHints, s.reply)
+	addTool(s, "forward", "Forward a message", "Forward a message with its attachments unless no_attachments. "+draftNote+" "+heldNote+" "+keyNote, composeHints, s.forward)
 	addTool(s, "create_draft", "Create a draft", "Save a new message to the account's Drafts folder without sending it.", composeHints, s.createDraft)
 	addTool(s, "update_draft", "Update a draft", "Replace a draft with a new version. The result's draft_ref is the new ref; the old ref is gone.", composeHints, s.updateDraft)
 	addTool(s, "send_draft", "Send a draft", "Send a draft and remove it from Drafts. "+heldNote+" "+keyNote, composeHints, s.sendDraft)
