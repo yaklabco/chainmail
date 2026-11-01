@@ -362,7 +362,7 @@ func TestTestAccountReportsChecks(t *testing.T) {
 		t.Errorf("account = %q", out.Account)
 	case !imap.OK || imap.Reason != "" || len(imap.Capabilities) != 2 || imap.Capabilities[1] != "IDLE" || imap.LatencyMS != 42:
 		t.Errorf("imap = %+v", imap)
-	case smtp.OK || smtp.Reason != api.ReasonAuthRejected || smtp.Error != "535 bad credentials" || smtp.LatencyMS != 7:
+	case smtp.OK || smtp.Reason != api.ReasonAuthRejected || smtp.Error == nil || smtp.Error.Untrusted != "535 bad credentials" || smtp.LatencyMS != 7:
 		t.Errorf("smtp = %+v", smtp)
 	}
 	if text := textOf(res); !strings.HasPrefix(text, "work: imap ok=true, smtp ok=false") || !strings.Contains(text, api.ReasonAuthRejected) {
@@ -520,4 +520,25 @@ func TestMessageLabelsAndTypesAreEnveloped(t *testing.T) {
 	case len(m.Attachments) != 1 || m.Attachments[0].ContentType.Untrusted != "application/pdf":
 		t.Errorf("attachments = %+v", m.Attachments)
 	}
+}
+
+// TestTestAccountWrapsServerErrors: a check's error text is the IMAP or SMTP
+// server's own reply, so a server can phrase it as an instruction. It must
+// reach the client only as untrusted data, in both representations.
+func TestTestAccountWrapsServerErrors(t *testing.T) {
+	t.Parallel()
+	f := &fakeDaemon{TestAccount: func(context.Context, *chainmailv1.TestAccountRequest) (*chainmailv1.TestAccountResponse, error) {
+		return &chainmailv1.TestAccountResponse{
+			Account: "work",
+			Imap:    &chainmailv1.Check{Reason: api.ReasonAuthRejected, Error: "NO " + readHostile},
+			Smtp:    &chainmailv1.Check{Reason: api.ReasonAuthRejected, Error: "535 " + readHostile},
+		}, nil
+	}}
+	e := newTestEnv(t, f, latest)
+	res := e.call(t, "test_account", map[string]any{"account": "work"})
+	wantOK(t, res)
+	if n := readWrappedOnly(t, res.StructuredContent, readHostile); n != 2 {
+		t.Errorf("%d enveloped hostile errors, want 2", n)
+	}
+	readInsideMarkers(t, textOf(res), readHostile)
 }
