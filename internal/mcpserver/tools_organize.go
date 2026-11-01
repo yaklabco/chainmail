@@ -228,9 +228,50 @@ func (s *Server) addGated(name string) {
 
 // refreshGate lists expunge and delete_folder when policy allows them on at
 // least one account, and removes them otherwise or when the daemon cannot
-// be asked. Run calls it before serving, and gateOnList calls it before a
-// tools/list once the last check is older than gateInterval.
+// be asked. It always asks the daemon, waiting for any refresh in flight
+// first. Run calls it before serving.
 func (s *Server) refreshGate(ctx context.Context) {
+	s.gate.refresh <- struct{}{}
+	defer func() { <-s.gate.refresh }()
+	s.checkGate(ctx)
+}
+
+// refreshStaleGate runs a refresh before a tools/list once the last check is
+// older than gateInterval. Lists that find the check stale together share
+// one daemon call: each waits for the refresh in flight and then looks
+// again, so only the first asks. A list whose ctx ends while it waits skips
+// the refresh and is served from the current state.
+func (s *Server) refreshStaleGate(ctx context.Context) {
+	if !s.gateStale() {
+		return
+	}
+	select {
+	case s.gate.refresh <- struct{}{}:
+	default:
+		if s.gate.contended != nil {
+			s.gate.contended()
+		}
+		select {
+		case s.gate.refresh <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+	}
+	defer func() { <-s.gate.refresh }()
+	// Stale is false now when a refresh finished while this one waited.
+	if ctx.Err() == nil && s.gateStale() {
+		s.checkGate(ctx)
+	}
+}
+
+// checkGate asks the daemon which gated tools policy allows and applies the
+// answer. The caller holds s.gate.refresh, so answers apply in the order
+// they were asked for. The daemon call runs without s.gate.mu, and the tool
+// changes and the check time are applied together under it. AddTool and
+// RemoveTools only update the SDK registry here: the SDK sends
+// notifications/tools/list_changed later, from a timer, without its lock or
+// s.gate.mu held.
+func (s *Server) checkGate(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, gateTimeout)
 	defer cancel()
 	want := map[string]bool{}

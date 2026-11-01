@@ -5,10 +5,12 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/protobuf/proto"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
@@ -245,5 +247,152 @@ func TestOrganizeAnnotations(t *testing.T) {
 	}
 	if seen != len(want) {
 		t.Errorf("listed %d of the %d organize tools", seen, len(want))
+	}
+}
+
+// heldGate is a fake ListAccounts that answers in call order. The start-up
+// check allows nothing. The second check allows expunge, but the daemon holds
+// it until unblock. Every later check fails, as if the daemon were restarting.
+type heldGate struct {
+	calls     atomic.Int32
+	held      chan struct{} // closed when the second check reaches the daemon
+	release   chan struct{} // closed by unblock to answer the second check
+	contended chan struct{} // closed when a tools/list refresh waits for another
+	unblockMu sync.Once
+	waitMu    sync.Once
+}
+
+func (h *heldGate) listAccounts(ctx context.Context, _ *chainmailv1.ListAccountsRequest) (*chainmailv1.ListAccountsResponse, error) {
+	switch h.calls.Add(1) {
+	case 1:
+		return &chainmailv1.ListAccountsResponse{}, nil
+	case 2:
+		close(h.held)
+		select {
+		case <-h.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return &chainmailv1.ListAccountsResponse{Accounts: []*chainmailv1.Account{
+			{Name: "a", Capabilities: &chainmailv1.AccountCapabilities{AllowExpunge: true}},
+		}}, nil
+	default:
+		return nil, connect.NewError(connect.CodeUnavailable, errors.New("daemon restarting"))
+	}
+}
+
+func (h *heldGate) unblock() { h.unblockMu.Do(func() { close(h.release) }) }
+
+// newHeldGateEnv starts a Server on a heldGate whose start-up check is
+// already 60 seconds old, so the next tools/list asks the daemon again.
+func newHeldGateEnv(t *testing.T) (*testEnv, *heldGate) {
+	t.Helper()
+	h := &heldGate{held: make(chan struct{}), release: make(chan struct{}), contended: make(chan struct{})}
+	t.Cleanup(h.unblock)
+	f := &fakeDaemon{ListAccounts: h.listAccounts}
+	startFake(t, f)
+	var mu sync.Mutex
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	s := New(Options{Socket: f.Socket, Version: "test", AttachmentsDir: dir, Now: func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}})
+	s.gate.contended = func() { h.waitMu.Do(func() { close(h.contended) }) }
+	cs := connectClient(t, s, latest) // Run's start-up check is done once the client is connected
+	mu.Lock()
+	now = now.Add(gateInterval)
+	mu.Unlock()
+	return &testEnv{fake: f, srv: s, cs: cs, dir: dir}, h
+}
+
+// listAsync sends a tools/list and reports its error when it returns.
+func listAsync(t *testing.T, e *testEnv) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.cs.ListTools(t.Context(), nil)
+		done <- err
+	}()
+	return done
+}
+
+// TestGateAppliesOverlappingChecksInOrder overlaps two stale tools/list
+// calls. The first one's check allows expunge and is held at the daemon. A
+// second check, if one is made, fails at once. An older answer must never
+// replace a newer one, so either the second list waits and reuses the first
+// check, or the later failure decides and expunge ends hidden.
+func TestGateAppliesOverlappingChecksInOrder(t *testing.T) {
+	t.Parallel()
+	e, h := newHeldGateEnv(t)
+	first := listAsync(t, e)
+	<-h.held
+	second := listAsync(t, e)
+	select {
+	case err := <-second: // it did not wait, so its own check has been applied
+		if err != nil {
+			t.Fatalf("second tools/list: %v", err)
+		}
+		second = nil
+	case <-h.contended: // it is waiting for the held check
+	}
+	h.unblock()
+	if err := <-first; err != nil {
+		t.Fatalf("first tools/list: %v", err)
+	}
+	if second != nil {
+		if err := <-second; err != nil {
+			t.Fatalf("second tools/list: %v", err)
+		}
+	}
+	asked := h.calls.Load() - 1 // checks made by the two overlapping lists
+	listed := slices.Contains(listToolNames(t, e.cs), "expunge")
+	switch {
+	case asked == 1 && !listed:
+		t.Error("the one overlapping check allowed expunge, but it is not listed")
+	case asked == 2 && listed:
+		t.Error("expunge listed after the newer check failed: the older allowed answer was applied last")
+	case asked != 1 && asked != 2:
+		t.Errorf("the overlapping lists asked the daemon %d times, want 1 or 2", asked)
+	}
+}
+
+// TestGateListStopsWaitingWhenItsContextEnds pins that a stale tools/list
+// waiting for a held check gives up when its context ends: it skips the
+// check, asks the daemon nothing, and the list goes on.
+func TestGateListStopsWaitingWhenItsContextEnds(t *testing.T) {
+	t.Parallel()
+	e, h := newHeldGateEnv(t)
+	first := listAsync(t, e)
+	<-h.held
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	nextRan := make(chan struct{})
+	next := func(context.Context, string, mcp.Request) (mcp.Result, error) {
+		close(nextRan)
+		return nil, nil
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = e.srv.gateOnList(next)(ctx, "tools/list", nil)
+	}()
+	select {
+	case <-h.contended:
+		cancel()
+	case <-done:
+	}
+	<-done
+	select {
+	case <-nextRan:
+	default:
+		t.Error("tools/list did not go on after its context ended")
+	}
+	if got := h.calls.Load(); got != 2 {
+		t.Errorf("daemon asked %d times, want 2 (the start-up check and the held one)", got)
+	}
+	h.unblock()
+	if err := <-first; err != nil {
+		t.Fatalf("first tools/list: %v", err)
 	}
 }

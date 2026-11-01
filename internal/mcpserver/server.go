@@ -54,11 +54,21 @@ type Server struct {
 	gate   gateState
 }
 
-// gateState records which policy-gated tools are listed. refreshGate is its only writer.
+// gateState records which policy-gated tools are listed. checkGate is its
+// only writer.
 type gateState struct {
 	mu      sync.Mutex
 	listed  map[string]bool
-	checked time.Time // when refreshGate last ran; zero means never
+	checked time.Time // when checkGate last ran; zero means never
+	// refresh is a one-slot lock that serializes refreshes. A refresh holds it
+	// from before it asks the daemon until it has applied the answer, so
+	// answers apply in the order they were asked for and an older answer
+	// never replaces a newer one. It is separate from mu so the daemon call
+	// runs without mu held.
+	refresh chan struct{}
+	// contended, when set, is called as a tools/list refresh starts waiting
+	// for one already in flight. Tests set it before Run to order calls.
+	contended func()
 }
 
 // New builds a Server with every tool registered. It does not dial the
@@ -67,7 +77,7 @@ func New(opts Options) *Server {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
-	s := &Server{opts: opts, daemon: client.New(opts.Socket, clientKind), gate: gateState{listed: map[string]bool{}}}
+	s := &Server{opts: opts, daemon: client.New(opts.Socket, clientKind), gate: gateState{listed: map[string]bool{}, refresh: make(chan struct{}, 1)}}
 	s.mcp = mcp.NewServer(&mcp.Implementation{Name: "chainmail", Title: "chainmail", Version: opts.Version}, &mcp.ServerOptions{
 		Instructions: instructions,
 		Logger:       opts.Logger,
@@ -99,14 +109,13 @@ func (s *Server) Run(ctx context.Context, t mcp.Transport) error {
 }
 
 // gateOnList is receiving middleware: before a tools/list it calls
-// refreshGate when the last check is older than gateInterval (60s). It
-// records the check time under s.gate.mu (field checked time.Time, set by
-// refreshGate) and uses s.opts.Now (default time.Now) so tests are
-// deterministic.
+// refreshStaleGate, which checks the gated tools again once the last check
+// is older than gateInterval (60s). The clock is s.opts.Now (default
+// time.Now), so tests are deterministic.
 func (s *Server) gateOnList(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-		if method == "tools/list" && s.gateStale() {
-			s.refreshGate(ctx)
+		if method == "tools/list" {
+			s.refreshStaleGate(ctx)
 		}
 		return next(ctx, method, req)
 	}
