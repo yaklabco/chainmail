@@ -52,6 +52,11 @@ type composeService struct {
 	// of its messages. Tests shorten them.
 	uploadTimeout time.Duration
 	uploadIdle    time.Duration
+	// uploadTimer starts the wait for one upload message, returning its
+	// channel and stop. uploadDeadline bounds a whole upload. Tests replace
+	// both to end an upload at a moment they pick.
+	uploadTimer    func(time.Duration) (<-chan time.Time, func() bool)
+	uploadDeadline func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 
 	// mu guards owners, the account of each live upload.
 	mu     sync.Mutex
@@ -70,8 +75,16 @@ func newComposeService(s *Server) *composeService {
 		outcomeInterval: interval,
 		uploadTimeout:   streamTimeout,
 		uploadIdle:      uploadIdleTimeout,
+		uploadTimer:     realTimer,
+		uploadDeadline:  context.WithTimeout,
 		owners:          map[string]uploadOwner{},
 	}
+}
+
+// realTimer is the upload wait outside tests: a time.Timer and its Stop.
+func realTimer(d time.Duration) (<-chan time.Time, func() bool) {
+	t := time.NewTimer(d)
+	return t.C, t.Stop
 }
 
 // Send implements chainmailv1connect.ComposeServiceHandler.
@@ -347,10 +360,10 @@ func (c *composeService) UploadAttachment(ctx context.Context, stream *connect.C
 		return nil, err
 	}
 	// The whole upload has uploadTimeout, whatever deadline the client set.
-	ctx, cancel := context.WithTimeout(ctx, c.uploadTimeout)
+	ctx, cancel := c.uploadDeadline(ctx, c.uploadTimeout)
 	defer cancel()
 	entry := audit.Entry{Action: "upload"}
-	in := &uploadStream{stream: stream, ctx: ctx, idle: c.uploadIdle, abort: readAborter(ctx)}
+	in := &uploadStream{stream: stream, ctx: ctx, idle: c.uploadIdle, timer: c.uploadTimer, abort: readAborter(ctx)}
 	info, upErr := c.upload(ctx, in, &entry)
 	if err := c.record(ctx, cl, entry, upErr); err != nil {
 		return nil, err
@@ -423,6 +436,8 @@ type uploadStream struct {
 	stream *connect.ClientStream[chainmailv1.UploadAttachmentRequest]
 	ctx    context.Context
 	idle   time.Duration
+	// timer starts the wait for one message, returning its channel and stop.
+	timer func(time.Duration) (<-chan time.Time, func() bool)
 	// abort ends a read of the request body in progress, or reports that it
 	// cannot.
 	abort func() bool
@@ -446,13 +461,13 @@ func (u *uploadStream) receive() (*chainmailv1.UploadAttachmentRequest, error) {
 		}
 		done <- received{err: u.stream.Err()}
 	}()
-	idle := time.NewTimer(u.idle)
-	defer idle.Stop()
+	idle, stop := u.timer(u.idle)
+	defer stop()
 	var cause error
 	select {
 	case r := <-done:
 		return r.msg, r.err
-	case <-idle.C:
+	case <-idle:
 		cause = fmt.Errorf("the upload sent nothing for %v: %w", u.idle, context.DeadlineExceeded)
 	case <-u.ctx.Done():
 		cause = u.ctx.Err()
