@@ -109,6 +109,10 @@ type Conn struct {
 	addr    string
 	timeout time.Duration
 	done    bool // Send ran or Close was called
+
+	// withTimeout bounds a Send by timeout. Nil means context.WithTimeout;
+	// a test sets it to pick the moment the bound passes.
+	withTimeout func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 }
 
 // Dial connects, negotiates TLS and authenticates, within opts.Timeout.
@@ -172,7 +176,11 @@ func (c *Conn) Send(ctx context.Context, from string, to []string, raw []byte) e
 	if len(to) == 0 {
 		return &SendError{Outcome: NotSentPermanent, Err: errNoRecipients}
 	}
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	bound := c.withTimeout
+	if bound == nil {
+		bound = context.WithTimeout
+	}
+	ctx, cancel := bound(ctx, c.timeout)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return &SendError{Outcome: NotSentTemporary, Err: fmt.Errorf("before MAIL FROM: %w", err)}
