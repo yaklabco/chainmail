@@ -448,3 +448,42 @@ func TestGateLogsOnlyTheErrorKind(t *testing.T) {
 		})
 	}
 }
+
+// TestFolderResultsWrapTheServersName: create_folder and rename_folder
+// return the name the server uses, which a NAMESPACE prefix the server
+// chose can extend. It reaches the agent only as untrusted data, and the
+// summaries are fixed text.
+func TestFolderResultsWrapTheServersName(t *testing.T) {
+	t.Parallel()
+	serverSide := "INBOX." + readHostile + ".Projects"
+	f := &fakeDaemon{
+		CreateFolder: func(context.Context, *chainmailv1.CreateFolderRequest) (*chainmailv1.CreateFolderResponse, error) {
+			return &chainmailv1.CreateFolderResponse{Name: serverSide}, nil
+		},
+		RenameFolder: func(context.Context, *chainmailv1.RenameFolderRequest) (*chainmailv1.RenameFolderResponse, error) {
+			return &chainmailv1.RenameFolderResponse{Name: serverSide}, nil
+		},
+	}
+	e := newTestEnv(t, f, latest)
+	for tool, args := range map[string]map[string]any{
+		"create_folder": {"account": "work", "name": "Projects"},
+		"rename_folder": {"account": "work", "from": "Old", "to": "Projects"},
+	} {
+		t.Run(tool, func(t *testing.T) {
+			res := e.call(t, tool, args)
+			wantOK(t, res)
+			var out struct {
+				Account string    `json:"account"`
+				Name    untrusted `json:"name"`
+			}
+			decode(t, res, &out)
+			if out.Account != "work" || out.Name.Untrusted != serverSide {
+				t.Errorf("out = %+v", out)
+			}
+			if n := readWrappedOnly(t, res.StructuredContent, readHostile); n != 1 {
+				t.Errorf("%d enveloped hostile names, want 1", n)
+			}
+			readInsideMarkers(t, textOf(res), readHostile)
+		})
+	}
+}
