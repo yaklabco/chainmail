@@ -7,6 +7,7 @@ package mailstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -33,6 +34,21 @@ var (
 	// ErrExists means a folder with that name already exists.
 	ErrExists = errors.New("already exists")
 )
+
+// FolderNotFoundError is ErrNotFound for a folder a caller named that the
+// account does not have, such as the destination of a move. Name is the
+// folder as the store looked for it: on a server with a personal namespace
+// prefix, the prefixed name.
+type FolderNotFoundError struct {
+	Name string
+}
+
+func (e *FolderNotFoundError) Error() string {
+	return fmt.Sprintf("%v: no folder %q", ErrNotFound, e.Name)
+}
+
+// Is makes a FolderNotFoundError match ErrNotFound.
+func (e *FolderNotFoundError) Is(target error) bool { return target == ErrNotFound }
 
 const (
 	// SampleBytes is how much of a text part a store reads to build a

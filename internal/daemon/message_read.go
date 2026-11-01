@@ -101,6 +101,9 @@ func messageErr(err error) error {
 	if err == nil {
 		return nil
 	}
+	if nf, ok := errors.AsType[*mailstore.FolderNotFoundError](err); ok {
+		return &fixedTextError{msg: folderMissingText(nf.Name), err: err}
+	}
 	reason := apiReason(err)
 	if reason == api.ReasonInvalidArgument {
 		return err

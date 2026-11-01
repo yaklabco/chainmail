@@ -229,3 +229,14 @@ func TestRunMainSignalAfterRun(t *testing.T) {
 		t.Errorf("code %d, %d stops; an interrupted run must not exit 0", code, p.stops.Load())
 	}
 }
+
+func TestPrefixedConfig(t *testing.T) {
+	t.Parallel()
+	got := string(prefixedConfig)
+	if !strings.Contains(got, "namespace inbox {\n  inbox = yes\n  prefix = INBOX.\n  separator = .\n") || strings.Contains(got, "separator = /") {
+		t.Errorf("prefixed config has the wrong namespace:\n%s", got)
+	}
+	if strings.Contains(string(config), "prefix = INBOX.") {
+		t.Error("the shared config gained the prefix")
+	}
+}

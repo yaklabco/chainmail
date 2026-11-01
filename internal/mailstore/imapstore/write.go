@@ -76,20 +76,41 @@ func (s *Store) appendedMsgID(ctx context.Context, c *conn, r ref.Ref) uint64 {
 	return ids[r.UID]
 }
 
-// Move implements mailstore.Writer.
+// Move implements mailstore.Writer. folder is written as the server has it
+// (serverName), as CreateFolder writes a new folder's name.
 func (s *Store) Move(ctx context.Context, refs []ref.Ref, folder string) []mailstore.RefResult {
 	if s.gmail() {
 		return s.gmailMove(ctx, refs, folder)
 	}
-	return s.transfer(ctx, refs, folder, false)
+	return s.transferNamed(ctx, refs, folder, false)
 }
 
-// Copy implements mailstore.Writer.
+// Copy implements mailstore.Writer. folder is written as the server has it
+// (serverName), as CreateFolder writes a new folder's name.
 func (s *Store) Copy(ctx context.Context, refs []ref.Ref, folder string) []mailstore.RefResult {
 	if s.gmail() {
 		return s.gmailCopy(ctx, refs, folder)
 	}
-	return s.transfer(ctx, refs, folder, true)
+	return s.transferNamed(ctx, refs, folder, true)
+}
+
+// transferNamed is transfer into the folder a caller names, written as the
+// server has it: the rule CreateFolder follows (serverName). Each folder
+// group gets the namespace on its own connection once that has dialed, so
+// a first move still fans out. Only one of a first write's groups asks the
+// server, and the others wait for its answer (namespace). An empty name is
+// refused.
+func (s *Store) transferNamed(ctx context.Context, refs []ref.Ref, name string, keepOriginal bool) []mailstore.RefResult {
+	if name == "" {
+		return s.transfer(ctx, refs, "", keepOriginal)
+	}
+	return s.transferTo(ctx, refs, keepOriginal, func(ctx context.Context, c *conn) (string, error) {
+		ns, err := s.namespace(ctx, c)
+		if err != nil {
+			return "", err
+		}
+		return folderTree{prefix: ns.prefix, delim: ns.delim}.serverName(name), nil
+	})
 }
 
 // Archive implements mailstore.Writer. The folder is Options.ArchiveFolder,
@@ -258,7 +279,17 @@ func (s *Store) transfer(ctx context.Context, refs []ref.Ref, dest string, keepO
 	if dest == "" {
 		return failAll(refs, fmt.Errorf("%w: no folder named", mailstore.ErrNotFound))
 	}
+	return s.transferTo(ctx, refs, keepOriginal, func(context.Context, *conn) (string, error) { return dest, nil })
+}
+
+// transferTo is transfer into the folder destOn gives on each group's
+// connection, before anything changes.
+func (s *Store) transferTo(ctx context.Context, refs []ref.Ref, keepOriginal bool, destOn func(context.Context, *conn) (string, error)) []mailstore.RefResult {
 	return s.writeBatch(ctx, refs, func(ctx context.Context, c *conn, g *groupWrite, sent func()) error {
+		dest, err := destOn(ctx, c)
+		if err != nil {
+			return err
+		}
 		if !keepOriginal && c.Selected() == dest {
 			return keepPresent(ctx, c, g)
 		}
@@ -276,7 +307,6 @@ func (s *Store) transfer(ctx context.Context, refs []ref.Ref, dest string, keepO
 		}
 		set := uidSet(g.uids)
 		var cu copyUID
-		var err error
 		sent()
 		if move {
 			cu, err = c.uidMove(ctx, set, dest)
@@ -375,7 +405,7 @@ func (s *Store) setPlaced(g *groupWrite, dest string, validity uint32, pairs map
 func (s *Store) destError(err error, dest string) error {
 	if missingFolder(err) {
 		s.forgetFolders()
-		return fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, dest)
+		return &mailstore.FolderNotFoundError{Name: dest}
 	}
 	return err
 }

@@ -198,6 +198,16 @@ func (s *Store) folderLocked(name string) (mailstore.Folder, error) {
 	return mailstore.Folder{}, fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, name)
 }
 
+// destLocked returns the folder a move or copy names. A missing one is a
+// mailstore.FolderNotFoundError, as the IMAP store reports it.
+func (s *Store) destLocked(name string) (mailstore.Folder, error) {
+	f, err := s.folderLocked(name)
+	if err != nil {
+		return mailstore.Folder{}, &mailstore.FolderNotFoundError{Name: name}
+	}
+	return f, nil
+}
+
 // existsLocked reports whether a folder is called name. INBOX matches in
 // any case, as IMAP has it, and on Gmail every name does.
 func (s *Store) existsLocked(name string) bool {
@@ -334,7 +344,7 @@ func parseRaw(raw []byte) Message {
 func (s *Store) Move(ctx context.Context, refs []ref.Ref, folder string) []mailstore.RefResult {
 	var dest mailstore.Folder
 	return s.batch(ctx, opMove, refs, func() (err error) {
-		dest, err = s.folderLocked(folder)
+		dest, err = s.destLocked(folder)
 		return err
 	}, func(m *Message, r ref.Ref) (ref.Ref, error) {
 		return s.moveLocked(m, r, dest)
@@ -411,7 +421,7 @@ func (s *Store) srcLocked(r ref.Ref) mailstore.Folder {
 func (s *Store) Copy(ctx context.Context, refs []ref.Ref, folder string) []mailstore.RefResult {
 	var dest mailstore.Folder
 	return s.batch(ctx, opCopy, refs, func() (err error) {
-		dest, err = s.folderLocked(folder)
+		dest, err = s.destLocked(folder)
 		return err
 	}, func(m *Message, r ref.Ref) (ref.Ref, error) {
 		if !s.gmail {
@@ -721,7 +731,7 @@ func (s *Store) namedLocked(name string) (mailstore.Folder, error) {
 	if i := slices.IndexFunc(s.folders, func(f mailstore.Folder) bool { return s.sameName(f.Name, name) }); i >= 0 {
 		return s.folders[i], nil
 	}
-	return mailstore.Folder{}, fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, name)
+	return mailstore.Folder{}, &mailstore.FolderNotFoundError{Name: name}
 }
 
 // checkMutableLocked refuses changes to INBOX, role folders and, on Gmail,

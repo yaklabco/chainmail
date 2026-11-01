@@ -1,12 +1,16 @@
 package imapstore
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/ref"
 	"github.com/jamesainslie/chainmail/internal/testutil/imaptest"
 )
 
@@ -332,5 +336,130 @@ func TestFolderNamesWithoutANamespacePrefix(t *testing.T) {
 				t.Errorf("commands = %q, want %s", srv.received(), tc.want)
 			}
 		})
+	}
+}
+
+// On a server that keeps every folder under "INBOX.", a move, copy, rename
+// or delete names a folder the way CreateFolder does: without the prefix,
+// with "/" between levels, or as the server has it.
+func TestFolderWritesFollowThePersonalNamespace(t *testing.T) {
+	t.Parallel()
+	srv := startWriteServer(t, &writeServer{caps: "NAMESPACE MOVE UIDPLUS", delim: ".", namespace: "INBOX.", folders: []*wsFolder{
+		wsMailbox("INBOX", "", 7, 1, 2), wsMailbox("INBOX.Projects.2026", "", 20),
+		wsMailbox("INBOX.Old", "", 21), wsMailbox("INBOX.Empty", "", 22),
+	}})
+	s := writeStore(t, srv, Options{})
+	ctx := t.Context()
+
+	if res := s.Move(ctx, []ref.Ref{hostRef("INBOX", 7, 1)}, "Projects/2026"); res[0].Err != nil || res[0].Ref.Folder != "INBOX.Projects.2026" {
+		t.Errorf("Move = %+v, want a ref in INBOX.Projects.2026", res[0])
+	}
+	if srv.sent(`UID MOVE 1 "INBOX.Projects.2026"`) != 1 {
+		t.Errorf("commands = %q, want UID MOVE into INBOX.Projects.2026", srv.received())
+	}
+	for _, name := range []string{"Old", "INBOX.Old"} {
+		if res := s.Copy(ctx, []ref.Ref{hostRef("INBOX", 7, 2)}, name); res[0].Err != nil || res[0].Ref.Folder != "INBOX.Old" {
+			t.Errorf("Copy to %q = %+v, want a ref in INBOX.Old", name, res[0])
+		}
+	}
+	if n := srv.sent(`UID COPY 2 "INBOX.Old"`); n != 2 {
+		t.Errorf("UID COPY into INBOX.Old sent %d times, want 2: commands %q", n, srv.received())
+	}
+	if got, err := s.RenameFolder(ctx, "Old", "New"); err != nil || got != "INBOX.New" {
+		t.Errorf("RenameFolder(Old, New) = %q, %v, want INBOX.New", got, err)
+	}
+	if srv.sent(`RENAME "INBOX.Old" "INBOX.New"`) != 1 {
+		t.Errorf("commands = %q, want INBOX.Old renamed", srv.received())
+	}
+	if err := s.DeleteFolder(ctx, "Empty", false); err != nil {
+		t.Errorf("DeleteFolder(Empty): %v", err)
+	}
+	if srv.sent(`DELETE "INBOX.Empty"`) != 1 {
+		t.Errorf("commands = %q, want INBOX.Empty deleted", srv.received())
+	}
+	var nf *mailstore.FolderNotFoundError
+	if res := s.Move(ctx, []ref.Ref{hostRef("INBOX", 7, 2)}, "Nope"); !errors.As(res[0].Err, &nf) || nf.Name != "INBOX.Nope" {
+		t.Errorf("Move to Nope = %+v, want FolderNotFoundError for INBOX.Nope", res[0])
+	}
+	if _, err := s.RenameFolder(ctx, "Nope", "X"); !errors.As(err, &nf) || nf.Name != "INBOX.Nope" {
+		t.Errorf("RenameFolder(Nope) = %v", err)
+	}
+	if err := s.DeleteFolder(ctx, "Nope", false); !errors.As(err, &nf) || nf.Name != "INBOX.Nope" {
+		t.Errorf("DeleteFolder(Nope) = %v", err)
+	}
+	if n := srv.sent("NAMESPACE"); n != 1 {
+		t.Errorf("NAMESPACE sent %d times, want once", n)
+	}
+}
+
+// TestAFirstMoveDiscoversTheNamespaceOnce: the folder groups of a cold
+// store's first move all wait for one namespace discovery and use its
+// answer, so they name the same destination. The server refuses the first
+// NAMESPACE and would answer a second with the "INBOX." prefix; the
+// refusal falls back to LIST "" "" and is the store's answer. The refused
+// NAMESPACE is held until the other group either sends a NAMESPACE of its
+// own or starts waiting for this discovery, so the probes overlap.
+func TestAFirstMoveDiscoversTheNamespaceOnce(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	open := func() { releaseOnce.Do(func() { close(release) }) }
+	var namespaces atomic.Int32
+	srv := startWriteServer(t, &writeServer{
+		caps: "NAMESPACE MOVE UIDPLUS", delim: ".", namespace: "INBOX.",
+		folders: []*wsFolder{
+			wsMailbox("INBOX", "", 7, 1), wsMailbox("A", "", 8, 1),
+			wsMailbox("Keep", "", 30), wsMailbox("INBOX.Keep", "", 31),
+		},
+		intercept: func(c wsCmd) (string, bool) {
+			if c.kind != "NAMESPACE" {
+				return "", false
+			}
+			if namespaces.Add(1) > 1 {
+				open()
+				return "", false
+			}
+			select {
+			case <-release:
+			case <-t.Context().Done():
+			}
+			return c.tag + " NO namespace refused\r\n", true
+		},
+	})
+	s := writeStore(t, srv, Options{PoolSize: 2})
+	s.nsWait = open
+	res := s.Move(t.Context(), []ref.Ref{hostRef("INBOX", 7, 1), hostRef("A", 8, 1)}, "Keep")
+	for i, r := range res {
+		if r.Err != nil {
+			t.Errorf("ref %d: %+v", i, r)
+		}
+	}
+	if res[0].Ref.Folder != res[1].Ref.Folder {
+		t.Errorf("the groups moved into %q and %q, want one destination: commands %q", res[0].Ref.Folder, res[1].Ref.Folder, srv.received())
+	}
+	if n := srv.sent("NAMESPACE"); n != 1 {
+		t.Errorf("NAMESPACE sent %d times, want once per store", n)
+	}
+	if n := srv.sent(`UID MOVE 1 "Keep"`); n != 2 {
+		t.Errorf("%d UID MOVE into Keep, the refusal's answer, want 2: commands %q", n, srv.received())
+	}
+}
+
+// TestNamespaceWaitGivesUpOnCancel: a call waiting for another's namespace
+// discovery returns when its context ends.
+func TestNamespaceWaitGivesUpOnCancel(t *testing.T) {
+	t.Parallel()
+	srv := startWriteServer(t, &writeServer{caps: "NAMESPACE", folders: []*wsFolder{wsMailbox("INBOX", "", 7)}})
+	s := writeStore(t, srv, Options{})
+	s.nsGate <- struct{}{} // another discovery is in progress
+	t.Cleanup(func() { <-s.nsGate })
+	ctx, cancel := context.WithCancel(t.Context())
+	s.nsWait = cancel
+	_, err := s.namespace(ctx, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("namespace behind a discovery in progress = %v, want context.Canceled", err)
+	}
+	if n := srv.sent("NAMESPACE"); n != 0 {
+		t.Errorf("NAMESPACE sent %d times, want none", n)
 	}
 }

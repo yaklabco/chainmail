@@ -924,3 +924,38 @@ func TestOrganizeDestructivePolicySettings(t *testing.T) {
 		checkPolicyDenied(t, err, expungeDenied, expungeHint)
 	})
 }
+
+// A missing named folder is NOT_FOUND with its name and a hint to list the
+// account's folders, as a per-ref outcome of move and copy and as the error
+// of rename and delete.
+func TestOrganizeMissingFolderNamesIt(t *testing.T) {
+	t.Parallel()
+	const hint = "list the account's folders: chainmail folders (MCP: list_folders)"
+	m := startFakeMailConfig(t, destructiveConfig)
+	refs := strs(m.host.Add(fake.Message{Folder: "INBOX", Subject: "a"}))
+	resp, err := m.Client.Organize.Move(t.Context(), connect.NewRequest(&chainmailv1.MoveRequest{Refs: refs, Folder: "Nope"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := resp.Msg.GetOutcomes()[0].GetError()
+	if e.GetReason() != api.ReasonNotFound || e.GetMessage() != `no folder "Nope"` || e.GetHint() != hint {
+		t.Errorf("move outcome error = %+v", e)
+	}
+	org := m.Client.Organize
+	for name, call := range map[string]func() error{
+		"rename": func() error {
+			_, err := org.RenameFolder(t.Context(), connect.NewRequest(&chainmailv1.RenameFolderRequest{Account: "host", From: "Nope", To: "Other"}))
+			return err
+		},
+		"delete": func() error {
+			_, err := org.DeleteFolder(t.Context(), connect.NewRequest(&chainmailv1.DeleteFolderRequest{Account: "host", Name: "Nope"}))
+			return err
+		},
+	} {
+		err := call()
+		var cerr *connect.Error
+		if !errors.As(err, &cerr) || reasonOf(err) != api.ReasonNotFound || cerr.Message() != `no folder "Nope"` || api.Detail(err).GetHint() != hint {
+			t.Errorf("%s: err = %v, hint %q", name, err, api.Detail(err).GetHint())
+		}
+	}
+}
