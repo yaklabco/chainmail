@@ -94,7 +94,11 @@ func (a *accountService) TestAccount(ctx context.Context, req *connect.Request[c
 			}
 		}
 	}
-	if err := a.s.record(ctx, c, entry, testErr); err != nil {
+	// A failure before the checks, such as a token refresh, can carry the
+	// token server's own text, so it gets fixed text like any MessageService
+	// failure. The checks' own diagnostics stay in resp, which agents read
+	// as untrusted.
+	if err := a.s.record(ctx, c, entry, messageErr(testErr)); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(resp), nil
