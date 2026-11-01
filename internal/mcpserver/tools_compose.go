@@ -133,7 +133,7 @@ type deleteDraftOut struct {
 type composeOut struct {
 	Status            string      `json:"status" jsonschema:"sent, draft, held or duplicate"`
 	OriginalStatus    string      `json:"original_status,omitempty" jsonschema:"with duplicate: what the first call with this key did"`
-	MessageID         string      `json:"message_id,omitempty" jsonschema:"the Message-ID, without angle brackets"`
+	MessageID         *untrusted  `json:"message_id,omitempty" jsonschema:"the Message-ID, without angle brackets; untrusted, since send_draft keeps the stored draft's own"`
 	SentRef           string      `json:"sent_ref,omitempty" jsonschema:"the ref of the copy in Sent"`
 	SentCopyError     string      `json:"sent_copy_error,omitempty" jsonschema:"why the Sent copy could not be stored; the message itself was sent"`
 	DraftRef          string      `json:"draft_ref,omitempty" jsonschema:"the ref of the saved draft; with held always present, empty when the server did not report it"`
@@ -147,7 +147,7 @@ type composeOut struct {
 // too_many_recipients and hint are present even when empty or false.
 type heldOut struct {
 	Status            string      `json:"status"`
-	MessageID         string      `json:"message_id,omitempty"`
+	MessageID         *untrusted  `json:"message_id,omitempty"`
 	DraftRef          string      `json:"draft_ref"`
 	Blocked           []untrusted `json:"blocked"`
 	TooManyRecipients bool        `json:"too_many_recipients"`
@@ -293,7 +293,7 @@ func composeFrom(res *chainmailv1.ComposeResult, key string) (composeOut, string
 			hint = h.GetDraft().GetHint()
 		}
 		out := composeOut{
-			Status: statusHeld, DraftRef: h.GetDraft().GetRef(), MessageID: h.GetDraft().GetMessageId(),
+			Status: statusHeld, DraftRef: h.GetDraft().GetRef(), MessageID: serverNamePtr(h.GetDraft().GetMessageId()),
 			TooManyRecipients: h.GetTooManyRecipients(), Hint: hint, IdempotencyKey: key,
 		}
 		for _, a := range h.GetBlocked() {
@@ -302,16 +302,16 @@ func composeFrom(res *chainmailv1.ComposeResult, key string) (composeOut, string
 		return out, heldSummary(out), nil
 	case res.GetSent() != nil:
 		sent := res.GetSent()
-		out := composeOut{Status: statusSent, MessageID: sent.GetMessageId(), SentRef: sent.GetSentRef(), SentCopyError: sent.GetSentCopyError(), IdempotencyKey: key}
-		summary := "Sent " + out.MessageID + "."
+		out := composeOut{Status: statusSent, MessageID: serverNamePtr(sent.GetMessageId()), SentRef: sent.GetSentRef(), SentCopyError: sent.GetSentCopyError(), IdempotencyKey: key}
+		summary := "Sent."
 		if sent.GetDuplicate() {
 			out.Status, out.OriginalStatus = statusDuplicate, statusSent
-			summary = "Duplicate: this key was already used and nothing was sent again. The first send went out as " + out.MessageID + "."
+			summary = "Duplicate: this key was already used and nothing was sent again. The first send went out."
 		}
 		return out, summary, nil
 	case res.GetDraft() != nil:
 		d := res.GetDraft()
-		out := composeOut{Status: statusDraft, DraftRef: d.GetRef(), MessageID: d.GetMessageId(), Hint: d.GetHint()}
+		out := composeOut{Status: statusDraft, DraftRef: d.GetRef(), MessageID: serverNamePtr(d.GetMessageId()), Hint: d.GetHint()}
 		return out, "Saved to Drafts, not sent.", nil
 	default:
 		return composeOut{}, "", errors.New("the daemon returned no result")
@@ -323,10 +323,11 @@ func (s *Server) composeResult(res *chainmailv1.ComposeResult, key string) (*mcp
 	if err != nil {
 		return nil, composeOut{}, s.errorResult(err)
 	}
-	if out.Status != statusHeld {
+	if out.Status != statusHeld && out.MessageID == nil {
 		return &mcp.CallToolResult{Content: plainText(summary, out)}, out, nil
 	}
-	// Blocked addresses may be message-derived, so a held result is untrusted text.
+	// Blocked addresses and a Message-ID may be message-derived, so such a
+	// result is untrusted text. The summaries never quote them.
 	text, err := untrustedText(summary, out)
 	if err != nil {
 		return nil, composeOut{}, s.errorResult(err)

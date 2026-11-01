@@ -62,19 +62,20 @@ func TestDownloadAttachment(t *testing.T) {
 					continue
 				}
 				wantOK(t, res)
-				var out savedFileOut
+				var out attachmentFileOut
 				decode(t, res, &out)
-				b, err := os.ReadFile(out.Path)
+				path := out.Path.Untrusted
+				b, err := os.ReadFile(path)
 				if err != nil || string(b) != strings.Join(tt.chunks, "") || out.Size != int64(len(b)) {
-					t.Errorf("file %s = %q, %v (size %d)", out.Path, b, err, out.Size)
+					t.Errorf("file %s = %q, %v (size %d)", path, b, err, out.Size)
 				}
-				if filepath.Dir(out.Path) != e.dir || out.ContentType != "application/pdf" || out.Filename == nil || out.Filename.Untrusted != tt.filename {
+				if filepath.Dir(path) != e.dir || out.ContentType.Untrusted != "application/pdf" || out.Filename == nil || out.Filename.Untrusted != tt.filename {
 					t.Errorf("out = %+v", out)
 				}
 				if !strings.Contains(textOf(res), untrustedPreamble) {
 					t.Error("the text does not wrap the message-derived name")
 				}
-				got = append(got, filepath.Base(out.Path))
+				got = append(got, filepath.Base(path))
 			}
 			if strings.Join(got, "|") != strings.Join(tt.wantNames, "|") {
 				t.Errorf("names = %v, want %v", got, tt.wantNames)
@@ -97,10 +98,10 @@ func TestDownloadAttachmentDirRules(t *testing.T) {
 	other := t.TempDir()
 	res := e.call(t, "download_attachment", map[string]any{"ref": testRef, "part": "2", "dir": other})
 	wantOK(t, res)
-	var out savedFileOut
+	var out attachmentFileOut
 	decode(t, res, &out)
-	if filepath.Dir(out.Path) != other {
-		t.Errorf("saved to %s, want %s", out.Path, other)
+	if filepath.Dir(out.Path.Untrusted) != other {
+		t.Errorf("saved to %s, want %s", out.Path.Untrusted, other)
 	}
 }
 
@@ -152,4 +153,26 @@ func TestFileToolAnnotations(t *testing.T) {
 	if seen != len(titles) {
 		t.Errorf("listed %d of the %d file tools", seen, len(titles))
 	}
+}
+
+// TestDownloadAttachmentWrapsMessageStrings: the content type and the file
+// name come from the message, and the saved path holds the sanitized name,
+// which can still read as an instruction. All three reach the agent only as
+// untrusted data, and the summary is fixed text.
+func TestDownloadAttachmentWrapsMessageStrings(t *testing.T) {
+	t.Parallel()
+	f := &fakeDaemon{DownloadAttachment: func(_ context.Context, _ *chainmailv1.DownloadAttachmentRequest, st *connect.ServerStream[chainmailv1.DownloadAttachmentResponse]) error {
+		hdr := &chainmailv1.AttachmentHeader{Filename: readU(readHostile + ".pdf"), ContentType: "application/pdf; x=" + readHostile, Size: 1}
+		if err := st.Send(&chainmailv1.DownloadAttachmentResponse{Chunk: &chainmailv1.DownloadAttachmentResponse_Header{Header: hdr}}); err != nil {
+			return err
+		}
+		return st.Send(&chainmailv1.DownloadAttachmentResponse{Chunk: &chainmailv1.DownloadAttachmentResponse_Data{Data: []byte("x")}})
+	}}
+	e := newTestEnv(t, f, latest)
+	res := e.call(t, "download_attachment", map[string]any{"ref": testRef, "part": "2"})
+	wantOK(t, res)
+	if n := readWrappedOnly(t, res.StructuredContent, readHostile); n != 3 {
+		t.Errorf("%d enveloped hostile strings, want 3 (path, content_type, filename)", n)
+	}
+	readInsideMarkers(t, textOf(res), readHostile)
 }
