@@ -84,11 +84,11 @@ func TestAuditFlagsPassThrough(t *testing.T) {
 	t.Parallel()
 	f := &fakeAdmin{}
 	socket := startFakeAdmin(t, f)
+	at := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	env := Env{Now: func() time.Time { return at }}
 
-	before := time.Now()
-	got := runCLI(t, Env{}, "--socket", socket, "audit",
+	got := runCLI(t, env, "--socket", socket, "audit",
 		"--since", "2h", "--account", "host", "--action", "send", "--limit", "7", "--before-id", "42")
-	after := time.Now()
 	if got.code != 0 {
 		t.Fatalf("audit: %+v", got)
 	}
@@ -96,23 +96,19 @@ func TestAuditFlagsPassThrough(t *testing.T) {
 	if req.GetAccount() != "host" || req.GetAction() != "send" || req.GetLimit() != 7 || req.GetBeforeId() != 42 {
 		t.Errorf("request = %v", req)
 	}
-	since := req.GetSince().AsTime()
-	if since.Before(before.Add(-2*time.Hour)) || since.After(after.Add(-2*time.Hour)) {
-		t.Errorf("since = %v, want 2h before a time in [%v, %v]", since, before, after)
+	if since, want := req.GetSince().AsTime(), at.Add(-2*time.Hour); !since.Equal(want) {
+		t.Errorf("since = %v, want %v", since, want)
 	}
 
-	before = time.Now()
-	if got := runCLI(t, Env{}, "--socket", socket, "audit"); got.code != 0 {
+	if got := runCLI(t, env, "--socket", socket, "audit"); got.code != 0 {
 		t.Fatalf("audit: %+v", got)
 	}
-	after = time.Now()
 	req = f.last(t)
 	if req.GetAccount() != "" || req.GetAction() != "" || req.GetLimit() != 0 || req.GetBeforeId() != 0 {
 		t.Errorf("default request = %v, want the daemon to choose", req)
 	}
-	since = req.GetSince().AsTime()
-	if since.Before(before.Add(-24*time.Hour)) || since.After(after.Add(-24*time.Hour)) {
-		t.Errorf("default since = %v, want 24h before a time in [%v, %v]", since, before, after)
+	if since, want := req.GetSince().AsTime(), at.Add(-24*time.Hour); !since.Equal(want) {
+		t.Errorf("default since = %v, want %v", since, want)
 	}
 }
 

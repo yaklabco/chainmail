@@ -35,7 +35,7 @@ func newAuditCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 				return usageError{err: errors.New("--since must not be negative"), hint: helpHint(cmd)}
 			}
 			req := &chainmailv1.ReadAuditRequest{
-				Since:    timestamppb.New(time.Now().Add(-since)),
+				Since:    timestamppb.New(env.now().Add(-since)),
 				Account:  account,
 				Action:   action,
 				Limit:    limit,
