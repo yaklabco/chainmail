@@ -378,17 +378,58 @@ func TestComposeHeldWireShape(t *testing.T) {
 }
 
 // TestComposeSentOmitsHeldFields keeps sent and draft results free of the
-// held-only properties.
+// held-only properties. A draft keeps its own draft_ref.
 func TestComposeSentOmitsHeldFields(t *testing.T) {
 	t.Parallel()
-	e := newTestEnv(t, &fakeDaemon{Send: sentResult(&chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Sent{Sent: &chainmailv1.Sent{MessageId: "m1@x"}}})}, latest)
-	res := e.call(t, "send_email", map[string]any{"account": "work", "to": []string{"a@x.test"}, "subject": "Q3", "body": "hi"})
-	wantOK(t, res)
-	sc, _ := res.StructuredContent.(map[string]any)
-	for _, k := range []string{"draft_ref", "blocked", "too_many_recipients"} {
-		if v, ok := sc[k]; ok {
-			t.Errorf("a sent result has %s = %v", k, v)
-		}
+	tests := []struct {
+		name      string
+		fake      *fakeDaemon
+		tool      string
+		args      map[string]any
+		wantDraft string // empty: no draft_ref property
+	}{
+		{
+			name: "sent",
+			fake: &fakeDaemon{Send: sentResult(&chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Sent{Sent: &chainmailv1.Sent{MessageId: "m1@x"}}})},
+			tool: "send_email",
+			args: map[string]any{"account": "work", "to": []string{"a@x.test"}, "subject": "Q3", "body": "hi"},
+		},
+		{
+			name: "draft",
+			fake: &fakeDaemon{CreateDraft: func(context.Context, *chainmailv1.CreateDraftRequest) (*chainmailv1.CreateDraftResponse, error) {
+				return &chainmailv1.CreateDraftResponse{Draft: &chainmailv1.Draft{Ref: testRef2, MessageId: "d1@x"}}, nil
+			}},
+			tool:      "create_draft",
+			args:      map[string]any{"account": "work", "to": []string{"a@x.test"}, "subject": "Q3", "body": "hi"},
+			wantDraft: testRef2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnv(t, tt.fake, latest)
+			res := e.call(t, tt.tool, tt.args)
+			wantOK(t, res)
+			sc, ok := res.StructuredContent.(map[string]any)
+			if !ok {
+				t.Fatalf("structured content is %T, want an object", res.StructuredContent)
+			}
+			if sc["status"] != tt.name {
+				t.Errorf("status = %v, want %s", sc["status"], tt.name)
+			}
+			d, has := sc["draft_ref"]
+			switch {
+			case tt.wantDraft == "" && has:
+				t.Errorf("a %s result has draft_ref = %v", tt.name, d)
+			case tt.wantDraft != "" && d != tt.wantDraft:
+				t.Errorf("draft_ref = %v (present %t), want %q", d, has, tt.wantDraft)
+			}
+			for _, k := range []string{"blocked", "too_many_recipients"} {
+				if v, ok := sc[k]; ok {
+					t.Errorf("a %s result has %s = %v", tt.name, k, v)
+				}
+			}
+		})
 	}
 }
 
