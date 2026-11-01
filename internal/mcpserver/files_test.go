@@ -551,7 +551,7 @@ func TestFilesNoHardLinks(t *testing.T) {
 		if cerr := root.Close(); cerr != nil {
 			t.Fatal(cerr)
 		}
-		if got := (&Server{}).errorResult(err); err == nil || fakeReason(got) != tt.wantReason {
+		if got := New(Options{}).errorResult(err); err == nil || fakeReason(got) != tt.wantReason {
 			t.Errorf("%v: err = %v, want %s", tt.errno, err, tt.wantReason)
 		}
 		var te *toolError
