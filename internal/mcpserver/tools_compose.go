@@ -127,18 +127,48 @@ type deleteDraftOut struct {
 	Deleted bool   `json:"deleted"`
 }
 
-// composeOut is what a send, reply, forward or draft call did.
+// composeOut is what a send, reply, forward or draft call did. A held
+// result marshals through heldOut, so its held properties are always present.
 type composeOut struct {
-	Status            string   `json:"status" jsonschema:"sent, draft, held or duplicate"`
-	OriginalStatus    string   `json:"original_status,omitempty" jsonschema:"with duplicate: what the first call with this key did"`
-	MessageID         string   `json:"message_id,omitempty" jsonschema:"the Message-ID, without angle brackets"`
-	SentRef           string   `json:"sent_ref,omitempty" jsonschema:"the ref of the copy in Sent"`
-	SentCopyError     string   `json:"sent_copy_error,omitempty" jsonschema:"why the Sent copy could not be stored; the message itself was sent"`
-	DraftRef          string   `json:"draft_ref,omitempty" jsonschema:"the ref of the saved draft"`
-	Blocked           []string `json:"blocked,omitempty" jsonschema:"with held: recipients not on the allowlist"`
-	TooManyRecipients *bool    `json:"too_many_recipients,omitempty" jsonschema:"with held: more recipients than policy allows"`
-	Hint              string   `json:"hint,omitempty" jsonschema:"what to tell James, or how to find the draft"`
-	IdempotencyKey    string   `json:"idempotency_key,omitempty" jsonschema:"the key this call used"`
+	Status            string      `json:"status" jsonschema:"sent, draft, held or duplicate"`
+	OriginalStatus    string      `json:"original_status,omitempty" jsonschema:"with duplicate: what the first call with this key did"`
+	MessageID         string      `json:"message_id,omitempty" jsonschema:"the Message-ID, without angle brackets"`
+	SentRef           string      `json:"sent_ref,omitempty" jsonschema:"the ref of the copy in Sent"`
+	SentCopyError     string      `json:"sent_copy_error,omitempty" jsonschema:"why the Sent copy could not be stored; the message itself was sent"`
+	DraftRef          string      `json:"draft_ref,omitempty" jsonschema:"the ref of the saved draft; with held always present, empty when the server did not report it"`
+	Blocked           []untrusted `json:"blocked,omitempty" jsonschema:"with held, always present: recipients not on the allowlist, possibly taken from the original message"`
+	TooManyRecipients bool        `json:"too_many_recipients,omitempty" jsonschema:"with held, always present: more recipients than policy allows"`
+	Hint              string      `json:"hint,omitempty" jsonschema:"what to tell James, or how to find the draft"`
+	IdempotencyKey    string      `json:"idempotency_key,omitempty" jsonschema:"the key this call used"`
+}
+
+// heldOut is the wire form of a held composeOut: draft_ref, blocked,
+// too_many_recipients and hint are present even when empty or false.
+type heldOut struct {
+	Status            string      `json:"status"`
+	MessageID         string      `json:"message_id,omitempty"`
+	DraftRef          string      `json:"draft_ref"`
+	Blocked           []untrusted `json:"blocked"`
+	TooManyRecipients bool        `json:"too_many_recipients"`
+	Hint              string      `json:"hint"`
+	IdempotencyKey    string      `json:"idempotency_key,omitempty"`
+}
+
+// MarshalJSON keeps the held properties on a held result and leaves them
+// out of sent, duplicate and draft results.
+func (o composeOut) MarshalJSON() ([]byte, error) {
+	if o.Status != statusHeld {
+		type plain composeOut // no methods, so no recursion
+		return json.Marshal(plain(o))
+	}
+	blocked := o.Blocked
+	if blocked == nil {
+		blocked = []untrusted{}
+	}
+	return json.Marshal(heldOut{
+		Status: o.Status, MessageID: o.MessageID, DraftRef: o.DraftRef, Blocked: blocked,
+		TooManyRecipients: o.TooManyRecipients, Hint: o.Hint, IdempotencyKey: o.IdempotencyKey,
+	})
 }
 
 // deriveKey returns "mcp-" and the lowercase unpadded base32 SHA-256 of the
@@ -230,6 +260,9 @@ func refAccount(s string) (string, error) {
 	return r.Account, nil
 }
 
+// heldSummary is the trusted text of a held result. Blocked addresses can come
+// from the original message, so it gives only their number; the addresses
+// themselves appear only inside the untrusted block.
 func heldSummary(o composeOut) string {
 	var b strings.Builder
 	b.WriteString("HELD BY POLICY: the message was NOT sent. It was saved to the account's Drafts folder for James to send, edit or delete")
@@ -237,10 +270,13 @@ func heldSummary(o composeOut) string {
 		b.WriteString(" (draft " + o.DraftRef + ")")
 	}
 	b.WriteString(". Do not retry this send and do not look for another way to send it; tell James it is waiting in Drafts.")
-	if len(o.Blocked) > 0 {
-		b.WriteString("\nNot on the allowlist: " + strings.Join(o.Blocked, ", ") + ".")
+	switch n := len(o.Blocked); {
+	case n == 1:
+		b.WriteString("\n1 recipient is not on the allowlist; it is listed in blocked below.")
+	case n > 1:
+		fmt.Fprintf(&b, "\n%d recipients are not on the allowlist; they are listed in blocked below.", n)
 	}
-	if o.TooManyRecipients != nil && *o.TooManyRecipients {
+	if o.TooManyRecipients {
 		b.WriteString("\nMore recipients than policy allows.")
 	}
 	return b.String()
@@ -257,7 +293,10 @@ func composeFrom(res *chainmailv1.ComposeResult, key string) (composeOut, string
 		}
 		out := composeOut{
 			Status: statusHeld, DraftRef: h.GetDraft().GetRef(), MessageID: h.GetDraft().GetMessageId(),
-			Blocked: h.GetBlocked(), TooManyRecipients: boolPtr(h.GetTooManyRecipients()), Hint: hint, IdempotencyKey: key,
+			TooManyRecipients: h.GetTooManyRecipients(), Hint: hint, IdempotencyKey: key,
+		}
+		for _, a := range h.GetBlocked() {
+			out.Blocked = append(out.Blocked, untrusted{Untrusted: a})
 		}
 		return out, heldSummary(out), nil
 	case res.GetSent() != nil:
@@ -283,7 +322,15 @@ func (s *Server) composeResult(res *chainmailv1.ComposeResult, key string) (*mcp
 	if err != nil {
 		return nil, composeOut{}, s.errorResult(err)
 	}
-	return &mcp.CallToolResult{Content: plainText(summary, out)}, out, nil
+	if out.Status != statusHeld {
+		return &mcp.CallToolResult{Content: plainText(summary, out)}, out, nil
+	}
+	// Blocked addresses may be message-derived, so a held result is untrusted text.
+	text, err := untrustedText(summary, out)
+	if err != nil {
+		return nil, composeOut{}, s.errorResult(err)
+	}
+	return &mcp.CallToolResult{Content: text}, out, nil
 }
 
 func (s *Server) sendEmail(ctx context.Context, _ *mcp.CallToolRequest, in sendEmailIn) (*mcp.CallToolResult, composeOut, error) {
