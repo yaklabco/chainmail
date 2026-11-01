@@ -446,6 +446,57 @@ const allowConfig = passwordConfig + `
 send_allow = ["*@example.net"]
 `
 
+// TestPrepareReturnsAHoldAsAResult pins prepare's shape: a held build comes
+// back as its decision with the built message, no connection and no error,
+// even when the dial failed. An allowed build gets the dial's error.
+func TestPrepareReturnsAHoldAsAResult(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		to          []string
+		wantBlocked []string // nil means not held
+	}{
+		{name: "held", to: []string{"you@blocked.invalid", "ok@example.net"}, wantBlocked: []string{"you@blocked.invalid"}},
+		{name: "allowed", to: []string{"ok@example.net"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s, _ := newTestServerConfig(t, allowConfig)
+			ctx := peerContext(t.Context())
+			if err := setSecretDirect(ctx, s, auth.PasswordSecret("host"), []byte("pw")); err != nil {
+				t.Fatal(err)
+			}
+			acct, err := s.opts.Config.Account("host")
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := newComposeService(s)
+			c.dial = func(context.Context, provider.Endpoint, auth.Credentials, sender.DialOptions) (*sender.Conn, error) {
+				return nil, errors.New("the mail server is down")
+			}
+			built := compose.Message{Raw: []byte("From: me@example.com\r\nSubject: hi\r\n\r\nhi\r\n"), MessageID: "p@example.com", EnvelopeFrom: acct.Address, EnvelopeTo: tt.to}
+			job := sendJob{acct: acct, build: func(context.Context) (compose.Message, error) { return built, nil }}
+			msg, held, conn, err := c.prepare(ctx, job)
+			if conn != nil {
+				t.Errorf("prepare returned a connection: %v", conn)
+			}
+			if tt.wantBlocked == nil {
+				if held != nil || api.Detail(err).GetReason() != api.ReasonServerUnavailable {
+					t.Fatalf("prepare = held %+v, err %v, want the dial's SERVER_UNAVAILABLE", held, err)
+				}
+				return
+			}
+			if err != nil || held == nil || held.Allowed || !slices.Equal(held.Blocked, tt.wantBlocked) {
+				t.Fatalf("prepare = held %+v, err %v, want held with %v blocked and no error", held, err, tt.wantBlocked)
+			}
+			if msg.MessageID != built.MessageID {
+				t.Errorf("held message %q, want the built %q", msg.MessageID, built.MessageID)
+			}
+		})
+	}
+}
+
 // TestHeldBuildCancelsTheDial holds a send while its dial still runs. The
 // hold cancels the dial instead of waiting for it, and the draft is the
 // built message with the envelope recipients missing from To and Cc as its
