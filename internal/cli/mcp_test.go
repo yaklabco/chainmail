@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 )
@@ -122,5 +123,32 @@ func TestMCPCommandClosesStdinWhenCancelled(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		_ = inR.Close() // unblocks the write
 		t.Fatal("stdin is neither read nor closed after exit")
+	}
+}
+
+// TestMCPCommandKeepsClientTextOutOfStderr: a session that fails on a frame
+// the client sent must not echo that frame's text to stderr, through the
+// server's log or through the CLI's own error report, and still fails.
+func TestMCPCommandKeepsClientTextOutOfStderr(t *testing.T) {
+	t.Parallel()
+	const secret = "SENTINEL-hunter2-Bearer-ya29"
+	var stdout, stderr bytes.Buffer
+	home := t.TempDir()
+	env := Env{
+		Stdin:  io.NopCloser(strings.NewReader(`{"jsonrpc":"` + secret + `","id":1,"method":"tools/list"}` + "\n")),
+		Stdout: &stdout, Stderr: &stderr,
+		Getenv: func(k string) string {
+			if k == "HOME" {
+				return home
+			}
+			return ""
+		},
+	}
+	code := Execute(t.Context(), []string{"--socket", "/nonexistent/chainmail.sock", "mcp"}, env)
+	if strings.Contains(stderr.String(), secret) || strings.Contains(stdout.String(), secret) {
+		t.Errorf("client-controlled text reached the output: stderr %q, stdout %q", stderr.String(), stdout.String())
+	}
+	if code == 0 {
+		t.Errorf("exit code 0 for a failed session (stderr %q)", stderr.String())
 	}
 }
