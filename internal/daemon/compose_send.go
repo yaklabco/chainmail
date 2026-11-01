@@ -206,7 +206,7 @@ func (c *composeService) attempt(ctx context.Context, job sendJob, entry *audit.
 			found, ok := c.searchOutcome(detached, job.acct, msg.MessageID)
 			if !ok {
 				c.s.opts.Logger.Warn("send outcome unknown", "account", job.acct.Name, "message_id", msg.MessageID)
-				return nil, idempotency.Unknown, outcomeUnknownErr(msg.MessageID)
+				return nil, idempotency.Unknown, outcomeUnknownErr()
 			}
 			sent.SentRef = found
 		default:
@@ -629,7 +629,7 @@ func replay(claim idempotency.Claim) (*chainmailv1.ComposeResult, error) {
 	}
 	if len(claim.Result) == 0 {
 		// An earlier daemon stopped mid-send and Recover settled the key.
-		return nil, api.New(connect.CodeUnknown, api.ReasonSendOutcomeUnknown, outcomeHint(""), errors.New(replayText[api.ReasonSendOutcomeUnknown]))
+		return nil, api.New(connect.CodeUnknown, api.ReasonSendOutcomeUnknown, outcomeHint, errors.New(replayText[api.ReasonSendOutcomeUnknown]))
 	}
 	d := &chainmailv1.ErrorDetail{}
 	if err := proto.Unmarshal(claim.Result, d); err != nil {
@@ -639,7 +639,13 @@ func replay(claim idempotency.Claim) (*chainmailv1.ComposeResult, error) {
 	if !ok {
 		msg = replayText[""]
 	}
-	return nil, api.New(reasonCode(d.GetReason()), d.GetReason(), d.GetHint(), errors.New(msg))
+	hint := d.GetHint()
+	if d.GetReason() == api.ReasonSendOutcomeUnknown {
+		// An earlier daemon stored a hint that quoted the Message-ID, which
+		// send_draft takes from the stored draft.
+		hint = outcomeHint
+	}
+	return nil, api.New(reasonCode(d.GetReason()), d.GetReason(), hint, errors.New(msg))
 }
 
 // replayText is the message of a repeated call whose first attempt failed, by reason.
@@ -688,14 +694,17 @@ var (
 	errDryRunAndDraft = &argError{msg: "dry_run and draft cannot both be set", hint: "pass one of them"}
 )
 
-// refusedErr is the error for a message the server refused for good.
+// refusedErr is the error for a message the server refused for good. A
+// refusal of recipients counts them and does not name them: reply derives
+// its recipients from the original message and send_draft from the stored
+// draft, so an address can be text a hostile sender chose, and the error's
+// text reaches clients as trusted.
 func refusedErr(se *sender.SendError) error {
 	const hint = "nothing was sent; fix the message and send it with a new idempotency key"
 	switch {
 	case len(se.Refused) > 0:
-		// The refused addresses are the caller's own recipients.
-		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, hint,
-			&fixedTextError{msg: "the mail server refused the recipients: " + strings.Join(se.Refused, ", "), err: se})
+		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, refusedRecipientsHint,
+			&fixedTextError{msg: refusedRecipientsText(len(se.Refused)), err: se})
 	case se.Code == 0:
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, hint,
 			&fixedTextError{msg: "the message could not be submitted to the mail server", err: se})
@@ -703,6 +712,18 @@ func refusedErr(se *sender.SendError) error {
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, hint,
 			&fixedTextError{msg: "the mail server refused the message", err: se})
 	}
+}
+
+// refusedRecipientsHint is the hint for a send whose recipients the mail server refused.
+const refusedRecipientsHint = "nothing was sent; check the addresses with the recipient, or use dry_run to see " +
+	"who the message goes to, then send it with a new idempotency key"
+
+// refusedRecipientsText is the message for n refused recipients.
+func refusedRecipientsText(n int) string {
+	if n == 1 {
+		return "the mail server refused 1 recipient"
+	}
+	return fmt.Sprintf("the mail server refused %d recipients", n)
 }
 
 // notSentErr is the error for a send that failed in a way that is safe to
@@ -713,17 +734,16 @@ func notSentErr(se *sender.SendError) error {
 }
 
 // outcomeUnknownErr is the error for a send that may have gone out.
-func outcomeUnknownErr(messageID string) error {
-	return api.New(connect.CodeUnknown, api.ReasonSendOutcomeUnknown, outcomeHint(messageID),
+func outcomeUnknownErr() error {
+	return api.New(connect.CodeUnknown, api.ReasonSendOutcomeUnknown, outcomeHint,
 		errors.New("the connection was lost after the message was handed over; it may or may not have been sent"))
 }
 
-func outcomeHint(messageID string) string {
-	if messageID == "" {
-		return "search the Sent folder before sending again; repeating this call will not send"
-	}
-	return "search the Sent folder for Message-ID <" + messageID + "> before sending again; repeating this call will not send"
-}
+// outcomeHint is the hint of a send of unknown outcome, first and on every
+// replay for its key. It does not quote the Message-ID: send_draft keeps
+// the stored draft's, which another client could have written.
+const outcomeHint = "search the Sent folder for this message, by its subject or recipients, before sending again; " +
+	"do not send it again blindly; repeating this call will not send"
 
 // sendText is the whole client message for a send-type failure, by
 // reason. As for reads, mail server and sender text never reaches a client.
@@ -739,8 +759,12 @@ var sendText = map[string]string{
 
 // composeErr maps a ComposeService failure to the Connect error the client
 // sees. Errors the pipeline already built pass through. INVALID_ARGUMENT
-// keeps its text, which the daemon writes from the request. Anything else
-// gets fixed text by reason, with the cause kept for the daemon's logs.
+// keeps its text: fixed words and values from the request only. That holds
+// for compose.ErrInvalid too, since a forward checks the original's
+// attachments with compose.CheckFile before building (see
+// errOriginalNotForwardable), and Build's own errors name no media type.
+// Anything else gets fixed text by reason, with the cause kept for the
+// daemon's logs.
 func composeErr(err error) *connect.Error {
 	var cerr *connect.Error
 	if errors.As(err, &cerr) {

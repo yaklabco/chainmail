@@ -773,6 +773,14 @@ func sortedKeys(m map[string]File) []string {
 	return keys
 }
 
+// CheckFile reports whether Build can attach f: it returns the error Build
+// gives for f as an attachment, or nil. A forward checks the original's
+// parts with it, so it can refuse one with text of its own.
+func CheckFile(f File) error {
+	_, err := filePart(f, "attachment")
+	return err
+}
+
 // filePart is an attachment or inline image. Its media type is the declared
 // one, or sniffed from the data when none is declared. It is base64 encoded,
 // except for the composite types compositePart handles.
@@ -783,7 +791,7 @@ func filePart(f File, disposition string) (*part, error) {
 	}
 	mt, params, err := mime.ParseMediaType(ct)
 	if err != nil {
-		return nil, fmt.Errorf("%w: bad content type %q", ErrInvalid, ct)
+		return nil, fmt.Errorf("%w: an attachment has a bad content type", ErrInvalid)
 	}
 	p := &part{
 		mediaType:   mt,
@@ -805,9 +813,12 @@ func filePart(f File, disposition string) (*part, error) {
 // endings made CRLF. An attached email that is not 7-bit goes as
 // message/global, which RFC 6532 lets be base64 encoded. Any other composite
 // that is not 7-bit, and a multipart type without a boundary, is refused.
+// The errors do not name the media type: a forward re-attaches the
+// original's parts with their declared types, which the original's sender
+// chose, and the error's text reaches clients.
 func compositePart(p *part) (*part, error) {
 	if strings.HasPrefix(p.mediaType, "multipart/") && p.params["boundary"] == "" {
-		return nil, fmt.Errorf("%w: %s attachment has no boundary", ErrInvalid, p.mediaType)
+		return nil, fmt.Errorf("%w: a multipart attachment has no boundary", ErrInvalid)
 	}
 	if data, ok := sevenBit(p.body); ok {
 		p.encoding, p.body = sevenBitEncoding, data
@@ -817,7 +828,7 @@ func compositePart(p *part) (*part, error) {
 		p.mediaType = "message/global"
 		return p, nil
 	}
-	return nil, fmt.Errorf("%w: %s attachment is not 7-bit data", ErrInvalid, p.mediaType)
+	return nil, fmt.Errorf("%w: a multipart or message attachment is not 7-bit data", ErrInvalid)
 }
 
 // sevenBit returns data with CRLF line endings, and whether it is 7bit data

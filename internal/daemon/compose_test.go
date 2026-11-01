@@ -532,8 +532,10 @@ func TestSendRecipientRefused(t *testing.T) {
 	if reasonOf(err) != api.ReasonInvalidArgument {
 		t.Fatalf("err = %v, want INVALID_ARGUMENT", err)
 	}
-	if !strings.Contains(err.Error(), "cc@example.net") || strings.Contains(err.Error(), "you@example.net") {
-		t.Errorf("err = %v, want it to name the refused recipient only", err)
+	// The error counts the refused recipients and names none: reply and
+	// send_draft take theirs from a message.
+	if !strings.Contains(err.Error(), "refused 1 recipient") || strings.Contains(err.Error(), "cc@example.net") || strings.Contains(err.Error(), "you@example.net") {
+		t.Errorf("err = %v, want it to count the refused recipient and name none", err)
 	}
 	if strings.Contains(err.Error(), "secret server text") {
 		t.Errorf("err = %v carries the server's text", err)
