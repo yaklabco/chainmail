@@ -43,9 +43,11 @@ const invoice = "From: Ann <ann@example.org>\r\nTo: mcp@example.test\r\nSubject:
 func buildChainmail(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "chainmail")
-	cmd := exec.CommandContext(t.Context(), "go", "build", "-o", bin, "./cmd/chainmail")
+	// -p 1 and GOMAXPROCS=1: this build runs beside the other integration
+	// packages, and the outer go test flags do not bound it.
+	cmd := exec.CommandContext(t.Context(), "go", "build", "-p", "1", "-o", bin, "./cmd/chainmail")
 	cmd.Dir = filepath.Join("..", "..")
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOMAXPROCS=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
@@ -211,8 +213,10 @@ func TestMCPAgainstDovecot(t *testing.T) {
 		t.Fatalf("Drafts search = %+v, want the held draft %s", drafts.Rows, held.DraftRef)
 	}
 
-	// 4. the audit log names every MCP call with client kind mcp.
+	// 4. the audit log names every MCP call with client kind mcp: each
+	// exercised action has at least as many rows as calls made above.
 	sawHeld := false
+	byAction := map[string]int{}
 	for _, r := range h.AuditRows(t) {
 		if r.Action == "secret.set" {
 			continue // set by the harness's own client
@@ -220,8 +224,16 @@ func TestMCPAgainstDovecot(t *testing.T) {
 		if r.Client != "mcp" {
 			t.Errorf("audit row %+v has client %q, want mcp", r, r.Client)
 		}
+		byAction[r.Action]++
 		if r.Action == "send" && r.Reason == "HELD" {
 			sawHeld = true
+		}
+	}
+	for action, want := range map[string]int{
+		"search": 2, "get": 1, "folders.create": 1, "move": 1, "archive": 1, "draft.create": 1, "send": 1,
+	} {
+		if byAction[action] < want {
+			t.Errorf("audit has %d %s rows, want at least %d (rows by action: %v)", byAction[action], action, want, byAction)
 		}
 	}
 	if !sawHeld {
