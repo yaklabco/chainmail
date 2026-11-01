@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -341,28 +343,52 @@ func TestHarnessRefs(t *testing.T) {
 	}
 }
 
-// TestRunJoinsItsCancelCallback: once Run returns after its context ends,
-// the callback that ends the requests in flight has finished, not merely
-// started in a goroutine of its own.
+// TestRunJoinsItsCancelCallback holds the callback that ends the requests in
+// flight open, and checks Run cannot return until it is let go. The bounded
+// wait can only miss a bug, never report a false one.
 func TestRunJoinsItsCancelCallback(t *testing.T) {
 	t.Parallel()
 	f := &fakeDaemon{}
 	startFake(t, f)
-	for range 50 {
-		s := New(Options{Socket: f.Socket, Version: "test", AttachmentsDir: t.TempDir()})
-		ctx, cancel := context.WithCancel(t.Context())
-		serverT, _ := mcp.NewInMemoryTransports()
-		done := make(chan error, 1)
-		go func() { done <- s.Run(ctx, serverT) }()
-		cancel()
-		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
-			t.Fatalf("Run = %v, want nil or context.Canceled", err)
-		}
-		s.inflight.mu.Lock()
-		ended := s.inflight.ended
-		s.inflight.mu.Unlock()
-		if ended == nil {
-			t.Fatal("Run returned before its cancel callback ended the requests in flight")
-		}
+	s := New(Options{Socket: f.Socket, Version: "test", AttachmentsDir: t.TempDir()})
+	entered, release := make(chan struct{}), make(chan struct{})
+	s.beforeEnd = func() {
+		close(entered)
+		<-release
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	serverT, _ := mcp.NewInMemoryTransports()
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, serverT) }()
+	cancel()
+	<-entered
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned (%v) while its cancel callback was still running", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want nil or context.Canceled", err)
 	}
 }
+
+// TestSDKDiagnosticsNeverReachTheLog: the SDK logs raw transport and session
+// errors, and a client controls their text. A frame whose jsonrpc field is a
+// secret must not put it in the stderr log.
+func TestSDKDiagnosticsNeverReachTheLog(t *testing.T) {
+	t.Parallel()
+	f := &fakeDaemon{}
+	startFake(t, f)
+	var logs syncBuffer
+	s := New(Options{Socket: f.Socket, Version: "test", AttachmentsDir: t.TempDir(), Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	in := io.NopCloser(strings.NewReader(`{"jsonrpc":"` + sentinel + `","id":1,"method":"tools/list"}` + "\n"))
+	err := s.Run(t.Context(), &mcp.IOTransport{Reader: in, Writer: nopWriteCloser{io.Discard}})
+	if strings.Contains(logs.String(), sentinel) {
+		t.Errorf("the stderr log holds client-controlled text: %q (Run = %v)", logs.String(), err)
+	}
+}
+
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
