@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -16,7 +17,7 @@ func TestMCPCommandSpeaksMCPOnStdio(t *testing.T) {
 	t.Parallel()
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	var stderr bytes.Buffer
+	var stderr syncBuffer
 	home := t.TempDir()
 	env := Env{
 		Stdin: inR, Stdout: outW, Stderr: &stderr,
@@ -74,7 +75,7 @@ func TestMCPCommandClosesStdinWhenCancelled(t *testing.T) {
 	t.Parallel()
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	var stderr bytes.Buffer
+	var stderr syncBuffer
 	home := t.TempDir()
 	env := Env{
 		Stdin: inR, Stdout: outW, Stderr: &stderr,
@@ -132,7 +133,8 @@ func TestMCPCommandClosesStdinWhenCancelled(t *testing.T) {
 func TestMCPCommandKeepsClientTextOutOfStderr(t *testing.T) {
 	t.Parallel()
 	const secret = "SENTINEL-hunter2-Bearer-ya29"
-	var stdout, stderr bytes.Buffer
+	var stdout bytes.Buffer
+	var stderr syncBuffer
 	home := t.TempDir()
 	env := Env{
 		Stdin:  io.NopCloser(strings.NewReader(`{"jsonrpc":"` + secret + `","id":1,"method":"tools/list"}` + "\n")),
@@ -151,4 +153,23 @@ func TestMCPCommandKeepsClientTextOutOfStderr(t *testing.T) {
 	if code == 0 {
 		t.Errorf("exit code 0 for a failed session (stderr %q)", stderr.String())
 	}
+}
+
+// syncBuffer is a bytes.Buffer safe for concurrent use, for a stderr the
+// command may still be writing while a test reads it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
