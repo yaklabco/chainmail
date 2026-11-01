@@ -3,7 +3,9 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -64,5 +66,61 @@ func TestMCPCommandSpeaksMCPOnStdio(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("chainmail mcp did not exit on stdin EOF")
+	}
+}
+
+func TestMCPCommandClosesStdinWhenCancelled(t *testing.T) {
+	t.Parallel()
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	var stderr bytes.Buffer
+	home := t.TempDir()
+	env := Env{
+		Stdin: inR, Stdout: outW, Stderr: &stderr,
+		Getenv: func(k string) string {
+			if k == "HOME" {
+				return home
+			}
+			return ""
+		},
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan int, 1)
+	go func() {
+		done <- Execute(ctx, []string{"--socket", "/nonexistent/chainmail.sock", "mcp"}, env)
+		_ = outW.Close() // ends the reader below if the command exits early
+	}()
+	go func() { _, _ = io.Copy(io.Discard, outR) }()
+	req := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}` + "\n"
+	if _, err := io.WriteString(inW, req); err != nil {
+		t.Fatal(err)
+	}
+	// stdin stays open: only the context ends the session.
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Errorf("exit code %d, stderr %s", code, stderr.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("chainmail mcp did not exit when its context ended")
+	}
+	// With stdin closed, a write fails at once. Were it still open, the
+	// SDK's reader goroutine would still be blocked reading it and would
+	// take the write.
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := io.WriteString(inW, "\n")
+		wrote <- err
+	}()
+	select {
+	case err := <-wrote:
+		if !errors.Is(err, io.ErrClosedPipe) {
+			t.Errorf("writing to stdin after exit: %v, want io.ErrClosedPipe (stdin not closed)", err)
+		}
+	case <-time.After(10 * time.Second):
+		_ = inR.Close() // unblocks the write
+		t.Fatal("stdin is neither read nor closed after exit")
 	}
 }

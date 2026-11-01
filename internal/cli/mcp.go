@@ -41,7 +41,7 @@ func newMCPCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 				AttachmentsDir: dir,
 				Logger:         logger,
 			})
-			runErr := s.Run(ctx, &mcp.IOTransport{Reader: io.NopCloser(env.Stdin), Writer: nopWriteCloser{env.Stdout}})
+			runErr := s.Run(ctx, &mcp.IOTransport{Reader: closingReader(env.Stdin), Writer: nopWriteCloser{env.Stdout}})
 			if cause := ctx.Err(); cause != nil {
 				logger.Info("session ended by a signal", "cause", cause)
 				return nil
@@ -49,6 +49,18 @@ func newMCPCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			return runErr
 		},
 	}
+}
+
+// closingReader is stdin for the MCP transport. When the session ends the
+// SDK closes it, which closes stdin itself when it can be closed, such as
+// os.Stdin or a pipe, so the SDK's reader goroutine is not left blocked in
+// Read. A blocking os.Stdin may still hold that Read until the process
+// exits, which follows Execute at once.
+func closingReader(r io.Reader) io.ReadCloser {
+	if rc, ok := r.(io.ReadCloser); ok {
+		return rc
+	}
+	return io.NopCloser(r)
 }
 
 // nopWriteCloser lets the MCP transport close stdout without closing it.
