@@ -94,16 +94,19 @@ func fieldPaths(proc string, md protoreflect.MessageDescriptor, prefix string, s
 	}
 }
 
-// setPaths records the leaf field paths m has set.
+// setPaths records the field paths m has set: every leaf, and every message
+// or message list on the way to one.
 func setPaths(m protoreflect.Message, prefix string, out map[string]bool) {
 	m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
 		path := prefix + string(fd.Name())
 		switch {
 		case fd.IsList() && fd.Kind() == protoreflect.MessageKind:
+			out[path] = true
 			for i := range v.List().Len() {
 				setPaths(v.List().Get(i).Message(), path+".", out)
 			}
 		case fd.Kind() == protoreflect.MessageKind && !fd.IsMap() && !fd.IsList():
+			out[path] = true // so an ignored message field that a tool now sets is caught
 			setPaths(v.Message(), path+".", out)
 		default:
 			out[path] = true
@@ -257,6 +260,19 @@ func TestEveryRequestFieldIsMappedOrIgnored(t *testing.T) {
 		}
 		if !exists[k] {
 			t.Errorf("ignore entry %q names no request field", k)
+		}
+	}
+}
+
+// TestEveryExclusionHasAReason keeps the left-out RPCs and ignored fields
+// honest: an entry must say why, or it is not an exclusion.
+func TestEveryExclusionHasAReason(t *testing.T) {
+	t.Parallel()
+	for name, list := range map[string]map[string]string{"leftOut": leftOut, "ignored": ignored} {
+		for k, why := range list {
+			if strings.TrimSpace(why) == "" {
+				t.Errorf("%s entry %q has no reason", name, k)
+			}
 		}
 	}
 }
