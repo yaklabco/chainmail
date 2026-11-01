@@ -229,7 +229,8 @@ func TestSendDeadlineDuringDataReplyIsUnknown(t *testing.T) {
 					<-release
 				},
 			})
-			defer close(release) // lets the server goroutine finish before its Close
+			releaseServer := sync.OnceFunc(func() { close(release) })
+			defer releaseServer() // lets the server goroutine finish before its Close
 			ctx := t.Context()
 			conn := dialT(t, srv, ca, DialOptions{Timeout: time.Hour})
 			if name == "ctx deadline" {
@@ -242,7 +243,19 @@ func TestSendDeadlineDuringDataReplyIsUnknown(t *testing.T) {
 					return ctxtest.Expiring(parent, expire), func() {}
 				}
 			}
-			err := conn.Send(ctx, user.Username, rcpts, msg)
+			res := make(chan error, 1)
+			go func() { res <- conn.Send(ctx, user.Username, rcpts, msg) }()
+			var err error
+			select {
+			case err = <-res:
+			case <-time.After(5 * time.Second):
+				// Send ignored its deadline. Free it so the test fails
+				// instead of hanging: let the server reply, drop the socket,
+				// and join the goroutine.
+				releaseServer()
+				_ = conn.raw.Close()
+				t.Fatalf("Send did not return within 5s of its deadline (then: %v)", <-res)
+			}
 			se := asSendError(t, err)
 			if se.Outcome != Unknown {
 				t.Errorf("Outcome = %v, want Unknown (err %v)", se.Outcome, err)
