@@ -140,12 +140,21 @@ type Store struct {
 	// when its context ends.
 	loginGate chan struct{}
 
+	// nsGate holds one token, which a namespace discovery takes, so a store
+	// asks the server once and every other call waits for its answer. It is
+	// a channel rather than a mutex so a waiter can give up when its
+	// context ends.
+	nsGate chan struct{}
+
 	// chunk is how much of a part each FETCH asks for while streaming:
 	// chunkSize, unless a test shrinks it.
 	chunk int64
 	// dialTimeout bounds connecting and logging in: the package's
 	// dialTimeout, unless a test shrinks it.
 	dialTimeout time.Duration
+	// nsWait, when a test sets it, runs as a call starts waiting for
+	// another call's namespace discovery to finish.
+	nsWait func()
 
 	// folderGen counts renames and deletes of folders. A connection opened
 	// a folder before the latest one opens it again rather than trust it.
@@ -177,7 +186,7 @@ const closeWait = 5 * time.Second
 // New returns a Store for acct. It connects on first use.
 func New(acct config.ResolvedAccount, creds Credentialer, opts Options) *Store {
 	opts = opts.withDefaults()
-	s := &Store{acct: acct, creds: creds, opts: opts, loginGate: make(chan struct{}, 1), chunk: chunkSize, dialTimeout: dialTimeout}
+	s := &Store{acct: acct, creds: creds, opts: opts, loginGate: make(chan struct{}, 1), nsGate: make(chan struct{}, 1), chunk: chunkSize, dialTimeout: dialTimeout}
 	s.pool = newPool(s.dial, poolOptions{size: opts.PoolSize, noopAfter: opts.NoopAfter, idleLogout: opts.IdleLogout, now: opts.Now})
 	return s
 }

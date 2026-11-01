@@ -96,9 +96,10 @@ func (s *Store) Copy(ctx context.Context, refs []ref.Ref, folder string) []mails
 
 // transferNamed is transfer into the folder a caller names, written as the
 // server has it: the rule CreateFolder follows (serverName). Each folder
-// group asks for the namespace on its own connection until the store keeps
-// the answer, so only a first write talks to the server for it, and a
-// first move still fans out. An empty name is refused.
+// group gets the namespace on its own connection once that has dialed, so
+// a first move still fans out. Only one of a first write's groups asks the
+// server, and the others wait for its answer (namespace). An empty name is
+// refused.
 func (s *Store) transferNamed(ctx context.Context, refs []ref.Ref, name string, keepOriginal bool) []mailstore.RefResult {
 	if name == "" {
 		return s.transfer(ctx, refs, "", keepOriginal)

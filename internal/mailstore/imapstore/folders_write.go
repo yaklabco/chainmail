@@ -191,13 +191,53 @@ type folderSpace struct {
 // namespace, the prefix is "" and LIST "" "" gives the delimiter. The store
 // keeps the answer for its whole life, since a server does not move its
 // namespaces.
+//
+// One call at a time asks, holding nsGate, and calls that come meanwhile
+// wait for it on their own connections and take its answer, so concurrent
+// folder groups of a first write never name a destination from different
+// answers. A refusal's fallback is an answer. A failure, such as a broken
+// connection, keeps nothing, and the next call asks again.
 func (s *Store) namespace(ctx context.Context, c *conn) (folderSpace, error) {
-	s.mu.Lock()
-	ns, known := s.ns, s.nsKnown
-	s.mu.Unlock()
-	if known {
+	if ns, ok := s.knownNamespace(); ok {
 		return ns, nil
 	}
+	select {
+	case s.nsGate <- struct{}{}:
+	default:
+		if s.nsWait != nil {
+			s.nsWait()
+		}
+		select {
+		case s.nsGate <- struct{}{}:
+		case <-ctx.Done():
+			return folderSpace{}, ctx.Err()
+		}
+	}
+	defer func() { <-s.nsGate }()
+	if ns, ok := s.knownNamespace(); ok {
+		return ns, nil
+	}
+	ns, err := c.discoverNamespace(ctx)
+	if err != nil {
+		return folderSpace{}, err
+	}
+	s.mu.Lock()
+	s.ns, s.nsKnown = ns, true
+	s.mu.Unlock()
+	return ns, nil
+}
+
+// knownNamespace returns the folderSpace the store keeps, if it has one.
+func (s *Store) knownNamespace() (folderSpace, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ns, s.nsKnown
+}
+
+// discoverNamespace asks the server on c for its folderSpace, as namespace
+// describes.
+func (c *conn) discoverNamespace(ctx context.Context) (folderSpace, error) {
+	var ns folderSpace
 	found := false
 	if c.client().Caps().Has(imap.CapNamespace) {
 		var data *imap.NamespaceData
@@ -222,9 +262,6 @@ func (s *Store) namespace(ctx context.Context, c *conn) (folderSpace, error) {
 		}
 		ns.delim = d
 	}
-	s.mu.Lock()
-	s.ns, s.nsKnown = ns, true
-	s.mu.Unlock()
 	return ns, nil
 }
 

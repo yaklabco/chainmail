@@ -64,6 +64,10 @@ type writeServer struct {
 	// namespace is the personal namespace prefix NAMESPACE reports, with
 	// delim. Advertise NAMESPACE in caps for the client to ask.
 	namespace string
+	// intercept, when set, sees each command before it is answered,
+	// without mu held, so it may block to coordinate connections. A reply
+	// it gives with ok set goes out instead of the scripted one.
+	intercept func(c wsCmd) (reply string, ok bool)
 
 	mu     sync.Mutex
 	events []string // "recv UID MOVE 1:2 Archive", "sent UID MOVE"
@@ -302,10 +306,17 @@ func (srv *writeServer) serve(conn net.Conn) {
 			if b.kind == srv.slowKind {
 				time.Sleep(srv.slow)
 			}
+			reply, ok := "", false
+			if srv.intercept != nil {
+				reply, ok = srv.intercept(b)
+			}
+			if !ok {
+				reply = srv.reply(&st, b)
+			}
 			// Logged before it goes out, so a command the client sends on
 			// hearing this reply is always logged after it.
 			srv.log("sent " + b.kind)
-			if !send(srv.reply(&st, b)) {
+			if !send(reply) {
 				return
 			}
 		}
