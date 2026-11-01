@@ -16,6 +16,7 @@ import (
 
 	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/provider"
+	"github.com/jamesainslie/chainmail/internal/testutil/ctxtest"
 	"github.com/jamesainslie/chainmail/internal/testutil/smtptest"
 	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
 )
@@ -209,30 +210,38 @@ func TestSendOutcomes(t *testing.T) {
 	}
 }
 
-// A context that ends while the client waits for the reply to the final dot
-// leaves the outcome unknown: the server has the whole message.
+// A deadline that passes while the client waits for the reply to the final
+// dot leaves the outcome unknown: the server has the whole message. The
+// server's OnMessage hook runs once it has read the dot and before it
+// replies, and ends the deadline there, so no timing decides where the
+// deadline lands. The ctx case ends the caller's ctx; the dial timeout case
+// ends the bound Send takes from DialOptions.Timeout.
 func TestSendDeadlineDuringDataReplyIsUnknown(t *testing.T) {
 	t.Parallel()
-	for name, bound := range map[string]func(*testing.T) (context.Context, DialOptions){
-		"ctx deadline": func(t *testing.T) (context.Context, DialOptions) {
-			ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
-			t.Cleanup(cancel)
-			return ctx, DialOptions{}
-		},
-		"dial timeout": func(t *testing.T) (context.Context, DialOptions) {
-			return t.Context(), DialOptions{Timeout: 300 * time.Millisecond}
-		},
-	} {
+	for _, name := range []string{"ctx deadline", "dial timeout"} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
+			expire := make(chan struct{})
 			release := make(chan struct{})
 			srv, ca := startSMTP(t, provider.SecurityStartTLS, smtptest.Options{
-				OnMessage: func(smtptest.Envelope) { <-release },
+				OnMessage: func(smtptest.Envelope) {
+					close(expire) // the whole message is in; the reply waits for release
+					<-release
+				},
 			})
 			defer close(release) // lets the server goroutine finish before its Close
-			ctx, opts := bound(t)
-			conn := dialT(t, srv, ca, opts)
-			start := time.Now()
+			ctx := t.Context()
+			conn := dialT(t, srv, ca, DialOptions{Timeout: time.Hour})
+			if name == "ctx deadline" {
+				ctx = ctxtest.Expiring(ctx, expire)
+			} else {
+				conn.withTimeout = func(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+					if d != time.Hour {
+						t.Errorf("Send bounded by %v, want the dial timeout", d)
+					}
+					return ctxtest.Expiring(parent, expire), func() {}
+				}
+			}
 			err := conn.Send(ctx, user.Username, rcpts, msg)
 			se := asSendError(t, err)
 			if se.Outcome != Unknown {
@@ -240,9 +249,6 @@ func TestSendDeadlineDuringDataReplyIsUnknown(t *testing.T) {
 			}
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Errorf("err = %v, want context.DeadlineExceeded in the chain", err)
-			}
-			if elapsed := time.Since(start); elapsed > 5*time.Second {
-				t.Errorf("Send took %v, want it bounded by 300ms", elapsed)
 			}
 		})
 	}
