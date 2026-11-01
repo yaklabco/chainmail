@@ -3,6 +3,7 @@ package imapstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -605,16 +606,16 @@ func TestAMoveResolvesItsFolderOnce(t *testing.T) {
 }
 
 // TestDestOnceKeepsOnlyAnAnswer: destOnce keeps the first destination found
-// and not a failure, and a group waiting for another's lookup gives up
-// when its context ends.
+// and not a lost connection, which the group retries on a fresh one, and a
+// group waiting for another's lookup gives up when its context ends.
 func TestDestOnceKeepsOnlyAnAnswer(t *testing.T) {
 	t.Parallel()
 	d := newDestOnce()
 	calls := 0
-	fail := func() (string, error) { calls++; return "", errors.New("connection reset") }
+	lost := func() (string, error) { calls++; return "", fmt.Errorf("listing: %w", errConnLost) }
 	find := func() (string, error) { calls++; return "Keep", nil }
-	if _, err := d.get(t.Context(), fail); err == nil {
-		t.Fatal("a failed lookup gave no error")
+	if _, err := d.get(t.Context(), lost); !errors.Is(err, errConnLost) {
+		t.Fatalf("a lost connection gave %v", err)
 	}
 	for range 2 {
 		if got, err := d.get(t.Context(), find); err != nil || got != "Keep" {
@@ -622,7 +623,7 @@ func TestDestOnceKeepsOnlyAnAnswer(t *testing.T) {
 		}
 	}
 	if calls != 2 {
-		t.Errorf("lookups = %d, want 2: the failure retried, then the answer kept", calls)
+		t.Errorf("lookups = %d, want 2: the lost connection retried, then the answer kept", calls)
 	}
 	d.gate <- struct{}{} // another group is finding it
 	t.Cleanup(func() { <-d.gate })
@@ -630,5 +631,25 @@ func TestDestOnceKeepsOnlyAnAnswer(t *testing.T) {
 	cancel()
 	if _, err := d.get(ctx, find); !errors.Is(err, context.Canceled) {
 		t.Errorf("get behind a lookup in progress = %v, want context.Canceled", err)
+	}
+}
+
+// TestDestOnceKeepsARefusal: a server's answer to the destination LIST,
+// even a refusal, is the answer for every folder group of the call, so one
+// call sends at most one destination LIST. Only a lost connection, which
+// the group retries on a fresh one, is asked again.
+func TestDestOnceKeepsARefusal(t *testing.T) {
+	t.Parallel()
+	d := newDestOnce()
+	calls := 0
+	refused := errors.New("NO LIST refused")
+	refuse := func() (string, error) { calls++; return "", refused }
+	for group := range 3 {
+		if _, err := d.get(t.Context(), refuse); !errors.Is(err, refused) {
+			t.Fatalf("group %d: get = %v, want the refusal", group, err)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("destination LISTs = %d, want 1 for the whole call", calls)
 	}
 }
