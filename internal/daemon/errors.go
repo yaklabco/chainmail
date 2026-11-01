@@ -77,7 +77,7 @@ func toConnectError(err error) *connect.Error {
 		return api.New(connect.CodeNotFound, api.ReasonStaleRef, "search again", err)
 	case errors.As(err, &noFolder):
 		return api.New(connect.CodeNotFound, api.ReasonNotFound, folderHint,
-			&fixedTextError{msg: folderMissingText(noFolder.Name), err: err})
+			&fixedTextError{msg: folderMissingText(noFolder), err: err})
 	case errors.Is(err, mailstore.ErrNotFound):
 		return api.New(connect.CodeNotFound, api.ReasonNotFound, "", err)
 	case errors.Is(err, context.DeadlineExceeded):
@@ -124,7 +124,16 @@ const queryHint = "the query language is described in: chainmail search --help"
 // folderHint answers a folder the account does not have.
 const folderHint = "list the account's folders: chainmail folders (MCP: list_folders)"
 
-// folderMissingText is the client's message for a missing named folder. The
-// name came from the request, or from the server's folder list, never from
-// a message, so it is safe to show.
-func folderMissingText(name string) string { return fmt.Sprintf("no folder %q", name) }
+// folderMissingText is the client's message for a missing folder. It names
+// the folder as the client gave it in the request (Requested), never as the
+// store looked for it (Name): that name can carry the server's namespace
+// prefix, which the server chose and a hostile one can phrase as an
+// instruction. A folder the client did not name, such as the Trash a trash
+// finds by its role, gets fixed text. Name stays on the error for the
+// daemon's logs.
+func folderMissingText(nf *mailstore.FolderNotFoundError) string {
+	if nf.Requested == "" {
+		return "a folder this action needs does not exist on the account"
+	}
+	return fmt.Sprintf("no folder %q", nf.Requested)
+}
