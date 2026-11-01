@@ -141,13 +141,13 @@ func TestDovecotPrefixedNamespace(t *testing.T) {
 	}
 
 	var nf *mailstore.FolderNotFoundError
-	if res := s.Move(ctx, []ref.Ref{moved[0].Ref}, "Nope"); !errors.As(res[0].Err, &nf) || nf.Name != "INBOX.Nope" {
-		t.Errorf("Move to Nope = %+v, want FolderNotFoundError for INBOX.Nope", res[0])
+	if res := s.Move(ctx, []ref.Ref{moved[0].Ref}, "Nope"); !errors.As(res[0].Err, &nf) || nf.Name != "INBOX.Nope" || nf.Requested != "Nope" {
+		t.Errorf("Move to Nope = %+v, want FolderNotFoundError for INBOX.Nope, requested as Nope", res[0])
 	}
-	if _, err := s.RenameFolder(ctx, "Nope", "Other"); !errors.As(err, &nf) || nf.Name != "INBOX.Nope" {
-		t.Errorf("RenameFolder(Nope) = %v, want FolderNotFoundError for INBOX.Nope", err)
+	if _, err := s.RenameFolder(ctx, "Nope", "Other"); !errors.As(err, &nf) || nf.Name != "INBOX.Nope" || nf.Requested != "Nope" {
+		t.Errorf("RenameFolder(Nope) = %v, want FolderNotFoundError for INBOX.Nope, requested as Nope", err)
 	}
-	if err := s.DeleteFolder(ctx, "Nope", false); !errors.As(err, &nf) || nf.Name != "INBOX.Nope" {
-		t.Errorf("DeleteFolder(Nope) = %v, want FolderNotFoundError for INBOX.Nope", err)
+	if err := s.DeleteFolder(ctx, "Nope", false); !errors.As(err, &nf) || nf.Name != "INBOX.Nope" || nf.Requested != "Nope" {
+		t.Errorf("DeleteFolder(Nope) = %v, want FolderNotFoundError for INBOX.Nope, requested as Nope", err)
 	}
 }

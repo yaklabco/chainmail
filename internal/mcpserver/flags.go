@@ -7,20 +7,28 @@ var systemFlags = map[string]string{
 	"seen": `\Seen`, "flagged": `\Flagged`, "answered": `\Answered`, "draft": `\Draft`,
 }
 
-// shortFlag names an IMAP flag for agents: \Seen is "seen". Keywords stay as they are.
-func shortFlag(f string) string {
-	if name, ok := strings.CutPrefix(f, `\`); ok {
-		return strings.ToLower(name)
-	}
-	return f
+// shownFlags are the system flags a result names by short name: \Deleted
+// as "deleted", and the four of systemFlags.
+var shownFlags = map[string]string{
+	`\seen`: "seen", `\flagged`: "flagged", `\answered`: "answered", `\draft`: "draft", `\deleted`: "deleted",
 }
 
-func shortFlags(fs []string) []string {
-	out := make([]string, len(fs))
-	for i, f := range fs {
-		out[i] = shortFlag(f)
+// splitFlags sorts a message's IMAP flags for agents. A system flag of
+// shownFlags, matched in any case, becomes its short name in flags.
+// Everything else, a keyword such as $Forwarded or another flag a server
+// or a sender's client set, stays as the server has it, in keywords: these
+// are not restricted to a fixed vocabulary, so they are untrusted. flags
+// is never nil, so an output always holds the array.
+func splitFlags(fs []string) (flags []string, keywords []untrusted) {
+	flags = []string{}
+	for _, f := range fs {
+		if name, ok := shownFlags[strings.ToLower(f)]; ok {
+			flags = append(flags, name)
+			continue
+		}
+		keywords = append(keywords, serverName(f))
 	}
-	return out
+	return flags, keywords
 }
 
 // imapFlag turns a short system flag name, in any case, into the IMAP flag.

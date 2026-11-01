@@ -87,12 +87,12 @@ func TestSendEmailResults(t *testing.T) {
 		{
 			name:   "sent",
 			result: &chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Sent{Sent: &chainmailv1.Sent{MessageId: "m1@x", SentRef: testRef2}}},
-			want:   composeOut{Status: statusSent, MessageID: "m1@x", SentRef: testRef2}, wantText: []string{"Sent m1@x"},
+			want:   composeOut{Status: statusSent, MessageID: serverNamePtr("m1@x"), SentRef: testRef2}, wantText: []string{"Sent.", "m1@x"},
 		},
 		{
 			name:   "duplicate",
 			result: &chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Sent{Sent: &chainmailv1.Sent{MessageId: "m1@x", Duplicate: true}}},
-			want:   composeOut{Status: statusDuplicate, OriginalStatus: statusSent, MessageID: "m1@x"}, wantText: []string{"nothing was sent again"},
+			want:   composeOut{Status: statusDuplicate, OriginalStatus: statusSent, MessageID: serverNamePtr("m1@x")}, wantText: []string{"nothing was sent again"},
 		},
 		{
 			name: "held",
@@ -101,7 +101,7 @@ func TestSendEmailResults(t *testing.T) {
 				Hint: "held by policy: saved to Drafts for James to review and send",
 			}}},
 			want: composeOut{
-				Status: statusHeld, DraftRef: testRef2, MessageID: "m2@x", Blocked: []untrusted{{Untrusted: "stranger@evil.test"}},
+				Status: statusHeld, DraftRef: testRef2, MessageID: serverNamePtr("m2@x"), Blocked: []untrusted{{Untrusted: "stranger@evil.test"}},
 				TooManyRecipients: true, Hint: "held by policy: saved to Drafts for James to review and send",
 			},
 			wantText: []string{"NOT sent", "Drafts", "Do not retry", "stranger@evil.test", "More recipients"},
@@ -131,9 +131,14 @@ func TestSendEmailResults(t *testing.T) {
 	}
 }
 
+// composeSameID compares two optional Message-IDs by value.
+func composeSameID(a, b *untrusted) bool {
+	return (a == nil) == (b == nil) && (a == nil || *a == *b)
+}
+
 // composeEqual compares two outputs field by field.
 func composeEqual(a, b composeOut) bool {
-	return a.Status == b.Status && a.OriginalStatus == b.OriginalStatus && a.MessageID == b.MessageID &&
+	return a.Status == b.Status && a.OriginalStatus == b.OriginalStatus && composeSameID(a.MessageID, b.MessageID) &&
 		a.SentRef == b.SentRef && a.DraftRef == b.DraftRef && slices.Equal(a.Blocked, b.Blocked) &&
 		a.TooManyRecipients == b.TooManyRecipients && a.Hint == b.Hint
 }
@@ -378,17 +383,58 @@ func TestComposeHeldWireShape(t *testing.T) {
 }
 
 // TestComposeSentOmitsHeldFields keeps sent and draft results free of the
-// held-only properties.
+// held-only properties. A draft keeps its own draft_ref.
 func TestComposeSentOmitsHeldFields(t *testing.T) {
 	t.Parallel()
-	e := newTestEnv(t, &fakeDaemon{Send: sentResult(&chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Sent{Sent: &chainmailv1.Sent{MessageId: "m1@x"}}})}, latest)
-	res := e.call(t, "send_email", map[string]any{"account": "work", "to": []string{"a@x.test"}, "subject": "Q3", "body": "hi"})
-	wantOK(t, res)
-	sc, _ := res.StructuredContent.(map[string]any)
-	for _, k := range []string{"draft_ref", "blocked", "too_many_recipients"} {
-		if v, ok := sc[k]; ok {
-			t.Errorf("a sent result has %s = %v", k, v)
-		}
+	tests := []struct {
+		name      string
+		fake      *fakeDaemon
+		tool      string
+		args      map[string]any
+		wantDraft string // empty: no draft_ref property
+	}{
+		{
+			name: "sent",
+			fake: &fakeDaemon{Send: sentResult(&chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Sent{Sent: &chainmailv1.Sent{MessageId: "m1@x"}}})},
+			tool: "send_email",
+			args: map[string]any{"account": "work", "to": []string{"a@x.test"}, "subject": "Q3", "body": "hi"},
+		},
+		{
+			name: "draft",
+			fake: &fakeDaemon{CreateDraft: func(context.Context, *chainmailv1.CreateDraftRequest) (*chainmailv1.CreateDraftResponse, error) {
+				return &chainmailv1.CreateDraftResponse{Draft: &chainmailv1.Draft{Ref: testRef2, MessageId: "d1@x"}}, nil
+			}},
+			tool:      "create_draft",
+			args:      map[string]any{"account": "work", "to": []string{"a@x.test"}, "subject": "Q3", "body": "hi"},
+			wantDraft: testRef2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnv(t, tt.fake, latest)
+			res := e.call(t, tt.tool, tt.args)
+			wantOK(t, res)
+			sc, ok := res.StructuredContent.(map[string]any)
+			if !ok {
+				t.Fatalf("structured content is %T, want an object", res.StructuredContent)
+			}
+			if sc["status"] != tt.name {
+				t.Errorf("status = %v, want %s", sc["status"], tt.name)
+			}
+			d, has := sc["draft_ref"]
+			switch {
+			case tt.wantDraft == "" && has:
+				t.Errorf("a %s result has draft_ref = %v", tt.name, d)
+			case tt.wantDraft != "" && d != tt.wantDraft:
+				t.Errorf("draft_ref = %v (present %t), want %q", d, has, tt.wantDraft)
+			}
+			for _, k := range []string{"blocked", "too_many_recipients"} {
+				if v, ok := sc[k]; ok {
+					t.Errorf("a %s result has %s = %v", tt.name, k, v)
+				}
+			}
+		})
 	}
 }
 
@@ -442,4 +488,43 @@ func composeSameJSON(t *testing.T, a, b any) bool {
 		t.Fatal(err)
 	}
 	return string(ja) == string(jb)
+}
+
+// TestComposeWrapsTheMessageID: send_draft keeps the stored draft's
+// Message-ID, so a result's message_id can come from a message. It reaches
+// the agent only as untrusted data, never in the summary, whatever the
+// status.
+func TestComposeWrapsTheMessageID(t *testing.T) {
+	t.Parallel()
+	id := readHostile + "@x.test"
+	sendDraft := func(r *chainmailv1.ComposeResult) *fakeDaemon {
+		return &fakeDaemon{SendDraft: func(context.Context, *chainmailv1.SendDraftRequest) (*chainmailv1.SendDraftResponse, error) {
+			return &chainmailv1.SendDraftResponse{Result: r}, nil
+		}}
+	}
+	tests := []struct {
+		name string
+		fake *fakeDaemon
+		tool string
+		args map[string]any
+	}{
+		{"sent", sendDraft(&chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Sent{Sent: &chainmailv1.Sent{MessageId: id, SentRef: testRef2}}}), "send_draft", map[string]any{"ref": testRef}},
+		{"duplicate", sendDraft(&chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Sent{Sent: &chainmailv1.Sent{MessageId: id, Duplicate: true}}}), "send_draft", map[string]any{"ref": testRef}},
+		{"held", sendDraft(composeHeld(&chainmailv1.Held{Draft: &chainmailv1.Draft{Ref: testRef, MessageId: id}, Hint: "held by policy"})), "send_draft", map[string]any{"ref": testRef}},
+		{"draft", &fakeDaemon{CreateDraft: func(context.Context, *chainmailv1.CreateDraftRequest) (*chainmailv1.CreateDraftResponse, error) {
+			return &chainmailv1.CreateDraftResponse{Draft: &chainmailv1.Draft{Ref: testRef2, MessageId: id}}, nil
+		}}, "create_draft", map[string]any{"account": "work", "subject": "Q3"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnv(t, tt.fake, latest)
+			res := e.call(t, tt.tool, tt.args)
+			wantOK(t, res)
+			if n := readWrappedOnly(t, res.StructuredContent, readHostile); n != 1 {
+				t.Errorf("%d enveloped hostile strings, want 1 (message_id)", n)
+			}
+			readInsideMarkers(t, textOf(res), readHostile)
+		})
+	}
 }

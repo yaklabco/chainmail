@@ -165,7 +165,9 @@ func TestMCPAgainstDovecot(t *testing.T) {
 	}
 
 	// 2. organize: a new folder, a move into it, then archive.
-	var folder struct{ Name string }
+	var folder struct {
+		Name struct{ Untrusted string } `json:"name"`
+	}
 	s.call("create_folder", map[string]any{"account": "dove", "name": "Projects"}, &folder)
 	var moved, archived struct {
 		Outcomes []struct {
@@ -173,7 +175,7 @@ func TestMCPAgainstDovecot(t *testing.T) {
 		} `json:"outcomes"`
 		Succeeded int `json:"succeeded"`
 	}
-	s.call("move", map[string]any{"refs": []string{found.Rows[0].Ref}, "folder": folder.Name}, &moved)
+	s.call("move", map[string]any{"refs": []string{found.Rows[0].Ref}, "folder": folder.Name.Untrusted}, &moved)
 	if moved.Succeeded != 1 || moved.Outcomes[0].NewRef == "" {
 		t.Fatalf("move = %+v", moved)
 	}

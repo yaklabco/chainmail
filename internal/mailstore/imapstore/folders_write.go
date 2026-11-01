@@ -26,6 +26,7 @@ import (
 func (s *Store) CreateFolder(ctx context.Context, name string) (string, error) {
 	var created string
 	err := s.changeFolders(ctx, false, func(c *conn, t folderTree, sent func()) error {
+		requested := name
 		name := t.serverName(name)
 		if err := t.checkName(s.acct.Name, name); err != nil {
 			return err
@@ -34,10 +35,10 @@ func (s *Store) CreateFolder(ctx context.Context, name string) (string, error) {
 			return fmt.Errorf("%w: folder %q", mailstore.ErrExists, name)
 		}
 		sent()
-		if err := t.createParents(ctx, c, name); err != nil {
+		if err := t.createParents(ctx, c, name, requested); err != nil {
 			return err
 		}
-		if err := c.folderCommand(ctx, name, func() error { return c.client().Create(name, nil).Wait() }); err != nil {
+		if err := c.folderCommand(ctx, name, requested, func() error { return c.client().Create(name, nil).Wait() }); err != nil {
 			return err
 		}
 		created = name
@@ -55,10 +56,11 @@ func (s *Store) CreateFolder(ctx context.Context, name string) (string, error) {
 func (s *Store) RenameFolder(ctx context.Context, from, to string) (string, error) {
 	var renamed string
 	err := s.changeFolders(ctx, true, func(c *conn, t folderTree, sent func()) error {
+		requestedTo := to
 		to := t.serverName(to)
 		i := t.lookup(from)
 		if i < 0 {
-			return &mailstore.FolderNotFoundError{Name: t.serverName(from)}
+			return &mailstore.FolderNotFoundError{Name: t.serverName(from), Requested: from}
 		}
 		if err := t.mutable(i); err != nil {
 			return err
@@ -88,10 +90,10 @@ func (s *Store) RenameFolder(ctx context.Context, from, to string) (string, erro
 			}
 		}
 		sent()
-		if err := t.createParents(ctx, c, to); err != nil {
+		if err := t.createParents(ctx, c, to, requestedTo); err != nil {
 			return err
 		}
-		if err := c.folderCommand(ctx, src, func() error { return c.client().Rename(src, to, nil).Wait() }); err != nil {
+		if err := c.folderCommand(ctx, src, from, func() error { return c.client().Rename(src, to, nil).Wait() }); err != nil {
 			return err
 		}
 		renamed = to
@@ -108,7 +110,7 @@ func (s *Store) DeleteFolder(ctx context.Context, name string, force bool) error
 	return s.changeFolders(ctx, true, func(c *conn, t folderTree, sent func()) error {
 		i := t.lookup(name)
 		if i < 0 {
-			return &mailstore.FolderNotFoundError{Name: t.serverName(name)}
+			return &mailstore.FolderNotFoundError{Name: t.serverName(name), Requested: name}
 		}
 		if err := t.mutable(i); err != nil {
 			return err
@@ -118,7 +120,7 @@ func (s *Store) DeleteFolder(ctx context.Context, name string, force bool) error
 			return fmt.Errorf("%w: %s has folders under it; delete them first", mailstore.ErrRefused, target)
 		}
 		if !force && selectable(t.list[i].Attrs) {
-			n, err := c.messageCount(ctx, target)
+			n, err := c.messageCount(ctx, target, name)
 			if err != nil {
 				return err
 			}
@@ -127,7 +129,7 @@ func (s *Store) DeleteFolder(ctx context.Context, name string, force bool) error
 			}
 		}
 		sent()
-		return c.folderCommand(ctx, target, func() error { return c.client().Delete(target).Wait() })
+		return c.folderCommand(ctx, target, name, func() error { return c.client().Delete(target).Wait() })
 	})
 }
 
@@ -440,8 +442,9 @@ func (t folderTree) mutable(i int) error {
 }
 
 // createParents creates each missing folder above name, top first. One
-// that turns out to exist already is fine.
-func (t folderTree) createParents(ctx context.Context, c *conn, name string) error {
+// that turns out to exist already is fine. requested is the caller's name
+// for name, for a missing-folder error.
+func (t folderTree) createParents(ctx context.Context, c *conn, name, requested string) error {
 	if t.delim == 0 {
 		return nil
 	}
@@ -451,7 +454,7 @@ func (t folderTree) createParents(ctx context.Context, c *conn, name string) err
 		if t.find(parent) >= 0 {
 			continue
 		}
-		err := c.folderCommand(ctx, parent, func() error { return c.client().Create(parent, nil).Wait() })
+		err := c.folderCommand(ctx, parent, requested, func() error { return c.client().Create(parent, nil).Wait() })
 		if err != nil && !errors.Is(err, mailstore.ErrExists) {
 			return err
 		}
@@ -459,8 +462,9 @@ func (t folderTree) createParents(ctx context.Context, c *conn, name string) err
 	return nil
 }
 
-// messageCount asks STATUS how many messages folder holds.
-func (c *conn) messageCount(ctx context.Context, folder string) (uint32, error) {
+// messageCount asks STATUS how many messages folder holds. requested is
+// the caller's name for folder, for a missing-folder error.
+func (c *conn) messageCount(ctx context.Context, folder, requested string) (uint32, error) {
 	var data *imap.StatusData
 	err := c.do(ctx, func() error {
 		var err error
@@ -468,20 +472,22 @@ func (c *conn) messageCount(ctx context.Context, folder string) (uint32, error) 
 		return err
 	})
 	if err != nil {
-		return 0, folderError(err, folder)
+		return 0, folderError(err, folder, requested)
 	}
 	return deref(data.NumMessages), nil
 }
 
 // folderCommand runs a CREATE, RENAME or DELETE of name and sorts the
-// server's refusal.
-func (c *conn) folderCommand(ctx context.Context, name string, f func() error) error {
-	return folderError(c.do(ctx, f), name)
+// server's refusal. requested is the folder as the caller named it.
+func (c *conn) folderCommand(ctx context.Context, name, requested string, f func() error) error {
+	return folderError(c.do(ctx, f), name, requested)
 }
 
 // folderError turns a NO to a folder command into the mailstore error it
-// means, leaving the server's text out. Other failures pass through.
-func folderError(err error, name string) error {
+// means, leaving the server's text out. A missing folder names requested,
+// the caller's name, for clients (see mailstore.FolderNotFoundError).
+// Other failures pass through.
+func folderError(err error, name, requested string) error {
 	var e *imap.Error
 	if !errors.As(err, &e) || e.Type != imap.StatusResponseTypeNo {
 		return err
@@ -490,7 +496,7 @@ func folderError(err error, name string) error {
 	case e.Code == imap.ResponseCodeAlreadyExists || strings.Contains(strings.ToLower(e.Text), "already exists"):
 		return fmt.Errorf("%w: folder %q", mailstore.ErrExists, name)
 	case missingFolder(err):
-		return &mailstore.FolderNotFoundError{Name: name}
+		return &mailstore.FolderNotFoundError{Name: name, Requested: requested}
 	case e.Code == imap.ResponseCodeCannot || e.Code == imap.ResponseCodeNoPerm:
 		return fmt.Errorf("%w: the server refused to change %q", mailstore.ErrRefused, name)
 	}

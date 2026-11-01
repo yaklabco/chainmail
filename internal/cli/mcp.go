@@ -43,7 +43,11 @@ func newMCPCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 				Logger:         logger,
 			})
 			runErr := s.Run(ctx, &mcp.IOTransport{Reader: closingReader(env.Stdin), Writer: nopWriteCloser{env.Stdout}})
-			if cause := ctx.Err(); cause != nil {
+			// Cause is nil while ctx runs, and once it ends names the signal
+			// (signal.NotifyContext). A session error that raced the signal
+			// is not dropped: Run logged its kind, never its text, unless it
+			// was the cancellation itself.
+			if cause := context.Cause(ctx); cause != nil {
 				logger.Info("session ended by a signal", "cause", cause)
 				return nil
 			}

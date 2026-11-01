@@ -35,12 +35,16 @@ var (
 	ErrExists = errors.New("already exists")
 )
 
-// FolderNotFoundError is ErrNotFound for a folder a caller named that the
-// account does not have, such as the destination of a move. Name is the
-// folder as the store looked for it: on a server with a personal namespace
-// prefix, the prefixed name.
+// FolderNotFoundError is ErrNotFound for a folder the account does not
+// have, such as the destination of a move. Name is the folder as the store
+// looked for it: on a server with a personal namespace prefix, the prefixed
+// name, so part of it is the server's choice and it is only for logs.
+// Requested is the folder as the caller named it, before the store mapped
+// it to the server's name, or empty when the caller named no folder, as
+// for the Trash a trash finds by its role. Only Requested may reach a client.
 type FolderNotFoundError struct {
-	Name string
+	Name      string
+	Requested string
 }
 
 func (e *FolderNotFoundError) Error() string {
