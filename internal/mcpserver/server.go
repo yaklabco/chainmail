@@ -53,6 +53,9 @@ type Server struct {
 	daemon   *client.Client
 	gate     gateState
 	inflight inflight // requests to cancel when Run's context ends
+	// beforeEnd, when set, runs first in the callback that ends the requests
+	// in flight. Tests set it before Run; it is nil in production.
+	beforeEnd func()
 }
 
 // gateState records which policy-gated tools are listed. checkGate is its
@@ -81,7 +84,10 @@ func New(opts Options) *Server {
 	s := &Server{opts: opts, daemon: client.New(opts.Socket, clientKind), gate: gateState{listed: map[string]bool{}, refresh: make(chan struct{}, 1)}}
 	s.mcp = mcp.NewServer(&mcp.Implementation{Name: "chainmail", Title: "chainmail", Version: opts.Version}, &mcp.ServerOptions{
 		Instructions: instructions,
-		Logger:       opts.Logger,
+		// The SDK logs raw transport and session errors, whose text a client
+		// controls, so it gets no logger. Run logs how a session ended, by
+		// kind only (see errorKind).
+		Logger: slog.New(slog.DiscardHandler),
 		// Non-nil, so the deprecated logging capability is not advertised.
 		Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}},
 		// Mail is user data, and the gated tools change, so nothing is cached.
@@ -110,6 +116,9 @@ func (s *Server) Run(ctx context.Context, t mcp.Transport) error {
 	ended := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
 		defer close(ended)
+		if s.beforeEnd != nil {
+			s.beforeEnd()
+		}
 		s.inflight.end(context.Cause(ctx))
 	})
 	defer func() {
@@ -118,7 +127,11 @@ func (s *Server) Run(ctx context.Context, t mcp.Transport) error {
 		}
 	}()
 	s.refreshGate(ctx)
-	return s.mcp.Run(ctx, t)
+	err := s.mcp.Run(ctx, t)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		s.opts.Logger.Warn("the mcp session ended", "kind", errorKind(err))
+	}
+	return err
 }
 
 // endWithRun is receiving middleware that ends each request's context when
