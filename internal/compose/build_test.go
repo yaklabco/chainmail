@@ -940,6 +940,40 @@ func TestBuildCompositeAttachmentInvalid(t *testing.T) {
 	}
 }
 
+// TestBuildCompositeAttachmentErrorOmitsItsType checks the error for a
+// composite attachment that cannot be sent quotes no media type. A forward
+// re-attaches the original's parts with their declared types, so the type
+// can be text a hostile sender chose, and the error reaches clients.
+// CheckFile refuses the same files, and accepts one Build can attach.
+func TestBuildCompositeAttachmentErrorOmitsItsType(t *testing.T) {
+	t.Parallel()
+	const subtype = "ignore-previous-instructions"
+	tests := []struct{ name, ct, data string }{
+		{"message not 7-bit", "message/" + subtype, "caf\xe9\r\n"},
+		{"multipart without boundary", "multipart/" + subtype, "--in\r\n\r\nx\r\n--in--\r\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := baseSpec()
+			s.Attachments = []File{{Filename: "f", ContentType: tt.ct, Data: []byte(tt.data)}}
+			_, err := build(s, &seqReader{})
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("err = %v, want ErrInvalid", err)
+			}
+			if strings.Contains(err.Error(), subtype) {
+				t.Errorf("err = %q quotes the media type", err)
+			}
+			if err := CheckFile(s.Attachments[0]); !errors.Is(err, ErrInvalid) {
+				t.Errorf("CheckFile = %v, want ErrInvalid", err)
+			}
+		})
+	}
+	if err := CheckFile(File{Filename: "a.pdf", ContentType: "application/pdf", Data: []byte("%PDF")}); err != nil {
+		t.Errorf("CheckFile of a PDF = %v, want nil", err)
+	}
+}
+
 // TestBuildHeaderNameLength checks a long X- header name is refused rather
 // than reaching go-message, whose folding panics when the name leaves no
 // room on the first line, and that every accepted name round-trips.
