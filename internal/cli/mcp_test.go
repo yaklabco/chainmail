@@ -173,3 +173,60 @@ func (b *syncBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
+
+// cancelOnLine is a stderr that cancels a context, with cause, once a line
+// holding line is written to it.
+type cancelOnLine struct {
+	syncBuffer
+	line   string
+	cancel func()
+}
+
+func (w *cancelOnLine) Write(p []byte) (int, error) {
+	n, err := w.syncBuffer.Write(p)
+	if strings.Contains(string(p), w.line) {
+		w.cancel()
+	}
+	return n, err
+}
+
+// TestMCPCommandLogsTheSignalAndARacingError: a session that fails just as
+// a signal ends the command exits 0, as a signal does. Its stderr names
+// the signal from the context's cause, and the session's error by kind
+// (logged by the server), never by its text.
+func TestMCPCommandLogsTheSignalAndARacingError(t *testing.T) {
+	t.Parallel()
+	const secret = "SENTINEL-hunter2-Bearer-ya29"
+	const signal = "terminated signal received"
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	// The session fails on the frame below, and the signal comes as the
+	// server logs that failure, so ctx has ended when Run returns its error.
+	stderr := &cancelOnLine{line: "the mcp session ended", cancel: func() { cancel(errors.New(signal)) }}
+	var stdout bytes.Buffer
+	home := t.TempDir()
+	env := Env{
+		Stdin:  io.NopCloser(strings.NewReader(`{"jsonrpc":"` + secret + `","id":1,"method":"tools/list"}` + "\n")),
+		Stdout: &stdout, Stderr: stderr,
+		Getenv: func(k string) string {
+			if k == "HOME" {
+				return home
+			}
+			return ""
+		},
+	}
+	code := Execute(ctx, []string{"--socket", "/nonexistent/chainmail.sock", "mcp"}, env)
+	got := stderr.String()
+	if code != 0 {
+		t.Errorf("exit code %d, want 0 for a session a signal ended (stderr %q)", code, got)
+	}
+	if !strings.Contains(got, "session ended by a signal") || !strings.Contains(got, signal) {
+		t.Errorf("stderr does not name the signal from the context's cause: %q", got)
+	}
+	if !strings.Contains(got, "the mcp session ended") || !strings.Contains(got, "kind=") {
+		t.Errorf("stderr does not give the session error's kind: %q", got)
+	}
+	if strings.Contains(got, secret) || strings.Contains(stdout.String(), secret) {
+		t.Errorf("client-controlled text reached the output: stderr %q, stdout %q", got, stdout.String())
+	}
+}
