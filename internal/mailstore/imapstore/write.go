@@ -153,13 +153,15 @@ func (c *conn) hasFolder(ctx context.Context, name string) (bool, error) {
 }
 
 // destOnce finds one write's destination once and gives every folder group
-// that answer. A failure is not kept, so the next group asks again. Its
-// gate holds one token, taken while a group finds or reads the answer; it
-// is a channel rather than a mutex so a waiter can give up when its
-// context ends.
+// that answer, so one call sends at most one destination LIST. The server's
+// answer is kept even when it is a refusal. Only a lost connection is not
+// kept, since the group retries that on a fresh connection. Its gate holds
+// one token, taken while a group finds or reads the answer; it is a channel
+// rather than a mutex so a waiter can give up when its context ends.
 type destOnce struct {
 	gate  chan struct{}
 	dest  string
+	err   error
 	found bool
 }
 
@@ -175,14 +177,14 @@ func (d *destOnce) get(ctx context.Context, find func() (string, error)) (string
 	}
 	defer func() { <-d.gate }()
 	if d.found {
-		return d.dest, nil
+		return d.dest, d.err
 	}
 	dest, err := find()
-	if err != nil {
+	if errors.Is(err, errConnLost) {
 		return "", err
 	}
-	d.dest, d.found = dest, true
-	return dest, nil
+	d.dest, d.err, d.found = dest, err, true
+	return dest, err
 }
 
 // Archive implements mailstore.Writer. The folder is Options.ArchiveFolder,
