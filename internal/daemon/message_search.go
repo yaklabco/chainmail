@@ -29,7 +29,7 @@ func (m *messageService) Search(ctx context.Context, req *connect.Request[chainm
 	ctx, cancel := withDeadline(ctx, callTimeout)
 	defer cancel()
 	resp, entry, searchErr := m.search(ctx, req.Msg)
-	if err := m.s.record(ctx, c, entry, searchErr); err != nil {
+	if err := m.s.record(ctx, c, entry, messageErr(searchErr)); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(resp), nil
@@ -180,10 +180,15 @@ func (rp resumePoint) cursorSource(account, folder string) ref.CursorSource {
 }
 
 // narrow keeps the matches of a fresh source result below where the cursor
-// left off. A changed UIDVALIDITY is ErrStaleRef.
+// left off. A changed UIDVALIDITY is ErrStaleRef, with fixed text: the
+// folder's name came from the server, which a hostile one can phrase as an
+// instruction, so only the daemon's logs see it.
 func (rp resumePoint) narrow(r mailstore.SourceResult) (mailstore.SourceResult, error) {
 	if r.Source.UIDValidity != rp.bound.UIDValidity {
-		return r, fmt.Errorf("%w: %s changed since the first page; search again", mailstore.ErrStaleRef, r.Source.Folder)
+		return r, &fixedTextError{
+			msg: "a folder changed since the first page; search again",
+			err: fmt.Errorf("%w: %s changed since the first page", mailstore.ErrStaleRef, r.Source.Folder),
+		}
 	}
 	if rp.bound.Below > 0 {
 		below := make([]uint32, 0, len(r.UIDs))

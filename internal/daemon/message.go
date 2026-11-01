@@ -127,7 +127,7 @@ func (m *messageService) ListFolders(ctx context.Context, req *connect.Request[c
 	ctx, cancel := withDeadline(ctx, callTimeout)
 	defer cancel()
 	resp, entry, listErr := m.listFolders(ctx, req.Msg.GetAccounts())
-	if err := m.s.record(ctx, c, entry, listErr); err != nil {
+	if err := m.s.record(ctx, c, entry, messageErr(listErr)); err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(resp), nil
