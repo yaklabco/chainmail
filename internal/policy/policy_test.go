@@ -2,6 +2,7 @@ package policy
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/jamesainslie/chainmail/internal/config"
@@ -317,5 +318,14 @@ send_allow = ["*@example.net", "pal@[192.0.2.2]", "friend@x.test"]
 				t.Errorf("CheckSend(%q) = %+v, want %+v", tt.recipients, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNewWordsInvalidEntriesAsParseDoes(t *testing.T) {
+	t.Parallel()
+	_, perr := config.Parse([]byte("[policy]\nsend_allow = [\"*@*\"]\n"))
+	_, nerr := New(&config.Config{Policy: config.Policy{SendAllow: []string{"*@*"}}})
+	if perr == nil || nerr == nil || nerr.Error() != `policy.send_allow: invalid entry "*@*"` || !strings.Contains(perr.Error(), nerr.Error()) {
+		t.Errorf("Parse: %v; New: %v; want the same wording", perr, nerr)
 	}
 }

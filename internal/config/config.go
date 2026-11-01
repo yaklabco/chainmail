@@ -15,7 +15,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
-	"github.com/jamesainslie/chainmail/internal/policy/entry"
+	"github.com/jamesainslie/chainmail/internal/mailaddr/allow"
 	"github.com/jamesainslie/chainmail/internal/provider"
 )
 
@@ -60,6 +60,15 @@ type Policy struct {
 	AllowExpunge bool `toml:"allow_expunge"`
 	// AllowFolderDelete permits deleting folders.
 	AllowFolderDelete bool `toml:"allow_folder_delete"`
+}
+
+// WithDefaults returns p with Parse's defaults for unset fields: a
+// max_recipients of 0 becomes DefaultMaxRecipients.
+func (p Policy) WithDefaults() Policy {
+	if p.MaxRecipients == 0 {
+		p.MaxRecipients = DefaultMaxRecipients
+	}
+	return p
 }
 
 // AccountPolicy is an account's [accounts.<name>.policy] table.
@@ -280,9 +289,7 @@ func (c *Config) applyDefaults() {
 	if c.Daemon.BodyLimit == "" {
 		c.Daemon.BodyLimit = DefaultBodyLimit
 	}
-	if c.Policy.MaxRecipients == 0 {
-		c.Policy.MaxRecipients = DefaultMaxRecipients
-	}
+	c.Policy = c.Policy.WithDefaults()
 	for name, a := range c.Accounts {
 		if a.Username == "" {
 			a.Username = a.Address
@@ -401,12 +408,23 @@ func joinMethods(ms []provider.AuthMethod) string {
 	return strings.Join(parts, " or ")
 }
 
-// validateSendAllow checks each entry with the matcher's own rules, so the
-// config check and the policy never disagree.
+// validateSendAllow reports each problem SendAllowProblems finds.
 func validateSendAllow(where string, entries []string, add func(string, ...any)) {
+	for _, p := range SendAllowProblems(where, entries) {
+		add("%s", p)
+	}
+}
+
+// SendAllowProblems lists the entries of a send_allow list at where that are
+// not a bare address or *@domain, each worded as Parse reports it:
+// `<where>: invalid entry "<entry>"`. It checks with the matcher's own rules,
+// so the config check and the policy never disagree.
+func SendAllowProblems(where string, entries []string) []string {
+	var out []string
 	for _, e := range entries {
-		if !entry.Valid(e) {
-			add("%s: invalid entry %q", where, e)
+		if !allow.Valid(e) {
+			out = append(out, fmt.Sprintf("%s: invalid entry %q", where, e))
 		}
 	}
+	return out
 }

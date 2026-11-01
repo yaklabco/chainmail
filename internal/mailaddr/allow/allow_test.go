@@ -1,4 +1,4 @@
-package entry
+package allow
 
 import "testing"
 
