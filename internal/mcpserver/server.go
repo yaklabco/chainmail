@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -50,6 +51,8 @@ type Server struct {
 	opts   Options
 	mcp    *mcp.Server
 	daemon *client.Client
+
+	inflight inflight // requests to cancel when Run's context ends
 }
 
 // New builds a Server with every tool registered. It does not dial the
@@ -70,7 +73,7 @@ func New(opts Options) *Server {
 			c.CacheScope = "private"
 		},
 	})
-	s.mcp.AddReceivingMiddleware(structuredErrors, s.gateOnList)
+	s.mcp.AddReceivingMiddleware(s.endWithRun, structuredErrors, s.gateOnList)
 	s.registerReadTools()
 	s.registerFileTools()
 	s.registerComposeTools()
@@ -83,10 +86,29 @@ func New(opts Options) *Server {
 // tools/list once the last check is older than gateInterval. There is no
 // background timer, so an idle session writes no audit rows. It returns
 // nil when the client closes the stream, and ctx's error when ctx ends.
+// When ctx ends, every request in flight is cancelled with it (see
+// endWithRun), so Run returns even while the client keeps its stream open.
 func (s *Server) Run(ctx context.Context, t mcp.Transport) error {
 	defer s.daemon.Close()
+	stop := context.AfterFunc(ctx, func() { s.inflight.end(context.Cause(ctx)) })
+	defer stop()
 	s.refreshGate(ctx)
 	return s.mcp.Run(ctx, t)
+}
+
+// endWithRun is receiving middleware that ends each request's context when
+// Run's context ends. The SDK hides the end of Run's context from handlers,
+// and on cancellation its Run calls ServerSession.Close, which waits for
+// every handler before it closes the transport. Without this, a daemon call
+// in flight when Run is cancelled, for example by SIGTERM, would hold Run
+// open until the daemon answered.
+func (s *Server) endWithRun(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		ctx, cancel := context.WithCancelCause(ctx)
+		defer cancel(nil)
+		defer s.inflight.add(cancel)()
+		return next(ctx, method, req)
+	}
 }
 
 // gateOnList is receiving middleware: before a tools/list it calls
@@ -116,4 +138,46 @@ func DefaultAttachmentsDir(getenv func(string) string) (string, error) {
 		base = filepath.Join(home, ".cache")
 	}
 	return filepath.Join(base, "chainmail", "attachments"), nil
+}
+
+// inflight holds the cancel funcs of the requests in flight, so that the end
+// of Run's context can reach them. It is safe for concurrent use.
+type inflight struct {
+	mu     sync.Mutex
+	next   uint64
+	cancel map[uint64]context.CancelCauseFunc
+	ended  error // the cause Run's context ended with; nil while it runs
+}
+
+// add tracks cancel until the returned func is called. Once Run's context
+// has ended it cancels at once instead.
+func (f *inflight) add(cancel context.CancelCauseFunc) (remove func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ended != nil {
+		cancel(f.ended)
+		return func() {}
+	}
+	if f.cancel == nil {
+		f.cancel = make(map[uint64]context.CancelCauseFunc)
+	}
+	id := f.next
+	f.next++
+	f.cancel[id] = cancel
+	return func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		delete(f.cancel, id)
+	}
+}
+
+// end cancels every tracked request, and every later one, with cause.
+func (f *inflight) end(cause error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ended = cause
+	for _, cancel := range f.cancel {
+		cancel(cause)
+	}
+	clear(f.cancel)
 }

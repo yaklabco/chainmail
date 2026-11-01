@@ -226,6 +226,64 @@ func TestClientCancellationCancelsTheDaemonCall(t *testing.T) {
 	}
 }
 
+func TestEndingRunCancelsTheDaemonCall(t *testing.T) {
+	t.Parallel()
+	started, cancelled := make(chan struct{}), make(chan struct{})
+	f := &fakeDaemon{ListFolders: func(ctx context.Context, _ *chainmailv1.ListFoldersRequest) (*chainmailv1.ListFoldersResponse, error) {
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+		return nil, ctx.Err()
+	}}
+	startFake(t, f)
+	s := New(Options{Socket: f.Socket, Version: "test", AttachmentsDir: t.TempDir()})
+	probeTool(s)
+	serverT, clientT := mcp.NewInMemoryTransports()
+	serverCtx, stopServer := context.WithCancel(context.Background())
+	defer stopServer()
+	ran := make(chan error, 1)
+	go func() { ran <- s.Run(serverCtx, serverT) }()
+
+	// The client's context is independent and never cancelled: the client
+	// keeps its side of the stream open the whole time.
+	clientCtx, stopClient := context.WithCancel(context.Background())
+	defer stopClient()
+	c := mcp.NewClient(&mcp.Implementation{Name: "chainmail-test", Version: "0"}, &mcp.ClientOptions{Capabilities: &mcp.ClientCapabilities{}})
+	cs, err := c.Connect(clientCtx, clientT, &mcp.ClientSessionOptions{ProtocolVersion: latest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := make(chan struct{})
+	go func() {
+		defer close(called)
+		_, _ = cs.CallTool(clientCtx, &mcp.CallToolParams{Name: "probe"}) // its outcome is not the point
+	}()
+	t.Cleanup(func() {
+		_ = cs.Close() // the session is over either way
+		<-called
+	})
+
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the daemon call did not start")
+	}
+	stopServer()
+	select {
+	case <-cancelled:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ending Run's context did not cancel the daemon call")
+	}
+	select {
+	case err := <-ran:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after its context ended")
+	}
+}
+
 func TestUnknownToolIsAProtocolError(t *testing.T) {
 	t.Parallel()
 	e := newTestEnv(t, &fakeDaemon{}, latest)
