@@ -190,12 +190,6 @@ func openDir(path string) (*os.Root, fs.FileInfo, error) {
 	return root, st, nil
 }
 
-// ownedByMe reports whether st belongs to the process's effective user.
-func ownedByMe(st fs.FileInfo) bool {
-	sys, ok := st.Sys().(*syscall.Stat_t)
-	return ok && sys.Uid == uint32(os.Geteuid())
-}
-
 // hinted is a tool error with a reason and a hint.
 func hinted(reason, hint, format string, args ...any) error {
 	return &toolError{body: errorBody{Reason: reason, Message: fmt.Sprintf(format, args...), Hint: hint}}
