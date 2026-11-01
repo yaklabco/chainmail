@@ -76,8 +76,9 @@ func (s *Store) appendedMsgID(ctx context.Context, c *conn, r ref.Ref) uint64 {
 	return ids[r.UID]
 }
 
-// Move implements mailstore.Writer. folder is written as the server has it
-// (serverName), as CreateFolder writes a new folder's name.
+// Move implements mailstore.Writer. folder is found as RenameFolder finds
+// one (destination): as given when the server has a folder called that,
+// else as serverName writes it, the way CreateFolder writes a new name.
 func (s *Store) Move(ctx context.Context, refs []ref.Ref, folder string) []mailstore.RefResult {
 	if s.gmail() {
 		return s.gmailMove(ctx, refs, folder)
@@ -85,8 +86,7 @@ func (s *Store) Move(ctx context.Context, refs []ref.Ref, folder string) []mails
 	return s.transferNamed(ctx, refs, folder, false)
 }
 
-// Copy implements mailstore.Writer. folder is written as the server has it
-// (serverName), as CreateFolder writes a new folder's name.
+// Copy implements mailstore.Writer. folder is found as Move finds it.
 func (s *Store) Copy(ctx context.Context, refs []ref.Ref, folder string) []mailstore.RefResult {
 	if s.gmail() {
 		return s.gmailCopy(ctx, refs, folder)
@@ -94,23 +94,95 @@ func (s *Store) Copy(ctx context.Context, refs []ref.Ref, folder string) []mails
 	return s.transferNamed(ctx, refs, folder, true)
 }
 
-// transferNamed is transfer into the folder a caller names, written as the
-// server has it: the rule CreateFolder follows (serverName). Each folder
-// group gets the namespace on its own connection once that has dialed, so
-// a first move still fans out. Only one of a first write's groups asks the
-// server, and the others wait for its answer (namespace). An empty name is
-// refused.
+// transferNamed is transfer into the folder a caller names, found by
+// destination. Each folder group gets the namespace on its own connection
+// once that has dialed, so a first move still fans out. Only one of a first
+// write's groups asks the server, and the others wait for its answer
+// (namespace). Likewise one group finds the destination and the others
+// take its answer (destOnce), so the groups of one call never write to two
+// folders. An empty name is refused.
 func (s *Store) transferNamed(ctx context.Context, refs []ref.Ref, name string, keepOriginal bool) []mailstore.RefResult {
 	if name == "" {
 		return s.transfer(ctx, refs, "", "", keepOriginal)
 	}
+	dest := newDestOnce()
 	return s.transferTo(ctx, refs, keepOriginal, name, func(ctx context.Context, c *conn) (string, error) {
 		ns, err := s.namespace(ctx, c)
 		if err != nil {
 			return "", err
 		}
-		return folderTree{prefix: ns.prefix, delim: ns.delim}.serverName(name), nil
+		return dest.get(ctx, func() (string, error) { return destination(ctx, c, ns, name) })
 	})
+}
+
+// destination is the folder a caller's name for a move or copy target
+// means, found as lookup finds the folder a rename or delete names: name
+// itself when the server has a folder called that, such as a shared folder
+// outside the personal namespace or a top-level Keep beside INBOX.Keep,
+// else serverName(name) in ns. It asks the server on c only when the two
+// differ.
+func destination(ctx context.Context, c *conn, ns folderSpace, name string) (string, error) {
+	mapped := folderTree{prefix: ns.prefix, delim: ns.delim}.serverName(name)
+	if mapped == name {
+		return name, nil
+	}
+	exists, err := c.hasFolder(ctx, name)
+	switch {
+	case err != nil:
+		return "", err
+	case exists:
+		return name, nil
+	default:
+		return mapped, nil
+	}
+}
+
+// hasFolder reports whether the server has a folder called name, matched
+// as find matches. LIST takes name as a pattern, in which * and % match
+// other folders too, so only a folder of exactly that name counts.
+func (c *conn) hasFolder(ctx context.Context, name string) (bool, error) {
+	var list []*imap.ListData
+	if err := c.do(ctx, func() error {
+		var err error
+		list, err = c.client().List("", name, nil).Collect()
+		return err
+	}); err != nil {
+		return false, err
+	}
+	return folderTree{list: list}.find(name) >= 0, nil
+}
+
+// destOnce finds one write's destination once and gives every folder group
+// that answer. A failure is not kept, so the next group asks again. Its
+// gate holds one token, taken while a group finds or reads the answer; it
+// is a channel rather than a mutex so a waiter can give up when its
+// context ends.
+type destOnce struct {
+	gate  chan struct{}
+	dest  string
+	found bool
+}
+
+func newDestOnce() *destOnce { return &destOnce{gate: make(chan struct{}, 1)} }
+
+// get returns the destination, calling find for it unless an earlier
+// group found it.
+func (d *destOnce) get(ctx context.Context, find func() (string, error)) (string, error) {
+	select {
+	case d.gate <- struct{}{}:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	defer func() { <-d.gate }()
+	if d.found {
+		return d.dest, nil
+	}
+	dest, err := find()
+	if err != nil {
+		return "", err
+	}
+	d.dest, d.found = dest, true
+	return dest, nil
 }
 
 // Archive implements mailstore.Writer. The folder is Options.ArchiveFolder,

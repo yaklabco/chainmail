@@ -529,3 +529,106 @@ func TestMissingFolderKeepsTheCallersName(t *testing.T) {
 	wantMissing(t, "Gmail Move", g.Move(ctx, []ref.Ref{gref}, "Nope")[0].Err, "Nope", "Nope")
 	wantMissing(t, "Gmail Copy", g.Copy(ctx, []ref.Ref{gref}, "Nope")[0].Err, "Nope", "Nope")
 }
+
+// TestMoveAndCopyFindTheFolderAsGiven: on a server that keeps folders under
+// "INBOX.", a move or copy destination is found the way RenameFolder and
+// DeleteFolder find a folder: the name as given when the server has a
+// folder called that, else the name under the prefix. So a top-level Keep
+// beside INBOX.Keep, and a shared folder outside the personal namespace,
+// stay reachable by the names LIST gives them.
+func TestMoveAndCopyFindTheFolderAsGiven(t *testing.T) {
+	t.Parallel()
+	folders := func() []*wsFolder {
+		return []*wsFolder{
+			wsMailbox("INBOX", "", 7, 1, 2, 3, 4), wsMailbox("A", "", 8, 1),
+			wsMailbox("Keep", "", 30), wsMailbox("INBOX.Keep", "", 31),
+			wsMailbox("INBOX.Only", "", 32), wsMailbox("Shared.Team", "", 33),
+		}
+	}
+	tests := []struct {
+		name, caps, folder, want string
+		copy                     bool
+	}{
+		{name: "move to a top-level folder beside one under the prefix", caps: "NAMESPACE MOVE UIDPLUS", folder: "Keep", want: "Keep"},
+		{name: "copy to a top-level folder beside one under the prefix", caps: "NAMESPACE MOVE UIDPLUS", folder: "Keep", want: "Keep", copy: true},
+		{name: "move by copy to a top-level folder", caps: "NAMESPACE UIDPLUS", folder: "Keep", want: "Keep"},
+		{name: "move to a name only under the prefix", caps: "NAMESPACE MOVE UIDPLUS", folder: "Only", want: "INBOX.Only"},
+		{name: "copy to a name only under the prefix", caps: "NAMESPACE MOVE UIDPLUS", folder: "Only", want: "INBOX.Only", copy: true},
+		{name: "move to a shared folder outside the namespace", caps: "NAMESPACE MOVE UIDPLUS", folder: "Shared.Team", want: "Shared.Team"},
+		{name: "copy to a shared folder outside the namespace", caps: "NAMESPACE MOVE UIDPLUS", folder: "Shared.Team", want: "Shared.Team", copy: true},
+		{name: "a name with the prefix", caps: "NAMESPACE MOVE UIDPLUS", folder: "INBOX.Keep", want: "INBOX.Keep"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := startWriteServer(t, &writeServer{caps: tc.caps, delim: ".", namespace: "INBOX.", folders: folders()})
+			s := writeStore(t, srv, Options{})
+			write := s.Move
+			if tc.copy {
+				write = s.Copy
+			}
+			res := write(t.Context(), []ref.Ref{hostRef("INBOX", 7, 1)}, tc.folder)
+			if res[0].Err != nil || res[0].Ref.Folder != tc.want {
+				t.Fatalf("result = %+v, want a ref in %s: commands %q", res[0], tc.want, srv.received())
+			}
+			if got := len(srv.folder(tc.want).msgs); got != 1 {
+				t.Errorf("%s holds %d messages, want 1: commands %q", tc.want, got, srv.received())
+			}
+		})
+	}
+}
+
+// TestAMoveResolvesItsFolderOnce: the folder groups of one move all take
+// the same destination, asked of the server once.
+func TestAMoveResolvesItsFolderOnce(t *testing.T) {
+	t.Parallel()
+	srv := startWriteServer(t, &writeServer{caps: "NAMESPACE MOVE UIDPLUS", delim: ".", namespace: "INBOX.", folders: []*wsFolder{
+		wsMailbox("INBOX", "", 7, 1), wsMailbox("A", "", 8, 1), wsMailbox("B", "", 9, 1),
+		wsMailbox("Keep", "", 30), wsMailbox("INBOX.Keep", "", 31),
+	}})
+	s := writeStore(t, srv, Options{PoolSize: 3})
+	res := s.Move(t.Context(), []ref.Ref{hostRef("INBOX", 7, 1), hostRef("A", 8, 1), hostRef("B", 9, 1)}, "Keep")
+	for i, r := range res {
+		if r.Err != nil || r.Ref.Folder != "Keep" {
+			t.Errorf("ref %d: %+v, want a ref in Keep", i, r)
+		}
+	}
+	lists := 0
+	for _, c := range srv.received() {
+		if kindOf(c) == "LIST" && strings.Contains(c, "Keep") {
+			lists++
+		}
+	}
+	if lists != 1 {
+		t.Errorf("%d LISTs for Keep, want 1: commands %q", lists, srv.received())
+	}
+}
+
+// TestDestOnceKeepsOnlyAnAnswer: destOnce keeps the first destination found
+// and not a failure, and a group waiting for another's lookup gives up
+// when its context ends.
+func TestDestOnceKeepsOnlyAnAnswer(t *testing.T) {
+	t.Parallel()
+	d := newDestOnce()
+	calls := 0
+	fail := func() (string, error) { calls++; return "", errors.New("connection reset") }
+	find := func() (string, error) { calls++; return "Keep", nil }
+	if _, err := d.get(t.Context(), fail); err == nil {
+		t.Fatal("a failed lookup gave no error")
+	}
+	for range 2 {
+		if got, err := d.get(t.Context(), find); err != nil || got != "Keep" {
+			t.Fatalf("get = %q, %v, want Keep", got, err)
+		}
+	}
+	if calls != 2 {
+		t.Errorf("lookups = %d, want 2: the failure retried, then the answer kept", calls)
+	}
+	d.gate <- struct{}{} // another group is finding it
+	t.Cleanup(func() { <-d.gate })
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := d.get(ctx, find); !errors.Is(err, context.Canceled) {
+		t.Errorf("get behind a lookup in progress = %v, want context.Canceled", err)
+	}
+}
