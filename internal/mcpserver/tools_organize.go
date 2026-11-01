@@ -281,10 +281,11 @@ func (s *Server) refreshStaleGate(ctx context.Context) {
 // checkGate asks the daemon which gated tools policy allows and applies the
 // answer. The caller holds s.gate.refresh, so answers apply in the order
 // they were asked for. The daemon call runs without s.gate.mu, and the tool
-// changes and the check time are applied together under it. AddTool and
-// RemoveTools only update the SDK registry here: the SDK sends
-// notifications/tools/list_changed later, from a timer, without its lock or
-// s.gate.mu held.
+// changes and the check time are applied together under it. The same
+// answer sets the destructiveHint of the draft tools that expunge while
+// expunge is allowed (addDraftTools). AddTool and RemoveTools only update
+// the SDK registry here: the SDK sends notifications/tools/list_changed
+// later, from a timer, without its lock or s.gate.mu held.
 func (s *Server) checkGate(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, gateTimeout)
 	defer cancel()
@@ -303,6 +304,9 @@ func (s *Server) checkGate(ctx context.Context) {
 	s.gate.mu.Lock()
 	defer s.gate.mu.Unlock()
 	s.gate.checked = s.now()
+	if want[toolExpunge] != s.gate.listed[toolExpunge] {
+		s.addDraftTools(want[toolExpunge])
+	}
 	for _, name := range gatedTools {
 		switch {
 		case want[name] && !s.gate.listed[name]:

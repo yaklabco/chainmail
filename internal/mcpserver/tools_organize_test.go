@@ -487,3 +487,77 @@ func TestFolderResultsWrapTheServersName(t *testing.T) {
 		})
 	}
 }
+
+// draftExpungers are the draft tools that expunge the old draft for good
+// while policy allows expunge, and move it to Trash otherwise.
+var draftExpungers = []string{"delete_draft", "send_draft", "update_draft"}
+
+// destructiveHints returns each listed tool's destructiveHint.
+func destructiveHints(t *testing.T, cs *mcp.ClientSession) map[string]bool {
+	t.Helper()
+	res, err := cs.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make(map[string]bool, len(res.Tools))
+	for _, tl := range res.Tools {
+		if tl.Annotations == nil || tl.Annotations.DestructiveHint == nil {
+			t.Fatalf("%s: no destructiveHint", tl.Name)
+		}
+		out[tl.Name] = *tl.Annotations.DestructiveHint
+	}
+	return out
+}
+
+// TestDraftToolsFollowTheExpungePolicy: update_draft, send_draft and
+// delete_draft are destructive exactly while some account allows expunge,
+// since the daemon then expunges the old draft rather than move it to
+// Trash. The hint changes with the same check that lists expunge, on a
+// stale tools/list, and the tools keep their handlers.
+func TestDraftToolsFollowTheExpungePolicy(t *testing.T) {
+	t.Parallel()
+	p := &gatePolicy{}
+	var mu sync.Mutex
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	advance := func() { mu.Lock(); now = now.Add(gateInterval); mu.Unlock() }
+	f := &fakeDaemon{ListAccounts: p.listAccounts, DeleteDraft: func(context.Context, *chainmailv1.DeleteDraftRequest) (*chainmailv1.DeleteDraftResponse, error) {
+		return &chainmailv1.DeleteDraftResponse{}, nil
+	}}
+	e := newTestEnv(t, f, latest, func(o *Options) { o.Now = clock })
+	steps := []struct {
+		name                  string
+		expunge, folderDelete bool
+	}{
+		{name: "expunge off"},
+		{name: "expunge on", expunge: true},
+		{name: "folder delete alone does not count", folderDelete: true},
+		{name: "expunge on again", expunge: true, folderDelete: true},
+		{name: "expunge off again"},
+	}
+	for _, st := range steps { // sequential: each step builds on the last
+		if st.name != steps[0].name {
+			p.set(st.expunge, st.folderDelete, false)
+			advance() // the next tools/list finds the check stale
+		}
+		hints := destructiveHints(t, e.cs)
+		if _, listed := hints["expunge"]; listed != st.expunge {
+			t.Errorf("%s: expunge listed = %t, want %t", st.name, listed, st.expunge)
+		}
+		for _, name := range draftExpungers {
+			got, ok := hints[name]
+			if !ok || got != st.expunge {
+				t.Errorf("%s: %s destructiveHint = %t (listed %t), want %t", st.name, name, got, ok, st.expunge)
+			}
+		}
+		for _, name := range []string{"send_email", "reply", "forward", "create_draft"} {
+			if hints[name] {
+				t.Errorf("%s: %s is destructive", st.name, name)
+			}
+		}
+		wantOK(t, e.call(t, "delete_draft", map[string]any{"ref": testRef}))
+		if got := e.fake.lastCall(t, chainmailv1connect.ComposeServiceDeleteDraftProcedure).Msg; !proto.Equal(got, &chainmailv1.DeleteDraftRequest{Ref: testRef}) {
+			t.Errorf("%s: delete_draft request = %v", st.name, got)
+		}
+	}
+}

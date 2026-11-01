@@ -43,9 +43,22 @@ func (s *Server) registerComposeTools() {
 	addTool(s, "reply", "Reply to a message", "Reply to a message, quoting it under the new text. With all, it replies to everyone. "+draftNote+" "+heldNote+" "+keyNote, composeHints, s.reply)
 	addTool(s, "forward", "Forward a message", "Forward a message with its attachments unless no_attachments. "+draftNote+" "+heldNote+" "+keyNote, composeHints, s.forward)
 	addTool(s, "create_draft", "Create a draft", "Save a new message to the account's Drafts folder without sending it.", composeHints, s.createDraft)
-	addTool(s, "update_draft", "Update a draft", "Replace a draft with a new version. The result's draft_ref is the new ref; the old ref is gone.", composeHints, s.updateDraft)
-	addTool(s, "send_draft", "Send a draft", "Send a draft and remove it from Drafts. "+heldNote+" "+keyNote, composeHints, s.sendDraft)
-	addTool(s, "delete_draft", "Delete a draft", "Delete a draft. While policy disables expunge, the daemon moves it to Trash.", hints{idempotent: true, openWorld: true}, s.deleteDraft)
+	s.addDraftTools(false)
+}
+
+// addDraftTools registers update_draft, send_draft and delete_draft. Each
+// removes the old draft: to Trash while no account allows expunge, and for
+// good on an account that does. So destructive is whether some account
+// allows expunge, as checkGate last found it, and checkGate calls this again
+// when that changes. AddTool replaces a tool of the same name, keeps this
+// handler, and has the SDK send notifications/tools/list_changed.
+func (s *Server) addDraftTools(destructive bool) {
+	h := composeHints
+	h.destructive = destructive
+	addTool(s, "update_draft", "Update a draft", "Replace a draft with a new version. The result's draft_ref is the new ref; the old ref is gone.", h, s.updateDraft)
+	addTool(s, "send_draft", "Send a draft", "Send a draft and remove it from Drafts. "+heldNote+" "+keyNote, h, s.sendDraft)
+	h.idempotent = true
+	addTool(s, "delete_draft", "Delete a draft", "Delete a draft. While policy disables expunge, the daemon moves it to Trash.", h, s.deleteDraft)
 }
 
 // contentIn is the body, attachments and options every writing tool takes.
