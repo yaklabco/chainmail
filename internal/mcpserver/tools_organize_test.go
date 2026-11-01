@@ -3,7 +3,9 @@ package mcpserver
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -394,5 +396,55 @@ func TestGateListStopsWaitingWhenItsContextEnds(t *testing.T) {
 	h.unblock()
 	if err := <-first; err != nil {
 		t.Fatalf("first tools/list: %v", err)
+	}
+}
+
+// TestGateLogsOnlyTheErrorKind fails ListAccounts with a sentinel in the
+// error text, at start and on a stale tools/list. The stderr log names the
+// failure's kind and never its text, which can carry a backend's
+// diagnostics or a secret.
+func TestGateLogsOnlyTheErrorKind(t *testing.T) {
+	t.Parallel()
+	for name, failure := range map[string]error{
+		"connect error":              connect.NewError(connect.CodeUnavailable, errors.New("backend said "+sentinel)),
+		"detail-less internal error": connect.NewError(connect.CodeInternal, errors.New("transport said "+sentinel)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var mu sync.Mutex
+			now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+			var logs syncBuffer
+			f := &fakeDaemon{ListAccounts: func(context.Context, *chainmailv1.ListAccountsRequest) (*chainmailv1.ListAccountsResponse, error) {
+				return nil, failure
+			}}
+			e := newTestEnv(t, f, latest, func(o *Options) {
+				o.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+				o.Now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+			})
+			start := logs.String()
+			if !strings.Contains(start, "kind=") || !strings.Contains(start, "connect") {
+				t.Errorf("start-up log does not name the failure's kind: %q", start)
+			}
+			mu.Lock()
+			now = now.Add(gateInterval)
+			mu.Unlock()
+			listToolNames(t, e.cs)
+			calls := 0
+			for _, c := range e.fake.Calls() {
+				if c.Procedure == chainmailv1connect.AccountServiceListAccountsProcedure {
+					calls++
+				}
+			}
+			if calls != 2 {
+				t.Fatalf("ListAccounts called %d times, want 2 (start-up and the stale list)", calls)
+			}
+			all := logs.String()
+			if strings.Count(all, "kind=") < 2 {
+				t.Errorf("the stale refresh did not log the failure's kind: %q", all)
+			}
+			if strings.Contains(all, sentinel) {
+				t.Errorf("the error's text reached the stderr log: %q", all)
+			}
+		})
 	}
 }

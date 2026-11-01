@@ -277,7 +277,9 @@ func (s *Server) checkGate(ctx context.Context) {
 	want := map[string]bool{}
 	resp, err := s.daemon.Account.ListAccounts(ctx, connect.NewRequest(&chainmailv1.ListAccountsRequest{}))
 	if err != nil {
-		s.opts.Logger.Warn("checking policy for the gated tools", "err", err)
+		// Only the kind: the text of a transport or detail-less error can
+		// carry a backend's diagnostics or a secret (see errorKind).
+		s.opts.Logger.Warn("checking policy for the gated tools", "kind", errorKind(err))
 	} else {
 		for _, a := range resp.Msg.GetAccounts() {
 			want[toolExpunge] = want[toolExpunge] || a.GetCapabilities().GetAllowExpunge()
