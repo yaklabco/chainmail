@@ -45,11 +45,12 @@ func (a *accountService) list() (*chainmailv1.ListAccountsResponse, error) {
 			return nil, err
 		}
 		pb := &chainmailv1.Account{
-			Name:       name,
-			Provider:   acct.Provider.Name,
-			Address:    acct.Address,
-			AuthMethod: string(acct.Auth),
-			AuthState:  chainmailv1.AuthState_AUTH_STATE_OK,
+			Name:         name,
+			Provider:     acct.Provider.Name,
+			Address:      acct.Address,
+			AuthMethod:   string(acct.Auth),
+			AuthState:    chainmailv1.AuthState_AUTH_STATE_OK,
+			Capabilities: a.capabilities(),
 		}
 		if st.Required {
 			pb.AuthState = chainmailv1.AuthState_AUTH_STATE_REQUIRED
@@ -58,6 +59,16 @@ func (a *accountService) list() (*chainmailv1.ListAccountsResponse, error) {
 		resp.Accounts = append(resp.Accounts, pb)
 	}
 	return resp, nil
+}
+
+// capabilities is what the policy lets agents do on an account, as the
+// organize gate decides it. The per-account policy table holds only
+// send_allow, so today both flags are the global settings for every account.
+func (a *accountService) capabilities() *chainmailv1.AccountCapabilities {
+	return &chainmailv1.AccountCapabilities{
+		AllowExpunge:      a.s.policy.AllowExpunge(),
+		AllowFolderDelete: a.s.policy.AllowFolderDelete(),
+	}
 }
 
 func (a *accountService) TestAccount(ctx context.Context, req *connect.Request[chainmailv1.TestAccountRequest]) (*connect.Response[chainmailv1.TestAccountResponse], error) {

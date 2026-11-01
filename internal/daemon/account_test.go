@@ -17,6 +17,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/emersion/go-smtp"
 	"golang.org/x/oauth2"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/api"
@@ -93,6 +94,43 @@ func TestListAccountsReportsAuthState(t *testing.T) {
 	}
 	if last := lastAudit(t, h); last.Action != "accounts.list" || last.Result != "ok" {
 		t.Errorf("audit = %+v", last)
+	}
+}
+
+// ListAccounts reports each account's policy-gated capabilities as the
+// policy gates them, and never the send allowlist.
+func TestListAccountsReportsCapabilities(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, policy          string
+		expunge, folderDelete bool
+	}{
+		{name: "defaults"},
+		{name: "expunge", policy: "allow_expunge = true\n", expunge: true},
+		{name: "folder delete", policy: "allow_folder_delete = true\n", folderDelete: true},
+		{name: "both", policy: "allow_expunge = true\nallow_folder_delete = true\n", expunge: true, folderDelete: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := hostingerConfig + "\n[policy]\nsend_allow = [\"*@allow-list-secret.test\"]\n" + tt.policy
+			h := daemontest.Start(t, cfg, daemontest.Options{})
+			resp, err := h.Client.Account.ListAccounts(t.Context(), connect.NewRequest(&chainmailv1.ListAccountsRequest{}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			caps := resp.Msg.GetAccounts()[0].GetCapabilities()
+			if caps == nil || caps.GetAllowExpunge() != tt.expunge || caps.GetAllowFolderDelete() != tt.folderDelete {
+				t.Errorf("capabilities = %+v, want expunge %v, folder delete %v", caps, tt.expunge, tt.folderDelete)
+			}
+			raw, err := protojson.Marshal(resp.Msg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(raw), "allow-list-secret") {
+				t.Errorf("ListAccounts leaks the allowlist: %s", raw)
+			}
+		})
 	}
 }
 

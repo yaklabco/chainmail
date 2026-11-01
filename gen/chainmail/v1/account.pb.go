@@ -84,7 +84,10 @@ type Account struct {
 	AuthMethod string    `protobuf:"bytes,4,opt,name=auth_method,json=authMethod,proto3" json:"auth_method,omitempty"`
 	AuthState  AuthState `protobuf:"varint,5,opt,name=auth_state,json=authState,proto3,enum=chainmail.v1.AuthState" json:"auth_state,omitempty"`
 	// Why auth is required, and what to run, when auth_state is AUTH_STATE_REQUIRED.
-	AuthDetail    string `protobuf:"bytes,6,opt,name=auth_detail,json=authDetail,proto3" json:"auth_detail,omitempty"`
+	AuthDetail string `protobuf:"bytes,6,opt,name=auth_detail,json=authDetail,proto3" json:"auth_detail,omitempty"`
+	// What the policy lets agents do on this account, after the global and
+	// the account's own policy tables. Never the send allowlist.
+	Capabilities  *AccountCapabilities `protobuf:"bytes,7,opt,name=capabilities,proto3" json:"capabilities,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -161,6 +164,69 @@ func (x *Account) GetAuthDetail() string {
 	return ""
 }
 
+func (x *Account) GetCapabilities() *AccountCapabilities {
+	if x != nil {
+		return x.Capabilities
+	}
+	return nil
+}
+
+// AccountCapabilities says which policy-gated actions an account allows.
+// The daemon still checks the policy on every call.
+type AccountCapabilities struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Expunge may remove messages for good.
+	AllowExpunge bool `protobuf:"varint,1,opt,name=allow_expunge,json=allowExpunge,proto3" json:"allow_expunge,omitempty"`
+	// DeleteFolder may delete folders.
+	AllowFolderDelete bool `protobuf:"varint,2,opt,name=allow_folder_delete,json=allowFolderDelete,proto3" json:"allow_folder_delete,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *AccountCapabilities) Reset() {
+	*x = AccountCapabilities{}
+	mi := &file_chainmail_v1_account_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AccountCapabilities) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AccountCapabilities) ProtoMessage() {}
+
+func (x *AccountCapabilities) ProtoReflect() protoreflect.Message {
+	mi := &file_chainmail_v1_account_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AccountCapabilities.ProtoReflect.Descriptor instead.
+func (*AccountCapabilities) Descriptor() ([]byte, []int) {
+	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *AccountCapabilities) GetAllowExpunge() bool {
+	if x != nil {
+		return x.AllowExpunge
+	}
+	return false
+}
+
+func (x *AccountCapabilities) GetAllowFolderDelete() bool {
+	if x != nil {
+		return x.AllowFolderDelete
+	}
+	return false
+}
+
 type ListAccountsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -169,7 +235,7 @@ type ListAccountsRequest struct {
 
 func (x *ListAccountsRequest) Reset() {
 	*x = ListAccountsRequest{}
-	mi := &file_chainmail_v1_account_proto_msgTypes[1]
+	mi := &file_chainmail_v1_account_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -181,7 +247,7 @@ func (x *ListAccountsRequest) String() string {
 func (*ListAccountsRequest) ProtoMessage() {}
 
 func (x *ListAccountsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_account_proto_msgTypes[1]
+	mi := &file_chainmail_v1_account_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -194,7 +260,7 @@ func (x *ListAccountsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAccountsRequest.ProtoReflect.Descriptor instead.
 func (*ListAccountsRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{1}
+	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{2}
 }
 
 type ListAccountsResponse struct {
@@ -206,7 +272,7 @@ type ListAccountsResponse struct {
 
 func (x *ListAccountsResponse) Reset() {
 	*x = ListAccountsResponse{}
-	mi := &file_chainmail_v1_account_proto_msgTypes[2]
+	mi := &file_chainmail_v1_account_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -218,7 +284,7 @@ func (x *ListAccountsResponse) String() string {
 func (*ListAccountsResponse) ProtoMessage() {}
 
 func (x *ListAccountsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_account_proto_msgTypes[2]
+	mi := &file_chainmail_v1_account_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -231,7 +297,7 @@ func (x *ListAccountsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAccountsResponse.ProtoReflect.Descriptor instead.
 func (*ListAccountsResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{2}
+	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ListAccountsResponse) GetAccounts() []*Account {
@@ -250,7 +316,7 @@ type TestAccountRequest struct {
 
 func (x *TestAccountRequest) Reset() {
 	*x = TestAccountRequest{}
-	mi := &file_chainmail_v1_account_proto_msgTypes[3]
+	mi := &file_chainmail_v1_account_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -262,7 +328,7 @@ func (x *TestAccountRequest) String() string {
 func (*TestAccountRequest) ProtoMessage() {}
 
 func (x *TestAccountRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_account_proto_msgTypes[3]
+	mi := &file_chainmail_v1_account_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -275,7 +341,7 @@ func (x *TestAccountRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TestAccountRequest.ProtoReflect.Descriptor instead.
 func (*TestAccountRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{3}
+	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *TestAccountRequest) GetAccount() string {
@@ -301,7 +367,7 @@ type Check struct {
 
 func (x *Check) Reset() {
 	*x = Check{}
-	mi := &file_chainmail_v1_account_proto_msgTypes[4]
+	mi := &file_chainmail_v1_account_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -313,7 +379,7 @@ func (x *Check) String() string {
 func (*Check) ProtoMessage() {}
 
 func (x *Check) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_account_proto_msgTypes[4]
+	mi := &file_chainmail_v1_account_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -326,7 +392,7 @@ func (x *Check) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Check.ProtoReflect.Descriptor instead.
 func (*Check) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{4}
+	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Check) GetOk() bool {
@@ -375,7 +441,7 @@ type TestAccountResponse struct {
 
 func (x *TestAccountResponse) Reset() {
 	*x = TestAccountResponse{}
-	mi := &file_chainmail_v1_account_proto_msgTypes[5]
+	mi := &file_chainmail_v1_account_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -387,7 +453,7 @@ func (x *TestAccountResponse) String() string {
 func (*TestAccountResponse) ProtoMessage() {}
 
 func (x *TestAccountResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_account_proto_msgTypes[5]
+	mi := &file_chainmail_v1_account_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -400,7 +466,7 @@ func (x *TestAccountResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TestAccountResponse.ProtoReflect.Descriptor instead.
 func (*TestAccountResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{5}
+	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *TestAccountResponse) GetAccount() string {
@@ -436,7 +502,7 @@ type ProbeLimitsRequest struct {
 
 func (x *ProbeLimitsRequest) Reset() {
 	*x = ProbeLimitsRequest{}
-	mi := &file_chainmail_v1_account_proto_msgTypes[6]
+	mi := &file_chainmail_v1_account_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -448,7 +514,7 @@ func (x *ProbeLimitsRequest) String() string {
 func (*ProbeLimitsRequest) ProtoMessage() {}
 
 func (x *ProbeLimitsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_account_proto_msgTypes[6]
+	mi := &file_chainmail_v1_account_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -461,7 +527,7 @@ func (x *ProbeLimitsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProbeLimitsRequest.ProtoReflect.Descriptor instead.
 func (*ProbeLimitsRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{6}
+	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ProbeLimitsRequest) GetAccounts() []string {
@@ -492,7 +558,7 @@ type AccountLimit struct {
 
 func (x *AccountLimit) Reset() {
 	*x = AccountLimit{}
-	mi := &file_chainmail_v1_account_proto_msgTypes[7]
+	mi := &file_chainmail_v1_account_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -504,7 +570,7 @@ func (x *AccountLimit) String() string {
 func (*AccountLimit) ProtoMessage() {}
 
 func (x *AccountLimit) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_account_proto_msgTypes[7]
+	mi := &file_chainmail_v1_account_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -517,7 +583,7 @@ func (x *AccountLimit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AccountLimit.ProtoReflect.Descriptor instead.
 func (*AccountLimit) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{7}
+	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *AccountLimit) GetAccount() string {
@@ -566,7 +632,7 @@ type ProbeLimitsResponse struct {
 
 func (x *ProbeLimitsResponse) Reset() {
 	*x = ProbeLimitsResponse{}
-	mi := &file_chainmail_v1_account_proto_msgTypes[8]
+	mi := &file_chainmail_v1_account_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -578,7 +644,7 @@ func (x *ProbeLimitsResponse) String() string {
 func (*ProbeLimitsResponse) ProtoMessage() {}
 
 func (x *ProbeLimitsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_account_proto_msgTypes[8]
+	mi := &file_chainmail_v1_account_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -591,7 +657,7 @@ func (x *ProbeLimitsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProbeLimitsResponse.ProtoReflect.Descriptor instead.
 func (*ProbeLimitsResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{8}
+	return file_chainmail_v1_account_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ProbeLimitsResponse) GetLimits() []*AccountLimit {
@@ -605,7 +671,7 @@ var File_chainmail_v1_account_proto protoreflect.FileDescriptor
 
 const file_chainmail_v1_account_proto_rawDesc = "" +
 	"\n" +
-	"\x1achainmail/v1/account.proto\x12\fchainmail.v1\x1a\x1achainmail/v1/message.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xcd\x01\n" +
+	"\x1achainmail/v1/account.proto\x12\fchainmail.v1\x1a\x1achainmail/v1/message.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x94\x02\n" +
 	"\aAccount\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x18\n" +
@@ -615,7 +681,11 @@ const file_chainmail_v1_account_proto_rawDesc = "" +
 	"\n" +
 	"auth_state\x18\x05 \x01(\x0e2\x17.chainmail.v1.AuthStateR\tauthState\x12\x1f\n" +
 	"\vauth_detail\x18\x06 \x01(\tR\n" +
-	"authDetail\"\x15\n" +
+	"authDetail\x12E\n" +
+	"\fcapabilities\x18\a \x01(\v2!.chainmail.v1.AccountCapabilitiesR\fcapabilities\"j\n" +
+	"\x13AccountCapabilities\x12#\n" +
+	"\rallow_expunge\x18\x01 \x01(\bR\fallowExpunge\x12.\n" +
+	"\x13allow_folder_delete\x18\x02 \x01(\bR\x11allowFolderDelete\"\x15\n" +
 	"\x13ListAccountsRequest\"I\n" +
 	"\x14ListAccountsResponse\x121\n" +
 	"\baccounts\x18\x01 \x03(\v2\x15.chainmail.v1.AccountR\baccounts\".\n" +
@@ -665,40 +735,42 @@ func file_chainmail_v1_account_proto_rawDescGZIP() []byte {
 }
 
 var file_chainmail_v1_account_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_chainmail_v1_account_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_chainmail_v1_account_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_chainmail_v1_account_proto_goTypes = []any{
 	(AuthState)(0),                // 0: chainmail.v1.AuthState
 	(*Account)(nil),               // 1: chainmail.v1.Account
-	(*ListAccountsRequest)(nil),   // 2: chainmail.v1.ListAccountsRequest
-	(*ListAccountsResponse)(nil),  // 3: chainmail.v1.ListAccountsResponse
-	(*TestAccountRequest)(nil),    // 4: chainmail.v1.TestAccountRequest
-	(*Check)(nil),                 // 5: chainmail.v1.Check
-	(*TestAccountResponse)(nil),   // 6: chainmail.v1.TestAccountResponse
-	(*ProbeLimitsRequest)(nil),    // 7: chainmail.v1.ProbeLimitsRequest
-	(*AccountLimit)(nil),          // 8: chainmail.v1.AccountLimit
-	(*ProbeLimitsResponse)(nil),   // 9: chainmail.v1.ProbeLimitsResponse
-	(*timestamppb.Timestamp)(nil), // 10: google.protobuf.Timestamp
-	(*ItemError)(nil),             // 11: chainmail.v1.ItemError
+	(*AccountCapabilities)(nil),   // 2: chainmail.v1.AccountCapabilities
+	(*ListAccountsRequest)(nil),   // 3: chainmail.v1.ListAccountsRequest
+	(*ListAccountsResponse)(nil),  // 4: chainmail.v1.ListAccountsResponse
+	(*TestAccountRequest)(nil),    // 5: chainmail.v1.TestAccountRequest
+	(*Check)(nil),                 // 6: chainmail.v1.Check
+	(*TestAccountResponse)(nil),   // 7: chainmail.v1.TestAccountResponse
+	(*ProbeLimitsRequest)(nil),    // 8: chainmail.v1.ProbeLimitsRequest
+	(*AccountLimit)(nil),          // 9: chainmail.v1.AccountLimit
+	(*ProbeLimitsResponse)(nil),   // 10: chainmail.v1.ProbeLimitsResponse
+	(*timestamppb.Timestamp)(nil), // 11: google.protobuf.Timestamp
+	(*ItemError)(nil),             // 12: chainmail.v1.ItemError
 }
 var file_chainmail_v1_account_proto_depIdxs = []int32{
 	0,  // 0: chainmail.v1.Account.auth_state:type_name -> chainmail.v1.AuthState
-	1,  // 1: chainmail.v1.ListAccountsResponse.accounts:type_name -> chainmail.v1.Account
-	5,  // 2: chainmail.v1.TestAccountResponse.imap:type_name -> chainmail.v1.Check
-	5,  // 3: chainmail.v1.TestAccountResponse.smtp:type_name -> chainmail.v1.Check
-	10, // 4: chainmail.v1.AccountLimit.probed_at:type_name -> google.protobuf.Timestamp
-	11, // 5: chainmail.v1.AccountLimit.error:type_name -> chainmail.v1.ItemError
-	8,  // 6: chainmail.v1.ProbeLimitsResponse.limits:type_name -> chainmail.v1.AccountLimit
-	2,  // 7: chainmail.v1.AccountService.ListAccounts:input_type -> chainmail.v1.ListAccountsRequest
-	4,  // 8: chainmail.v1.AccountService.TestAccount:input_type -> chainmail.v1.TestAccountRequest
-	7,  // 9: chainmail.v1.AccountService.ProbeLimits:input_type -> chainmail.v1.ProbeLimitsRequest
-	3,  // 10: chainmail.v1.AccountService.ListAccounts:output_type -> chainmail.v1.ListAccountsResponse
-	6,  // 11: chainmail.v1.AccountService.TestAccount:output_type -> chainmail.v1.TestAccountResponse
-	9,  // 12: chainmail.v1.AccountService.ProbeLimits:output_type -> chainmail.v1.ProbeLimitsResponse
-	10, // [10:13] is the sub-list for method output_type
-	7,  // [7:10] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	2,  // 1: chainmail.v1.Account.capabilities:type_name -> chainmail.v1.AccountCapabilities
+	1,  // 2: chainmail.v1.ListAccountsResponse.accounts:type_name -> chainmail.v1.Account
+	6,  // 3: chainmail.v1.TestAccountResponse.imap:type_name -> chainmail.v1.Check
+	6,  // 4: chainmail.v1.TestAccountResponse.smtp:type_name -> chainmail.v1.Check
+	11, // 5: chainmail.v1.AccountLimit.probed_at:type_name -> google.protobuf.Timestamp
+	12, // 6: chainmail.v1.AccountLimit.error:type_name -> chainmail.v1.ItemError
+	9,  // 7: chainmail.v1.ProbeLimitsResponse.limits:type_name -> chainmail.v1.AccountLimit
+	3,  // 8: chainmail.v1.AccountService.ListAccounts:input_type -> chainmail.v1.ListAccountsRequest
+	5,  // 9: chainmail.v1.AccountService.TestAccount:input_type -> chainmail.v1.TestAccountRequest
+	8,  // 10: chainmail.v1.AccountService.ProbeLimits:input_type -> chainmail.v1.ProbeLimitsRequest
+	4,  // 11: chainmail.v1.AccountService.ListAccounts:output_type -> chainmail.v1.ListAccountsResponse
+	7,  // 12: chainmail.v1.AccountService.TestAccount:output_type -> chainmail.v1.TestAccountResponse
+	10, // 13: chainmail.v1.AccountService.ProbeLimits:output_type -> chainmail.v1.ProbeLimitsResponse
+	11, // [11:14] is the sub-list for method output_type
+	8,  // [8:11] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_chainmail_v1_account_proto_init() }
@@ -713,7 +785,7 @@ func file_chainmail_v1_account_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chainmail_v1_account_proto_rawDesc), len(file_chainmail_v1_account_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   9,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

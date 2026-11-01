@@ -24,6 +24,18 @@ message Account {
   AuthState auth_state = 5;
   // Why auth is required, and what to run, when auth_state is AUTH_STATE_REQUIRED.
   string auth_detail = 6;
+  // What the policy lets agents do on this account, after the global and
+  // the account's own policy tables. Never the send allowlist.
+  AccountCapabilities capabilities = 7;
+}
+
+// AccountCapabilities says which policy-gated actions an account allows.
+// The daemon still checks the policy on every call.
+message AccountCapabilities {
+  // Expunge may remove messages for good.
+  bool allow_expunge = 1;
+  // DeleteFolder may delete folders.
+  bool allow_folder_delete = 2;
 }
 
 message ListAccountsRequest {}
