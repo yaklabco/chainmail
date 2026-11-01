@@ -32,13 +32,16 @@ type Env struct {
 	StdoutTerminal bool
 	// TZ is the time zone tables and text show dates in. Nil means UTC.
 	TZ *time.Location
+	// Now reads the clock, for times relative to now such as audit --since.
+	// Nil means time.Now.
+	Now func() time.Time
 }
 
 // DefaultEnv returns the real process environment.
 func DefaultEnv() Env {
 	env := Env{
 		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Getenv: os.Getenv, PassShow: passShow,
-		StdoutTerminal: term.IsTerminal(int(os.Stdout.Fd())), TZ: time.Local,
+		StdoutTerminal: term.IsTerminal(int(os.Stdout.Fd())), TZ: time.Local, Now: time.Now,
 	}
 	if fd := int(os.Stdin.Fd()); term.IsTerminal(fd) {
 		env.ReadPassword = func() ([]byte, error) { return readTerminalPassword(fd) }
@@ -52,6 +55,14 @@ func (e Env) location() *time.Location {
 		return time.UTC
 	}
 	return e.TZ
+}
+
+// now is the time from e.Now, or time.Now when it is nil.
+func (e Env) now() time.Time {
+	if e.Now == nil {
+		return time.Now()
+	}
+	return e.Now()
 }
 
 // passShow reads a pass entry through a pipe. gpg asks for a passphrase
