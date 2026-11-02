@@ -156,6 +156,9 @@ type Store struct {
 	// nsWait, when a test sets it, runs as a call starts waiting for
 	// another call's namespace discovery to finish.
 	nsWait func()
+	// after is the store's clock for the waits it runs on its own, such as
+	// Idle's limit: time.After, unless a test drives it.
+	after func(d time.Duration) <-chan time.Time
 
 	// folderGen counts renames and deletes of folders. A connection opened
 	// a folder before the latest one opens it again rather than trust it.
@@ -193,7 +196,7 @@ const closeWait = 5 * time.Second
 // New returns a Store for acct. It connects on first use.
 func New(acct config.ResolvedAccount, creds Credentialer, opts Options) *Store {
 	opts = opts.withDefaults()
-	s := &Store{acct: acct, creds: creds, opts: opts, loginGate: make(chan struct{}, 1), nsGate: make(chan struct{}, 1), chunk: chunkSize, dialTimeout: dialTimeout, watches: map[*watchConn]struct{}{}}
+	s := &Store{acct: acct, creds: creds, opts: opts, loginGate: make(chan struct{}, 1), nsGate: make(chan struct{}, 1), chunk: chunkSize, dialTimeout: dialTimeout, after: time.After, watches: map[*watchConn]struct{}{}}
 	s.pool = newPool(s.dial, poolOptions{size: opts.PoolSize, noopAfter: opts.NoopAfter, idleLogout: opts.IdleLogout, now: opts.Now})
 	return s
 }

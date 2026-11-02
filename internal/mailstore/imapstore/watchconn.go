@@ -169,10 +169,12 @@ func (w *watchConn) IdleSupported() bool { return w.c.client().Caps().Has(imap.C
 // Idle implements mailstore.WatchConn. A report that arrived since Idle last
 // returned, during a Sync included, makes it return at once without IDLE.
 // Starting IDLE and ending it with DONE are commands, each bounded by the
-// command timeout; the wait between them is bounded only by limit and ctx.
-// When ctx ends, Idle still sends DONE and waits for IDLE to complete, then
-// returns ctx.Err() with the folder still selected, so the next Sync works.
-// A DONE that fails leaves the connection dead and returns the failure.
+// command timeout and neither cut short by ctx; the wait between them is
+// bounded only by limit and ctx. When ctx ends, even before the server has
+// answered IDLE, Idle still waits for the answer, sends DONE and waits for
+// IDLE to complete, then returns ctx.Err() with the folder still selected,
+// so the next Sync works. A DONE that fails leaves the connection dead and
+// returns the failure.
 func (w *watchConn) Idle(ctx context.Context, limit time.Duration) (mailstore.Wake, error) {
 	if !w.IdleSupported() {
 		return mailstore.Wake{}, fmt.Errorf("%w: %s does not offer IDLE", mailstore.ErrUnsupported, w.s.acct.Name)
@@ -188,19 +190,20 @@ func (w *watchConn) Idle(ctx context.Context, limit time.Duration) (mailstore.Wa
 	}
 	w.idling.Store(true)
 	defer w.idling.Store(false)
+	// Cancelling while the server has yet to answer IDLE would shut the
+	// connection, so ctx ends the wait below instead, after which DONE ends
+	// IDLE cleanly.
 	var cmd *imapclient.IdleCommand
-	if err := w.c.do(ctx, func() error {
+	if err := w.c.do(context.WithoutCancel(ctx), func() error {
 		var err error
 		cmd, err = w.c.client().Idle()
 		return err
 	}); err != nil {
 		return mailstore.Wake{}, w.s.watchError(err)
 	}
-	timer := time.NewTimer(limit)
-	defer timer.Stop()
 	select {
 	case <-w.signal:
-	case <-timer.C:
+	case <-w.s.after(limit):
 	case <-ctx.Done():
 	case <-w.c.client().Closed():
 	}
