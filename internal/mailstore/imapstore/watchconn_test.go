@@ -447,7 +447,10 @@ func TestWatchCloseWhileDoneIsUnanswered(t *testing.T) {
 	closed := make(chan error, 1)
 	wg.Go(func() { closed <- wc.Close() })
 	select {
-	case <-closed:
+	case err := <-closed:
+		if err != nil {
+			t.Errorf("Close while DONE was unanswered = %v, want nil: it shuts the socket rather than log out", err)
+		}
 		if elapsed := time.Since(start); elapsed > time.Second {
 			t.Errorf("Close took %v while DONE was unanswered, want well under 1s", elapsed)
 		}
