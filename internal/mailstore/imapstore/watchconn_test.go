@@ -169,9 +169,7 @@ func TestWatchStoreCloseDuringIdle(t *testing.T) {
 		done <- err
 	})
 	// Wait until Idle is under way, so Close meets it.
-	for !wc.(*watchConn).idling.Load() {
-		time.Sleep(time.Millisecond)
-	}
+	waitIdling(t, wc.(*watchConn), done)
 	start := time.Now()
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -283,4 +281,22 @@ func TestWatchDroppedConnection(t *testing.T) {
 			t.Fatal("Idle did not return within 2s of the connection dropping")
 		}
 	})
+}
+
+// waitIdling waits up to 2 seconds for w to be in Idle, failing t if Idle
+// returns first, with what it returned, or never starts.
+func waitIdling(t *testing.T, w *watchConn, done <-chan error) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !w.idling.Load() {
+		select {
+		case err := <-done:
+			t.Fatalf("Idle returned %v before it was under way", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Idle was not under way within 2s")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
