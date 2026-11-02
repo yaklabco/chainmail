@@ -1,13 +1,18 @@
 package daemon
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	"github.com/jamesainslie/chainmail/internal/api"
+	"github.com/jamesainslie/chainmail/internal/client"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/watch"
 )
@@ -167,5 +172,73 @@ func TestGroupProto(t *testing.T) {
 	want := &chainmailv1.GroupStatus{Name: "bot", AckedId: 4, Lag: 2, CreatedAt: timestamppb.New(created), LastSeenAt: timestamppb.New(created.Add(time.Hour))}
 	if !proto.Equal(got, want) {
 		t.Errorf("groupProto = %v, want %v", got, want)
+	}
+}
+
+// serveWatchTest serves s until the test ends and returns a client of it.
+func serveWatchTest(t *testing.T, s *Server) *client.Client {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx) }()
+	c := client.New(s.opts.Listener.Addr().String(), "test")
+	t.Cleanup(func() {
+		c.Close()
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Serve: %v", err)
+		}
+	})
+	return c
+}
+
+func testWatchEvent(subject string) watch.Event {
+	return watch.Event{At: time.Now(), Kind: watch.KindNew, Account: "host", Folder: "INBOX", Ref: "ref-" + subject, Message: &watch.Message{Subject: subject}}
+}
+
+// TestSubscribeWakesOnNotify checks that a caught-up stream learns of an
+// event from the log's notify. The heartbeat is an hour, so nothing else
+// could wake it before the test's deadline.
+func TestSubscribeWakesOnNotify(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServerOptions(t, passwordConfig, Options{WatchHeartbeat: time.Hour})
+	c := serveWatchTest(t, s)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	stream, err := c.Watch.Subscribe(ctx, connect.NewRequest(&chainmailv1.SubscribeRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stream.Close() }()
+	if !stream.Receive() || stream.Msg().GetHeartbeat() == nil {
+		t.Fatalf("first item = %v (%v), want the caught-up heartbeat", stream.Msg(), stream.Err())
+	}
+	if err := s.watchLog.Publish(ctx, testWatchEvent("woken")); err != nil {
+		t.Fatal(err)
+	}
+	if !stream.Receive() {
+		t.Fatalf("stream ended: %v", stream.Err())
+	}
+	if e := stream.Msg().GetEvent(); e.GetId() != 1 || e.GetMessage().GetSubject().GetUntrusted() != "woken" {
+		t.Errorf("item = %v, want event 1", stream.Msg())
+	}
+}
+
+// TestSubscribeFailsWhenTheAuditWriteFails checks that a stream that could
+// not be audited never starts. The failure comes before the first send, so
+// the stream itself is never touched.
+func TestSubscribeFailsWhenTheAuditWriteFails(t *testing.T) {
+	t.Parallel()
+	s, stateDB := newTestServer(t)
+	if err := stateDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	w := &watchService{s: s}
+	err := w.Subscribe(peerContext(t.Context()), connect.NewRequest(&chainmailv1.SubscribeRequest{Group: "bot"}), nil)
+	if connect.CodeOf(err) != connect.CodeInternal || api.Detail(err).GetReason() != api.ReasonInternal {
+		t.Errorf("err = %v, want INTERNAL", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "audit write failed") {
+		t.Errorf("err = %v, want the audit failure", err)
 	}
 }
