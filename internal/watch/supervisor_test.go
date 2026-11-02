@@ -448,6 +448,93 @@ func TestSupervisorGmailWatchesAllMailOnly(t *testing.T) {
 	}
 }
 
+// supGoogleCheck is the google_check the Google tests set: a value no
+// default or fallback uses, so a test sees the setting reach the watcher.
+const supGoogleCheck = 7 * time.Second
+
+// supGoogleRig is a rig for a quiet Google account on preset, whose server
+// reports nothing to a waiting IDLE, with google_check at supGoogleCheck.
+func supGoogleRig(t *testing.T, fs *fake.Store, preset string) *supRig {
+	t.Helper()
+	fs.SetQuietIdle(true)
+	return newSupRig(t, fs, supAccount(t, preset, nil, nil), func(o *SupervisorOptions) {
+		o.Settings.GoogleCheck = supGoogleCheck
+	})
+}
+
+// Gmail tells an IDLE about new mail late, often 30 seconds after it
+// arrives, so a Google account's watcher ends each IDLE after google_check
+// and syncs All Mail, on the same connection, whether or not the server
+// spoke. Other accounts keep their IDLE until idleRestart.
+func TestSupervisorGoogleChecksWhileIdle(t *testing.T) {
+	t.Parallel()
+	for _, preset := range []string{"gmail", "google-workspace"} {
+		t.Run(preset, func(t *testing.T) {
+			t.Parallel()
+			fs := supFake(true)
+			r := supGoogleRig(t, fs, preset)
+			r.start()
+			r.waitFor("All Mail watching", supStatus(supAllMail, StateWatching))
+			r.waitIdle(supAllMail)
+			r.clock.expectAfter(t, supGoogleCheck)
+			fs.Add(supGmailMsg("quiet", `\Inbox`))
+			r.clock.Advance(supGoogleCheck)
+			r.waitFor("new event for quiet", supNew(supAllMail, "quiet"))
+			r.waitIdle(supAllMail)
+			r.clock.expectAfter(t, supGoogleCheck)
+			if n := fs.Calls("OpenWatch"); n != 1 {
+				t.Errorf("OpenWatch ran %d times, want 1", n)
+			}
+		})
+	}
+	t.Run("hostinger", func(t *testing.T) {
+		t.Parallel()
+		fs := supFake(false)
+		fs.SetQuietIdle(true)
+		r := newSupRig(t, fs, supAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}), func(o *SupervisorOptions) {
+			o.Settings.GoogleCheck = supGoogleCheck
+		})
+		r.start()
+		r.waitFor("INBOX watching", supStatus("INBOX", StateWatching))
+		r.waitIdle("INBOX")
+		r.clock.expectAfter(t, idleRestart)
+		r.clock.mu.Lock()
+		n := r.clock.afters[supGoogleCheck]
+		r.clock.mu.Unlock()
+		if n != 0 {
+			t.Errorf("After(%v) ran %d times on a non-Google account, want 0", supGoogleCheck, n)
+		}
+	})
+}
+
+// An expunge Gmail does not report while the short IDLE runs is found by
+// the next pass, which still schedules the sweep at the sweep floor, not at
+// expunge_sweep.
+func TestSupervisorGoogleQuietExpungeSweepsAtTheFloor(t *testing.T) {
+	t.Parallel()
+	fs := supFake(true)
+	old := fs.Add(supGmailMsg("old", `\Inbox`))
+	r := supGoogleRig(t, fs, "gmail")
+	r.start()
+	r.waitFor("All Mail watching", supStatus(supAllMail, StateWatching))
+	r.waitIdle(supAllMail)
+	r.clock.expectAfter(t, supGoogleCheck)
+	fs.ExternalExpunge(supAllMail, old.UID)
+	r.clock.Advance(supGoogleCheck)
+	// The pass after the check reports the expunge, which schedules the
+	// sweep at the floor. Until then the folder idles in short checks.
+	r.waitIdle(supAllMail)
+	r.clock.expectAfter(t, supGoogleCheck)
+	if n := supCount(r.all(), supKind(supAllMail, KindExpunged)); n != 0 {
+		t.Fatalf("%d expunged events before the sweep floor, want 0", n)
+	}
+	r.clock.Advance(ExpungeSweepFloor)
+	e := r.waitFor("expunged event for old", supKind(supAllMail, KindExpunged))
+	if e.Ref != old.String() {
+		t.Errorf("expunged ref = %q, want %q", e.Ref, old.String())
+	}
+}
+
 // A server without IDLE polls the watched folder on its own connection
 // every idle_fallback_poll.
 func TestSupervisorFallsBackToPollingWithoutIdle(t *testing.T) {

@@ -128,6 +128,9 @@ func rebaseEvents(prev FolderRow, in diffInput) []Event {
 // IDs come from d.Changed whenever it carries them, since on Gmail every
 // message is there with or without CONDSTORE. Flag hashes come from it only
 // with FullFlags. It is never nil, so an empty folder still clears the old set.
+// UIDs at or above the selected UIDNEXT arrived after the SELECT and are
+// left out: the checkpoint starts there, so the next pass reports them as
+// new. A server that reported no UIDNEXT keeps them all.
 func rebaseUIDs(d mailstore.Delta) map[uint32]knownUID {
 	changed := make(map[uint32]mailstore.FlagState, len(d.Changed))
 	for _, f := range d.Changed {
@@ -135,6 +138,9 @@ func rebaseUIDs(d mailstore.Delta) map[uint32]knownUID {
 	}
 	uids := make(map[uint32]knownUID, len(d.UIDs))
 	for _, uid := range d.UIDs {
+		if d.State.UIDNext > 0 && uid >= d.State.UIDNext {
+			continue
+		}
 		var k knownUID
 		if f, ok := changed[uid]; ok {
 			k.GmailMsgID = f.GmailMsgID

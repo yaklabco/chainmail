@@ -602,7 +602,7 @@ func TestWatchDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if want := (WatchConfig{Retention: "168h", MaxEvents: 200000, ExpungeSweep: "1h", IdleFallbackPoll: "30s"}); cfg.Watch != want {
+	if want := (WatchConfig{Retention: "168h", MaxEvents: 200000, ExpungeSweep: "1h", IdleFallbackPoll: "30s", GoogleCheck: "5s"}); cfg.Watch != want {
 		t.Errorf("watch = %+v, want %+v", cfg.Watch, want)
 	}
 	want := WatchSettings{
@@ -610,6 +610,7 @@ func TestWatchDefaults(t *testing.T) {
 		MaxEvents:        200000,
 		ExpungeSweep:     time.Hour,
 		IdleFallbackPoll: 30 * time.Second,
+		GoogleCheck:      5 * time.Second,
 	}
 	if got := cfg.WatchSettings(); got != want {
 		t.Errorf("WatchSettings() = %+v, want %+v", got, want)
@@ -641,6 +642,7 @@ func TestWatchSettings(t *testing.T) {
 		MaxEvents:        200000,
 		ExpungeSweep:     time.Hour,
 		IdleFallbackPoll: 30 * time.Second,
+		GoogleCheck:      5 * time.Second,
 	}
 	cfg, err := Parse([]byte(watchAccount + `
 [watch]
@@ -648,6 +650,7 @@ retention = "24h"
 max_events = 5000
 expunge_sweep = "30m"
 idle_fallback_poll = "1m30s"
+google_check = "20s"
 `))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -657,6 +660,7 @@ idle_fallback_poll = "1m30s"
 		MaxEvents:        5000,
 		ExpungeSweep:     30 * time.Minute,
 		IdleFallbackPoll: 90 * time.Second,
+		GoogleCheck:      20 * time.Second,
 	}
 	if got := cfg.WatchSettings(); got != want {
 		t.Errorf("WatchSettings() = %+v, want %+v", got, want)
@@ -665,7 +669,7 @@ idle_fallback_poll = "1m30s"
 	// defaults for unset or unparsable values rather than zero.
 	for name, c := range map[string]*Config{
 		"empty":      {},
-		"unparsable": {Watch: WatchConfig{Retention: "a week", MaxEvents: -5, ExpungeSweep: "0s", IdleFallbackPoll: "-1m"}},
+		"unparsable": {Watch: WatchConfig{Retention: "a week", MaxEvents: -5, ExpungeSweep: "0s", IdleFallbackPoll: "-1m", GoogleCheck: "1x"}},
 	} {
 		if got := c.WatchSettings(); got != defaults {
 			t.Errorf("%s: WatchSettings() = %+v, want the defaults %+v", name, got, defaults)
@@ -829,6 +833,8 @@ func TestWatchValidBounds(t *testing.T) {
 		"[watch]\nexpunge_sweep = \"24h\"\n",
 		"[watch]\nidle_fallback_poll = \"10s\"\n",
 		"[watch]\nidle_fallback_poll = \"10m\"\n",
+		"[watch]\ngoogle_check = \"2s\"\n",
+		"[watch]\ngoogle_check = \"10m\"\n",
 		watchAccount + "sync = { poll = \"30s\" }\n",
 		watchAccount + "sync = { poll = \"24h\" }\n",
 		watchAccount + "watch = []\n",
@@ -863,6 +869,9 @@ func TestWatchInvalid(t *testing.T) {
 		{name: "idle_fallback_poll too short", config: "[watch]\nidle_fallback_poll = \"9s\"\n", problem: "watch.idle_fallback_poll: 9s must be between 10s and 10m"},
 		{name: "idle_fallback_poll too long", config: "[watch]\nidle_fallback_poll = \"10m1s\"\n", problem: "watch.idle_fallback_poll: 10m1s must be between 10s and 10m"},
 		{name: "idle_fallback_poll negative", config: "[watch]\nidle_fallback_poll = \"-30s\"\n", problem: "watch.idle_fallback_poll: -30s must be between 10s and 10m"},
+		{name: "google_check too short", config: "[watch]\ngoogle_check = \"1s\"\n", problem: "watch.google_check: 1s must be between 2s and 10m"},
+		{name: "google_check too long", config: "[watch]\ngoogle_check = \"10m1s\"\n", problem: "watch.google_check: 10m1s must be between 2s and 10m"},
+		{name: "google_check not a duration", config: "[watch]\ngoogle_check = \"fast\"\n", problem: `watch.google_check: duration "fast": ` + durationHint},
 		{name: "sync.poll too short", config: watchAccount + "sync = { poll = \"29s\" }\n", problem: "accounts.host: sync.poll: 29s must be between 30s and 24h"},
 		{name: "sync.poll too long", config: watchAccount + "sync = { poll = \"24h1s\" }\n", problem: "accounts.host: sync.poll: 24h1s must be between 30s and 24h"},
 		{name: "sync.poll not a duration", config: watchAccount + "sync = { poll = \"5 minutes\" }\n", problem: `accounts.host: sync.poll: duration "5 minutes": ` + durationHint},

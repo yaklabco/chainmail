@@ -45,7 +45,7 @@ func (s *Store) SyncFolder(ctx context.Context, folder string, req mailstore.Syn
 	var d mailstore.Delta
 	err := s.withConn(ctx, folder, func(c *conn) error {
 		var err error
-		d, err = s.syncPass(ctx, c, folder, req)
+		d, err = s.syncPass(ctx, c, folder, req, nil)
 		return err
 	})
 	return d, err
@@ -82,15 +82,34 @@ func (s *Store) selectForSync(ctx context.Context, c *conn, folder string) (*ima
 	}
 }
 
+// passView is what a pass saw of the folder, for a watch connection to
+// compare with its last pass. The caller sets since; the pass fills in the
+// rest.
+type passView struct {
+	// since is the UID from which the pass counts new mail: the UIDNEXT of
+	// the connection's last pass.
+	since uint32
+	// uidValidity, uidNext and exists are what the SELECT reported.
+	uidValidity, uidNext, exists uint32
+	// added counts the messages SEARCH found from since up to uidNext.
+	// counted says it searched from since or lower, so added is complete.
+	added   uint32
+	counted bool
+}
+
 // syncPass runs one sync pass on c with the semantics mailstore.SyncRequest
-// documents. WatchConn.Sync and SyncFolder share it.
-func (s *Store) syncPass(ctx context.Context, c *conn, folder string, req mailstore.SyncRequest) (mailstore.Delta, error) {
+// documents. WatchConn.Sync and SyncFolder share it. When view is not nil
+// the pass records in it what it saw.
+func (s *Store) syncPass(ctx context.Context, c *conn, folder string, req mailstore.SyncRequest, view *passView) (mailstore.Delta, error) {
 	data, err := s.selectForSync(ctx, c, folder)
 	if err != nil {
 		return mailstore.Delta{}, err
 	}
 	d := mailstore.Delta{State: folderState(c.uidValidity, c.uidNext, c.highestModSeq, c.client().Caps().Has(imap.CapCondStore))}
 	exists := data.NumMessages
+	if view != nil {
+		view.uidValidity, view.uidNext, view.exists = d.State.UIDValidity, d.State.UIDNext, exists
+	}
 	if req.From == (mailstore.Checkpoint{}) || req.From.UIDValidity != d.State.UIDValidity {
 		d.Rebased = true
 		switch {
@@ -110,7 +129,7 @@ func (s *Store) syncPass(ctx context.Context, c *conn, folder string, req mailst
 		return d, nil
 	}
 	if d.State.UIDNext > req.From.UIDNext {
-		if err := s.syncNew(ctx, c, folder, req, &d); err != nil {
+		if err := s.syncNew(ctx, c, folder, req, &d, view); err != nil {
 			return mailstore.Delta{}, err
 		}
 	}
@@ -131,12 +150,21 @@ func (s *Store) syncPass(ctx context.Context, c *conn, folder string, req mailst
 // above, so UIDs below req.From.UIDNext are dropped. UIDs at or above the
 // selected UIDNEXT arrived after the SELECT and are left for the next pass,
 // which the checkpoint from d.State sends there.
-func (s *Store) syncNew(ctx context.Context, c *conn, folder string, req mailstore.SyncRequest, d *mailstore.Delta) error {
+// A view that is not nil gets the count of new mail from view.since on.
+func (s *Store) syncNew(ctx context.Context, c *conn, folder string, req mailstore.SyncRequest, d *mailstore.Delta, view *passView) error {
 	from := max(req.From.UIDNext, 1)
 	criteria := &imap.SearchCriteria{UID: []imap.UIDSet{{imap.UIDRange{Start: imap.UID(from), Stop: 0}}}}
 	found, _, err := c.search(ctx, criteria, false)
 	if err != nil {
 		return err
+	}
+	if view != nil && from <= view.since {
+		view.counted = true
+		for _, u := range found {
+			if u >= view.since && u < d.State.UIDNext {
+				view.added++
+			}
+		}
 	}
 	uids := slices.DeleteFunc(found, func(u uint32) bool { return u < from || u >= d.State.UIDNext })
 	slices.Sort(uids)

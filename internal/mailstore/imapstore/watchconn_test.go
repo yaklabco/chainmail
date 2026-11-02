@@ -591,3 +591,57 @@ func TestWatchIdleCancelledBeforeContinuation(t *testing.T) {
 		t.Errorf("Sync after the cancelled Idle found %d new, want UID %d", len(d.New), u1)
 	}
 }
+
+// TestWatchSyncReportsUnannouncedExpunges: Gmail tells an IDLE of an
+// expunge late, and a SELECT drops whatever it had not said yet, so a watch
+// connection whose IDLE keeps ending early can miss every EXPUNGE. Sync
+// compares its SELECT's message count with the last one on the connection
+// plus the new mail between them, and reports a shortfall as an expunge, so
+// the next Idle returns one at once. New mail alone, or no change, reports
+// no expunge.
+func TestWatchSyncReportsUnannouncedExpunges(t *testing.T) {
+	t.Parallel()
+	s, srv, ca := watchFixture(t,
+		fakegmail.Message{Raw: "Subject: one\r\n\r\nx\r\n", Date: gmailDay(1)},
+		fakegmail.Message{Raw: "Subject: two\r\n\r\ny\r\n", Date: gmailDay(2)},
+		fakegmail.Message{Raw: "Subject: three\r\n\r\nz\r\n", Date: gmailDay(3)},
+	)
+	remote := fakeGmailRemote(t, srv, ca)
+	wc, err := s.OpenWatch(t.Context(), storetest.GmailAllMail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wc.Close() })
+	var from mailstore.Checkpoint
+	// pass syncs from the last checkpoint and returns what the next Idle
+	// would report at once.
+	pass := func(desc string) mailstore.Wake {
+		t.Helper()
+		d, err := wc.Sync(t.Context(), mailstore.SyncRequest{From: from})
+		if err != nil {
+			t.Fatalf("%s: Sync: %v", desc, err)
+		}
+		from = mailstore.Checkpoint{UIDValidity: d.State.UIDValidity, UIDNext: d.State.UIDNext, HighestModSeq: d.State.HighestModSeq}
+		wake, err := wc.Idle(t.Context(), 0)
+		if err != nil {
+			t.Fatalf("%s: Idle: %v", desc, err)
+		}
+		return wake
+	}
+	pass("baseline")
+	remote.Append(t, storetest.GmailAllMail, storetest.Message{Subject: "four", Date: gmailDay(4), Body: "w"})
+	if wake := pass("new mail"); wake.Expunged {
+		t.Errorf("after new mail alone, Idle reported %+v, want no expunge", wake)
+	}
+	if wake := pass("no change"); wake != (mailstore.Wake{}) {
+		t.Errorf("after no change, Idle reported %+v, want nothing", wake)
+	}
+	remote.Expunge(t, storetest.GmailAllMail, 2)
+	remote.Append(t, storetest.GmailAllMail, storetest.Message{Subject: "five", Date: gmailDay(5), Body: "v"})
+	if wake := pass("an expunge and new mail"); !wake.Changed || !wake.Expunged {
+		t.Errorf("after an expunge and new mail, Idle reported %+v, want an expunge", wake)
+	}
+	if wake := pass("no change again"); wake != (mailstore.Wake{}) {
+		t.Errorf("after no change again, Idle reported %+v, want nothing", wake)
+	}
+}

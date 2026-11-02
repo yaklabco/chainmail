@@ -320,9 +320,21 @@ func uidsOf(msgs []*Message) []uint32 {
 
 // changedLocked records a change to folder: its HIGHESTMODSEQ rises, and
 // every watch connection on it gets a pending wake, with Expunged when a
-// message left it. It returns the new HIGHESTMODSEQ.
+// message left it. With SetQuietIdle on, only HIGHESTMODSEQ rises, and an
+// expunge waits for each connection's next Sync. It returns the new
+// HIGHESTMODSEQ.
 func (s *Store) changedLocked(folder string, expunged bool) uint64 {
 	s.modseq[folder]++
+	if s.quietIdle {
+		if expunged {
+			for c := range s.watches {
+				if c.folder == folder {
+					c.unseenExpunge = true
+				}
+			}
+		}
+		return s.modseq[folder]
+	}
 	for c := range s.watches {
 		if c.folder != folder {
 			continue
@@ -346,6 +358,18 @@ func (s *Store) SetIdle(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.idle = on
+}
+
+// SetQuietIdle says whether changes go unreported to a waiting Idle, as on
+// Gmail, which can tell an IDLE about a change 30 seconds or more after it.
+// A quiet change still shows in the next pass, and a quiet expunge is
+// reported after the next Sync on each connection, as imapstore infers one
+// from the message count. The default is false: every change wakes the folder's
+// watch connections at once.
+func (s *Store) SetQuietIdle(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.quietIdle = on
 }
 
 // SetAfter replaces the timer Idle waits on for its max, so a test with a
@@ -451,6 +475,8 @@ type watchConn struct {
 	pending mailstore.Wake
 	dropped bool
 	closed  bool
+	// unseenExpunge is a quiet expunge (SetQuietIdle) the next Sync reports.
+	unseenExpunge bool
 }
 
 // notifyLocked wakes a waiting Idle without blocking.
@@ -494,7 +520,13 @@ func (c *watchConn) Sync(ctx context.Context, req mailstore.SyncRequest) (mailst
 	if err := s.watchErrLocked(ctx, opSync); err != nil {
 		return mailstore.Delta{}, err
 	}
-	return s.syncLocked(c.folder, req, c.condstore)
+	d, err := s.syncLocked(c.folder, req, c.condstore)
+	if err == nil && c.unseenExpunge {
+		c.unseenExpunge = false
+		c.pending.Changed, c.pending.Expunged = true, true
+		c.notifyLocked()
+	}
+	return d, err
 }
 
 // IdleSupported implements mailstore.WatchConn.

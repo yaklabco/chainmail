@@ -125,6 +125,12 @@ type watchConn struct {
 	// signal holds a token once pending has a report.
 	signal chan struct{}
 
+	// last is what the connection's last successful Sync saw, and hasLast
+	// whether there was one. Only the owner's goroutine, which runs Sync,
+	// uses them.
+	last    passView
+	hasLast bool
+
 	// idling is set while IDLE may be running, so Close shuts the socket
 	// rather than queue LOGOUT behind an IDLE that only DONE would end.
 	idling atomic.Bool
@@ -178,12 +184,44 @@ func (w *watchConn) take() mailstore.Wake {
 
 // Sync implements mailstore.WatchConn. It does not retry: a dropped
 // connection is ErrUnavailable, and the caller dials again.
+//
+// A pass that finds fewer messages than the last pass on the connection
+// plus the new mail between them reports an expunge, as if the server had
+// sent one, so the next Idle returns it at once. Gmail tells an IDLE of an
+// expunge late, and the SELECT that starts each pass drops what it had not
+// said yet, so an IDLE that ends early, as on the Google presets, could
+// otherwise miss every one.
 func (w *watchConn) Sync(ctx context.Context, req mailstore.SyncRequest) (mailstore.Delta, error) {
-	d, err := w.s.syncPass(ctx, w.c, w.folder, req)
+	view := passView{since: w.last.uidNext}
+	d, err := w.s.syncPass(ctx, w.c, w.folder, req, &view)
 	if err != nil {
 		return mailstore.Delta{}, w.s.watchError(err)
 	}
+	if w.hasLast && unannouncedExpunge(w.last, view) {
+		w.report(true)
+	}
+	w.last, w.hasLast = view, true
 	return d, nil
+}
+
+// unannouncedExpunge reports whether a message the pass before saw has left
+// the folder: the messages now are fewer than those then plus the new ones
+// since. A UIDVALIDITY change, or a pass that did not count every new UID,
+// proves nothing. A message that arrived and left between the passes counts
+// in neither, and one that left between this SELECT and its SEARCH only
+// lowers the count, so the answer is never a false yes.
+func unannouncedExpunge(prev, now passView) bool {
+	if now.uidValidity != prev.uidValidity || now.uidNext < prev.uidNext {
+		return false
+	}
+	added := uint32(0)
+	if now.uidNext > prev.uidNext {
+		if !now.counted {
+			return false
+		}
+		added = now.added
+	}
+	return now.exists < prev.exists+added
 }
 
 // IdleSupported implements mailstore.WatchConn.

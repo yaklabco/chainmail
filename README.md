@@ -203,6 +203,7 @@ retention = "168h"               # events and idle groups older than this are re
 max_events = 200000
 expunge_sweep = "1h"
 idle_fallback_poll = "30s"       # watched folders on servers without IDLE
+google_check = "5s"              # how often a Google account's All Mail is synced while it idles
 ```
 
 | Key | Required | Default | Meaning |
@@ -241,6 +242,7 @@ idle_fallback_poll = "30s"       # watched folders on servers without IDLE
 | `watch.max_events` | no | `200000` | The most events the log keeps, oldest removed first. 1000 to 10000000. |
 | `watch.expunge_sweep` | no | `1h` | How often synced folders are swept for expunged mail. Between `5m` and `24h`. |
 | `watch.idle_fallback_poll` | no | `30s` | How often a watched folder is synced on a server without IDLE. Between `10s` and `10m`. |
+| `watch.google_check` | no | `5s` | How often a Google account's All Mail is synced while its IDLE waits. Gmail can tell an IDLE about new mail 30 seconds or more after it arrives, so this bounds how late a `new` event can be. Between `2s` and `10m`. |
 
 Vault secret names:
 
@@ -864,7 +866,7 @@ The daemon watches each account's mail and writes what changes to an event log i
 
 ### What is watched
 
-The daemon runs one supervisor for each account with `sync.enabled` on, from start to shutdown. On the Google presets it watches All Mail, the folder with the `\All` attribute, on one connection. All Mail holds every message whatever its labels, so that one connection sees every label, and a Google account polls nothing. Other accounts watch each folder in `watch` with IDLE, each on a connection of its own, and poll the rest of `sync.folders` every `sync.poll`. A poll asks the server for the folder's status on a pooled connection and syncs only when it changed, or every time on a server without CONDSTORE, whose status cannot show a flag change. A server without IDLE gets its watched folders synced every `idle_fallback_poll` on their own connections instead. An IDLE ends after 25 minutes at most, and the folder is synced before the next one starts.
+The daemon runs one supervisor for each account with `sync.enabled` on, from start to shutdown. On the Google presets it watches All Mail, the folder with the `\All` attribute, on one connection. All Mail holds every message whatever its labels, so that one connection sees every label, and a Google account polls nothing. Other accounts watch each folder in `watch` with IDLE, each on a connection of its own, and poll the rest of `sync.folders` every `sync.poll`. A poll asks the server for the folder's status on a pooled connection and syncs only when it changed, or every time on a server without CONDSTORE, whose status cannot show a flag change. A server without IDLE gets its watched folders synced every `idle_fallback_poll` on their own connections instead. An IDLE ends after 25 minutes at most, and the folder is synced before the next one starts. On the Google presets it ends after `google_check` (5 seconds by default) instead: Gmail tells an IDLE about new mail late, often around 30 seconds after the mail arrives and sometimes later, while a fresh sync sees it at once. A check that finds nothing changed costs ending and restarting the IDLE, one SELECT and a checkpoint write.
 
 The first sync of a folder records where it stands and the messages it holds, and publishes a `status` event with state `baselined`. It reports nothing for the mail already there. After that, each new message produces a `new` event within seconds on a watched folder, and within `sync.poll` on a polled one. A sync commits its events together with the folder's checkpoint, so a crash neither loses nor repeats one. When the daemon starts, every folder catches up from its checkpoint, at most 500 messages per commit, so mail that arrived while the daemon was down produces its events in order.
 
@@ -896,7 +898,7 @@ A `uidvalidity` gap comes with the folder's new `baselined` status, and its `nex
 
 ### Expunges
 
-A server tells a watching client about new mail and flag changes at once, but chainmail finds expunged mail by comparing the folder's UIDs with the ones it knows. On a server with CONDSTORE that comparison, the sweep, runs on each connect, every `expunge_sweep`, and after the server reports an expunge during IDLE, as soon as 5 minutes have passed since the last sweep. So an `expunged` event can trail the change by up to 5 minutes on a watched folder whose server reports it, and by up to `expunge_sweep` otherwise, as on a polled folder. On a server without CONDSTORE every sync fetches the whole UID set, so each sync finds expunges.
+Most servers tell a watching client about new mail and flag changes at once (Gmail does it late, which `google_check` covers), but chainmail finds expunged mail by comparing the folder's UIDs with the ones it knows. On a server with CONDSTORE that comparison, the sweep, runs on each connect, every `expunge_sweep`, and after the server reports an expunge during IDLE, as soon as 5 minutes have passed since the last sweep. A sync on a watched folder also counts its messages, and a count lower than the last sync's plus the new mail since is taken as a reported expunge, which covers Gmail's late EXPUNGE on the Google presets. So an `expunged` event can trail the change by up to 5 minutes on a watched folder whose server reports it. On the Google presets the sync that notices it comes within `google_check`, so the event trails by up to 5 minutes, or by `google_check` when that is longer. Otherwise, as on a polled folder, it trails by up to `expunge_sweep`. Each bound is give or take a sync. On a server without CONDSTORE every sync fetches the whole UID set, so each sync finds expunges.
 
 On Gmail, archiving takes the `\Inbox` label away, which arrives as a `flags` event without `\Inbox`. Trashing a message, or marking it as spam, takes it out of All Mail, which arrives as an `expunged` event. Mail sent from the account arrives as a `new` event with the `\Sent` label.
 
