@@ -59,8 +59,9 @@ type Options struct {
 	// sends a heartbeat. Zero means 30 seconds. Tests shorten it.
 	WatchHeartbeat time.Duration
 	// DisableWatch starts no watch supervisors, so no account is watched or
-	// synced. The WatchService handlers and the event log still work. Tests
-	// that count mail store calls set it.
+	// synced, and pools are not shrunk for watcher connections. The
+	// WatchService handlers, the event log and its trimmer still work.
+	// Tests that count mail store calls set it, through daemontest.
 	DisableWatch bool
 }
 
