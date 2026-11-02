@@ -331,8 +331,8 @@ func TestReadEventsAnnotations(t *testing.T) {
 	switch {
 	case tl.Title != "Read mail events" || a == nil || a.Title != tl.Title:
 		t.Errorf("title %q, annotations %+v", tl.Title, a)
-	case !a.ReadOnlyHint || a.IdempotentHint || a.DestructiveHint == nil || *a.DestructiveHint || a.OpenWorldHint == nil || !*a.OpenWorldHint:
-		t.Errorf("hints %+v, want read-only, not destructive, not idempotent, open world", a)
+	case a.ReadOnlyHint || a.IdempotentHint || a.DestructiveHint == nil || *a.DestructiveHint || a.OpenWorldHint == nil || !*a.OpenWorldHint:
+		t.Errorf("hints %+v, want not read-only, not destructive, not idempotent, open world: a group read moves the group", a)
 	}
 	for _, want := range []string{`read_events(group: "<name>", wait_seconds: 60)`, "untrusted", "acknowledges what it returns", "auth_required", "James"} {
 		if !strings.Contains(tl.Description, want) {

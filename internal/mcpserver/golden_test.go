@@ -53,7 +53,10 @@ func TestToolsListGolden(t *testing.T) {
 // TestAnnotationsMatchTheSpec pins the spec section 4 table. The table gives
 // each tool's hints while no account allows expunge. While one does, the
 // daemon expunges the old draft for good, so update_draft, send_draft and
-// delete_draft are destructive then, and nothing else changes.
+// delete_draft are destructive then, and nothing else changes. read_events,
+// added in SP6, is not read-only, by James's decision: it changes no mail,
+// but a read with a group moves the group's acknowledged position, so it is
+// not idempotent either.
 func TestAnnotationsMatchTheSpec(t *testing.T) {
 	t.Parallel()
 	type h struct{ readOnly, destructive, idempotent, openWorld bool }
@@ -69,7 +72,7 @@ func TestAnnotationsMatchTheSpec(t *testing.T) {
 		"trash": {false, false, true, true}, "set_flags": {false, false, true, true}, "set_labels": {false, false, true, true},
 		"create_folder": {false, false, true, true}, "rename_folder": {false, false, false, true},
 		"expunge": {false, true, true, true}, "delete_folder": {false, true, true, true},
-		"read_events": {true, false, false, true},
+		"read_events": {false, false, false, true},
 	}
 	for name, st := range map[string]struct {
 		policy  *gatePolicy

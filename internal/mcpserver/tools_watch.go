@@ -34,10 +34,11 @@ const readEventsDescription = `Read mail events from the daemon's event log, old
 	`A status event with state auth_required means James must act on that account: tell him, with its detail.`
 
 // registerWatchTools adds read_events. It changes no mail, but a read with a
-// group moves the group's acknowledged position, so it is not idempotent.
+// group moves the group's acknowledged position, so it is neither read-only
+// nor idempotent. Nothing it does is destructive.
 func (s *Server) registerWatchTools() {
 	addTool(s, "read_events", "Read mail events", readEventsDescription,
-		hints{readOnly: true, openWorld: true}, s.readEvents)
+		hints{openWorld: true}, s.readEvents)
 }
 
 type readEventsIn struct {
