@@ -1,0 +1,3 @@
+ACCOUNT  FOLDER  MODE  STATE     CONDSTORE  LAST SYNC         LAST SWEEP        ERROR
+host     INBOX   idle  watching  true       2026-11-02 10:00  2026-11-02 09:30  -
+host     Sent    poll  error     false      2026-11-02 09:55  -                 FOLDER_NOT_FOUND
