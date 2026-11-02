@@ -35,7 +35,10 @@ type fakeWatch struct {
 	groups      func() (*chainmailv1.ListGroupsResponse, error)
 	deleteGroup func(name string) (*chainmailv1.DeleteGroupResponse, error)
 
-	acked chan struct{} // signalled after each Ack
+	acked chan struct{} // signalled after each Ack call is recorded
+	// ack, when set, answers Ack call n (0-based) after it is recorded.
+	// Nil answers every call with success.
+	ack func(ctx context.Context, n int) error
 
 	mu   sync.Mutex
 	subs []*chainmailv1.SubscribeRequest
@@ -57,13 +60,19 @@ func (f *fakeWatch) Subscribe(ctx context.Context, req *connect.Request[chainmai
 	return f.streams[n](ctx, stream.Send)
 }
 
-func (f *fakeWatch) Ack(_ context.Context, req *connect.Request[chainmailv1.AckRequest]) (*connect.Response[chainmailv1.AckResponse], error) {
+func (f *fakeWatch) Ack(ctx context.Context, req *connect.Request[chainmailv1.AckRequest]) (*connect.Response[chainmailv1.AckResponse], error) {
 	f.mu.Lock()
+	n := len(f.acks)
 	f.acks = append(f.acks, req.Msg)
 	f.mu.Unlock()
 	select {
 	case f.acked <- struct{}{}:
 	default:
+	}
+	if f.ack != nil {
+		if err := f.ack(ctx, n); err != nil {
+			return nil, err
+		}
 	}
 	return connect.NewResponse(&chainmailv1.AckResponse{}), nil
 }
@@ -903,5 +912,103 @@ func TestWatchStopsWhenStdoutFails(t *testing.T) {
 	}
 	if b := clock.backoffs(); len(b) != 0 {
 		t.Errorf("backoffs = %v after a failed write, want none", b)
+	}
+}
+
+// An Ack the daemon never answers is abandoned after watchAckTimeout, so
+// the heartbeat timeout still reconnects, and the position is acknowledged
+// again before the reconnect.
+func TestWatchGroupHungAckStillReconnects(t *testing.T) {
+	t.Parallel()
+	f := newFakeWatch(playThen(nil, eventItem(newEvent(1, "a"))), playThen(authRequired()))
+	f.ack = func(ctx context.Context, n int) error {
+		if n > 0 {
+			return nil
+		}
+		<-ctx.Done() // the first Ack hangs until the client gives up on it
+		return ctx.Err()
+	}
+	socket := startFakeWatch(t, f)
+	// The batch timer and the reconnect backoff, both a second, fire at once.
+	clock := newFakeClock(func(d time.Duration) bool { return d == time.Second })
+	res := runCLIAsync(t.Context(), Env{After: clock.After}, "--socket", socket, "watch", "--group", "bot")
+	f.waitAcks(t, 1)
+	clock.waitCount(t, watchAckTimeout, 1)
+	clock.fire(watchAckTimeout)
+	clock.waitCount(t, watchHeartbeatTimeout, 2) // the stream's start and its one event
+	clock.fire(watchHeartbeatTimeout)
+	got := waitResult(t, res)
+	if got.code != api.ExitAuth {
+		t.Fatalf("watch: %+v, want exit 5 from the second stream", got)
+	}
+	reqs := f.requests()
+	if len(reqs) != 2 || position(reqs[1]) != "group=bot" {
+		t.Errorf("requests = %v, want a reconnect with the group", reqs)
+	}
+	if acks := f.ackIDs(t, "bot"); !slices.Equal(acks, []int64{1, 1}) {
+		t.Errorf("acks = %v, want [1 1]: the abandoned Ack, then its retry before the reconnect", acks)
+	}
+}
+
+// A failed Ack does not end the watch. The position stays pending, and the
+// acknowledgement on exit sends it again.
+func TestWatchGroupFailedAckIsRetried(t *testing.T) {
+	t.Parallel()
+	f := newFakeWatch(playThen(nil, eventItem(newEvent(1, "a")), eventItem(newEvent(2, "b"))))
+	f.ack = func(_ context.Context, n int) error {
+		if n == 0 {
+			return connect.NewError(connect.CodeUnavailable, errors.New("daemon busy"))
+		}
+		return nil
+	}
+	socket := startFakeWatch(t, f)
+	clock := newFakeClock(nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	res := runCLIAsync(ctx, Env{After: clock.After}, "--socket", socket, "watch", "--group", "bot")
+	clock.waitCount(t, watchHeartbeatTimeout, 3) // the stream's start and its 2 events
+	clock.fire(watchAckInterval)
+	f.waitAcks(t, 1)
+	cancel()
+	got := waitResult(t, res)
+	if got.code != 0 {
+		t.Fatalf("watch: %+v, want exit 0 on a signal", got)
+	}
+	if strings.Count(got.stdout, "\n") != 2 {
+		t.Errorf("stdout = %q, want 2 lines", got.stdout)
+	}
+	if acks := f.ackIDs(t, "bot"); !slices.Equal(acks, []int64{2, 2}) {
+		t.Errorf("acks = %v, want [2 2]: the failed Ack, then its retry on exit", acks)
+	}
+}
+
+// failAfter accepts n writes, then fails every write, as a pipe whose
+// reader has gone away does. Only the command's goroutine writes to it.
+type failAfter struct{ n int }
+
+func (w *failAfter) Write(p []byte) (int, error) {
+	if w.n == 0 {
+		return 0, errors.New("broken pipe")
+	}
+	w.n--
+	return len(p), nil
+}
+
+// An event whose line was never written is never acknowledged: the watch
+// exits 1 and acknowledges only the lines before it.
+func TestWatchGroupNeverAcksUnwrittenEvent(t *testing.T) {
+	t.Parallel()
+	f := newFakeWatch(playThen(nil,
+		eventItem(newEvent(1, "a")), eventItem(newEvent(2, "b")), eventItem(newEvent(3, "c"))))
+	socket := startFakeWatch(t, f)
+	got := runCLI(t, Env{Stdout: &failAfter{n: 2}, After: newFakeClock(nil).After}, "--socket", socket, "watch", "--group", "bot")
+	if got.code != api.ExitInternal {
+		t.Fatalf("watch: %+v, want exit 1", got)
+	}
+	if n := len(f.requests()); n != 1 {
+		t.Errorf("%d Subscribe calls, want 1", n)
+	}
+	if acks := f.ackIDs(t, "bot"); !slices.Equal(acks, []int64{2}) {
+		t.Errorf("acks = %v, want [2]: event 3 was never written", acks)
 	}
 }

@@ -57,8 +57,8 @@ const (
 	// lines, a group acknowledgement waits.
 	watchAckInterval = time.Second
 	watchAckBatch    = 100
-	// watchFinalAckTimeout bounds the acknowledgement sent on exit.
-	watchFinalAckTimeout = 5 * time.Second
+	// watchAckTimeout bounds each acknowledgement.
+	watchAckTimeout = 5 * time.Second
 )
 
 // watchKinds are the event kinds --kind takes.
@@ -190,13 +190,13 @@ func (w *watcher) run(ctx context.Context) error {
 		if signalled(ctx) {
 			return nil // a signal ended the watch, as it ends mcp
 		}
-		var stop stopError
-		switch {
-		case errors.Is(err, errWatchOnce):
+		if errors.Is(err, errWatchOnce) {
 			return nil
-		case errors.As(err, &stop):
+		}
+		if stop, ok := errors.AsType[stopError](err); ok {
 			return stop.err
-		case watchFatal(err):
+		}
+		if watchFatal(err) {
 			return err
 		}
 		if got {
@@ -217,8 +217,8 @@ func (w *watcher) run(ctx context.Context) error {
 // that needs a login, or an unknown account. Everything else, an
 // unreachable daemon included, is retried.
 func watchFatal(err error) bool {
-	var cerr *connect.Error
-	if !errors.As(err, &cerr) {
+	cerr, ok := errors.AsType[*connect.Error](err)
+	if !ok {
 		return false
 	}
 	switch api.ExitCode(api.Detail(cerr).GetReason()) {
@@ -373,9 +373,11 @@ func (w *watcher) queueAck(ctx context.Context, line bool) {
 }
 
 // flushAck acknowledges the current position for the group, if it is
-// higher than the last acknowledgement. A failed Ack is dropped: the next
-// batch covers it, and a reconnect resumes the group from what the daemon
-// has, so delivery stays at least once.
+// higher than the last acknowledgement. A failed or abandoned Ack leaves
+// the position pending: the next batch, the next heartbeat, the flush
+// before a reconnect or the one on exit sends it again, and a reconnect
+// resumes the group from what the daemon has, so delivery stays at least
+// once.
 func (w *watcher) flushAck(ctx context.Context) {
 	w.ackDue = nil
 	if w.opts.group == "" || !w.hasPos || w.pos <= w.acked {
@@ -383,19 +385,39 @@ func (w *watcher) flushAck(ctx context.Context) {
 	}
 	w.unacked = 0
 	id := w.pos
-	if _, err := w.watch.Ack(ctx, connect.NewRequest(&chainmailv1.AckRequest{Group: w.opts.group, Id: id})); err != nil {
+	if err := w.ack(ctx, id); err != nil {
 		return
 	}
 	w.acked = id
 }
 
+// ack sends one Ack, abandoned after watchAckTimeout on the watch's clock,
+// so a daemon that never answers cannot stall the heartbeat timeout or a
+// reconnect for longer than that.
+func (w *watcher) ack(ctx context.Context, id int64) error {
+	actx, cancel := context.WithCancel(ctx)
+	timeout := w.env.after(watchAckTimeout)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		select {
+		case <-timeout:
+			cancel()
+		case <-actx.Done():
+		}
+	})
+	defer func() {
+		cancel() // ends the timeout goroutine when the Ack answered first
+		wg.Wait()
+	}()
+	_, err := w.watch.Ack(actx, connect.NewRequest(&chainmailv1.AckRequest{Group: w.opts.group, Id: id}))
+	return err
+}
+
 // finalAck acknowledges what the watch printed since its last batch. It
 // runs as the watch exits, after a signal too, so it gets a context of its
-// own with a short deadline.
+// own. ack bounds it.
 func (w *watcher) finalAck(ctx context.Context) {
-	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), watchFinalAckTimeout)
-	defer cancel()
-	w.flushAck(actx)
+	w.flushAck(context.WithoutCancel(ctx))
 }
 
 // printEvent writes one event: a JSON line, or one human line in a table.
