@@ -21,6 +21,10 @@ type WatchConfig struct {
 	// IdleFallbackPoll is how often watched folders are polled on servers
 	// without IDLE: 10s to 10m.
 	IdleFallbackPoll string `toml:"idle_fallback_poll"`
+	// GoogleCheck is how often a Google preset account's All Mail is synced
+	// while it idles, since Gmail can tell an IDLE about a change 30 seconds
+	// or more after it: 2s to 10m.
+	GoogleCheck string `toml:"google_check"`
 }
 
 // AccountSync is an account's sync table.
@@ -41,6 +45,7 @@ type WatchSettings struct {
 	MaxEvents        int
 	ExpungeSweep     time.Duration
 	IdleFallbackPoll time.Duration
+	GoogleCheck      time.Duration
 }
 
 // Watch and sync defaults, as written in config.
@@ -49,6 +54,7 @@ const (
 	defaultMaxEvents        = 200000
 	defaultExpungeSweep     = "1h"
 	defaultIdleFallbackPoll = "30s"
+	defaultGoogleCheck      = "5s"
 	defaultSyncPoll         = "5m"
 	// defaultWatchFolder is the folder an account watches when it sets no
 	// watch list.
@@ -68,6 +74,7 @@ func (c *Config) WatchSettings() WatchSettings {
 		MaxEvents:        maxEvents,
 		ExpungeSweep:     durationOr(c.Watch.ExpungeSweep, defaultExpungeSweep),
 		IdleFallbackPoll: durationOr(c.Watch.IdleFallbackPoll, defaultIdleFallbackPoll),
+		GoogleCheck:      durationOr(c.Watch.GoogleCheck, defaultGoogleCheck),
 	}
 }
 
@@ -84,6 +91,9 @@ func (w *WatchConfig) applyDefaults() {
 	}
 	if w.IdleFallbackPoll == "" {
 		w.IdleFallbackPoll = defaultIdleFallbackPoll
+	}
+	if w.GoogleCheck == "" {
+		w.GoogleCheck = defaultGoogleCheck
 	}
 }
 
@@ -159,6 +169,8 @@ const (
 	maxExpungeSweep     = 24 * time.Hour
 	minIdleFallbackPoll = 10 * time.Second
 	maxIdleFallbackPoll = 10 * time.Minute
+	minGoogleCheck      = 2 * time.Second
+	maxGoogleCheck      = 10 * time.Minute
 	minSyncPoll         = 30 * time.Second
 	maxSyncPoll         = 24 * time.Hour
 )
@@ -171,6 +183,7 @@ func (w WatchConfig) validate(add func(string, ...any)) {
 	}
 	validateDuration("watch.expunge_sweep", w.ExpungeSweep, minExpungeSweep, maxExpungeSweep, add)
 	validateDuration("watch.idle_fallback_poll", w.IdleFallbackPoll, minIdleFallbackPoll, maxIdleFallbackPoll, add)
+	validateDuration("watch.google_check", w.GoogleCheck, minGoogleCheck, maxGoogleCheck, add)
 }
 
 // validateAccountWatch reports problems in an account's watch list and sync

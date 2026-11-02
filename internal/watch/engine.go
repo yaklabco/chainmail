@@ -98,7 +98,7 @@ type PassResult struct {
 
 // Pass syncs one folder until it is current: it repeats while Delta.More,
 // committing each batch's events, UID changes and checkpoint in one
-// transaction, and calls Log.Notify after each commit.
+// transaction, and calls Log.Notify after each commit that appended events.
 //
 // Each batch reads the stored checkpoint, so it starts where the last
 // committed batch stopped, and runs src.Sync with no transaction open. Only
@@ -165,8 +165,10 @@ func (e *Engine) step(ctx context.Context, account, folder string, src Source, s
 	return d.More, nil
 }
 
-// commit writes one batch in one transaction and wakes blocked readers
-// once it has committed.
+// commit writes one batch in one transaction and, once it has committed,
+// wakes blocked readers when it appended events. A batch without events,
+// such as a Google account's check every google_check that finds nothing,
+// gives a reader nothing to read.
 func (e *Engine) commit(ctx context.Context, dr diffResult) error {
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -201,6 +203,8 @@ func (e *Engine) commit(ctx context.Context, dr diffResult) error {
 	if err := e.commitTx(tx); err != nil {
 		return fmt.Errorf("committing sync batch: %w", err)
 	}
-	e.log.Notify()
+	if len(dr.Events) > 0 {
+		e.log.Notify()
+	}
 	return nil
 }

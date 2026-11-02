@@ -113,8 +113,10 @@ type Store struct {
 	watchFail error
 	// idle is whether the server advertises IDLE, after the timer Idle
 	// waits on, watches the open watch connections, and idleStarted the
-	// channel IdleStarted returns.
+	// channel IdleStarted returns. quietIdle keeps changes from waking a
+	// waiting Idle, as SetQuietIdle says.
 	idle        bool
+	quietIdle   bool
 	after       func(time.Duration) <-chan time.Time
 	watches     map[*watchConn]bool
 	idleStarted chan string

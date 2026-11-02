@@ -27,6 +27,7 @@ const reasonFolderNotFound = "FOLDER_NOT_FOUND"
 const (
 	fallbackExpungeSweep     = time.Hour
 	fallbackIdleFallbackPoll = 30 * time.Second
+	fallbackGoogleCheck      = 5 * time.Second
 	fallbackSyncPoll         = 5 * time.Minute
 )
 
@@ -121,6 +122,9 @@ func NewSupervisor(o SupervisorOptions) *Supervisor {
 	}
 	if s.settings.IdleFallbackPoll <= 0 {
 		s.settings.IdleFallbackPoll = fallbackIdleFallbackPoll
+	}
+	if s.settings.GoogleCheck <= 0 {
+		s.settings.GoogleCheck = fallbackGoogleCheck
 	}
 	if s.syncPoll <= 0 {
 		s.syncPoll = fallbackSyncPoll
@@ -562,7 +566,9 @@ func (w *watcher) pass(ctx context.Context, conn mailstore.WatchConn, sweep bool
 
 // wait blocks until the folder needs another pass and reports whether that
 // pass must sweep. With IDLE it waits for the server, the idleRestart or a
-// due sweep; without, for idle_fallback_poll or a due sweep.
+// due sweep, and on the Google presets for google_check at most, since
+// Gmail can tell an IDLE about a change 30 seconds or more after it; without
+// IDLE, for idle_fallback_poll or a due sweep.
 func (w *watcher) wait(ctx context.Context, conn mailstore.WatchConn) (sweep bool, err error) {
 	if w.sweepDue() {
 		return true, nil
@@ -574,7 +580,11 @@ func (w *watcher) wait(ctx context.Context, conn mailstore.WatchConn) (sweep boo
 		}
 		return w.sweepDue(), nil
 	}
-	wake, err := w.idle(ctx, conn, min(limit, idleRestart))
+	limit = min(limit, idleRestart)
+	if w.s.o.Account.Provider.Gmail {
+		limit = min(limit, w.s.settings.GoogleCheck)
+	}
+	wake, err := w.idle(ctx, conn, limit)
 	if err != nil {
 		return false, err
 	}

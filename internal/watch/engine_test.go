@@ -402,6 +402,26 @@ func TestPassWakesWaiters(t *testing.T) {
 	}
 }
 
+// A pass that appends no events, such as a Google account's check every
+// google_check that finds nothing, still commits its checkpoint but wakes
+// no reader: Wait has nothing new to return.
+func TestPassWithoutEventsWakesNoWaiter(t *testing.T) {
+	t.Parallel()
+	h := newEngineHarness(t, EngineOptions{})
+	src := &scriptSource{results: []scriptResult{
+		{delta: baselineDelta(1)},
+		{delta: mailstore.Delta{State: diffState(2, 10, true)}},
+	}}
+	h.pass(t, src, PassOptions{Mode: "idle"})
+	woken := h.log.changed()
+	h.pass(t, src, PassOptions{Mode: "idle"})
+	select {
+	case <-woken:
+		t.Error("a pass with no events woke the log's waiters")
+	default:
+	}
+}
+
 // engineAwaitConnQueue polls until db has queued want requests for a
 // connection in total, or ctx ends.
 func engineAwaitConnQueue(ctx context.Context, t *testing.T, db *sql.DB, want int64) {
