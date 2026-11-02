@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -337,5 +338,37 @@ func TestReadEventsAnnotations(t *testing.T) {
 		if !strings.Contains(tl.Description, want) {
 			t.Errorf("description lacks %q: %q", want, tl.Description)
 		}
+	}
+}
+
+// TestReadEventsDeadlineCoversTheWait checks the daemon call carries a
+// deadline past wait_seconds, by at most readEventsMargin. Connect sends the
+// deadline as a timeout header, and the fake's handler context has it.
+func TestReadEventsDeadlineCoversTheWait(t *testing.T) {
+	t.Parallel()
+	for _, wait := range []int{0, 60} {
+		t.Run(fmt.Sprintf("wait %ds", wait), func(t *testing.T) {
+			t.Parallel()
+			type seen struct {
+				left time.Duration
+				ok   bool
+			}
+			got := make(chan seen, 1)
+			f := &fakeDaemon{ReadEvents: func(ctx context.Context, _ *chainmailv1.ReadEventsRequest) (*chainmailv1.ReadEventsResponse, error) {
+				d, ok := ctx.Deadline()
+				got <- seen{left: time.Until(d), ok: ok}
+				return &chainmailv1.ReadEventsResponse{}, nil
+			}}
+			e := newTestEnv(t, f, latest)
+			wantOK(t, e.call(t, "read_events", map[string]any{"group": "triage", "wait_seconds": wait}))
+			s := <-got
+			w := time.Duration(wait) * time.Second
+			switch {
+			case !s.ok:
+				t.Error("the daemon call has no deadline")
+			case s.left <= w || s.left > w+readEventsMargin:
+				t.Errorf("deadline in %v, want more than %v and at most %v", s.left, w, w+readEventsMargin)
+			}
+		})
 	}
 }

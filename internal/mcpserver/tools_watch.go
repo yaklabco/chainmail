@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -16,6 +17,9 @@ const (
 	readEventsMaxWait      = 60
 	readEventsDefaultLimit = 50
 	readEventsMaxLimit     = 200
+	// readEventsMargin is how long past wait_seconds the daemon may take to
+	// answer, as for any other call, before the read fails with TIMEOUT.
+	readEventsMargin = 30 * time.Second
 )
 
 // eventKinds are the event kinds the daemon records and read_events filters on.
@@ -134,6 +138,11 @@ func (s *Server) readEvents(ctx context.Context, _ *mcp.CallToolRequest, in read
 	if err != nil {
 		return nil, readEventsOut{}, err
 	}
+	// The daemon holds the call for up to wait_seconds. The deadline covers
+	// that wait plus a margin; ctx still ends the call as soon as the client
+	// cancels the request or Run ends.
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(req.GetWaitSeconds())*time.Second+readEventsMargin)
+	defer cancel()
 	resp, err := s.daemon.Watch.ReadEvents(ctx, connect.NewRequest(req))
 	if err != nil {
 		return nil, readEventsOut{}, s.errorResult(err)
