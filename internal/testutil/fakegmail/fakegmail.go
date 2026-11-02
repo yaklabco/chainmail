@@ -64,14 +64,15 @@
 // refused. It is still looser in some: matching is by substring where Gmail
 // tokenises, is: values other than read and unread mean starred, any has:
 // means an attachment, and LIST patterns are case-sensitive even for INBOX.
-// Another session learns of changes at its next command, as EXISTS and
-// EXPUNGE, but not of flag changes. Sequence sets reach only the messages
-// the last EXISTS announced, but a UID command can name a newer arrival, and
-// its FETCH answer then comes before the EXISTS: imapserver lets a session
-// write EXISTS only once the command is done. Options.LateArrivals makes it
-// stricter there, as Gmail can be: FETCH, STORE and SEARCH then neither see
-// nor announce a new arrival, and a NOOP does both. Options.LateExists is
-// stricter still: a NOOP announces it only at the end of the next command.
+// Another session learns of changes at its next command, or within 10ms
+// while it idles, as EXISTS and EXPUNGE, but not of flag changes. Sequence
+// sets reach only the messages the last EXISTS announced, but a UID command
+// can name a newer arrival, and its FETCH answer then comes before the
+// EXISTS: imapserver lets a session write EXISTS only once the command is
+// done. Options.LateArrivals makes it stricter there, as Gmail can be:
+// FETCH, STORE and SEARCH then neither see nor announce a new arrival, and a
+// NOOP does both. Options.LateExists is stricter still: a NOOP announces it
+// only at the end of the next command.
 package fakegmail
 
 import (
@@ -135,6 +136,10 @@ type Options struct {
 	// once. Gmail behaves so for a message another session moved into a
 	// folder: it sends the EXISTS some time after the NOOP's answer.
 	LateExists bool
+	// IdleTicks, when set, gives an idling session the ticks at which it
+	// looks again for changes other sessions made, and a function that stops
+	// them. Nil means a ticker every 10ms. Tests set it to drive IDLE.
+	IdleTicks func() (ticks <-chan time.Time, stop func())
 }
 
 // late reports whether FETCH, STORE and SEARCH leave new arrivals unseen,
@@ -168,6 +173,13 @@ type Server struct {
 	afterAppend func()
 	// faults counts the armed failures of each command (FailNext).
 	faults map[string]int
+
+	// holdMu guards hold and holdSeen. hold, while set, is the channel
+	// HoldReads closes on release; every read of client data waits for it.
+	// holdSeen gets a token when a read is held.
+	holdMu   sync.Mutex
+	hold     chan struct{}
+	holdSeen chan struct{}
 }
 
 // folderKind says which messages a folder holds.
@@ -253,6 +265,9 @@ func StartWith(t testing.TB, ca *tlstest.CA, opts Options, username, password st
 	go func() { _ = srv.Serve(tls.NewListener(&trackingListener{Listener: ln, s: s}, ca.Server)) }() // Serve ends with an error once Close runs
 	// Close ln as well: if Close runs before Serve registers it, Serve never closes it.
 	t.Cleanup(func() { _, _ = srv.Close(), ln.Close() }) // nothing to do about close errors at test end
+	// Release a hold the test left, before the server closes: cleanups run
+	// last first.
+	t.Cleanup(s.releaseHold)
 	addr, ok := ln.Addr().(*net.TCPAddr)
 	if !ok {
 		t.Fatalf("listener address is %T", ln.Addr())
@@ -702,9 +717,56 @@ type trackedConn struct {
 	s *Server
 }
 
+// Read holds what it read while HoldReads is in force.
+func (c *trackedConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.s.waitHold()
+	}
+	return n, err
+}
+
 func (c *trackedConn) Close() error {
 	c.s.mu.Lock()
 	delete(c.s.conns, c.Conn)
 	c.s.mu.Unlock()
 	return c.Conn.Close()
+}
+
+// HoldReads makes the server hold what it reads from any client from now
+// on, unanswered, until release is called: a command sent after HoldReads
+// gets no answer, not even IDLE's continuation, until then. held gets a
+// token when the first read is held. release is safe to call more than
+// once, and the test's cleanup calls it if the test did not.
+func (s *Server) HoldReads() (held <-chan struct{}, release func()) {
+	hold, seen := make(chan struct{}), make(chan struct{}, 1)
+	s.holdMu.Lock()
+	s.hold, s.holdSeen = hold, seen
+	s.holdMu.Unlock()
+	return seen, s.releaseHold
+}
+
+// releaseHold ends the hold HoldReads started, if any.
+func (s *Server) releaseHold() {
+	s.holdMu.Lock()
+	defer s.holdMu.Unlock()
+	if s.hold != nil {
+		close(s.hold)
+		s.hold, s.holdSeen = nil, nil
+	}
+}
+
+// waitHold waits out a hold HoldReads started, if any.
+func (s *Server) waitHold() {
+	s.holdMu.Lock()
+	hold, seen := s.hold, s.holdSeen
+	s.holdMu.Unlock()
+	if hold == nil {
+		return
+	}
+	select {
+	case seen <- struct{}{}:
+	default: // a held read is already announced
+	}
+	<-hold
 }

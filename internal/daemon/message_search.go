@@ -92,7 +92,7 @@ func (m *messageService) plan(req *chainmailv1.SearchRequest) (*searchPlan, erro
 	case limit > maxSearchLimit:
 		return nil, &argError{msg: "limit is at most 500", hint: "page through larger results with the cursor"}
 	}
-	accts, err := m.accounts(append(slices.Clone(req.GetAccounts()), scope.Accounts...))
+	accts, err := m.s.resolveAccounts(append(slices.Clone(req.GetAccounts()), scope.Accounts...))
 	if err != nil {
 		return nil, err
 	}

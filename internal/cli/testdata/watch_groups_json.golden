@@ -1,0 +1,1 @@
+{"groups":[{"name":"nightly","acked_id":"120","lag":"3","created_at":"2026-11-01T08:00:00Z","last_seen_at":"2026-11-02T09:59:00Z"},{"name":"bot","acked_id":"0","lag":"123","created_at":"2026-11-02T07:00:00Z","last_seen_at":"2026-11-02T10:00:00Z"}]}

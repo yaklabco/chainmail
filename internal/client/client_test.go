@@ -6,8 +6,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -20,23 +18,9 @@ import (
 
 func TestCloseDropsIdleConnections(t *testing.T) {
 	t.Parallel()
-	dir, err := os.MkdirTemp("", "cmc")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	socket := filepath.Join(dir, "s.sock")
-	var lc net.ListenConfig
-	ln, err := lc.Listen(t.Context(), "unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
 	closed := make(chan struct{}, 1)
 	headers := make(chan string, 1)
-	protocols := new(http.Protocols)
-	protocols.SetUnencryptedHTTP2(true)
 	srv := &http.Server{
-		Protocols: protocols,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			headers <- r.Header.Get(api.HeaderClient)
 			http.Error(w, "nope", http.StatusTeapot)
@@ -50,11 +34,10 @@ func TestCloseDropsIdleConnections(t *testing.T) {
 			}
 		},
 	}
-	go func() { _ = srv.Serve(ln) }() // returns http.ErrServerClosed on Close
-	t.Cleanup(func() { _ = srv.Close() })
+	socket := serveUnix(t, srv)
 
 	c := New(socket, "cli")
-	_, err = c.Admin.GetStatus(t.Context(), connect.NewRequest(&chainmailv1.GetStatusRequest{}))
+	_, err := c.Admin.GetStatus(t.Context(), connect.NewRequest(&chainmailv1.GetStatusRequest{}))
 	var cerr *connect.Error
 	if !errors.As(err, &cerr) {
 		t.Fatalf("GetStatus: %v", err)
@@ -72,30 +55,15 @@ func TestCloseDropsIdleConnections(t *testing.T) {
 
 func TestStreamingCallsCarryClientHeader(t *testing.T) {
 	t.Parallel()
-	dir, err := os.MkdirTemp("", "cmc")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	socket := filepath.Join(dir, "s.sock")
-	var lc net.ListenConfig
-	ln, err := lc.Listen(t.Context(), "unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
 	headers := make(chan string, 1)
-	protocols := new(http.Protocols)
-	protocols.SetUnencryptedHTTP2(true)
 	srv := &http.Server{
-		Protocols: protocols,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			headers <- r.Header.Get(api.HeaderClient)
 			_, _ = io.Copy(io.Discard, r.Body)
 			http.Error(w, "nope", http.StatusTeapot)
 		}),
 	}
-	go func() { _ = srv.Serve(ln) }() // returns http.ErrServerClosed on Close
-	t.Cleanup(func() { _ = srv.Close() })
+	socket := serveUnix(t, srv)
 
 	c := New(socket, "cli")
 	defer c.Close()
@@ -131,25 +99,10 @@ func (b bigDryRun) Send(context.Context, *connect.Request[chainmailv1.SendReques
 // dry run as large as the daemon's 40 MiB Compose response cap allows.
 func TestComposeAcceptsLargeResponses(t *testing.T) {
 	t.Parallel()
-	dir, err := os.MkdirTemp("", "cmc")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	socket := filepath.Join(dir, "s.sock")
-	var lc net.ListenConfig
-	ln, err := lc.Listen(t.Context(), "unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
 	const size = 39 << 20
 	mux := http.NewServeMux()
 	mux.Handle(chainmailv1connect.NewComposeServiceHandler(bigDryRun{size: size}))
-	protocols := new(http.Protocols)
-	protocols.SetUnencryptedHTTP2(true)
-	srv := &http.Server{Protocols: protocols, Handler: mux}
-	go func() { _ = srv.Serve(ln) }() // returns http.ErrServerClosed on Close
-	t.Cleanup(func() { _ = srv.Close() })
+	socket := serveUnix(t, &http.Server{Handler: mux})
 
 	c := New(socket, "cli")
 	defer c.Close()

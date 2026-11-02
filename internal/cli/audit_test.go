@@ -51,6 +51,14 @@ func (f *fakeAdmin) last(t *testing.T) *chainmailv1.ReadAuditRequest {
 // startFakeAdmin serves f on a Unix socket until the test ends and returns the socket.
 func startFakeAdmin(t *testing.T, f *fakeAdmin) string {
 	t.Helper()
+	path, handler := chainmailv1connect.NewAdminServiceHandler(f)
+	return startFakeServer(t, path, handler)
+}
+
+// startFakeServer serves one Connect service, as its New...ServiceHandler
+// returns it, on a Unix socket until the test ends and returns the socket.
+func startFakeServer(t *testing.T, path string, handler http.Handler) string {
+	t.Helper()
 	// Unix socket paths are limited to 108 bytes, so avoid t.TempDir's long paths.
 	dir, err := os.MkdirTemp("", "cmd")
 	if err != nil {
@@ -64,7 +72,7 @@ func startFakeAdmin(t *testing.T, f *fakeAdmin) string {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	mux.Handle(chainmailv1connect.NewAdminServiceHandler(f))
+	mux.Handle(path, handler)
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
@@ -74,7 +82,7 @@ func startFakeAdmin(t *testing.T, f *fakeAdmin) string {
 	t.Cleanup(func() {
 		_ = srv.Close()
 		if err := <-done; err != nil && !errors.Is(err, http.ErrServerClosed) {
-			t.Errorf("fake admin server: %v", err)
+			t.Errorf("fake server: %v", err)
 		}
 	})
 	return socket

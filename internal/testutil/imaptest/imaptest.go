@@ -42,6 +42,13 @@ type User struct {
 	Mail map[string][]string
 	// OnSelect, when set, hears every SELECT and EXAMINE this user sends.
 	OnSelect func(mailbox string, readOnly bool)
+	// MaxConns, when above zero, caps this user's logged-in sessions: a
+	// login past it gets NO [LIMIT], as a server over its connection limit
+	// answers. A session stops counting once its connection has closed.
+	MaxConns int
+	// Conns, when set, counts this user's logged-in sessions. Start makes
+	// one for a MaxConns user that has none.
+	Conns *atomic.Int32
 }
 
 // Start runs a server until the test ends and returns its endpoint.
@@ -51,6 +58,9 @@ func Start(t testing.TB, ca *tlstest.CA, security provider.Security, users ...Us
 	mem := imapmemserver.New()
 	byName := map[string]User{}
 	for _, u := range users {
+		if u.MaxConns > 0 && u.Conns == nil {
+			u.Conns = new(atomic.Int32)
+		}
 		mu := imapmemserver.NewUser(u.Username, u.Password)
 		for _, name := range append([]string{"INBOX"}, u.Folders...) {
 			if err := mu.Create(name, nil); err != nil {
@@ -101,9 +111,12 @@ type session struct {
 	conn *imapserver.Conn
 	// current is the logged-in user, for OnSelect.
 	current *User
+	// counted says the session counts toward its user's Conns.
+	counted bool
 }
 
-// Login counts the attempt and answers with the user's LoginError when one is set.
+// Login counts the attempt and answers with the user's LoginError when one
+// is set, or NO [LIMIT] when the user is at MaxConns.
 func (s *session) Login(username, password string) error {
 	u, ok := s.users[username]
 	if ok && u.Logins != nil {
@@ -116,13 +129,33 @@ func (s *session) Login(username, password string) error {
 	if ok && u.LoginError != nil {
 		return u.LoginError
 	}
+	counting := ok && u.Conns != nil
+	if counting {
+		if n := int(u.Conns.Add(1)); u.MaxConns > 0 && n > u.MaxConns {
+			u.Conns.Add(-1)
+			return &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeLimit, Text: "Too many simultaneous connections"}
+		}
+	}
 	if err := s.Session.Login(username, password); err != nil {
+		if counting {
+			u.Conns.Add(-1)
+		}
 		return err
 	}
+	s.counted = counting
 	if ok {
 		s.current = &u
 	}
 	return nil
+}
+
+// Close ends the session's count toward its user's Conns.
+func (s *session) Close() error {
+	if s.counted {
+		s.current.Conns.Add(-1)
+		s.counted = false
+	}
+	return s.Session.Close()
 }
 
 // Select reports SELECT and EXAMINE to the user's OnSelect.

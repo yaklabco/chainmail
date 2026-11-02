@@ -18,10 +18,10 @@ func TestOpenStateCreatesSchema(t *testing.T) {
 	if err := conn.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Errorf("user_version = %d, want 2", version)
+	if version != 3 {
+		t.Errorf("user_version = %d, want 3", version)
 	}
-	for _, table := range []string{"audit", "idempotency", "account_limits"} {
+	for _, table := range []string{"audit", "idempotency", "account_limits", "sync_folders", "sync_uids", "events", "event_groups"} {
 		var name string
 		if err := conn.QueryRowContext(t.Context(), "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&name); err != nil {
 			t.Errorf("%s table missing: %v", table, err)
@@ -157,5 +157,48 @@ func TestComposeTablesCheckValues(t *testing.T) {
 	}
 	if _, err := conn.ExecContext(t.Context(), limit, "b", 0); err == nil {
 		t.Error("imap_cap 0 was accepted")
+	}
+}
+
+func TestWatchTablesCheckValues(t *testing.T) {
+	t.Parallel()
+	conn, err := OpenState(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("OpenState: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() }) // a close error at test end changes nothing
+	const event = "INSERT INTO events (at, account, kind) VALUES ('t', 'a', ?)"
+	for _, kind := range []string{"new", "flags", "expunged", "status", "gap"} {
+		if _, err := conn.ExecContext(t.Context(), event, kind); err != nil {
+			t.Errorf("event kind %q: %v", kind, err)
+		}
+	}
+	if _, err := conn.ExecContext(t.Context(), event, "moved"); err == nil {
+		t.Error("event kind 'moved' was accepted")
+	}
+	const folder = "INSERT INTO sync_folders (account, folder, condstore, mode) VALUES ('a', ?, ?, ?)"
+	for _, tt := range []struct {
+		folder    string
+		condstore int
+		mode      string
+		ok        bool
+	}{
+		{"f1", 0, "", true},
+		{"f2", 1, "idle", true},
+		{"f3", 0, "poll", true},
+		{"f4", 2, "", false},
+		{"f5", 0, "push", false},
+	} {
+		_, err := conn.ExecContext(t.Context(), folder, tt.folder, tt.condstore, tt.mode)
+		if (err == nil) != tt.ok {
+			t.Errorf("sync_folders condstore %d mode %q: err = %v, want ok %v", tt.condstore, tt.mode, err, tt.ok)
+		}
+	}
+	const uid = "INSERT INTO sync_uids (account, folder, uid) VALUES ('a', 'f', ?)"
+	if _, err := conn.ExecContext(t.Context(), uid, 7); err != nil {
+		t.Errorf("valid sync_uids row: %v", err)
+	}
+	if _, err := conn.ExecContext(t.Context(), uid, 7); err == nil {
+		t.Error("duplicate (account, folder, uid) was accepted")
 	}
 }

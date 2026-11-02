@@ -1,0 +1,1 @@
+{"folders":[{"account":"host","folder":"INBOX","mode":"idle","state":"watching","condstore":true,"last_sync_at":"2026-11-02T10:00:00Z","last_sweep_at":"2026-11-02T09:30:00Z","last_error":""},{"account":"host","folder":"Sent","mode":"poll","state":"error","condstore":false,"last_sync_at":"2026-11-02T09:55:00Z","last_sweep_at":null,"last_error":"FOLDER_NOT_FOUND"}]}

@@ -207,28 +207,40 @@ func (s *Store) FetchSummaries(ctx context.Context, src mailstore.Source, uids [
 		if c.uidValidity != src.UIDValidity {
 			return fmt.Errorf("%w: %s changed; search again", mailstore.ErrStaleRef, src.Folder)
 		}
-		preview := opts.Snippets && c.client().Caps().Has(imap.CapPreview)
-		bufs, err := c.fetch(ctx, uidSet(uids), s.summaryItems(preview, false))
-		if err != nil {
-			return err
-		}
-		byUID := make(map[uint32]*imapclient.FetchMessageBuffer, len(bufs))
-		for _, b := range bufs {
-			byUID[uint32(b.UID)] = b
-		}
-		var structures []imap.BodyStructure
-		for _, uid := range uids {
-			if b, ok := byUID[uid]; ok {
-				out = append(out, s.summary(src.Folder, c.uidValidity, b))
-				structures = append(structures, b.BodyStructure)
-			}
-		}
-		if opts.Snippets && !preview {
-			return c.samples(ctx, out, structures)
-		}
-		return nil
+		var err error
+		out, err = s.fetchSummaries(ctx, c, src.Folder, uids, opts.Snippets)
+		return err
 	})
 	return out, err
+}
+
+// fetchSummaries fetches summaries of uids in folder, which must be open on
+// c, and returns them in the order of uids, leaving out any the server did
+// not answer for. With snippets each gets PREVIEW when the server offers it
+// and a text sample otherwise. When fetching the samples fails it returns
+// the summaries with the error.
+func (s *Store) fetchSummaries(ctx context.Context, c *conn, folder string, uids []uint32, snippets bool) ([]mailstore.Summary, error) {
+	preview := snippets && c.client().Caps().Has(imap.CapPreview)
+	bufs, err := c.fetch(ctx, uidSet(uids), s.summaryItems(preview, false))
+	if err != nil {
+		return nil, err
+	}
+	byUID := make(map[uint32]*imapclient.FetchMessageBuffer, len(bufs))
+	for _, b := range bufs {
+		byUID[uint32(b.UID)] = b
+	}
+	var out []mailstore.Summary
+	var structures []imap.BodyStructure
+	for _, uid := range uids {
+		if b, ok := byUID[uid]; ok {
+			out = append(out, s.summary(folder, c.uidValidity, b))
+			structures = append(structures, b.BodyStructure)
+		}
+	}
+	if snippets && !preview {
+		return out, c.samples(ctx, out, structures)
+	}
+	return out, nil
 }
 
 // samples fills Sample with the first bytes of each message's text part.

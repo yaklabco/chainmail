@@ -456,3 +456,56 @@ func TestPoolConnPeakCountsDials(t *testing.T) {
 		t.Errorf("peak = %d, want 1 for the dial", got)
 	}
 }
+
+// yieldSlot frees one slot for a refused watcher. A pool at its cap steps
+// the cap down by one, never below one, and says so; a pool below its cap
+// keeps the cap and hands over one idle connection; a pool holding nothing
+// changes nothing, since shrinking it frees nothing. Borrowed connections
+// stay out and log out on return, and the last connection stays.
+func TestPoolYieldSlot(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		size           int
+		borrowed, idle int
+		wantCap        int
+		wantRetired    int
+		wantAtCap      bool
+	}{
+		{name: "full pool of idle connections", size: 3, idle: 3, wantCap: 2, wantRetired: 1, wantAtCap: true},
+		{name: "below the cap keeps it and frees one", size: 5, idle: 3, wantCap: 5, wantRetired: 1},
+		{name: "below the cap with two of five open", size: 5, idle: 2, wantCap: 5, wantRetired: 1},
+		{name: "borrowed connections are not taken", size: 3, borrowed: 2, idle: 1, wantCap: 2, wantRetired: 1, wantAtCap: true},
+		{name: "all borrowed", size: 3, borrowed: 3, wantCap: 2, wantRetired: 0, wantAtCap: true},
+		{name: "empty pool changes nothing", size: 3, wantCap: 3, wantRetired: 0},
+		{name: "one connection keeps one", size: 1, idle: 1, wantCap: 1, wantRetired: 0, wantAtCap: true},
+		{name: "a lone idle connection below the cap stays", size: 5, idle: 1, wantCap: 5, wantRetired: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := newTestPool(tt.size, &fakeDialer{}, &testClock{t: time.Unix(0, 0)}, time.Hour)
+			var out []*fakeConn
+			for range tt.borrowed + tt.idle {
+				c, err := p.get(t.Context(), "", false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out = append(out, c)
+			}
+			for _, c := range out[tt.borrowed:] {
+				p.put(c)
+			}
+			n, retired, atCap := p.yieldSlot()
+			if n != tt.wantCap || len(retired) != tt.wantRetired || atCap != tt.wantAtCap || p.size() != tt.wantCap {
+				t.Errorf("yieldSlot() = %d, %d retired, at cap %v (size %d); want %d, %d, %v", n, len(retired), atCap, p.size(), tt.wantCap, tt.wantRetired, tt.wantAtCap)
+			}
+			for _, c := range retired {
+				p.logout(c)
+			}
+			if open := p.openCount(); open != tt.borrowed+tt.idle-tt.wantRetired {
+				t.Errorf("openCount() = %d after logging out the retired, want %d", open, tt.borrowed+tt.idle-tt.wantRetired)
+			}
+		})
+	}
+}

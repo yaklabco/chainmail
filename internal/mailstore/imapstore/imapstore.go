@@ -39,6 +39,9 @@ type DialOptions struct {
 	// Timeout bounds connecting, logging in and fetching capabilities. Zero
 	// means 30 seconds.
 	Timeout time.Duration
+	// unilateral, when set, hears what the server reports unprompted, such
+	// as EXISTS and EXPUNGE during IDLE. Watch connections set it.
+	unilateral *imapclient.UnilateralDataHandler
 }
 
 // Session is a logged-in IMAP connection.
@@ -69,7 +72,7 @@ func Dial(ctx context.Context, ep provider.Endpoint, creds auth.Credentials, opt
 	}
 	// If ctx ends mid-handshake, closing the connection unblocks the read or write in progress.
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() }) // the caller sees ctx.Err() instead
-	client, err := handshake(ctx, conn, ep, opts.RootCAs)
+	client, err := handshake(ctx, conn, ep, opts.RootCAs, opts.unilateral)
 	loginFailed := false
 	if err == nil {
 		err = login(client, creds)
@@ -92,7 +95,9 @@ func Dial(ctx context.Context, ep provider.Endpoint, creds auth.Credentials, opt
 	return &Session{client: client, caps: caps, conn: conn, closeTimeout: defaultCloseTimeout}, nil
 }
 
-func handshake(ctx context.Context, conn net.Conn, ep provider.Endpoint, roots *x509.CertPool) (*imapclient.Client, error) {
+// handshake secures conn and returns a client on it, with unilateral, when
+// set, hearing what the server reports unprompted.
+func handshake(ctx context.Context, conn net.Conn, ep provider.Endpoint, roots *x509.CertPool, unilateral *imapclient.UnilateralDataHandler) (*imapclient.Client, error) {
 	tlsConfig := &tls.Config{ServerName: ep.Host, RootCAs: roots, MinVersion: tls.VersionTLS12}
 	switch ep.Security {
 	case provider.SecurityTLS:
@@ -100,9 +105,13 @@ func handshake(ctx context.Context, conn net.Conn, ep provider.Endpoint, roots *
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			return nil, fmt.Errorf("TLS handshake with %s: %w", ep.Addr(), err)
 		}
-		return imapclient.New(tlsConn, clientOptions(nil)), nil
+		options := clientOptions(nil)
+		options.UnilateralDataHandler = unilateral
+		return imapclient.New(tlsConn, options), nil
 	case provider.SecurityStartTLS:
-		c, err := imapclient.NewStartTLS(conn, clientOptions(tlsConfig))
+		options := clientOptions(tlsConfig)
+		options.UnilateralDataHandler = unilateral
+		c, err := imapclient.NewStartTLS(conn, options)
 		if err != nil {
 			return nil, fmt.Errorf("STARTTLS with %s: %w", ep.Addr(), err)
 		}

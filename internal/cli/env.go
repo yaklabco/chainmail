@@ -35,13 +35,16 @@ type Env struct {
 	// Now reads the clock, for times relative to now such as audit --since.
 	// Nil means time.Now.
 	Now func() time.Time
+	// After waits for a duration, as time.After does, for long-running
+	// commands such as watch. Nil means time.After.
+	After func(time.Duration) <-chan time.Time
 }
 
 // DefaultEnv returns the real process environment.
 func DefaultEnv() Env {
 	env := Env{
 		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Getenv: os.Getenv, PassShow: passShow,
-		StdoutTerminal: term.IsTerminal(int(os.Stdout.Fd())), TZ: time.Local, Now: time.Now,
+		StdoutTerminal: term.IsTerminal(int(os.Stdout.Fd())), TZ: time.Local, Now: time.Now, After: time.After,
 	}
 	if fd := int(os.Stdin.Fd()); term.IsTerminal(fd) {
 		env.ReadPassword = func() ([]byte, error) { return readTerminalPassword(fd) }
@@ -63,6 +66,14 @@ func (e Env) now() time.Time {
 		return time.Now()
 	}
 	return e.Now()
+}
+
+// after is e.After(d), or time.After(d) when e.After is nil.
+func (e Env) after(d time.Duration) <-chan time.Time {
+	if e.After == nil {
+		return time.After(d)
+	}
+	return e.After(d)
 }
 
 // passShow reads a pass entry through a pipe. gpg asks for a passphrase

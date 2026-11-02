@@ -49,9 +49,11 @@ func withDeadline(ctx context.Context, d time.Duration) (context.Context, contex
 	return context.WithTimeout(ctx, d)
 }
 
-// accounts resolves account names: the ones given, or every configured one.
-func (m *messageService) accounts(names []string) ([]config.ResolvedAccount, error) {
-	cfg := m.s.opts.Config
+// resolveAccounts resolves account names, sorted without repeats: the ones
+// given, or every configured one. An invalid name is INVALID_ARGUMENT and
+// an unknown one NOT_FOUND.
+func (s *Server) resolveAccounts(names []string) ([]config.ResolvedAccount, error) {
+	cfg := s.opts.Config
 	if len(names) == 0 {
 		names = cfg.AccountNames()
 	}
@@ -135,7 +137,7 @@ func (m *messageService) ListFolders(ctx context.Context, req *connect.Request[c
 
 func (m *messageService) listFolders(ctx context.Context, names []string) (*chainmailv1.ListFoldersResponse, audit.Entry, error) {
 	entry := audit.Entry{Action: "folders.list"}
-	accts, err := m.accounts(names)
+	accts, err := m.s.resolveAccounts(names)
 	if err != nil {
 		return nil, entry, err
 	}

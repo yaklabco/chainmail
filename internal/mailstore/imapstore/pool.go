@@ -45,9 +45,13 @@ type pool[C pooled] struct {
 	// They no longer count against max, but the server still holds their
 	// slots, so openCount reports them.
 	closing int
-	// peak is the most of open plus closing since the last resetConnPeak.
-	// Only a dial raises the sum: a logout moves a connection from open to
-	// closing.
+	// outside are connections dialed outside the pool, such as watch
+	// connections, that hold a slot on the server. They do not count
+	// against max, but openCount and peak count them.
+	outside int
+	// peak is the most of open, closing and outside since the last
+	// resetConnPeak. Only a dial raises the sum: a logout moves a
+	// connection from open to closing.
 	peak   int
 	idle   []*idleConn[C]
 	wake   chan struct{}
@@ -85,7 +89,7 @@ func (p *pool[C]) get(ctx context.Context, folder string, writable bool) (C, err
 		}
 		if p.open < p.max {
 			p.open++
-			p.peak = max(p.peak, p.open+p.closing)
+			p.peak = max(p.peak, p.slotsLocked())
 			p.mu.Unlock()
 			c, err := p.dial(ctx)
 			if err != nil {
@@ -179,24 +183,78 @@ func (p *pool[C]) shrink() int {
 	return p.max
 }
 
+// yieldSlot makes room for a connection dialed outside the pool that the
+// server refused for being over its limit, by at most one slot. A pool
+// that holds no open connection changes nothing: shrinking it frees no
+// slot, and the refusal is someone else's, such as sessions the server
+// still counts from before a restart. A pool at its cap steps the cap down
+// by one, never below one, and reports atCap, so the caller may record the
+// limit. A pool below its cap keeps the cap. Either way idle connections
+// are taken off the pool until one slot is free, never the last one, and
+// returned counted as closing, for the caller to log out.
+func (p *pool[C]) yieldSlot() (n int, retire []C, atCap bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.open == 0 {
+		return p.max, nil, false
+	}
+	atCap = p.open >= p.max
+	target := max(1, p.open-1)
+	if atCap {
+		p.max = max(1, p.max-1)
+		target = p.max
+	}
+	for p.open > target && len(p.idle) > 0 {
+		e := p.idle[0] // the oldest
+		p.idle = p.idle[1:]
+		if !e.timer.Stop() {
+			continue // the idle timer fired and expire owns this connection now
+		}
+		p.startLogoutLocked()
+		retire = append(retire, e.c)
+	}
+	return p.max, retire, atCap
+}
+
 // openCount returns how many connections hold a slot on the server:
-// dialing, borrowed, idle or still logging out.
+// dialing, borrowed, idle or still logging out, and those outside the pool.
 func (p *pool[C]) openCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.open + p.closing
+	return p.slotsLocked()
 }
 
-// resetConnPeak starts a new peak from the connections holding a slot now.
+// slotsLocked is openCount with p.mu held.
+func (p *pool[C]) slotsLocked() int { return p.open + p.closing + p.outside }
+
+// holdOutside counts a connection dialed outside the pool, from the start
+// of its dial, toward openCount and the peak. releaseOutside ends it, once
+// the connection has logged out or failed to dial.
+func (p *pool[C]) holdOutside() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.outside++
+	p.peak = max(p.peak, p.slotsLocked())
+}
+
+// releaseOutside ends a holdOutside.
+func (p *pool[C]) releaseOutside() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.outside--
+}
+
+// resetConnPeak starts a new peak from the connections holding a slot now,
+// those outside the pool included.
 func (p *pool[C]) resetConnPeak() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.peak = p.open + p.closing
+	p.peak = p.slotsLocked()
 }
 
 // connPeak returns the most connections that held a slot at once since the
 // last resetConnPeak, or since the pool was made: dialing, borrowed, idle or
-// still logging out. Connections that have closed since still count.
+// still logging out, and those outside the pool. Connections that have closed since still count.
 func (p *pool[C]) connPeak() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
