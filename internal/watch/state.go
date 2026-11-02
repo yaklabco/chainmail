@@ -28,8 +28,8 @@ type FolderRow struct {
 	LastError     string // an error reason such as FOLDER_NOT_FOUND, never server text
 }
 
-// KnownUID is one sync_uids row.
-type KnownUID struct {
+// knownUID is one sync_uids row.
+type knownUID struct {
 	GmailMsgID uint64
 	FlagsHash  string // "" for CONDSTORE folders
 }
@@ -136,9 +136,9 @@ func (s *State) Folders(ctx context.Context) ([]FolderRow, error) {
 	return out, nil
 }
 
-// UIDs returns the folder's known UIDs. It is empty, not nil, when there
+// uids returns the folder's known uids. It is empty, not nil, when there
 // are none.
-func (s *State) UIDs(ctx context.Context, account, folder string) (map[uint32]KnownUID, error) {
+func (s *State) uids(ctx context.Context, account, folder string) (map[uint32]knownUID, error) {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT uid, gmail_msgid, flags_hash FROM sync_uids WHERE account = ? AND folder = ?",
 		account, folder)
@@ -146,11 +146,11 @@ func (s *State) UIDs(ctx context.Context, account, folder string) (map[uint32]Kn
 		return nil, fmt.Errorf("watch: reading UIDs of %s/%s: %w", account, folder, err)
 	}
 	defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
-	out := make(map[uint32]KnownUID)
+	out := make(map[uint32]knownUID)
 	for rows.Next() {
 		var (
 			uid, msgID int64
-			k          KnownUID
+			k          knownUID
 		)
 		if err := rows.Scan(&uid, &msgID, &k.FlagsHash); err != nil {
 			return nil, fmt.Errorf("watch: reading UIDs of %s/%s: %w", account, folder, err)
@@ -214,8 +214,8 @@ func PutFolder(ctx context.Context, tx *sql.Tx, r FolderRow) error {
 	return nil
 }
 
-// ReplaceUIDs replaces the folder's known UIDs with uids in tx.
-func ReplaceUIDs(ctx context.Context, tx *sql.Tx, account, folder string, uids map[uint32]KnownUID) error {
+// replaceUIDs replaces the folder's known UIDs with uids in tx.
+func replaceUIDs(ctx context.Context, tx *sql.Tx, account, folder string, uids map[uint32]knownUID) error {
 	if _, err := tx.ExecContext(ctx, "DELETE FROM sync_uids WHERE account = ? AND folder = ?", account, folder); err != nil {
 		return fmt.Errorf("watch: clearing UIDs of %s/%s: %w", account, folder, err)
 	}
@@ -223,8 +223,8 @@ func ReplaceUIDs(ctx context.Context, tx *sql.Tx, account, folder string, uids m
 		"INSERT INTO sync_uids (account, folder, uid, gmail_msgid, flags_hash) VALUES (?, ?, ?, ?, ?)")
 }
 
-// PutUIDs inserts or updates uids in the folder's known UIDs in tx.
-func PutUIDs(ctx context.Context, tx *sql.Tx, account, folder string, uids map[uint32]KnownUID) error {
+// putUIDs inserts or updates uids in the folder's known UIDs in tx.
+func putUIDs(ctx context.Context, tx *sql.Tx, account, folder string, uids map[uint32]knownUID) error {
 	return writeUIDs(ctx, tx, account, folder, uids,
 		`INSERT INTO sync_uids (account, folder, uid, gmail_msgid, flags_hash) VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT (account, folder, uid) DO UPDATE SET
@@ -233,7 +233,7 @@ func PutUIDs(ctx context.Context, tx *sql.Tx, account, folder string, uids map[u
 
 // writeUIDs runs the insert for every UID through one prepared statement,
 // in ascending UID order, which suits the table's primary key.
-func writeUIDs(ctx context.Context, tx *sql.Tx, account, folder string, uids map[uint32]KnownUID, query string) error {
+func writeUIDs(ctx context.Context, tx *sql.Tx, account, folder string, uids map[uint32]knownUID, query string) error {
 	if len(uids) == 0 {
 		return nil
 	}
@@ -251,9 +251,9 @@ func writeUIDs(ctx context.Context, tx *sql.Tx, account, folder string, uids map
 	return nil
 }
 
-// DeleteUIDs removes uids from the folder's known UIDs in tx. UIDs it does
+// deleteUIDs removes uids from the folder's known UIDs in tx. UIDs it does
 // not know are ignored.
-func DeleteUIDs(ctx context.Context, tx *sql.Tx, account, folder string, uids []uint32) error {
+func deleteUIDs(ctx context.Context, tx *sql.Tx, account, folder string, uids []uint32) error {
 	if len(uids) == 0 {
 		return nil
 	}
@@ -270,15 +270,15 @@ func DeleteUIDs(ctx context.Context, tx *sql.Tx, account, folder string, uids []
 	return nil
 }
 
-// flagsHashLen is how many hex characters FlagsHash keeps.
+// flagsHashLen is how many hex characters flagsHash keeps.
 const flagsHashLen = 32
 
-// FlagsHash is a stable hash of a message's flags and labels: hex SHA-256
+// flagsHash is a stable hash of a message's flags and labels: hex SHA-256
 // of the sorted, deduplicated flags, each followed by "\n", a 0x00 byte,
 // then the sorted, deduplicated labels, each followed by "\n", truncated to
 // 32 hex characters. The newlines keep ["ab"] and ["a", "b"] apart. The
 // value is stored in sync_uids, so this encoding must never change.
-func FlagsHash(flags, labels []string) string {
+func flagsHash(flags, labels []string) string {
 	h := sha256.New()
 	writeSet(h, flags)
 	h.Write([]byte{0})

@@ -17,9 +17,9 @@ import (
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 )
 
-// ReasonFolderNotFound is the status detail and sync_folders last_error of
+// reasonFolderNotFound is the status detail and sync_folders last_error of
 // a synced folder the account does not have.
-const ReasonFolderNotFound = "FOLDER_NOT_FOUND"
+const reasonFolderNotFound = "FOLDER_NOT_FOUND"
 
 // Pass modes, as PassOptions.Mode and the sync_folders mode column record them.
 const (
@@ -197,7 +197,7 @@ func (p *parker) requested() (bool, string) {
 
 // active runs the watcher loops and the poller until ctx ends, every loop
 // has returned, or the account needs a human, asking AuthRequired every
-// AuthRecheck meanwhile. It returns once every loop has returned and closed
+// authRecheck meanwhile. It returns once every loop has returned and closed
 // its connection, so no pass is running, and reports whether to park.
 func (s *Supervisor) active(ctx context.Context) (park bool, hint string) {
 	actx, cancel := context.WithCancel(ctx)
@@ -227,7 +227,7 @@ func (s *Supervisor) active(ctx context.Context) (park bool, hint string) {
 	return p.requested()
 }
 
-// checkAuth asks AuthRequired every AuthRecheck until done closes or ctx
+// checkAuth asks AuthRequired every authRecheck until done closes or ctx
 // ends, and parks the account the first time the answer is yes.
 func (s *Supervisor) checkAuth(ctx context.Context, done <-chan struct{}, p *parker) {
 	for {
@@ -236,7 +236,7 @@ func (s *Supervisor) checkAuth(ctx context.Context, done <-chan struct{}, p *par
 			return
 		case <-ctx.Done():
 			return
-		case <-s.clock.After(AuthRecheck):
+		case <-s.clock.After(authRecheck):
 		}
 		if need, hint := s.o.AuthRequired(s.o.Account.Name); need {
 			p.park(hint)
@@ -246,7 +246,7 @@ func (s *Supervisor) checkAuth(ctx context.Context, done <-chan struct{}, p *par
 }
 
 // park records the account as needing a human, then asks AuthRequired
-// every AuthRecheck until it clears. It waits at least one AuthRecheck, so
+// every authRecheck until it clears. It waits at least one authRecheck, so
 // a refusal is never retried sooner, and reports false when ctx ends.
 func (s *Supervisor) park(ctx context.Context, hint string) bool {
 	s.logger.Warn("watching is parked until the account is authenticated")
@@ -254,7 +254,7 @@ func (s *Supervisor) park(ctx context.Context, hint string) bool {
 	for {
 		// Armed before the status is recorded, so whoever sees the status
 		// finds the recheck already waiting on the clock.
-		recheck := s.clock.After(AuthRecheck)
+		recheck := s.clock.After(authRecheck)
 		if !recorded {
 			if err := s.recordParked(ctx, hint); err != nil {
 				s.logger.Warn("recording that the account is parked", "reason", failureReason(err))
@@ -345,7 +345,7 @@ func (s *Supervisor) watchLoop(ctx context.Context, p *parker, folder string) {
 			return
 		case errors.As(err, &notFound):
 			s.logger.Warn("a watched folder does not exist", "folder", w.folder)
-			s.note(ctx, w.folder, w.mode, StateError, ReasonFolderNotFound, ReasonFolderNotFound)
+			s.note(ctx, w.folder, w.mode, StateError, reasonFolderNotFound, reasonFolderNotFound)
 			if s.o.Account.Provider.Gmail {
 				w.folder = "" // resolve the \All folder again
 			}
@@ -353,7 +353,7 @@ func (s *Supervisor) watchLoop(ctx context.Context, p *parker, folder string) {
 		default:
 			s.logger.Warn("watch connection failed", "folder", w.folder, "reason", failureReason(err))
 			s.note(ctx, w.folder, w.mode, StateReconnecting, "", api.ReasonServerUnavailable)
-			wait = Backoff(failures, s.jitter())
+			wait = backoff(failures, s.jitter())
 			failures++
 		}
 		if !s.sleep(ctx, wait) {
@@ -479,13 +479,13 @@ func (s *Supervisor) pollFolder(ctx context.Context, pf *polled) error {
 	}
 	var notFound *mailstore.FolderNotFoundError
 	if errors.As(err, &notFound) {
-		s.note(ctx, pf.folder, passModePoll, StateError, ReasonFolderNotFound, ReasonFolderNotFound)
+		s.note(ctx, pf.folder, passModePoll, StateError, reasonFolderNotFound, reasonFolderNotFound)
 		pf.next = s.clock.Now().Add(s.syncPoll)
 		return err
 	}
 	s.logger.Warn("polling a folder failed", "folder", pf.folder, "reason", failureReason(err))
 	s.note(ctx, pf.folder, passModePoll, StateReconnecting, "", api.ReasonServerUnavailable)
-	pf.next = s.clock.Now().Add(min(Backoff(pf.failures, s.jitter()), s.syncPoll))
+	pf.next = s.clock.Now().Add(min(backoff(pf.failures, s.jitter()), s.syncPoll))
 	pf.failures++
 	return err
 }
@@ -517,7 +517,7 @@ func (s *Supervisor) pollPass(ctx context.Context, folder string, sweep bool) (P
 		return PassResult{}, err
 	}
 	defer release()
-	return s.o.Engine.Pass(ctx, s.o.Account.Name, folder, StoreSource{W: w, Folder: folder}, PassOptions{Sweep: sweep, Mode: passModePoll})
+	return s.o.Engine.Pass(ctx, s.o.Account.Name, folder, storeSource{W: w, Folder: folder}, PassOptions{Sweep: sweep, Mode: passModePoll})
 }
 
 // session runs one connection on the folder: open, sync, then IDLE or poll
@@ -567,7 +567,7 @@ func (w *watcher) pass(ctx context.Context, conn mailstore.WatchConn, sweep bool
 }
 
 // wait blocks until the folder needs another pass and reports whether that
-// pass must sweep. With IDLE it waits for the server, the IdleRestart or a
+// pass must sweep. With IDLE it waits for the server, the idleRestart or a
 // due sweep; without, for idle_fallback_poll or a due sweep.
 func (w *watcher) wait(ctx context.Context, conn mailstore.WatchConn) (sweep bool, err error) {
 	if w.sweepDue() {
@@ -580,7 +580,7 @@ func (w *watcher) wait(ctx context.Context, conn mailstore.WatchConn) (sweep boo
 		}
 		return w.sweepDue(), nil
 	}
-	wake, err := w.idle(ctx, conn, min(limit, IdleRestart))
+	wake, err := w.idle(ctx, conn, min(limit, idleRestart))
 	if err != nil {
 		return false, err
 	}

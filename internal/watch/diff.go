@@ -9,8 +9,8 @@ import (
 	"github.com/jamesainslie/chainmail/internal/ref"
 )
 
-// DiffInput is what Diff needs besides the stored checkpoint and the delta.
-type DiffInput struct {
+// diffInput is what diff needs besides the stored checkpoint and the delta.
+type diffInput struct {
 	Account string
 	Folder  string
 	// Sweep says the pass asked for the folder's full UID set.
@@ -22,20 +22,20 @@ type DiffInput struct {
 	Snippet func(mailstore.Summary) string
 }
 
-// DiffResult is what one batch writes, all in one transaction.
-type DiffResult struct {
+// diffResult is what one batch writes, all in one transaction.
+type diffResult struct {
 	// Events are ordered gap, status, expunged, flags, then new, and by
 	// ascending UID within each kind.
 	Events  []Event
 	Next    FolderRow           // the checkpoint to store
-	Replace map[uint32]KnownUID // non-nil: replace the folder's UID set with it
-	Put     map[uint32]KnownUID // upserts
+	Replace map[uint32]knownUID // non-nil: replace the folder's UID set with it
+	Put     map[uint32]knownUID // upserts
 	Delete  []uint32
 }
 
-// Diff is the pure core of Pass, exported for table tests. prev is the
-// folder's stored row, or the zero row when it has none. known is the
-// folder's stored UID set. Diff reads it only for a sweep or full flags, so
+// diff is the pure core of Pass, which the table tests call directly. prev
+// is the folder's stored row, or the zero row when it has none. known is
+// the folder's stored UID set. diff reads it only for a sweep or full flags, so
 // it may be nil otherwise.
 //
 // A rebased delta (a first pass, or a UIDVALIDITY change) yields a gap when
@@ -46,15 +46,15 @@ type DiffResult struct {
 // missing from d.UIDs is expunged. Changed flags become flags events
 // (CONDSTORE's CHANGEDSINCE result below the old UIDNEXT, or every known
 // UID whose hash differs), and each new summary becomes a new event.
-func Diff(prev FolderRow, known map[uint32]KnownUID, d mailstore.Delta, in DiffInput) DiffResult {
-	res := DiffResult{Next: nextCheckpoint(prev, d, in)}
+func diff(prev FolderRow, known map[uint32]knownUID, d mailstore.Delta, in diffInput) diffResult {
+	res := diffResult{Next: nextCheckpoint(prev, d, in)}
 	if d.Rebased {
 		res.Events = rebaseEvents(prev, in)
 		res.Replace = rebaseUIDs(d)
 		return res
 	}
 	news := slices.SortedFunc(slices.Values(d.New), bySummaryUID)
-	put := make(map[uint32]KnownUID)
+	put := make(map[uint32]knownUID)
 	if in.Sweep || d.FullFlags {
 		var expunged []Event
 		expunged, res.Delete = expungedEvents(prev, known, d, in)
@@ -67,9 +67,9 @@ func Diff(prev FolderRow, known map[uint32]KnownUID, d mailstore.Delta, in DiffI
 	}
 	for _, s := range news {
 		res.Events = append(res.Events, newMailEvent(s, in))
-		k := KnownUID{GmailMsgID: s.Ref.GmailMsgID}
+		k := knownUID{GmailMsgID: s.Ref.GmailMsgID}
 		if !d.State.CondStore {
-			k.FlagsHash = FlagsHash(s.Flags, s.Labels)
+			k.FlagsHash = flagsHash(s.Flags, s.Labels)
 		}
 		put[s.Ref.UID] = k
 	}
@@ -84,7 +84,7 @@ func Diff(prev FolderRow, known map[uint32]KnownUID, d mailstore.Delta, in DiffI
 // come stops just after its last new UID, so the next batch starts there.
 // Mode, State and LastError carry over from prev, except that a baseline
 // records the baselined state its status event reports.
-func nextCheckpoint(prev FolderRow, d mailstore.Delta, in DiffInput) FolderRow {
+func nextCheckpoint(prev FolderRow, d mailstore.Delta, in diffInput) FolderRow {
 	next := FolderRow{
 		Account:       in.Account,
 		Folder:        in.Folder,
@@ -112,7 +112,7 @@ func nextCheckpoint(prev FolderRow, d mailstore.Delta, in DiffInput) FolderRow {
 
 // rebaseEvents reports a baseline: a uidvalidity gap when the folder had a
 // checkpoint, so watchers know to query again, then a baselined status.
-func rebaseEvents(prev FolderRow, in DiffInput) []Event {
+func rebaseEvents(prev FolderRow, in diffInput) []Event {
 	var events []Event
 	if prev.UIDValidity != 0 {
 		gap := syncEvent(in, KindGap)
@@ -128,18 +128,18 @@ func rebaseEvents(prev FolderRow, in DiffInput) []Event {
 // IDs come from d.Changed whenever it carries them, since on Gmail every
 // message is there with or without CONDSTORE. Flag hashes come from it only
 // with FullFlags. It is never nil, so an empty folder still clears the old set.
-func rebaseUIDs(d mailstore.Delta) map[uint32]KnownUID {
+func rebaseUIDs(d mailstore.Delta) map[uint32]knownUID {
 	changed := make(map[uint32]mailstore.FlagState, len(d.Changed))
 	for _, f := range d.Changed {
 		changed[f.UID] = f
 	}
-	uids := make(map[uint32]KnownUID, len(d.UIDs))
+	uids := make(map[uint32]knownUID, len(d.UIDs))
 	for _, uid := range d.UIDs {
-		var k KnownUID
+		var k knownUID
 		if f, ok := changed[uid]; ok {
 			k.GmailMsgID = f.GmailMsgID
 			if d.FullFlags {
-				k.FlagsHash = FlagsHash(f.Flags, f.Labels)
+				k.FlagsHash = flagsHash(f.Flags, f.Labels)
 			}
 		}
 		uids[uid] = k
@@ -151,7 +151,7 @@ func rebaseUIDs(d mailstore.Delta) map[uint32]KnownUID {
 // folder's full UID set. Each one missing is expunged, with the Gmail
 // message ID stored for it, and returned for deletion, ascending. A known
 // UID at or above the old UIDNEXT is left alone: d.UIDs cannot prove it gone.
-func expungedEvents(prev FolderRow, known map[uint32]KnownUID, d mailstore.Delta, in DiffInput) ([]Event, []uint32) {
+func expungedEvents(prev FolderRow, known map[uint32]knownUID, d mailstore.Delta, in diffInput) ([]Event, []uint32) {
 	present := make(map[uint32]struct{}, len(d.UIDs))
 	for _, uid := range d.UIDs {
 		present[uid] = struct{}{}
@@ -178,7 +178,7 @@ func expungedEvents(prev FolderRow, known map[uint32]KnownUID, d mailstore.Delta
 // condStoreFlagEvents turns a CHANGEDSINCE result into flags events. Only
 // UIDs below the old UIDNEXT count: anything at or above it, or in this
 // pass's new mail, is reported as new with its current flags instead.
-func condStoreFlagEvents(prev FolderRow, news []mailstore.Summary, d mailstore.Delta, in DiffInput) []Event {
+func condStoreFlagEvents(prev FolderRow, news []mailstore.Summary, d mailstore.Delta, in diffInput) []Event {
 	isNew := make(map[uint32]bool, len(news))
 	for _, s := range news {
 		isNew[s.Ref.UID] = true
@@ -197,26 +197,26 @@ func condStoreFlagEvents(prev FolderRow, news []mailstore.Summary, d mailstore.D
 // stored hashes. Each known UID whose hash differs gets a flags event and
 // its new hash in put. UIDs not known yet (new in this or a later batch) are
 // skipped: they arrive as new events.
-func fullFlagEvents(known map[uint32]KnownUID, d mailstore.Delta, in DiffInput, put map[uint32]KnownUID) []Event {
+func fullFlagEvents(known map[uint32]knownUID, d mailstore.Delta, in diffInput, put map[uint32]knownUID) []Event {
 	var events []Event
 	for _, f := range slices.SortedFunc(slices.Values(d.Changed), byFlagUID) {
 		k, ok := known[f.UID]
 		if !ok {
 			continue
 		}
-		hash := FlagsHash(f.Flags, f.Labels)
+		hash := flagsHash(f.Flags, f.Labels)
 		if hash == k.FlagsHash {
 			continue
 		}
 		msgID := cmp.Or(f.GmailMsgID, k.GmailMsgID)
 		events = append(events, flagsChangeEvent(in, d.State.UIDValidity, f, msgID))
-		put[f.UID] = KnownUID{GmailMsgID: msgID, FlagsHash: hash}
+		put[f.UID] = knownUID{GmailMsgID: msgID, FlagsHash: hash}
 	}
 	return events
 }
 
 // newMailEvent is the new event for one summary.
-func newMailEvent(s mailstore.Summary, in DiffInput) Event {
+func newMailEvent(s mailstore.Summary, in diffInput) Event {
 	e := syncEvent(in, KindNew)
 	e.Ref = s.Ref.String()
 	e.Message = messageFromSummary(s, in.Snippet)
@@ -247,7 +247,7 @@ func messageFromSummary(s mailstore.Summary, snippet func(mailstore.Summary) str
 }
 
 // flagsChangeEvent is a flags event with the message's current flags and labels.
-func flagsChangeEvent(in DiffInput, uidValidity uint32, f mailstore.FlagState, msgID uint64) Event {
+func flagsChangeEvent(in diffInput, uidValidity uint32, f mailstore.FlagState, msgID uint64) Event {
 	e := syncEvent(in, KindFlags)
 	e.Ref = syncRef(in, uidValidity, f.UID, msgID)
 	e.Flags = slices.Clone(f.Flags)
@@ -256,12 +256,12 @@ func flagsChangeEvent(in DiffInput, uidValidity uint32, f mailstore.FlagState, m
 }
 
 // syncEvent is an event of kind on the input's folder, stamped with its time.
-func syncEvent(in DiffInput, kind Kind) Event {
+func syncEvent(in diffInput, kind Kind) Event {
 	return Event{At: in.At, Kind: kind, Account: in.Account, Folder: in.Folder}
 }
 
 // syncRef is the ref of a message in the input's folder.
-func syncRef(in DiffInput, uidValidity, uid uint32, msgID uint64) string {
+func syncRef(in diffInput, uidValidity, uid uint32, msgID uint64) string {
 	return ref.Ref{Account: in.Account, Folder: in.Folder, UIDValidity: uidValidity, UID: uid, GmailMsgID: msgID}.String()
 }
 

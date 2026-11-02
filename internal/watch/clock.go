@@ -23,17 +23,17 @@ func (systemClock) After(d time.Duration) <-chan time.Time { return time.After(d
 
 // Timing constants, from spec section 5.
 const (
-	// IdleRestart is how long one IDLE runs before the watcher ends it and
+	// idleRestart is how long one IDLE runs before the watcher ends it and
 	// syncs, which doubles as a liveness check.
-	IdleRestart = 25 * time.Minute
-	// MaxBackoff caps the reconnect backoff before jitter.
-	MaxBackoff = 5 * time.Minute
+	idleRestart = 25 * time.Minute
+	// maxBackoff caps the reconnect backoff before jitter.
+	maxBackoff = 5 * time.Minute
 	// ExpungeSweepFloor is the default shortest time from one sweep to the
 	// next one a server EXPUNGE asks for (SupervisorOptions.SweepFloor).
 	ExpungeSweepFloor = 5 * time.Minute
-	// AuthRecheck is how often a parked loop asks whether the account is
+	// authRecheck is how often a parked loop asks whether the account is
 	// authenticated again.
-	AuthRecheck = 15 * time.Second
+	authRecheck = 15 * time.Second
 	// ShutdownLogout is the bound a WatchConn's Close puts on its logout.
 	ShutdownLogout = 5 * time.Second
 )
@@ -41,15 +41,15 @@ const (
 // backoffBase is the first reconnect wait, before jitter.
 const backoffBase = time.Second
 
-// Backoff is the wait before reconnect attempt n (0-based): 1s doubling,
+// backoff is the wait before reconnect attempt n (0-based): 1s doubling,
 // capped at 5 minutes, scaled by 0.8 + 0.4*jitter. A negative n counts as
 // 0, and jitter is clamped to [0, 1].
-func Backoff(n int, jitter float64) time.Duration {
+func backoff(n int, jitter float64) time.Duration {
 	d := backoffBase
-	for i := 0; i < n && d < MaxBackoff; i++ {
+	for i := 0; i < n && d < maxBackoff; i++ {
 		d *= 2
 	}
-	d = min(d, MaxBackoff)
+	d = min(d, maxBackoff)
 	jitter = min(max(jitter, 0), 1)
 	return time.Duration(float64(d) * (0.8 + 0.4*jitter))
 }

@@ -126,17 +126,17 @@ func TestUIDWriters(t *testing.T) {
 	t.Parallel()
 	conn := openDB(t)
 	s := NewState(conn)
-	h := FlagsHash([]string{`\Seen`}, nil)
+	h := flagsHash([]string{`\Seen`}, nil)
 
 	inTx(t, conn, func(ctx context.Context, tx *sql.Tx) error {
-		if err := ReplaceUIDs(ctx, tx, "a", "INBOX", map[uint32]KnownUID{1: {}, 2: {FlagsHash: h}, 3: {}}); err != nil {
+		if err := replaceUIDs(ctx, tx, "a", "INBOX", map[uint32]knownUID{1: {}, 2: {FlagsHash: h}, 3: {}}); err != nil {
 			return err
 		}
-		return ReplaceUIDs(ctx, tx, "a", "Archive", map[uint32]KnownUID{1: {}})
+		return replaceUIDs(ctx, tx, "a", "Archive", map[uint32]knownUID{1: {}})
 	})
-	assertUIDs := func(step, folder string, want map[uint32]KnownUID) {
+	assertUIDs := func(step, folder string, want map[uint32]knownUID) {
 		t.Helper()
-		got, err := s.UIDs(t.Context(), "a", folder)
+		got, err := s.uids(t.Context(), "a", folder)
 		if err != nil {
 			t.Fatalf("%s: UIDs: %v", step, err)
 		}
@@ -144,39 +144,39 @@ func TestUIDWriters(t *testing.T) {
 			t.Errorf("%s: UIDs(%s) = %v, want %v", step, folder, got, want)
 		}
 	}
-	assertUIDs("replace", "INBOX", map[uint32]KnownUID{1: {}, 2: {FlagsHash: h}, 3: {}})
+	assertUIDs("replace", "INBOX", map[uint32]knownUID{1: {}, 2: {FlagsHash: h}, 3: {}})
 
-	// ReplaceUIDs drops every UID not in the new set, in that folder only.
+	// replaceUIDs drops every UID not in the new set, in that folder only.
 	inTx(t, conn, func(ctx context.Context, tx *sql.Tx) error {
-		return ReplaceUIDs(ctx, tx, "a", "INBOX", map[uint32]KnownUID{3: {GmailMsgID: 1 << 62}, 4: {}})
+		return replaceUIDs(ctx, tx, "a", "INBOX", map[uint32]knownUID{3: {GmailMsgID: 1 << 62}, 4: {}})
 	})
-	assertUIDs("second replace", "INBOX", map[uint32]KnownUID{3: {GmailMsgID: 1 << 62}, 4: {}})
-	assertUIDs("second replace", "Archive", map[uint32]KnownUID{1: {}})
+	assertUIDs("second replace", "INBOX", map[uint32]knownUID{3: {GmailMsgID: 1 << 62}, 4: {}})
+	assertUIDs("second replace", "Archive", map[uint32]knownUID{1: {}})
 
-	// PutUIDs inserts new UIDs and updates known ones.
+	// putUIDs inserts new UIDs and updates known ones.
 	inTx(t, conn, func(ctx context.Context, tx *sql.Tx) error {
-		return PutUIDs(ctx, tx, "a", "INBOX", map[uint32]KnownUID{4: {FlagsHash: h}, 5: {GmailMsgID: 77}})
+		return putUIDs(ctx, tx, "a", "INBOX", map[uint32]knownUID{4: {FlagsHash: h}, 5: {GmailMsgID: 77}})
 	})
-	assertUIDs("put", "INBOX", map[uint32]KnownUID{3: {GmailMsgID: 1 << 62}, 4: {FlagsHash: h}, 5: {GmailMsgID: 77}})
+	assertUIDs("put", "INBOX", map[uint32]knownUID{3: {GmailMsgID: 1 << 62}, 4: {FlagsHash: h}, 5: {GmailMsgID: 77}})
 
-	// DeleteUIDs removes the listed UIDs and ignores unknown ones.
+	// deleteUIDs removes the listed UIDs and ignores unknown ones.
 	inTx(t, conn, func(ctx context.Context, tx *sql.Tx) error {
-		return DeleteUIDs(ctx, tx, "a", "INBOX", []uint32{3, 5, 99})
+		return deleteUIDs(ctx, tx, "a", "INBOX", []uint32{3, 5, 99})
 	})
-	assertUIDs("delete", "INBOX", map[uint32]KnownUID{4: {FlagsHash: h}})
+	assertUIDs("delete", "INBOX", map[uint32]knownUID{4: {FlagsHash: h}})
 
-	// Empty inputs are no-ops, and ReplaceUIDs with none clears the folder.
+	// Empty inputs are no-ops, and replaceUIDs with none clears the folder.
 	inTx(t, conn, func(ctx context.Context, tx *sql.Tx) error {
-		if err := PutUIDs(ctx, tx, "a", "INBOX", nil); err != nil {
+		if err := putUIDs(ctx, tx, "a", "INBOX", nil); err != nil {
 			return err
 		}
-		if err := DeleteUIDs(ctx, tx, "a", "INBOX", nil); err != nil {
+		if err := deleteUIDs(ctx, tx, "a", "INBOX", nil); err != nil {
 			return err
 		}
-		return ReplaceUIDs(ctx, tx, "a", "Archive", nil)
+		return replaceUIDs(ctx, tx, "a", "Archive", nil)
 	})
-	assertUIDs("empty", "INBOX", map[uint32]KnownUID{4: {FlagsHash: h}})
-	assertUIDs("empty", "Archive", map[uint32]KnownUID{})
+	assertUIDs("empty", "INBOX", map[uint32]knownUID{4: {FlagsHash: h}})
+	assertUIDs("empty", "Archive", map[uint32]knownUID{})
 }
 
 // A baseline of a large folder writes every row through one prepared
@@ -185,12 +185,12 @@ func TestReplaceUIDsLargeFolder(t *testing.T) {
 	t.Parallel()
 	conn := openDB(t)
 	const n = 20_000
-	uids := make(map[uint32]KnownUID, n)
+	uids := make(map[uint32]knownUID, n)
 	for uid := range uint32(n) {
-		uids[uid+1] = KnownUID{}
+		uids[uid+1] = knownUID{}
 	}
-	inTx(t, conn, func(ctx context.Context, tx *sql.Tx) error { return ReplaceUIDs(ctx, tx, "a", "INBOX", uids) })
-	got, err := NewState(conn).UIDs(t.Context(), "a", "INBOX")
+	inTx(t, conn, func(ctx context.Context, tx *sql.Tx) error { return replaceUIDs(ctx, tx, "a", "INBOX", uids) })
+	got, err := NewState(conn).uids(t.Context(), "a", "INBOX")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,13 +201,13 @@ func TestReplaceUIDsLargeFolder(t *testing.T) {
 
 func TestFlagsHash(t *testing.T) {
 	t.Parallel()
-	base := FlagsHash([]string{`\Seen`, `\Flagged`}, []string{`\Inbox`})
+	base := flagsHash([]string{`\Seen`, `\Flagged`}, []string{`\Inbox`})
 	// The value is stored in sync_uids, so it must never change between releases.
 	if base != "222464454d1426243c33ca6b9fe139c9" {
-		t.Errorf("FlagsHash = %s, want the pinned value", base)
+		t.Errorf("flagsHash = %s, want the pinned value", base)
 	}
-	if empty := FlagsHash(nil, nil); empty != "6e340b9cffb37a989ca544e6bb780a2c" {
-		t.Errorf("FlagsHash(nil, nil) = %s, want the pinned value", empty)
+	if empty := flagsHash(nil, nil); empty != "6e340b9cffb37a989ca544e6bb780a2c" {
+		t.Errorf("flagsHash(nil, nil) = %s, want the pinned value", empty)
 	}
 	tests := []struct {
 		name          string
@@ -223,17 +223,17 @@ func TestFlagsHash(t *testing.T) {
 		{"flags joined", []string{`\Seen\Flagged`}, []string{`\Inbox`}, false},
 	}
 	for _, tt := range tests {
-		got := FlagsHash(tt.flags, tt.labels)
+		got := flagsHash(tt.flags, tt.labels)
 		if (got == base) != tt.same {
-			t.Errorf("%s: FlagsHash = %s, base %s, want same %v", tt.name, got, base, tt.same)
+			t.Errorf("%s: flagsHash = %s, base %s, want same %v", tt.name, got, base, tt.same)
 		}
 	}
-	if FlagsHash([]string{"a"}, nil) == FlagsHash(nil, []string{"a"}) {
+	if flagsHash([]string{"a"}, nil) == flagsHash(nil, []string{"a"}) {
 		t.Error("a flag and a label with the same name hash alike")
 	}
 	in := []string{`\Seen`, `\Flagged`}
-	FlagsHash(in, nil)
+	flagsHash(in, nil)
 	if in[0] != `\Seen` {
-		t.Error("FlagsHash reordered its input")
+		t.Error("flagsHash reordered its input")
 	}
 }

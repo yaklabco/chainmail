@@ -1,4 +1,4 @@
-package watch_test
+package watch
 
 import (
 	"fmt"
@@ -10,7 +10,6 @@ import (
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/ref"
-	"github.com/jamesainslie/chainmail/internal/watch"
 )
 
 var (
@@ -39,15 +38,15 @@ func diffState(uidNext uint32, modSeq uint64, condStore bool) mailstore.FolderSt
 
 // diffCondRow is a CONDSTORE checkpoint at UIDNEXT 5 and HIGHESTMODSEQ 40,
 // last synced and swept an hour before diffAt.
-func diffCondRow() watch.FolderRow {
-	return watch.FolderRow{
+func diffCondRow() FolderRow {
+	return FolderRow{
 		Account: "host", Folder: "INBOX", UIDValidity: 7, UIDNext: 5, HighestModSeq: 40, CondStore: true,
-		Mode: "idle", State: watch.StateWatching, LastSyncAt: diffEarlier, LastSweepAt: diffEarlier,
+		Mode: "idle", State: StateWatching, LastSyncAt: diffEarlier, LastSweepAt: diffEarlier,
 	}
 }
 
 // diffPlainRow is diffCondRow on a server without CONDSTORE.
-func diffPlainRow() watch.FolderRow {
+func diffPlainRow() FolderRow {
 	r := diffCondRow()
 	r.HighestModSeq = 0
 	r.CondStore = false
@@ -56,7 +55,7 @@ func diffPlainRow() watch.FolderRow {
 
 // diffNext is prev advanced to st with UIDNEXT uidNext, synced at diffAt and
 // last swept at sweptAt.
-func diffNext(prev watch.FolderRow, st mailstore.FolderState, uidNext uint32, sweptAt time.Time) watch.FolderRow {
+func diffNext(prev FolderRow, st mailstore.FolderState, uidNext uint32, sweptAt time.Time) FolderRow {
 	prev.UIDValidity = st.UIDValidity
 	prev.UIDNext = uidNext
 	prev.HighestModSeq = st.HighestModSeq
@@ -68,20 +67,20 @@ func diffNext(prev watch.FolderRow, st mailstore.FolderState, uidNext uint32, sw
 
 // diffLine renders an event as one comparable line: its kind, ref and the
 // fields its kind carries.
-func diffLine(e watch.Event) string {
+func diffLine(e Event) string {
 	switch e.Kind {
-	case watch.KindGap:
+	case KindGap:
 		return fmt.Sprintf("gap %s next=%d", e.Reason, e.NextID)
-	case watch.KindStatus:
+	case KindStatus:
 		return "status " + e.State
-	case watch.KindFlags:
+	case KindFlags:
 		return fmt.Sprintf("flags %s %v %v", e.Ref, e.Flags, e.Labels)
 	default:
 		return string(e.Kind) + " " + e.Ref
 	}
 }
 
-func diffLines(events []watch.Event) []string {
+func diffLines(events []Event) []string {
 	var lines []string
 	for _, e := range events {
 		lines = append(lines, diffLine(e))
@@ -99,14 +98,14 @@ func flagsLine(uid uint32, msgID uint64, flags, labels []string) string {
 
 type diffCase struct {
 	name    string
-	prev    watch.FolderRow
-	known   map[uint32]watch.KnownUID
+	prev    FolderRow
+	known   map[uint32]knownUID
 	delta   mailstore.Delta
 	sweep   bool
 	events  []string
-	next    watch.FolderRow
-	replace map[uint32]watch.KnownUID
-	put     map[uint32]watch.KnownUID
+	next    FolderRow
+	replace map[uint32]knownUID
+	put     map[uint32]knownUID
 	deleted []uint32
 }
 
@@ -115,8 +114,8 @@ func runDiffCases(t *testing.T, tests []diffCase) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			in := watch.DiffInput{Account: "host", Folder: "INBOX", Sweep: tt.sweep, At: diffAt}
-			got := watch.Diff(tt.prev, tt.known, tt.delta, in)
+			in := diffInput{Account: "host", Folder: "INBOX", Sweep: tt.sweep, At: diffAt}
+			got := diff(tt.prev, tt.known, tt.delta, in)
 			if lines := diffLines(got.Events); !slices.Equal(lines, tt.events) {
 				t.Errorf("events =\n  %s\nwant\n  %s", strings.Join(lines, "\n  "), strings.Join(tt.events, "\n  "))
 			}
@@ -150,16 +149,16 @@ func TestDiffBaseline(t *testing.T) {
 			name:   "first baseline with CONDSTORE",
 			delta:  mailstore.Delta{State: diffState(4, 30, true), Rebased: true, UIDs: []uint32{1, 2, 3}},
 			events: []string{"status baselined"},
-			next: watch.FolderRow{
+			next: FolderRow{
 				Account: "host", Folder: "INBOX", UIDValidity: 7, UIDNext: 4, HighestModSeq: 30, CondStore: true,
-				State: watch.StateBaselined, LastSyncAt: diffAt, LastSweepAt: diffAt,
+				State: StateBaselined, LastSyncAt: diffAt, LastSweepAt: diffAt,
 			},
-			replace: map[uint32]watch.KnownUID{1: {}, 2: {}, 3: {}},
+			replace: map[uint32]knownUID{1: {}, 2: {}, 3: {}},
 		},
 		{
 			name:  "UIDVALIDITY change emits a gap before the baseline",
 			prev:  diffCondRow(),
-			known: map[uint32]watch.KnownUID{1: {}, 4: {}},
+			known: map[uint32]knownUID{1: {}, 4: {}},
 			delta: mailstore.Delta{
 				State:   mailstore.FolderState{UIDValidity: 9, UIDNext: 3, HighestModSeq: 12, CondStore: true},
 				Rebased: true,
@@ -167,11 +166,11 @@ func TestDiffBaseline(t *testing.T) {
 				Changed: []mailstore.FlagState{{UID: 2, GmailMsgID: 502}},
 			},
 			events: []string{"gap uidvalidity next=0", "status baselined"},
-			next: watch.FolderRow{
+			next: FolderRow{
 				Account: "host", Folder: "INBOX", UIDValidity: 9, UIDNext: 3, HighestModSeq: 12, CondStore: true,
-				Mode: "idle", State: watch.StateBaselined, LastSyncAt: diffAt, LastSweepAt: diffAt,
+				Mode: "idle", State: StateBaselined, LastSyncAt: diffAt, LastSweepAt: diffAt,
 			},
-			replace: map[uint32]watch.KnownUID{1: {}, 2: {GmailMsgID: 502}},
+			replace: map[uint32]knownUID{1: {}, 2: {GmailMsgID: 502}},
 		},
 		{
 			// Gmail returns every message in Changed with its X-GM-MSGID even
@@ -187,16 +186,16 @@ func TestDiffBaseline(t *testing.T) {
 				},
 			},
 			events: []string{"status baselined"},
-			next: watch.FolderRow{
+			next: FolderRow{
 				Account: "host", Folder: "INBOX", UIDValidity: 7, UIDNext: 3, HighestModSeq: 20, CondStore: true,
-				State: watch.StateBaselined, LastSyncAt: diffAt, LastSweepAt: diffAt,
+				State: StateBaselined, LastSyncAt: diffAt, LastSweepAt: diffAt,
 			},
-			replace: map[uint32]watch.KnownUID{1: {GmailMsgID: 101}, 2: {GmailMsgID: 102}},
+			replace: map[uint32]knownUID{1: {GmailMsgID: 101}, 2: {GmailMsgID: 102}},
 		},
 		{
 			name: "baseline without CONDSTORE stores flag hashes and ignores known UIDs",
 			// UID 9 is known but gone: a baseline never reports it expunged.
-			known: map[uint32]watch.KnownUID{9: {}},
+			known: map[uint32]knownUID{9: {}},
 			delta: mailstore.Delta{
 				State:     diffState(3, 0, false),
 				Rebased:   true,
@@ -208,24 +207,24 @@ func TestDiffBaseline(t *testing.T) {
 				},
 			},
 			events: []string{"status baselined"},
-			next: watch.FolderRow{
+			next: FolderRow{
 				Account: "host", Folder: "INBOX", UIDValidity: 7, UIDNext: 3,
-				State: watch.StateBaselined, LastSyncAt: diffAt, LastSweepAt: diffAt,
+				State: StateBaselined, LastSyncAt: diffAt, LastSweepAt: diffAt,
 			},
-			replace: map[uint32]watch.KnownUID{
-				1: {FlagsHash: watch.FlagsHash([]string{`\Seen`}, nil)},
-				2: {GmailMsgID: 802, FlagsHash: watch.FlagsHash(nil, []string{`\Inbox`})},
+			replace: map[uint32]knownUID{
+				1: {FlagsHash: flagsHash([]string{`\Seen`}, nil)},
+				2: {GmailMsgID: 802, FlagsHash: flagsHash(nil, []string{`\Inbox`})},
 			},
 		},
 		{
 			name:   "baseline of an empty folder still replaces the UID set",
 			delta:  mailstore.Delta{State: diffState(1, 0, true), Rebased: true},
 			events: []string{"status baselined"},
-			next: watch.FolderRow{
+			next: FolderRow{
 				Account: "host", Folder: "INBOX", UIDValidity: 7, UIDNext: 1, CondStore: true,
-				State: watch.StateBaselined, LastSyncAt: diffAt, LastSweepAt: diffAt,
+				State: StateBaselined, LastSyncAt: diffAt, LastSweepAt: diffAt,
 			},
-			replace: map[uint32]watch.KnownUID{},
+			replace: map[uint32]knownUID{},
 		},
 	})
 }
@@ -246,11 +245,11 @@ func TestDiff(t *testing.T) {
 			name: "new mail with CONDSTORE",
 			prev: diffCondRow(),
 			// Known UIDs without d.UIDs never become expunges.
-			known:  map[uint32]watch.KnownUID{1: {}, 2: {}, 3: {}, 4: {}},
+			known:  map[uint32]knownUID{1: {}, 2: {}, 3: {}, 4: {}},
 			delta:  mailstore.Delta{State: diffState(7, 41, true), New: []mailstore.Summary{diffSummary(5, 905), diffSummary(6, 0)}},
 			events: []string{newLine(5, 905), newLine(6, 0)},
 			next:   diffNext(diffCondRow(), diffState(7, 41, true), 7, diffEarlier),
-			put:    map[uint32]watch.KnownUID{5: {GmailMsgID: 905}, 6: {}},
+			put:    map[uint32]knownUID{5: {GmailMsgID: 905}, 6: {}},
 		},
 		{
 			name: "CONDSTORE flags ignore UIDs at or above the old UIDNEXT",
@@ -272,7 +271,7 @@ func TestDiff(t *testing.T) {
 				newLine(6, 0),
 			},
 			next: diffNext(diffCondRow(), diffState(7, 45, true), 7, diffEarlier),
-			put:  map[uint32]watch.KnownUID{5: {}, 6: {}},
+			put:  map[uint32]knownUID{5: {}, 6: {}},
 		},
 		{
 			// A source that reports a message below the checkpoint as new
@@ -286,16 +285,16 @@ func TestDiff(t *testing.T) {
 			},
 			events: []string{flagsLine(3, 0, []string{`\Answered`}, nil), newLine(4, 0)},
 			next:   diffNext(diffCondRow(), diffState(6, 42, true), 6, diffEarlier),
-			put:    map[uint32]watch.KnownUID{4: {}},
+			put:    map[uint32]knownUID{4: {}},
 		},
 		{
 			name: "full flags without CONDSTORE compare hashes",
 			prev: diffPlainRow(),
-			known: map[uint32]watch.KnownUID{
-				1: {FlagsHash: watch.FlagsHash(nil, nil)},
-				2: {FlagsHash: watch.FlagsHash(seen, nil)},
-				3: {GmailMsgID: 303, FlagsHash: watch.FlagsHash(nil, []string{`\Inbox`})},
-				4: {FlagsHash: watch.FlagsHash(seen, nil)},
+			known: map[uint32]knownUID{
+				1: {FlagsHash: flagsHash(nil, nil)},
+				2: {FlagsHash: flagsHash(seen, nil)},
+				3: {GmailMsgID: 303, FlagsHash: flagsHash(nil, []string{`\Inbox`})},
+				4: {FlagsHash: flagsHash(seen, nil)},
 			},
 			delta: mailstore.Delta{
 				State:     diffState(6, 0, false),
@@ -312,19 +311,19 @@ func TestDiff(t *testing.T) {
 			},
 			events: []string{flagsLine(1, 0, seen, nil), flagsLine(3, 303, nil, nil), newLine(5, 0)},
 			next:   diffNext(diffPlainRow(), diffState(6, 0, false), 6, diffEarlier),
-			put: map[uint32]watch.KnownUID{
-				1: {FlagsHash: watch.FlagsHash(seen, nil)},
-				3: {GmailMsgID: 303, FlagsHash: watch.FlagsHash(nil, nil)},
-				5: {FlagsHash: watch.FlagsHash(nil, nil)},
+			put: map[uint32]knownUID{
+				1: {FlagsHash: flagsHash(seen, nil)},
+				3: {GmailMsgID: 303, FlagsHash: flagsHash(nil, nil)},
+				5: {FlagsHash: flagsHash(nil, nil)},
 			},
 		},
 		{
 			name: "full flags without CONDSTORE find expunges with their Gmail message ID",
 			prev: diffPlainRow(),
-			known: map[uint32]watch.KnownUID{
-				1: {FlagsHash: watch.FlagsHash(nil, nil)},
-				2: {GmailMsgID: 202, FlagsHash: watch.FlagsHash(nil, nil)},
-				3: {FlagsHash: watch.FlagsHash(nil, nil)},
+			known: map[uint32]knownUID{
+				1: {FlagsHash: flagsHash(nil, nil)},
+				2: {GmailMsgID: 202, FlagsHash: flagsHash(nil, nil)},
+				3: {FlagsHash: flagsHash(nil, nil)},
 			},
 			delta: mailstore.Delta{
 				State:     diffState(5, 0, false),
@@ -341,7 +340,7 @@ func TestDiff(t *testing.T) {
 			prev:  diffCondRow(),
 			sweep: true,
 			// UID 6 is at or above UIDNEXT 5, so its absence proves nothing.
-			known:   map[uint32]watch.KnownUID{1: {}, 2: {GmailMsgID: 202}, 3: {}, 6: {}},
+			known:   map[uint32]knownUID{1: {}, 2: {GmailMsgID: 202}, 3: {}, 6: {}},
 			delta:   mailstore.Delta{State: diffState(5, 40, true), UIDs: []uint32{1, 3}},
 			events:  []string{expungedLine(2, 202)},
 			next:    diffNext(diffCondRow(), diffState(5, 40, true), 5, diffAt),
@@ -351,7 +350,7 @@ func TestDiff(t *testing.T) {
 			name:  "sweep of an emptied folder expunges every known UID below the old UIDNEXT",
 			prev:  diffCondRow(),
 			sweep: true,
-			known: map[uint32]watch.KnownUID{1: {}, 3: {GmailMsgID: 303}, 6: {}},
+			known: map[uint32]knownUID{1: {}, 3: {GmailMsgID: 303}, 6: {}},
 			delta: mailstore.Delta{State: diffState(5, 41, true), UIDs: []uint32{}},
 			events: []string{
 				expungedLine(1, 0),
@@ -365,7 +364,7 @@ func TestDiff(t *testing.T) {
 			// empty UID set alone proves nothing.
 			name:  "empty UIDs without a sweep or full flags expunge nothing",
 			prev:  diffCondRow(),
-			known: map[uint32]watch.KnownUID{1: {}, 3: {}},
+			known: map[uint32]knownUID{1: {}, 3: {}},
 			delta: mailstore.Delta{State: diffState(5, 40, true), UIDs: []uint32{}},
 			next:  diffNext(diffCondRow(), diffState(5, 40, true), 5, diffEarlier),
 		},
@@ -379,13 +378,13 @@ func TestDiff(t *testing.T) {
 			},
 			events: []string{newLine(5, 0), newLine(6, 0)},
 			next:   diffNext(diffCondRow(), diffState(20, 50, true), 7, diffEarlier),
-			put:    map[uint32]watch.KnownUID{5: {}, 6: {}},
+			put:    map[uint32]knownUID{5: {}, 6: {}},
 		},
 		{
 			name:  "events are ordered expunged, flags, new, each by UID",
 			prev:  diffCondRow(),
 			sweep: true,
-			known: map[uint32]watch.KnownUID{1: {}, 2: {}, 3: {}, 4: {}},
+			known: map[uint32]knownUID{1: {}, 2: {}, 3: {}, 4: {}},
 			delta: mailstore.Delta{
 				State:   diffState(7, 45, true),
 				UIDs:    []uint32{1, 3, 4, 5, 6},
@@ -400,7 +399,7 @@ func TestDiff(t *testing.T) {
 				newLine(6, 0),
 			},
 			next:    diffNext(diffCondRow(), diffState(7, 45, true), 7, diffAt),
-			put:     map[uint32]watch.KnownUID{5: {}, 6: {}},
+			put:     map[uint32]knownUID{5: {}, 6: {}},
 			deleted: []uint32{2},
 		},
 	})
@@ -427,8 +426,8 @@ func TestDiffNewEventMessage(t *testing.T) {
 			Preview:       &preview,
 		}
 	}
-	want := func(snippet *string) *watch.Message {
-		return &watch.Message{
+	want := func(snippet *string) *Message {
+		return &Message{
 			Date:          diffEarlier,
 			InternalDate:  diffEarlier.Add(time.Minute),
 			From:          []mailstore.Address{{Name: "Ann", Email: "ann@example.com"}},
@@ -445,7 +444,7 @@ func TestDiffNewEventMessage(t *testing.T) {
 	tests := []struct {
 		name    string
 		snippet func(mailstore.Summary) string
-		want    *watch.Message
+		want    *Message
 	}{
 		{name: "no renderer", want: want(nil)},
 		{name: "empty snippet", snippet: func(mailstore.Summary) string { return "" }, want: want(nil)},
@@ -455,13 +454,13 @@ func TestDiffNewEventMessage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			s := summary()
-			in := watch.DiffInput{Account: "host", Folder: "INBOX", At: diffAt, Snippet: tt.snippet}
-			got := watch.Diff(diffCondRow(), nil, mailstore.Delta{State: diffState(6, 40, true), New: []mailstore.Summary{s}}, in)
+			in := diffInput{Account: "host", Folder: "INBOX", At: diffAt, Snippet: tt.snippet}
+			got := diff(diffCondRow(), nil, mailstore.Delta{State: diffState(6, 40, true), New: []mailstore.Summary{s}}, in)
 			if len(got.Events) != 1 {
 				t.Fatalf("events = %d, want 1", len(got.Events))
 			}
 			e := got.Events[0]
-			if e.Kind != watch.KindNew || e.Ref != s.Ref.String() {
+			if e.Kind != KindNew || e.Ref != s.Ref.String() {
 				t.Errorf("event = %s %s, want new %s", e.Kind, e.Ref, s.Ref)
 			}
 			if !reflect.DeepEqual(e.Message, tt.want) {

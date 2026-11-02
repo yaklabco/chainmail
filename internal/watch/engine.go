@@ -10,7 +10,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 )
 
-// Source runs a sync pass. mailstore.WatchConn is one; StoreSource adapts
+// Source runs a sync pass. mailstore.WatchConn is one; storeSource adapts
 // a mailstore.Watcher's pooled SyncFolder.
 type Source interface {
 	Sync(ctx context.Context, req mailstore.SyncRequest) (mailstore.Delta, error)
@@ -20,14 +20,14 @@ type Source interface {
 // Source as it is.
 var _ Source = mailstore.WatchConn(nil)
 
-// StoreSource syncs Folder through W's pooled connections.
-type StoreSource struct {
+// storeSource syncs Folder through W's pooled connections.
+type storeSource struct {
 	W      mailstore.Watcher
 	Folder string
 }
 
 // Sync runs one pass on Folder with W.SyncFolder.
-func (s StoreSource) Sync(ctx context.Context, req mailstore.SyncRequest) (mailstore.Delta, error) {
+func (s storeSource) Sync(ctx context.Context, req mailstore.SyncRequest) (mailstore.Delta, error) {
 	return s.W.SyncFolder(ctx, s.Folder, req)
 }
 
@@ -145,13 +145,13 @@ func (e *Engine) step(ctx context.Context, account, folder string, src Source, s
 	// Known UIDs matter only for expunges and comparisons without
 	// CONDSTORE: a sweep (the first batch only) or full flags, on a folder
 	// with a checkpoint.
-	var known map[uint32]KnownUID
+	var known map[uint32]knownUID
 	if !d.Rebased && (sweep || d.FullFlags) {
-		if known, err = e.state.UIDs(ctx, account, folder); err != nil {
+		if known, err = e.state.uids(ctx, account, folder); err != nil {
 			return false, fmt.Errorf("reading known UIDs: %w", err)
 		}
 	}
-	dr := Diff(prev, known, d, DiffInput{Account: account, Folder: folder, Sweep: sweep, At: e.now(), Snippet: e.snippet})
+	dr := diff(prev, known, d, diffInput{Account: account, Folder: folder, Sweep: sweep, At: e.now(), Snippet: e.snippet})
 	if mode != "" {
 		dr.Next.Mode = mode
 	}
@@ -167,7 +167,7 @@ func (e *Engine) step(ctx context.Context, account, folder string, src Source, s
 
 // commit writes one batch in one transaction and wakes blocked readers
 // once it has committed.
-func (e *Engine) commit(ctx context.Context, dr DiffResult) error {
+func (e *Engine) commit(ctx context.Context, dr diffResult) error {
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning sync batch: %w", err)
@@ -184,17 +184,17 @@ func (e *Engine) commit(ctx context.Context, dr DiffResult) error {
 		return fmt.Errorf("storing sync checkpoint: %w", err)
 	}
 	if dr.Replace != nil {
-		if err := ReplaceUIDs(ctx, tx, account, folder, dr.Replace); err != nil {
+		if err := replaceUIDs(ctx, tx, account, folder, dr.Replace); err != nil {
 			return fmt.Errorf("replacing known UIDs: %w", err)
 		}
 	}
 	if len(dr.Delete) > 0 {
-		if err := DeleteUIDs(ctx, tx, account, folder, dr.Delete); err != nil {
+		if err := deleteUIDs(ctx, tx, account, folder, dr.Delete); err != nil {
 			return fmt.Errorf("deleting expunged UIDs: %w", err)
 		}
 	}
 	if len(dr.Put) > 0 {
-		if err := PutUIDs(ctx, tx, account, folder, dr.Put); err != nil {
+		if err := putUIDs(ctx, tx, account, folder, dr.Put); err != nil {
 			return fmt.Errorf("storing known UIDs: %w", err)
 		}
 	}

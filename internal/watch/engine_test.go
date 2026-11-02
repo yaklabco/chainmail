@@ -1,4 +1,4 @@
-package watch_test
+package watch
 
 import (
 	"context"
@@ -17,10 +17,9 @@ import (
 	"github.com/jamesainslie/chainmail/internal/db"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/ref"
-	"github.com/jamesainslie/chainmail/internal/watch"
 )
 
-// stubWatcher records the one SyncFolder call StoreSource makes.
+// stubWatcher records the one SyncFolder call storeSource makes.
 type stubWatcher struct {
 	folder string
 	req    mailstore.SyncRequest
@@ -41,9 +40,9 @@ func (w *stubWatcher) SyncFolder(_ context.Context, folder string, req mailstore
 	return w.delta, w.err
 }
 
-var _ watch.Source = watch.StoreSource{}
+var _ Source = storeSource{}
 
-// StoreSource syncs its folder through the watcher's pooled SyncFolder and
+// storeSource syncs its folder through the watcher's pooled SyncFolder and
 // returns the delta and error unchanged.
 func TestStoreSourceForwardsToSyncFolder(t *testing.T) {
 	t.Parallel()
@@ -61,7 +60,7 @@ func TestStoreSourceForwardsToSyncFolder(t *testing.T) {
 			t.Parallel()
 			w := &stubWatcher{delta: tt.delta, err: tt.err}
 			req := mailstore.SyncRequest{From: mailstore.Checkpoint{UIDValidity: 7, UIDNext: 8, HighestModSeq: 2}, Sweep: true, Batch: 50, Snippets: true}
-			got, err := watch.StoreSource{W: w, Folder: "Sent"}.Sync(t.Context(), req)
+			got, err := storeSource{W: w, Folder: "Sent"}.Sync(t.Context(), req)
 			if !errors.Is(err, tt.err) {
 				t.Errorf("err = %v, want %v", err, tt.err)
 			}
@@ -80,12 +79,12 @@ var engineAt = time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
 // engineHarness is an engine over a real state.db in a temp dir.
 type engineHarness struct {
 	db     *sql.DB
-	log    *watch.Log
-	state  *watch.State
-	engine *watch.Engine
+	log    *Log
+	state  *State
+	engine *Engine
 }
 
-func newEngineHarness(t *testing.T, opts watch.EngineOptions) engineHarness {
+func newEngineHarness(t *testing.T, opts EngineOptions) engineHarness {
 	t.Helper()
 	conn, err := db.OpenState(t.Context(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
@@ -96,13 +95,13 @@ func newEngineHarness(t *testing.T, opts watch.EngineOptions) engineHarness {
 	if opts.Now == nil {
 		opts.Now = now
 	}
-	lg := watch.NewLog(conn, now)
-	st := watch.NewState(conn)
-	return engineHarness{db: conn, log: lg, state: st, engine: watch.NewEngine(conn, lg, st, opts)}
+	lg := NewLog(conn, now)
+	st := NewState(conn)
+	return engineHarness{db: conn, log: lg, state: st, engine: NewEngine(conn, lg, st, opts)}
 }
 
 // pass runs a Pass on host's INBOX that must succeed.
-func (h engineHarness) pass(t *testing.T, src watch.Source, opts watch.PassOptions) watch.PassResult {
+func (h engineHarness) pass(t *testing.T, src Source, opts PassOptions) PassResult {
 	t.Helper()
 	res, err := h.engine.Pass(t.Context(), "host", "INBOX", src, opts)
 	if err != nil {
@@ -112,9 +111,9 @@ func (h engineHarness) pass(t *testing.T, src watch.Source, opts watch.PassOptio
 }
 
 // events reads every event in the log, oldest first.
-func (h engineHarness) events(t *testing.T) []watch.Event {
+func (h engineHarness) events(t *testing.T) []Event {
 	t.Helper()
-	page, err := h.log.Read(t.Context(), watch.Query{Limit: 1000})
+	page, err := h.log.Read(t.Context(), Query{Limit: 1000})
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -130,7 +129,7 @@ func (h engineHarness) tail(t *testing.T) int64 {
 	return tail
 }
 
-func (h engineHarness) row(t *testing.T) watch.FolderRow {
+func (h engineHarness) row(t *testing.T) FolderRow {
 	t.Helper()
 	row, ok, err := h.state.Folder(t.Context(), "host", "INBOX")
 	if err != nil || !ok {
@@ -142,7 +141,7 @@ func (h engineHarness) row(t *testing.T) watch.FolderRow {
 // uids lists host's INBOX known UIDs, ascending.
 func (h engineHarness) uids(t *testing.T) []uint32 {
 	t.Helper()
-	known, err := h.state.UIDs(t.Context(), "host", "INBOX")
+	known, err := h.state.uids(t.Context(), "host", "INBOX")
 	if err != nil {
 		t.Fatalf("UIDs: %v", err)
 	}
@@ -172,7 +171,7 @@ func (s *scriptSource) Sync(_ context.Context, req mailstore.SyncRequest) (mails
 
 // probeSource runs probe, then syncs through inner.
 type probeSource struct {
-	inner watch.Source
+	inner Source
 	probe func(ctx context.Context) error
 }
 
@@ -193,7 +192,7 @@ func baselineDelta(uids ...uint32) mailstore.Delta {
 // events, UID changes and checkpoint, reading From from the stored row.
 func TestPassCommitsBaselineThenChanges(t *testing.T) {
 	t.Parallel()
-	h := newEngineHarness(t, watch.EngineOptions{})
+	h := newEngineHarness(t, EngineOptions{})
 	src := &scriptSource{results: []scriptResult{
 		{delta: baselineDelta(1, 2)},
 		{delta: mailstore.Delta{
@@ -202,10 +201,10 @@ func TestPassCommitsBaselineThenChanges(t *testing.T) {
 			Changed: []mailstore.FlagState{{UID: 1, Flags: []string{`\Seen`}}},
 		}},
 	}}
-	if res, want := h.pass(t, src, watch.PassOptions{Mode: "idle"}), (watch.PassResult{Events: 1, Baselined: true, CondStore: true, Batches: 1}); res != want {
+	if res, want := h.pass(t, src, PassOptions{Mode: "idle"}), (PassResult{Events: 1, Baselined: true, CondStore: true, Batches: 1}); res != want {
 		t.Errorf("first Pass = %+v, want %+v", res, want)
 	}
-	if res, want := h.pass(t, src, watch.PassOptions{Mode: "idle"}), (watch.PassResult{Events: 2, CondStore: true, Batches: 1}); res != want {
+	if res, want := h.pass(t, src, PassOptions{Mode: "idle"}), (PassResult{Events: 2, CondStore: true, Batches: 1}); res != want {
 		t.Errorf("second Pass = %+v, want %+v", res, want)
 	}
 	wantReqs := []mailstore.SyncRequest{
@@ -238,19 +237,19 @@ func TestPassCommitsBaselineThenChanges(t *testing.T) {
 // zero and emits no gap.
 func TestPassBaselinesARowWithoutCheckpoint(t *testing.T) {
 	t.Parallel()
-	h := newEngineHarness(t, watch.EngineOptions{})
-	if err := h.state.SetStatus(t.Context(), "host", "INBOX", "idle", watch.StateWatching, ""); err != nil {
+	h := newEngineHarness(t, EngineOptions{})
+	if err := h.state.SetStatus(t.Context(), "host", "INBOX", "idle", StateWatching, ""); err != nil {
 		t.Fatal(err)
 	}
 	src := &scriptSource{results: []scriptResult{{delta: baselineDelta(1)}}}
-	h.pass(t, src, watch.PassOptions{Mode: "idle"})
+	h.pass(t, src, PassOptions{Mode: "idle"})
 	if src.reqs[0].From != (mailstore.Checkpoint{}) {
 		t.Errorf("From = %+v, want the zero checkpoint", src.reqs[0].From)
 	}
 	if lines := diffLines(h.events(t)); !slices.Equal(lines, []string{"status baselined"}) {
 		t.Errorf("events = %q, want only the baselined status", lines)
 	}
-	if row := h.row(t); row.State != watch.StateBaselined || row.UIDNext != 2 {
+	if row := h.row(t); row.State != StateBaselined || row.UIDNext != 2 {
 		t.Errorf("row = %+v, want state baselined at UIDNEXT 2", row)
 	}
 }
@@ -259,7 +258,7 @@ func TestPassBaselinesARowWithoutCheckpoint(t *testing.T) {
 // the checkpoint the last one stored. Only the first batch sweeps.
 func TestPassLoopsUntilCurrent(t *testing.T) {
 	t.Parallel()
-	h := newEngineHarness(t, watch.EngineOptions{
+	h := newEngineHarness(t, EngineOptions{
 		Batch:   2,
 		Snippet: func(s mailstore.Summary) string { return "about " + s.Subject },
 	})
@@ -273,9 +272,9 @@ func TestPassLoopsUntilCurrent(t *testing.T) {
 		}},
 		{delta: mailstore.Delta{State: diffState(6, 14, true), New: []mailstore.Summary{diffSummary(5, 0)}}},
 	}}
-	h.pass(t, src, watch.PassOptions{Mode: "poll"})
-	res := h.pass(t, src, watch.PassOptions{Sweep: true, Mode: "poll"})
-	if want := (watch.PassResult{Events: 3, CondStore: true, Batches: 2}); res != want {
+	h.pass(t, src, PassOptions{Mode: "poll"})
+	res := h.pass(t, src, PassOptions{Sweep: true, Mode: "poll"})
+	if want := (PassResult{Events: 3, CondStore: true, Batches: 2}); res != want {
 		t.Errorf("Pass = %+v, want %+v", res, want)
 	}
 	wantReqs := []mailstore.SyncRequest{
@@ -338,12 +337,12 @@ func TestPassFailureLeavesStateUntouched(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			h := newEngineHarness(t, watch.EngineOptions{})
+			h := newEngineHarness(t, EngineOptions{})
 			src := &scriptSource{results: []scriptResult{{delta: baselineDelta(1, 2)}, tt.result}}
-			h.pass(t, src, watch.PassOptions{Mode: "idle"})
+			h.pass(t, src, PassOptions{Mode: "idle"})
 			row, uids, lines, tail := h.row(t), h.uids(t), diffLines(h.events(t)), h.tail(t)
 
-			_, err := h.engine.Pass(t.Context(), "host", "INBOX", src, watch.PassOptions{Mode: tt.mode})
+			_, err := h.engine.Pass(t.Context(), "host", "INBOX", src, PassOptions{Mode: tt.mode})
 			switch {
 			case err == nil:
 				t.Fatal("Pass succeeded, want an error")
@@ -372,7 +371,7 @@ func TestPassFailureLeavesStateUntouched(t *testing.T) {
 // because Wait happened to read the log after the commit.
 func TestPassWakesWaiters(t *testing.T) {
 	t.Parallel()
-	h := newEngineHarness(t, watch.EngineOptions{})
+	h := newEngineHarness(t, EngineOptions{})
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -397,7 +396,7 @@ func TestPassWakesWaiters(t *testing.T) {
 		t.Fatalf("releasing the connection: %v", err)
 	}
 
-	h.pass(t, &scriptSource{results: []scriptResult{{delta: baselineDelta(1)}}}, watch.PassOptions{Mode: "idle"})
+	h.pass(t, &scriptSource{results: []scriptResult{{delta: baselineDelta(1)}}}, PassOptions{Mode: "idle"})
 	if err := <-woke; err != nil {
 		t.Errorf("Wait = %v, want it woken by the pass's Notify", err)
 	}
@@ -421,7 +420,7 @@ func engineAwaitConnQueue(ctx context.Context, t *testing.T, db *sql.DB, want in
 // one were open.
 func TestPassHoldsNoTransactionAcrossSync(t *testing.T) {
 	t.Parallel()
-	h := newEngineHarness(t, watch.EngineOptions{})
+	h := newEngineHarness(t, EngineOptions{})
 	src := probeSource{
 		inner: &scriptSource{results: []scriptResult{{delta: baselineDelta(1)}}},
 		probe: func(ctx context.Context) error {
@@ -431,7 +430,7 @@ func TestPassHoldsNoTransactionAcrossSync(t *testing.T) {
 			return err
 		},
 	}
-	h.pass(t, src, watch.PassOptions{Mode: "idle"})
+	h.pass(t, src, PassOptions{Mode: "idle"})
 }
 
 // folderSource is a CONDSTORE INBOX at UIDVALIDITY 7 that answers sync
@@ -477,11 +476,11 @@ func (f *folderSource) Sync(_ context.Context, req mailstore.SyncRequest) (mails
 }
 
 // newUIDs lists the UIDs of the new events, in log order.
-func newUIDs(t *testing.T, events []watch.Event) []uint32 {
+func newUIDs(t *testing.T, events []Event) []uint32 {
 	t.Helper()
 	var uids []uint32
 	for _, e := range events {
-		if e.Kind != watch.KindNew {
+		if e.Kind != KindNew {
 			continue
 		}
 		r, err := ref.Parse(e.Ref)
@@ -498,27 +497,27 @@ func newUIDs(t *testing.T, events []watch.Event) []uint32 {
 // message exactly once overall.
 func TestPassRerunAfterFailedCommitEmitsEachEventOnce(t *testing.T) {
 	t.Parallel()
-	h := newEngineHarness(t, watch.EngineOptions{Batch: 2})
+	h := newEngineHarness(t, EngineOptions{Batch: 2})
 	src := &folderSource{}
 	src.add(2)
-	h.pass(t, src, watch.PassOptions{Mode: "idle"}) // baseline: UIDs 1 and 2
+	h.pass(t, src, PassOptions{Mode: "idle"}) // baseline: UIDs 1 and 2
 	src.add(5)                                      // UIDs 3 to 7 arrive
 
 	errCrash := errors.New("disk I/O error")
 	commits := 0
-	watch.SetCommit(h.engine, func(tx *sql.Tx) error {
+	h.engine.commitTx = func(tx *sql.Tx) error {
 		commits++
 		if commits == 2 {
 			_ = tx.Rollback() // the crash: this batch never lands
 			return errCrash
 		}
 		return tx.Commit()
-	})
-	res, err := h.engine.Pass(t.Context(), "host", "INBOX", src, watch.PassOptions{Mode: "idle"})
+	}
+	res, err := h.engine.Pass(t.Context(), "host", "INBOX", src, PassOptions{Mode: "idle"})
 	if !errors.Is(err, errCrash) {
 		t.Fatalf("Pass err = %v, want %v", err, errCrash)
 	}
-	if want := (watch.PassResult{Events: 2, CondStore: true, Batches: 1}); res != want {
+	if want := (PassResult{Events: 2, CondStore: true, Batches: 1}); res != want {
 		t.Errorf("failed Pass = %+v, want the first batch only: %+v", res, want)
 	}
 	if got := newUIDs(t, h.events(t)); !slices.Equal(got, []uint32{3, 4}) {
@@ -528,10 +527,10 @@ func TestPassRerunAfterFailedCommitEmitsEachEventOnce(t *testing.T) {
 		t.Errorf("after the failure, UIDNEXT = %d, want 5 (the last committed batch)", row.UIDNext)
 	}
 
-	watch.SetCommit(h.engine, (*sql.Tx).Commit)
+	h.engine.commitTx = (*sql.Tx).Commit
 	src.reqs = nil
-	res = h.pass(t, src, watch.PassOptions{Mode: "idle"})
-	if want := (watch.PassResult{Events: 3, CondStore: true, Batches: 2}); res != want {
+	res = h.pass(t, src, PassOptions{Mode: "idle"})
+	if want := (PassResult{Events: 3, CondStore: true, Batches: 2}); res != want {
 		t.Errorf("rerun = %+v, want %+v", res, want)
 	}
 	if got := src.reqs[0].From.UIDNext; got != 5 {
@@ -566,9 +565,9 @@ func TestPassCapsBatch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			h := newEngineHarness(t, watch.EngineOptions{Batch: tt.batch})
+			h := newEngineHarness(t, EngineOptions{Batch: tt.batch})
 			src := &scriptSource{results: []scriptResult{{delta: baselineDelta(1)}}}
-			h.pass(t, src, watch.PassOptions{Mode: "idle"})
+			h.pass(t, src, PassOptions{Mode: "idle"})
 			if got := src.reqs[0].Batch; got != tt.want {
 				t.Errorf("SyncRequest.Batch = %d, want %d", got, tt.want)
 			}
