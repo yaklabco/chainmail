@@ -1056,9 +1056,16 @@ func TestQuietGroupStreamOutlivesRetention(t *testing.T) {
 	heartbeat(stream)
 	later := start.Add(200 * time.Hour)
 	now.Store(&later)
-	// The first heartbeat after the jump may have stamped the old time.
-	heartbeat(stream)
-	heartbeat(stream)
+	// A heartbeat already on its way may have stamped the old time, so wait
+	// for one that stamped the new one.
+	for stamped := false; !stamped; {
+		heartbeat(stream)
+		groups, err := s.watchLog.Groups(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stamped = len(groups) == 1 && groups[0].LastSeenAt.Equal(later)
+	}
 	if _, err := s.watchLog.Trim(ctx, 168*time.Hour, 1000); err != nil {
 		t.Fatal(err)
 	}
@@ -1077,5 +1084,61 @@ func TestQuietGroupStreamOutlivesRetention(t *testing.T) {
 	}
 	if e := stream.Msg().GetEvent(); e.GetId() != 1 || e.GetMessage().GetSubject().GetUntrusted() != "while away" {
 		t.Errorf("first item after the reconnect = %v, want event 1", stream.Msg())
+	}
+}
+
+// TestGroupTouchIsThrottled checks that a group stream refreshes its
+// group's last use at most once per heartbeat interval: the caught-up
+// heartbeat after each event does not write again until an interval has
+// passed on the daemon's clock.
+func TestGroupTouchIsThrottled(t *testing.T) {
+	t.Parallel()
+	var now atomic.Pointer[time.Time]
+	start := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	now.Store(&start)
+	s, _ := newTestServerOptions(t, passwordConfig, Options{Now: func() time.Time { return *now.Load() }, WatchHeartbeat: time.Hour, DisableWatch: true})
+	c := serveWatchTest(t, s)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	stream, err := c.Watch.Subscribe(ctx, connect.NewRequest(&chainmailv1.SubscribeRequest{Group: "bot"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stream.Close() }()
+	untilBeat := func() {
+		t.Helper()
+		for stream.Receive() {
+			if stream.Msg().GetHeartbeat() != nil {
+				return
+			}
+		}
+		t.Fatalf("stream ended: %v", stream.Err())
+	}
+	lastSeen := func() time.Time {
+		t.Helper()
+		groups, err := s.watchLog.Groups(ctx)
+		if err != nil || len(groups) != 1 {
+			t.Fatalf("Groups = %+v, %v", groups, err)
+		}
+		return groups[0].LastSeenAt
+	}
+	untilBeat()
+	soon := start.Add(time.Minute)
+	now.Store(&soon)
+	if err := s.watchLog.Publish(ctx, testWatchEvent("one")); err != nil {
+		t.Fatal(err)
+	}
+	untilBeat()
+	if got := lastSeen(); !got.Equal(start) {
+		t.Errorf("last seen after a heartbeat within the interval = %v, want %v", got, start)
+	}
+	later := start.Add(2 * time.Hour)
+	now.Store(&later)
+	if err := s.watchLog.Publish(ctx, testWatchEvent("two")); err != nil {
+		t.Fatal(err)
+	}
+	untilBeat()
+	if got := lastSeen(); !got.Equal(later) {
+		t.Errorf("last seen after a heartbeat past the interval = %v, want %v", got, later)
 	}
 }
