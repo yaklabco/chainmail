@@ -69,6 +69,9 @@ type Message struct {
 	// raw is the message as Append received it. When set, it is what the
 	// store streams, instead of a message built from the fields.
 	raw []byte
+	// modseq is the MODSEQ of the message's last change in its folder:
+	// arriving there, or a flag or label edit.
+	modseq uint64
 }
 
 // Store is an in-memory account.
@@ -102,6 +105,19 @@ type Store struct {
 	archiveFolder string
 	// nsPrefix and nsDelim are the namespace SetNamespace gives.
 	nsPrefix, nsDelim string
+	// Watch state and test hooks, in watch.go. modseq is each folder's
+	// HIGHESTMODSEQ, condstore whether the server advertises CONDSTORE,
+	// and watchFail the error FailWatch set for the next pass.
+	modseq    map[string]uint64
+	condstore bool
+	watchFail error
+	// idle is whether the server advertises IDLE, after the timer Idle
+	// waits on, watches the open watch connections, and idleStarted the
+	// channel IdleStarted returns.
+	idle        bool
+	after       func(time.Duration) <-chan time.Time
+	watches     map[*watchConn]bool
+	idleStarted chan string
 }
 
 var _ mailstore.Store = (*Store)(nil)
@@ -117,6 +133,8 @@ func New(account string, gmail bool) *Store {
 		msgIDs: map[uint64]bool{}, threadIDs: map[uint64]bool{}, nextMsgID: 1000,
 		fail: map[string]error{}, folderFail: map[string]error{}, calls: map[string]int{},
 		everValidity: map[string]uint32{}, writeFail: map[string]error{},
+		modseq: map[string]uint64{}, condstore: true, idle: true, after: time.After,
+		watches: map[*watchConn]bool{}, idleStarted: make(chan string, idleStartedCap),
 	}
 	if gmail {
 		s.AddFolder("INBOX", mailstore.RoleInbox)
@@ -167,6 +185,8 @@ func (s *Store) addFolderLocked(name string, role mailstore.Role, v, next uint32
 	s.uidValidity[name] = v
 	s.everValidity[name] = v
 	s.nextUID[name] = next
+	// A new folder starts at HIGHESTMODSEQ 1.
+	s.modseq[name] = 1
 }
 
 // removeFolderLocked forgets a folder. Its messages must already be gone.
@@ -174,6 +194,7 @@ func (s *Store) removeFolderLocked(name string) {
 	s.folders = slices.DeleteFunc(s.folders, func(f mailstore.Folder) bool { return f.Name == name })
 	delete(s.uidValidity, name)
 	delete(s.nextUID, name)
+	delete(s.modseq, name)
 	delete(s.folderFail, name)
 }
 
@@ -215,6 +236,7 @@ func (s *Store) Add(m Message) ref.Ref {
 	m.uid = s.nextUID[m.Folder]
 	s.nextUID[m.Folder]++
 	s.msgs = append(s.msgs, &m)
+	s.touchLocked(&m)
 	return s.refLocked(&m)
 }
 
@@ -554,11 +576,14 @@ func (s *Store) inThreadLocked(seed *Message, root string, m *Message) bool {
 	return trimID(m.MessageID) == root || slices.Contains(mailstore.MessageIDs(m.References), root)
 }
 
-// Close implements mailstore.Store.
+// Close implements mailstore.Store. It closes every open watch connection
+// without waiting for its owner, so a watcher sees ErrUnavailable and
+// reconnects through a replacement store.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
+	s.closeWatchesLocked()
 	return nil
 }
 
