@@ -1,0 +1,824 @@
+package watch
+
+import (
+	"cmp"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"math/rand/v2"
+	"slices"
+	"sync"
+	"time"
+
+	"github.com/jamesainslie/chainmail/internal/api"
+	"github.com/jamesainslie/chainmail/internal/auth"
+	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
+)
+
+// ReasonFolderNotFound is the status detail and sync_folders last_error of
+// a synced folder the account does not have.
+const ReasonFolderNotFound = "FOLDER_NOT_FOUND"
+
+// Pass modes, as PassOptions.Mode and the sync_folders mode column record them.
+const (
+	passModeIdle = "idle"
+	passModePoll = "poll"
+)
+
+// Fallbacks for settings left zero. config.Parse always fills them; these
+// only keep a hand-built SupervisorOptions from sweeping or polling in a
+// tight loop.
+const (
+	fallbackExpungeSweep     = time.Hour
+	fallbackIdleFallbackPoll = 30 * time.Second
+	fallbackSyncPoll         = 5 * time.Minute
+)
+
+// idleGrace is how long past an IDLE's limit the supervisor waits before it
+// cancels an IDLE that is still running. A store ends IDLE at the limit it is
+// given, so the cancel is a backstop for a stuck connection, and the way a
+// test clock, which the store cannot see, ends an IDLE.
+const idleGrace = 5 * time.Second
+
+// errNoWatcher means the account's store cannot watch or sync folders.
+var errNoWatcher = errors.New("the account's store does not implement mailstore.Watcher")
+
+// SupervisorOptions configure a Supervisor.
+type SupervisorOptions struct {
+	// Account is the account to watch and sync.
+	Account config.ResolvedAccount
+	// Settings are the resolved [watch] values.
+	Settings config.WatchSettings
+	// SweepFloor is the shortest time from one sweep to the next one a
+	// server EXPUNGE asks for. 0 means ExpungeSweepFloor. The daemon passes
+	// a short floor through for integration tests on Dovecot.
+	SweepFloor time.Duration
+	// Store opens the account's store and returns its release. The
+	// supervisor releases it as soon as it has opened a watch connection
+	// or finished a pooled call, never holding it while idle.
+	Store func(ctx context.Context) (mailstore.Store, func(), error)
+	// Engine runs every sync pass.
+	Engine *Engine
+	// Log receives status events.
+	Log *Log
+	// State holds the sync_folders rows.
+	State *State
+	// AuthRequired reports whether the account needs a human, and the hint.
+	AuthRequired func(account string) (bool, string)
+	// Clock is what the supervisor waits on. Nil means RealClock.
+	Clock Clock
+	// Jitter returns a value in [0, 1). Nil means math/rand/v2.
+	Jitter func() float64
+	// Logger gets one line per failure, without error text. Nil discards.
+	Logger *slog.Logger
+}
+
+// Supervisor watches and syncs one account: one watcher loop per watched
+// folder, each on its own connection, and one poller for the synced folders
+// that are not watched. Spec section 5 describes its failure handling. Auth
+// parks the whole account: every loop stops, every known folder's row says
+// auth_required, and one account-wide status event carries the hint.
+type Supervisor struct {
+	o          SupervisorOptions
+	clock      Clock
+	jitter     func() float64
+	logger     *slog.Logger
+	settings   config.WatchSettings
+	syncPoll   time.Duration
+	sweepFloor time.Duration
+
+	// writeStatus and publishEvents are State.SetStatus and Log.Publish.
+	// Tests replace them to fail a status write.
+	writeStatus   func(ctx context.Context, account, folder, mode, state, lastError string) error
+	publishEvents func(ctx context.Context, events ...Event) error
+
+	// mu guards statuses: the mode and state last recorded per folder,
+	// keyed by name, "" for the account-wide status. Its folders other than
+	// "" are the ones a parking records.
+	mu       sync.Mutex
+	statuses map[string]folderStatus
+}
+
+// NewSupervisor returns a supervisor for o.Account. A nil Clock, Jitter,
+// Logger or AuthRequired gets the system clock, math/rand/v2, a discarding
+// logger and "never required".
+func NewSupervisor(o SupervisorOptions) *Supervisor {
+	s := &Supervisor{
+		o: o, clock: o.Clock, jitter: o.Jitter, logger: o.Logger,
+		settings: o.Settings, syncPoll: o.Account.SyncPoll, statuses: map[string]folderStatus{},
+	}
+	if s.clock == nil {
+		s.clock = RealClock
+	}
+	if s.jitter == nil {
+		s.jitter = rand.Float64
+	}
+	if s.logger == nil {
+		s.logger = slog.New(slog.DiscardHandler)
+	}
+	s.logger = s.logger.With("account", o.Account.Name)
+	if s.o.AuthRequired == nil {
+		s.o.AuthRequired = func(string) (bool, string) { return false, "" }
+	}
+	if s.settings.ExpungeSweep <= 0 {
+		s.settings.ExpungeSweep = fallbackExpungeSweep
+	}
+	if s.settings.IdleFallbackPoll <= 0 {
+		s.settings.IdleFallbackPoll = fallbackIdleFallbackPoll
+	}
+	if s.syncPoll <= 0 {
+		s.syncPoll = fallbackSyncPoll
+	}
+	s.writeStatus, s.publishEvents = o.State.SetStatus, o.Log.Publish
+	if !o.Account.Provider.Gmail {
+		for _, f := range o.Account.Watch {
+			s.know(f, passModeIdle)
+		}
+		for _, f := range polledFolders(o.Account) {
+			s.know(f, passModePoll)
+		}
+	}
+	s.sweepFloor = o.SweepFloor
+	if s.sweepFloor <= 0 {
+		s.sweepFloor = ExpungeSweepFloor
+	}
+	return s
+}
+
+// Run watches and syncs until ctx ends, then closes every connection. It
+// returns at once when the account has sync disabled, and when the store
+// cannot watch. While the account needs a human every loop is stopped and
+// the account is parked; the loops start again once the auth state clears.
+func (s *Supervisor) Run(ctx context.Context) {
+	if !s.o.Account.SyncEnabled {
+		return
+	}
+	for {
+		need, hint := s.o.AuthRequired(s.o.Account.Name)
+		if !need {
+			var park bool
+			if park, hint = s.active(ctx); !park || ctx.Err() != nil {
+				return
+			}
+		}
+		if !s.park(ctx, hint) {
+			return
+		}
+	}
+}
+
+// parker lets any loop of a running account ask Run to park it. The first
+// request's hint wins, and every request stops every loop.
+type parker struct {
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	asked  bool
+	hint   string
+}
+
+// park asks Run to park the account with hint and stops every loop.
+func (p *parker) park(hint string) {
+	p.mu.Lock()
+	if !p.asked {
+		p.asked, p.hint = true, hint
+	}
+	p.mu.Unlock()
+	p.cancel()
+}
+
+// requested reports whether a loop asked to park, and with which hint.
+func (p *parker) requested() (bool, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.asked, p.hint
+}
+
+// active runs the watcher loops and the poller until ctx ends, every loop
+// has returned, or the account needs a human, asking AuthRequired every
+// AuthRecheck meanwhile. It returns once every loop has returned and closed
+// its connection, so no pass is running, and reports whether to park.
+func (s *Supervisor) active(ctx context.Context) (park bool, hint string) {
+	actx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	p := &parker{cancel: cancel}
+	var loops sync.WaitGroup
+	if s.o.Account.Provider.Gmail {
+		// One watcher on the \All folder covers every Gmail label, so a
+		// Gmail account polls nothing.
+		loops.Go(func() { s.watchLoop(actx, p, "") })
+	} else {
+		for _, folder := range s.o.Account.Watch {
+			loops.Go(func() { s.watchLoop(actx, p, folder) })
+		}
+		if polled := polledFolders(s.o.Account); len(polled) > 0 {
+			loops.Go(func() { s.pollLoop(actx, p, polled) })
+		}
+	}
+	done := make(chan struct{})
+	var join sync.WaitGroup
+	join.Go(func() {
+		loops.Wait()
+		close(done)
+	})
+	s.checkAuth(actx, done, p)
+	join.Wait()
+	return p.requested()
+}
+
+// checkAuth asks AuthRequired every AuthRecheck until done closes or ctx
+// ends, and parks the account the first time the answer is yes.
+func (s *Supervisor) checkAuth(ctx context.Context, done <-chan struct{}, p *parker) {
+	for {
+		select {
+		case <-done:
+			return
+		case <-ctx.Done():
+			return
+		case <-s.clock.After(AuthRecheck):
+		}
+		if need, hint := s.o.AuthRequired(s.o.Account.Name); need {
+			p.park(hint)
+			return
+		}
+	}
+}
+
+// park records the account as needing a human, then asks AuthRequired
+// every AuthRecheck until it clears. It waits at least one AuthRecheck, so
+// a refusal is never retried sooner, and reports false when ctx ends.
+func (s *Supervisor) park(ctx context.Context, hint string) bool {
+	s.logger.Warn("watching is parked until the account is authenticated")
+	recorded := false
+	for {
+		// Armed before the status is recorded, so whoever sees the status
+		// finds the recheck already waiting on the clock.
+		recheck := s.clock.After(AuthRecheck)
+		if !recorded {
+			if err := s.recordParked(ctx, hint); err != nil {
+				s.logger.Warn("recording that the account is parked", "reason", failureReason(err))
+			} else {
+				recorded = true
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-recheck:
+		}
+		if need, _ := s.o.AuthRequired(s.o.Account.Name); !need {
+			// The next account-wide status is a new one.
+			s.forget("")
+			return true
+		}
+	}
+}
+
+// recordParked writes auth_required to every known folder's row, then
+// publishes one account-wide status event with the hint. Every loop has
+// returned, so no pass can overwrite a row. A failure leaves the rest for
+// the next call.
+func (s *Supervisor) recordParked(ctx context.Context, hint string) error {
+	for _, f := range s.knownFolders() {
+		if err := s.setStatus(ctx, f.name, f.mode, StateAuthRequired, api.ReasonAuthRequired); err != nil {
+			return err
+		}
+	}
+	return s.transition(ctx, "", "", StateAuthRequired, hint, api.ReasonAuthRequired)
+}
+
+// watcher is one watched folder's loop state. Only its own goroutine uses it.
+type watcher struct {
+	s *Supervisor
+	// folder is "" on Gmail until the \All folder is resolved.
+	folder string
+	// mode is passModeIdle, or passModePoll on a server without IDLE.
+	mode string
+	// lastSweep is when the last sweep pass ran. expungeAt is when an
+	// EXPUNGE asked for the next one, zero when none is pending.
+	lastSweep time.Time
+	expungeAt time.Time
+}
+
+// watchLoop keeps one folder watched until ctx ends. folder is "" on Gmail,
+// which resolves its \All folder before each connection that lacks it. An
+// auth failure parks the whole account through p, a missing folder retries
+// every sync.poll, and anything else reconnects with backoff, reset by a
+// successful pass.
+func (s *Supervisor) watchLoop(ctx context.Context, p *parker, folder string) {
+	w := &watcher{s: s, folder: folder, mode: passModeIdle}
+	failures := 0
+	for {
+		if need, hint := s.o.AuthRequired(s.o.Account.Name); need {
+			p.park(hint)
+			return
+		}
+		healthy, err := w.session(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if healthy {
+			failures = 0
+		}
+		var wait time.Duration
+		var notFound *mailstore.FolderNotFoundError
+		switch {
+		case errors.Is(err, errNoWatcher):
+			s.logger.Error("the account's store cannot watch folders", "folder", w.folder)
+			return
+		case authFailure(err):
+			s.logger.Warn("a watch connection needs the account authenticated", "folder", w.folder, "reason", failureReason(err))
+			p.park(s.authHint(err))
+			return
+		case errors.As(err, &notFound):
+			s.logger.Warn("a watched folder does not exist", "folder", w.folder)
+			s.note(ctx, w.folder, w.mode, StateError, ReasonFolderNotFound, ReasonFolderNotFound)
+			if s.o.Account.Provider.Gmail {
+				w.folder = "" // resolve the \All folder again
+			}
+			wait = s.syncPoll
+		default:
+			s.logger.Warn("watch connection failed", "folder", w.folder, "reason", failureReason(err))
+			s.note(ctx, w.folder, w.mode, StateReconnecting, "", api.ReasonServerUnavailable)
+			wait = Backoff(failures, s.jitter())
+			failures++
+		}
+		if !s.sleep(ctx, wait) {
+			return
+		}
+	}
+}
+
+// authHint is what to run to authenticate the account: the auth state's
+// hint, else the one err carries. Both are written by package auth, never
+// by a server.
+func (s *Supervisor) authHint(err error) string {
+	if need, hint := s.o.AuthRequired(s.o.Account.Name); need && hint != "" {
+		return hint
+	}
+	var required *auth.RequiredError
+	if errors.As(err, &required) {
+		return required.Hint
+	}
+	var rejected *auth.RejectedError
+	if errors.As(err, &rejected) {
+		return rejected.Hint
+	}
+	return ""
+}
+
+// authFailure reports whether err needs a human rather than a retry.
+func authFailure(err error) bool {
+	return errors.Is(err, auth.ErrAuthRequired) || errors.Is(err, auth.ErrRejected)
+}
+
+// polledFolders are the synced folders that are not watched, in config order.
+func polledFolders(a config.ResolvedAccount) []string {
+	var out []string
+	for _, f := range a.SyncFolders {
+		if !slices.Contains(a.Watch, f) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// polled is one polled folder's schedule. Only the poller's goroutine uses it.
+type polled struct {
+	folder string
+	// next is when the folder is due, lastSweep when its last sweep ran.
+	next      time.Time
+	lastSweep time.Time
+	// failures counts failed polls since the last success.
+	failures int
+}
+
+// pollLoop polls folders until ctx ends, each every sync.poll, starting at
+// once so they catch up from their checkpoints. A folder's failure stays
+// its own: a missing folder retries every sync.poll and an outage with
+// backoff capped at sync.poll. An auth failure parks the account through p.
+func (s *Supervisor) pollLoop(ctx context.Context, p *parker, folders []string) {
+	sched := make([]*polled, 0, len(folders))
+	for _, f := range folders {
+		sched = append(sched, &polled{folder: f})
+	}
+	for {
+		if need, hint := s.o.AuthRequired(s.o.Account.Name); need {
+			p.park(hint)
+			return
+		}
+		now := s.clock.Now()
+		for _, pf := range sched {
+			if pf.next.After(now) {
+				continue
+			}
+			err := s.pollFolder(ctx, pf, now)
+			if ctx.Err() != nil {
+				return
+			}
+			if errors.Is(err, errNoWatcher) {
+				s.logger.Error("the account's store cannot sync folders")
+				return
+			}
+			if authFailure(err) {
+				s.logger.Warn("a poll needs the account authenticated", "folder", pf.folder, "reason", failureReason(err))
+				p.park(s.authHint(err))
+				return
+			}
+		}
+		next := sched[0].next
+		for _, pf := range sched[1:] {
+			if pf.next.Before(next) {
+				next = pf.next
+			}
+		}
+		if !s.sleep(ctx, next.Sub(s.clock.Now())) {
+			return
+		}
+	}
+}
+
+// pollFolder polls one folder due at now, records its status and schedules
+// its next poll. The first poll of a folder sweeps, then one every
+// ExpungeSweep. A failed status write counts as a failed poll. The error is
+// returned so pollLoop can stop for auth or a store that cannot sync.
+func (s *Supervisor) pollFolder(ctx context.Context, pf *polled, now time.Time) error {
+	sweep := !now.Before(pf.lastSweep.Add(s.settings.ExpungeSweep))
+	res, err := s.pollPass(ctx, pf.folder, sweep)
+	if err == nil {
+		if sweep || res.Baselined {
+			pf.lastSweep = now
+		}
+		err = s.settled(ctx, pf.folder, passModePoll, res)
+	}
+	if err == nil {
+		pf.failures = 0
+		pf.next = now.Add(s.syncPoll)
+		return nil
+	}
+	if ctx.Err() != nil || errors.Is(err, errNoWatcher) || authFailure(err) {
+		return err // pollLoop handles these for every folder at once
+	}
+	var notFound *mailstore.FolderNotFoundError
+	if errors.As(err, &notFound) {
+		s.note(ctx, pf.folder, passModePoll, StateError, ReasonFolderNotFound, ReasonFolderNotFound)
+		pf.next = now.Add(s.syncPoll)
+		return err
+	}
+	s.logger.Warn("polling a folder failed", "folder", pf.folder, "reason", failureReason(err))
+	s.note(ctx, pf.folder, passModePoll, StateReconnecting, "", api.ReasonServerUnavailable)
+	pf.next = now.Add(min(Backoff(pf.failures, s.jitter()), s.syncPoll))
+	pf.failures++
+	return err
+}
+
+// pollPass runs STATUS on folder and then a pass when a sweep is due, the
+// folder has no CONDSTORE or no checkpoint, or its UIDVALIDITY, UIDNEXT or
+// HIGHESTMODSEQ moved. Each call holds the store only while it runs.
+func (s *Supervisor) pollPass(ctx context.Context, folder string, sweep bool) (PassResult, error) {
+	w, release, err := s.watcherStore(ctx)
+	if err != nil {
+		return PassResult{}, err
+	}
+	st, err := w.FolderState(ctx, folder)
+	release()
+	if err != nil {
+		return PassResult{}, err
+	}
+	if !sweep && st.CondStore {
+		row, ok, rerr := s.o.State.Folder(ctx, s.o.Account.Name, folder)
+		if rerr != nil {
+			return PassResult{}, rerr
+		}
+		if ok && row.UIDValidity == st.UIDValidity && row.UIDNext == st.UIDNext && row.HighestModSeq == st.HighestModSeq {
+			return PassResult{}, nil
+		}
+	}
+	w, release, err = s.watcherStore(ctx)
+	if err != nil {
+		return PassResult{}, err
+	}
+	defer release()
+	return s.o.Engine.Pass(ctx, s.o.Account.Name, folder, StoreSource{W: w, Folder: folder}, PassOptions{Sweep: sweep, Mode: passModePoll})
+}
+
+// session runs one connection on the folder: open, sync, then IDLE or poll
+// and sync after every wake, until an error or the end of ctx. healthy
+// reports whether a pass succeeded on it, which ends an outage.
+func (w *watcher) session(ctx context.Context) (healthy bool, err error) {
+	if w.folder == "" {
+		if w.folder, err = w.s.resolveAll(ctx); err != nil {
+			return false, err
+		}
+		w.s.know(w.folder, passModeIdle)
+	}
+	conn, err := w.s.openWatch(ctx, w.folder)
+	if err != nil {
+		return false, err
+	}
+	defer w.s.closeConn(conn, w.folder)
+	w.mode = passModePoll
+	if conn.IdleSupported() {
+		w.mode = passModeIdle
+	}
+	sweep := true // the first pass after a connect always sweeps
+	for {
+		if err = w.pass(ctx, conn, sweep); err != nil {
+			return healthy, err
+		}
+		healthy = true
+		if sweep, err = w.wait(ctx, conn); err != nil {
+			return healthy, err
+		}
+	}
+}
+
+// pass runs one engine pass on conn and records the folder as watching or
+// polling. A sweep, or a baseline, restarts the sweep schedule. A status
+// that cannot be recorded fails the pass like a database error.
+func (w *watcher) pass(ctx context.Context, conn mailstore.WatchConn, sweep bool) error {
+	res, err := w.s.o.Engine.Pass(ctx, w.s.o.Account.Name, w.folder, conn, PassOptions{Sweep: sweep, Mode: w.mode})
+	if err != nil {
+		return err
+	}
+	if sweep || res.Baselined {
+		w.lastSweep = w.s.clock.Now()
+		w.expungeAt = time.Time{}
+	}
+	return w.s.settled(ctx, w.folder, w.mode, res)
+}
+
+// wait blocks until the folder needs another pass and reports whether that
+// pass must sweep. With IDLE it waits for the server, the IdleRestart or a
+// due sweep; without, for idle_fallback_poll or a due sweep.
+func (w *watcher) wait(ctx context.Context, conn mailstore.WatchConn) (sweep bool, err error) {
+	if w.sweepDue() {
+		return true, nil
+	}
+	limit := w.nextSweep().Sub(w.s.clock.Now())
+	if !conn.IdleSupported() {
+		if !w.s.sleep(ctx, min(limit, w.s.settings.IdleFallbackPoll)) {
+			return false, ctx.Err()
+		}
+		return w.sweepDue(), nil
+	}
+	wake, err := w.idle(ctx, conn, min(limit, IdleRestart))
+	if err != nil {
+		return false, err
+	}
+	if wake.Expunged && w.expungeAt.IsZero() {
+		at := w.lastSweep.Add(w.s.sweepFloor)
+		if now := w.s.clock.Now(); now.After(at) {
+			at = now
+		}
+		w.expungeAt = at
+	}
+	return w.sweepDue(), nil
+}
+
+// idle runs conn.Idle until the server wakes it, the store's own timer for limit
+// passes, or the supervisor's clock passes limit plus idleGrace, when it
+// cancels the IDLE. Idle runs in a joined goroutine; the connection is used
+// by one goroutine at a time.
+func (w *watcher) idle(ctx context.Context, conn mailstore.WatchConn, limit time.Duration) (mailstore.Wake, error) {
+	idleCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		wake mailstore.Wake
+		err  error
+	}
+	done := make(chan result, 1)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		wake, err := conn.Idle(idleCtx, limit)
+		done <- result{wake: wake, err: err}
+	})
+	var r result
+	select {
+	case r = <-done:
+	case <-w.s.clock.After(limit + idleGrace):
+		cancel()
+		r = <-done
+		if ctx.Err() == nil && errors.Is(r.err, context.Canceled) {
+			r.err = nil // the supervisor's own timer ended the IDLE
+		}
+	}
+	wg.Wait()
+	return r.wake, r.err
+}
+
+// nextSweep is when the folder's next sweep is due: ExpungeSweep after the
+// last one, or sooner when an EXPUNGE asked for one.
+func (w *watcher) nextSweep() time.Time {
+	due := w.lastSweep.Add(w.s.settings.ExpungeSweep)
+	if !w.expungeAt.IsZero() && w.expungeAt.Before(due) {
+		due = w.expungeAt
+	}
+	return due
+}
+
+// sweepDue reports whether the next pass must sweep.
+func (w *watcher) sweepDue() bool { return !w.nextSweep().After(w.s.clock.Now()) }
+
+// watcherStore opens the account's store as a mailstore.Watcher. The caller
+// releases it as soon as its call returns.
+func (s *Supervisor) watcherStore(ctx context.Context) (mailstore.Watcher, func(), error) {
+	st, release, err := s.o.Store(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	w, ok := st.(mailstore.Watcher)
+	if !ok {
+		release()
+		return nil, nil, errNoWatcher
+	}
+	return w, release, nil
+}
+
+// openWatch opens a watch connection on folder. The store is released as
+// soon as OpenWatch returns: the connection lives outside the pool.
+func (s *Supervisor) openWatch(ctx context.Context, folder string) (mailstore.WatchConn, error) {
+	w, release, err := s.watcherStore(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return w.OpenWatch(ctx, folder)
+}
+
+// resolveAll finds a Gmail account's \All folder by its role, never by name.
+func (s *Supervisor) resolveAll(ctx context.Context) (string, error) {
+	st, release, err := s.o.Store(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	folders, err := st.ListFolders(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, f := range folders {
+		if f.Role == mailstore.RoleAll && f.Selectable {
+			return f.Name, nil
+		}
+	}
+	return "", &mailstore.FolderNotFoundError{Name: `\All`}
+}
+
+// closeConn logs out of a watch connection. Close bounds itself at
+// ShutdownLogout.
+func (s *Supervisor) closeConn(conn mailstore.WatchConn, folder string) {
+	if err := conn.Close(); err != nil {
+		s.logger.Debug("closing a watch connection", "folder", folder, "reason", failureReason(err))
+	}
+}
+
+// settled records a successful pass as watching or polling, by mode. A
+// baseline published its own status with the pass, so the steady state is
+// recorded after it. A failed write is returned, for the caller to back off
+// as from a database error and record it again after its next pass.
+func (s *Supervisor) settled(ctx context.Context, folder, mode string, res PassResult) error {
+	if res.Baselined {
+		s.record(folder, mode, StateBaselined)
+	}
+	state := StateWatching
+	if mode == passModePoll {
+		state = StatePolling
+	}
+	return s.transition(ctx, folder, mode, state, "", "")
+}
+
+// transition records a folder's status, only when state differs from the
+// last one recorded for the folder: the row through State.SetStatus first,
+// so a reader that sees the event also sees the row, then a status event.
+// The state is remembered only once both succeed, so a failed write is
+// retried by the next transition to the same state, and a row that cannot
+// be written is never announced. An empty folder is an account-wide status,
+// such as a Gmail one from before the \All folder is resolved, with no row.
+func (s *Supervisor) transition(ctx context.Context, folder, mode, state, detail, lastError string) error {
+	if s.recorded(folder) == state {
+		return nil
+	}
+	account := s.o.Account.Name
+	if folder != "" {
+		if err := s.writeStatus(ctx, account, folder, mode, state, lastError); err != nil {
+			return fmt.Errorf("recording sync status: %w", err)
+		}
+	}
+	ev := Event{At: s.clock.Now(), Kind: KindStatus, Account: account, Folder: folder, State: state, Detail: detail}
+	if err := s.publishEvents(ctx, ev); err != nil {
+		return fmt.Errorf("publishing sync status: %w", err)
+	}
+	s.record(folder, mode, state)
+	return nil
+}
+
+// note is transition for a failure path, which goes on to back off
+// whatever happens: a failed write is logged and retried by the next
+// transition to the same state.
+func (s *Supervisor) note(ctx context.Context, folder, mode, state, detail, lastError string) {
+	if err := s.transition(ctx, folder, mode, state, detail, lastError); err != nil {
+		s.logger.Warn("recording a folder's sync status", "folder", folder, "reason", failureReason(err))
+	}
+}
+
+// setStatus writes a folder's row without an event, when state differs
+// from the last one recorded, and remembers it once written.
+func (s *Supervisor) setStatus(ctx context.Context, folder, mode, state, lastError string) error {
+	if s.recorded(folder) == state {
+		return nil
+	}
+	if err := s.writeStatus(ctx, s.o.Account.Name, folder, mode, state, lastError); err != nil {
+		return fmt.Errorf("recording sync status: %w", err)
+	}
+	s.record(folder, mode, state)
+	return nil
+}
+
+// folderStatus is the mode and state last recorded for a folder.
+type folderStatus struct {
+	name, mode, state string
+}
+
+// recorded is the state last recorded for folder, "" when none.
+func (s *Supervisor) recorded(folder string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.statuses[folder].state
+}
+
+// record remembers folder's mode and state.
+func (s *Supervisor) record(folder, mode, state string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statuses[folder] = folderStatus{name: folder, mode: mode, state: state}
+}
+
+// know adds folder, in mode, to the folders a parking records, unless it is
+// already known.
+func (s *Supervisor) know(folder, mode string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.statuses[folder]; !ok {
+		s.statuses[folder] = folderStatus{name: folder, mode: mode}
+	}
+}
+
+// forget drops what was recorded for folder.
+func (s *Supervisor) forget(folder string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.statuses, folder)
+}
+
+// knownFolders are the folders with a row to keep, sorted by name.
+func (s *Supervisor) knownFolders() []folderStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []folderStatus
+	for name, st := range s.statuses {
+		if name != "" {
+			out = append(out, st)
+		}
+	}
+	slices.SortFunc(out, func(a, b folderStatus) int { return cmp.Compare(a.name, b.name) })
+	return out
+}
+
+// sleep waits d on the supervisor's clock. It reports false when ctx ended first.
+func (s *Supervisor) sleep(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-s.clock.After(d):
+		return true
+	}
+}
+
+// failureReason is err's class, from a fixed set, for logs. Store errors can
+// quote the server, which can echo anything it was sent, so their text is
+// never logged.
+func failureReason(err error) string {
+	var notFound *mailstore.FolderNotFoundError
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline"
+	case errors.Is(err, auth.ErrAuthRequired):
+		return "auth_required"
+	case errors.Is(err, auth.ErrRejected):
+		return "auth_rejected"
+	case errors.As(err, &notFound):
+		return "folder_not_found"
+	case errors.Is(err, mailstore.ErrNotFound):
+		return "not_found"
+	case errors.Is(err, mailstore.ErrUnavailable):
+		return "unavailable"
+	case errors.Is(err, errNoWatcher):
+		return "no_watcher"
+	default:
+		return "other"
+	}
+}
