@@ -1,6 +1,7 @@
 package imapstore
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"sync"
@@ -355,5 +356,62 @@ func TestWatchIdleLimitUsesStoreClock(t *testing.T) {
 	}
 	if _, err := wc.Sync(t.Context(), mailstore.SyncRequest{}); err != nil {
 		t.Errorf("Sync after the Idle = %v; the connection must stay usable", err)
+	}
+}
+
+// TestWatchIdleCancelledBeforeContinuation cancels an Idle while the server
+// has yet to answer IDLE with its continuation: Idle still waits for it,
+// ends IDLE with DONE and returns the context's error, and the connection
+// stays selected and usable.
+func TestWatchIdleCancelledBeforeContinuation(t *testing.T) {
+	t.Parallel()
+	s, srv, ca := watchFixture(t)
+	wc, err := s.OpenWatch(t.Context(), storetest.GmailAllMail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wc.Close() })
+	d0, err := wc.Sync(t.Context(), mailstore.SyncRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, release := srv.HoldReads()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+	wg.Go(func() {
+		_, err := wc.Idle(ctx, time.Minute)
+		done <- err
+	})
+	select {
+	case <-held:
+	case err := <-done:
+		release()
+		t.Fatalf("Idle returned %v before the server got IDLE", err)
+	case <-time.After(2 * time.Second):
+		release()
+		t.Fatal("the server did not get IDLE within 2s")
+	}
+	cancel()
+	release()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Idle cancelled before the continuation = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Idle did not return within 2s of the release")
+	}
+	u1 := fakeGmailRemote(t, srv, ca).Append(t, storetest.GmailAllMail, storetest.Message{
+		Date: gmailDay(3), From: "sender@example.test", Subject: "after cancel", MessageID: "cancel@watch.example", Body: "x",
+	})
+	d, err := wc.Sync(t.Context(), mailstore.SyncRequest{From: mailstore.Checkpoint{UIDValidity: d0.State.UIDValidity, UIDNext: d0.State.UIDNext}})
+	if err != nil {
+		t.Fatalf("Sync after an Idle cancelled before its continuation = %v; the connection must stay usable", err)
+	}
+	if len(d.New) != 1 || d.New[0].Ref.UID != u1 {
+		t.Errorf("Sync after the cancelled Idle found %d new, want UID %d", len(d.New), u1)
 	}
 }
