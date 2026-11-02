@@ -116,6 +116,10 @@ type Server struct {
 	// watchWaitUnit is one ReadEvents wait_seconds: a second. Internal
 	// tests shorten it.
 	watchWaitUnit time.Duration
+	// watchAfterTail, when set, runs in a watch read between reading the
+	// tail and recovering a group left past it. Internal tests land an
+	// event or a cancellation in that window.
+	watchAfterTail func(context.Context)
 }
 
 // New wires up a Server. Call Serve to run it.
