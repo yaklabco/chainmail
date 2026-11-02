@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 
@@ -590,5 +591,329 @@ func TestSendAllowProblems(t *testing.T) {
 	}
 	if got := SendAllowProblems("x", nil); got != nil {
 		t.Errorf("no entries: %q, want nil", got)
+	}
+}
+
+const watchAccount = "[accounts.host]\nprovider = \"hostinger\"\naddress = \"me@example.com\"\n"
+
+func TestWatchDefaults(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse([]byte(validConfig))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if want := (WatchConfig{Retention: "168h", MaxEvents: 200000, ExpungeSweep: "1h", IdleFallbackPoll: "30s"}); cfg.Watch != want {
+		t.Errorf("watch = %+v, want %+v", cfg.Watch, want)
+	}
+	want := WatchSettings{
+		Retention:        168 * time.Hour,
+		MaxEvents:        200000,
+		ExpungeSweep:     time.Hour,
+		IdleFallbackPoll: 30 * time.Second,
+	}
+	if got := cfg.WatchSettings(); got != want {
+		t.Errorf("WatchSettings() = %+v, want %+v", got, want)
+	}
+	for _, name := range []string{"hostinger", "icloud", "local"} {
+		a := cfg.Accounts[name]
+		if a.Watch == nil || !slices.Equal(*a.Watch, []string{"INBOX"}) {
+			t.Errorf("%s: watch = %v, want [INBOX]", name, a.Watch)
+		}
+		if a.Sync.Poll != "5m" {
+			t.Errorf("%s: sync.poll = %q, want 5m", name, a.Sync.Poll)
+		}
+		if a.Sync.Enabled == nil || !*a.Sync.Enabled {
+			t.Errorf("%s: sync.enabled = %v, want true", name, a.Sync.Enabled)
+		}
+		if a.Sync.Folders != nil {
+			t.Errorf("%s: sync.folders = %q, want nil", name, a.Sync.Folders)
+		}
+	}
+	if w := cfg.Accounts["work"].Watch; w != nil {
+		t.Errorf("work (Gmail preset): watch = %v, want nil", *w)
+	}
+}
+
+func TestWatchSettings(t *testing.T) {
+	t.Parallel()
+	defaults := WatchSettings{
+		Retention:        168 * time.Hour,
+		MaxEvents:        200000,
+		ExpungeSweep:     time.Hour,
+		IdleFallbackPoll: 30 * time.Second,
+	}
+	cfg, err := Parse([]byte(watchAccount + `
+[watch]
+retention = "24h"
+max_events = 5000
+expunge_sweep = "30m"
+idle_fallback_poll = "1m30s"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := WatchSettings{
+		Retention:        24 * time.Hour,
+		MaxEvents:        5000,
+		ExpungeSweep:     30 * time.Minute,
+		IdleFallbackPoll: 90 * time.Second,
+	}
+	if got := cfg.WatchSettings(); got != want {
+		t.Errorf("WatchSettings() = %+v, want %+v", got, want)
+	}
+	// A Config built without Parse, as tests sometimes do, gets the
+	// defaults for unset or unparsable values rather than zero.
+	for name, c := range map[string]*Config{
+		"empty":      {},
+		"unparsable": {Watch: WatchConfig{Retention: "a week", MaxEvents: -5, ExpungeSweep: "0s", IdleFallbackPoll: "-1m"}},
+	} {
+		if got := c.WatchSettings(); got != defaults {
+			t.Errorf("%s: WatchSettings() = %+v, want the defaults %+v", name, got, defaults)
+		}
+	}
+}
+
+const gmailAccount = "[accounts.g]\nprovider = \"gmail\"\naddress = \"me@gmail.com\"\nauth = \"password\"\n"
+
+func TestAccountWatchResolution(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		extra       string
+		watch       []string
+		syncFolders []string
+		poll        time.Duration
+		enabled     bool
+	}{
+		{
+			name:  "defaults",
+			watch: []string{"INBOX"}, syncFolders: []string{"INBOX"}, poll: 5 * time.Minute, enabled: true,
+		},
+		{
+			name:  "two watched folders",
+			extra: `watch = ["INBOX", "Lists"]`,
+			watch: []string{"INBOX", "Lists"}, syncFolders: []string{"INBOX", "Lists"}, poll: 5 * time.Minute, enabled: true,
+		},
+		{
+			name:  "sync folders after watch in order without duplicates",
+			extra: "watch = [\"INBOX\", \"Lists\"]\nsync = { folders = [\"Sent\", \"INBOX\", \"Archive\", \"Sent\", \"Lists\"], poll = \"10m\" }",
+			watch: []string{"INBOX", "Lists"}, syncFolders: []string{"INBOX", "Lists", "Sent", "Archive"}, poll: 10 * time.Minute, enabled: true,
+		},
+		{
+			name:  "empty watch polls sync folders",
+			extra: "watch = []\nsync = { folders = [\"Sent\"] }",
+			watch: []string{}, syncFolders: []string{"Sent"}, poll: 5 * time.Minute, enabled: true,
+		},
+		{
+			name:  "empty watch and no sync folders",
+			extra: "watch = []",
+			watch: []string{}, syncFolders: []string{}, poll: 5 * time.Minute, enabled: true,
+		},
+		{
+			name:  "disabled",
+			extra: "sync = { enabled = false }",
+			watch: []string{"INBOX"}, syncFolders: []string{"INBOX"}, poll: 5 * time.Minute, enabled: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := Parse([]byte(watchAccount + tt.extra + "\n"))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			got, err := cfg.Account("host")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got.Watch, tt.watch) {
+				t.Errorf("Watch = %q, want %q", got.Watch, tt.watch)
+			}
+			if !slices.Equal(got.SyncFolders, tt.syncFolders) {
+				t.Errorf("SyncFolders = %q, want %q", got.SyncFolders, tt.syncFolders)
+			}
+			if got.SyncPoll != tt.poll {
+				t.Errorf("SyncPoll = %v, want %v", got.SyncPoll, tt.poll)
+			}
+			if got.SyncEnabled != tt.enabled {
+				t.Errorf("SyncEnabled = %v, want %v", got.SyncEnabled, tt.enabled)
+			}
+		})
+	}
+}
+
+func TestAccountWatchResolutionGmail(t *testing.T) {
+	t.Parallel()
+	for extra, enabled := range map[string]bool{
+		"":                           true,
+		"sync = { enabled = false }": false,
+		"sync = { poll = \"1h\" }":   true,
+	} {
+		cfg, err := Parse([]byte(gmailAccount + extra + "\n"))
+		if err != nil {
+			t.Fatalf("%q: Parse: %v", extra, err)
+		}
+		got, err := cfg.Account("g")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Watch != nil || got.SyncFolders != nil {
+			t.Errorf("%q: Watch = %q, SyncFolders = %q, want both nil on a Gmail preset", extra, got.Watch, got.SyncFolders)
+		}
+		if got.SyncEnabled != enabled {
+			t.Errorf("%q: SyncEnabled = %v, want %v", extra, got.SyncEnabled, enabled)
+		}
+	}
+}
+
+func TestAccountWatchUnparsedFallsBackToDefaults(t *testing.T) {
+	t.Parallel()
+	// A Config built without Parse watches INBOX, polls every 5m and syncs.
+	watch := []string{"INBOX", "Lists"}
+	cfg := &Config{Accounts: map[string]Account{
+		"host":  {Provider: "hostinger", Address: "me@example.com"},
+		"lists": {Provider: "hostinger", Address: "me@example.com", Watch: &watch},
+	}}
+	got, err := cfg.Account("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got.Watch, []string{"INBOX"}) || !slices.Equal(got.SyncFolders, []string{"INBOX"}) {
+		t.Errorf("Watch = %q, SyncFolders = %q, want [INBOX] for both", got.Watch, got.SyncFolders)
+	}
+	if got.SyncPoll != 5*time.Minute || !got.SyncEnabled {
+		t.Errorf("SyncPoll = %v, SyncEnabled = %v, want 5m and true", got.SyncPoll, got.SyncEnabled)
+	}
+	lists, err := cfg.Account("lists")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lists.Watch[0] = "changed"
+	if watch[0] != "INBOX" {
+		t.Errorf("changing the resolved watch list changed the config's: %q", watch)
+	}
+}
+
+func TestWatchCount(t *testing.T) {
+	t.Parallel()
+	gmail, _ := provider.Lookup("gmail")
+	hostinger, _ := provider.Lookup("hostinger")
+	tests := []struct {
+		name string
+		acct ResolvedAccount
+		want int
+	}{
+		{name: "disabled", acct: ResolvedAccount{Provider: hostinger, Watch: []string{"INBOX"}}, want: 0},
+		{name: "gmail", acct: ResolvedAccount{Provider: gmail, SyncEnabled: true}, want: 1},
+		{name: "gmail disabled", acct: ResolvedAccount{Provider: gmail}, want: 0},
+		{name: "two folders", acct: ResolvedAccount{Provider: hostinger, Watch: []string{"INBOX", "Lists"}, SyncEnabled: true}, want: 2},
+		{name: "empty watch", acct: ResolvedAccount{Provider: hostinger, Watch: []string{}, SyncEnabled: true}, want: 0},
+	}
+	for _, tt := range tests {
+		if got := tt.acct.WatchCount(); got != tt.want {
+			t.Errorf("%s: WatchCount() = %d, want %d", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestWatchValidBounds(t *testing.T) {
+	t.Parallel()
+	for _, config := range []string{
+		"[watch]\nretention = \"1h\"\n",
+		"[watch]\nretention = \"2160h\"\n",
+		"[watch]\nretention = \"1h30m\"\n",
+		"[watch]\nmax_events = 1000\n",
+		"[watch]\nmax_events = 10000000\n",
+		"[watch]\nmax_events = 0\n",
+		"[watch]\nexpunge_sweep = \"5m\"\n",
+		"[watch]\nexpunge_sweep = \"24h\"\n",
+		"[watch]\nidle_fallback_poll = \"10s\"\n",
+		"[watch]\nidle_fallback_poll = \"10m\"\n",
+		watchAccount + "sync = { poll = \"30s\" }\n",
+		watchAccount + "sync = { poll = \"24h\" }\n",
+		watchAccount + "watch = []\n",
+		watchAccount + "watch = []\nsync = { folders = [\"Sent\"] }\n",
+		gmailAccount + "sync = { enabled = false }\n",
+		gmailAccount + "sync = { poll = \"1h\" }\n",
+	} {
+		if _, err := Parse([]byte(config)); err != nil {
+			t.Errorf("%q: err = %v, want valid", config, err)
+		}
+	}
+}
+
+func TestWatchInvalid(t *testing.T) {
+	t.Parallel()
+	const workspace = "[oauth_clients.ws]\nclient_id = \"id\"\n[accounts.w]\nprovider = \"google-workspace\"\naddress = \"me@ainslies.us\"\noauth_client = \"ws\"\n"
+	const durationHint = "want a Go duration such as 30s, 5m or 168h"
+	tests := []struct {
+		name    string
+		config  string
+		problem string
+	}{
+		{name: "retention too short", config: "[watch]\nretention = \"59m\"\n", problem: "watch.retention: 59m must be between 1h and 2160h"},
+		{name: "retention too long", config: "[watch]\nretention = \"2161h\"\n", problem: "watch.retention: 2161h must be between 1h and 2160h"},
+		{name: "retention not a duration", config: "[watch]\nretention = \"a week\"\n", problem: `watch.retention: duration "a week": ` + durationHint},
+		{name: "max_events too few", config: "[watch]\nmax_events = 999\n", problem: "watch.max_events must be 1000 to 10000000"},
+		{name: "max_events too many", config: "[watch]\nmax_events = 10000001\n", problem: "watch.max_events must be 1000 to 10000000"},
+		{name: "max_events negative", config: "[watch]\nmax_events = -1\n", problem: "watch.max_events must be 1000 to 10000000"},
+		{name: "expunge_sweep too short", config: "[watch]\nexpunge_sweep = \"4m59s\"\n", problem: "watch.expunge_sweep: 4m59s must be between 5m and 24h"},
+		{name: "expunge_sweep too long", config: "[watch]\nexpunge_sweep = \"24h1s\"\n", problem: "watch.expunge_sweep: 24h1s must be between 5m and 24h"},
+		{name: "expunge_sweep in days", config: "[watch]\nexpunge_sweep = \"1d\"\n", problem: `watch.expunge_sweep: duration "1d": ` + durationHint},
+		{name: "idle_fallback_poll too short", config: "[watch]\nidle_fallback_poll = \"9s\"\n", problem: "watch.idle_fallback_poll: 9s must be between 10s and 10m"},
+		{name: "idle_fallback_poll too long", config: "[watch]\nidle_fallback_poll = \"10m1s\"\n", problem: "watch.idle_fallback_poll: 10m1s must be between 10s and 10m"},
+		{name: "idle_fallback_poll negative", config: "[watch]\nidle_fallback_poll = \"-30s\"\n", problem: "watch.idle_fallback_poll: -30s must be between 10s and 10m"},
+		{name: "sync.poll too short", config: watchAccount + "sync = { poll = \"29s\" }\n", problem: "accounts.host: sync.poll: 29s must be between 30s and 24h"},
+		{name: "sync.poll too long", config: watchAccount + "sync = { poll = \"24h1s\" }\n", problem: "accounts.host: sync.poll: 24h1s must be between 30s and 24h"},
+		{name: "sync.poll not a duration", config: watchAccount + "sync = { poll = \"5 minutes\" }\n", problem: `accounts.host: sync.poll: duration "5 minutes": ` + durationHint},
+		{name: "empty watch folder", config: watchAccount + "watch = [\"INBOX\", \"\"]\n", problem: "accounts.host: watch has an empty folder name"},
+		{name: "duplicate watch folder", config: watchAccount + "watch = [\"INBOX\", \"Lists\", \"INBOX\"]\n", problem: "accounts.host: watch lists INBOX twice"},
+		{name: "empty sync folder", config: watchAccount + "sync = { folders = [\"Sent\", \"\"] }\n", problem: "accounts.host: sync.folders has an empty folder name"},
+		{name: "gmail watch", config: gmailAccount + "watch = [\"INBOX\"]\n", problem: "accounts.g: watch and sync.folders are not allowed on Gmail presets; they always watch All Mail"},
+		{name: "gmail empty watch", config: gmailAccount + "watch = []\n", problem: "accounts.g: watch and sync.folders are not allowed on Gmail presets; they always watch All Mail"},
+		{name: "gmail sync folders", config: gmailAccount + "sync = { folders = [\"Sent\"] }\n", problem: "accounts.g: watch and sync.folders are not allowed on Gmail presets; they always watch All Mail"},
+		{name: "workspace watch", config: workspace + "watch = [\"INBOX\"]\n", problem: "accounts.w: watch and sync.folders are not allowed on Gmail presets; they always watch All Mail"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(tt.config))
+			var ve *ValidationError
+			if !errors.As(err, &ve) || !slices.Contains(ve.Problems, tt.problem) {
+				t.Errorf("err = %v, want a problem %q", err, tt.problem)
+			}
+		})
+	}
+}
+
+func TestWatchDuplicateReportedOnce(t *testing.T) {
+	t.Parallel()
+	_, err := Parse([]byte(watchAccount + "watch = [\"INBOX\", \"INBOX\", \"INBOX\", \"\", \"\"]\n"))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err = %v, want *ValidationError", err)
+	}
+	want := []string{"accounts.host: watch has an empty folder name", "accounts.host: watch lists INBOX twice"}
+	if !slices.Equal(ve.Problems, want) {
+		t.Errorf("problems = %q, want %q", ve.Problems, want)
+	}
+}
+
+func TestWatchRejectsUnknownKeys(t *testing.T) {
+	t.Parallel()
+	for name, config := range map[string]string{
+		"watch table":      watchAccount + "[watch]\nretension = \"24h\"\n",
+		"inline sync":      watchAccount + "sync = { folder = [\"Sent\"] }\n",
+		"sync table":       watchAccount + "[accounts.host.sync]\npolls = \"5m\"\n",
+		"prefetch for SP7": watchAccount + "sync = { prefetch_bodies = true }\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(config))
+			var strict *toml.StrictMissingError
+			if !errors.As(err, &strict) {
+				t.Errorf("err = %v, want *toml.StrictMissingError", err)
+			}
+		})
 	}
 }
