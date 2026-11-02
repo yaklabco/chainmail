@@ -1,0 +1,9 @@
+version   1.2.3
+started   Mon, 02 Nov 2026 08:00 UTC
+dev mode  false
+secrets   accounts/host, tokens/gm
+
+ACCOUNT  FOLDER            MODE  STATE     LAST SYNC         ERROR
+gm       [Gmail]/All Mail  idle  watching  2026-11-02 08:58  
+host     INBOX             idle  watching  2026-11-02 08:59  
+host     Sent              poll  error                       FOLDER_NOT_FOUND
