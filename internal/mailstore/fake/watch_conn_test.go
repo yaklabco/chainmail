@@ -268,6 +268,107 @@ func TestCloseClosesWatches(t *testing.T) {
 	if n := s.WatchConns(); n != 0 {
 		t.Errorf("WatchConns after the owners closed = %d, want 0", n)
 	}
+
+	// A closed store refuses new watch connections and pooled passes, as
+	// imapstore's closed pool does.
+	if c, err := s.OpenWatch(ctx, "INBOX"); !errors.Is(err, mailstore.ErrUnavailable) {
+		if err == nil {
+			_ = c.Close()
+		}
+		t.Errorf("OpenWatch on a closed store = %v, want ErrUnavailable", err)
+	}
+	if _, err := s.SyncFolder(ctx, "INBOX", mailstore.SyncRequest{}); !errors.Is(err, mailstore.ErrUnavailable) {
+		t.Errorf("SyncFolder on a closed store = %v, want ErrUnavailable", err)
+	}
+	if _, err := s.FolderState(ctx, "INBOX"); !errors.Is(err, mailstore.ErrUnavailable) {
+		t.Errorf("FolderState on a closed store = %v, want ErrUnavailable", err)
+	}
+	if n := s.WatchConns(); n != 0 {
+		t.Errorf("WatchConns after opens on a closed store = %d, want 0", n)
+	}
+}
+
+// TestSyncKeepsPendingExpunge checks that a pass which cannot see
+// deletions leaves a pending expunge for the next Idle, so the watcher
+// still learns it should sweep, and that a pass which returns the full
+// UID set (a sweep, a rebase, or the full-flags path) accounts for it.
+func TestSyncKeepsPendingExpunge(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		plain bool // the server has no CONDSTORE
+		req   mailstore.SyncRequest
+		keep  bool // the next Idle returns the expunge at once
+	}{
+		{name: "condstore pass without a sweep", req: mailstore.SyncRequest{From: cp(1, 4, 4)}, keep: true},
+		{name: "condstore sweep", req: mailstore.SyncRequest{From: cp(1, 4, 4), Sweep: true}},
+		{name: "rebase", req: mailstore.SyncRequest{}},
+		{name: "full flags without condstore", plain: true, req: mailstore.SyncRequest{From: cp(1, 4, 0)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s, refs := seedWatch(t)
+			s.SetCondStore(!tt.plain)
+			timers := &manualAfter{}
+			s.SetAfter(timers.After)
+			c := openWatch(t, s, "INBOX")
+			syncConn(t, c, mailstore.SyncRequest{})
+			s.ExternalExpunge("INBOX", refs[1].UID)
+			syncConn(t, c, tt.req)
+			done := idleAsync(t, c, time.Minute)
+			if tt.keep {
+				if r := result(t, done); r.err != nil || r.wake != (mailstore.Wake{Changed: true, Expunged: true}) {
+					t.Errorf("Idle = %+v, %v, want the pending expunge", r.wake, r.err)
+				}
+				select {
+				case f := <-s.IdleStarted():
+					t.Errorf("Idle with a pending expunge started to wait on %s", f)
+				default:
+				}
+				return
+			}
+			waitIdle(t, s, "INBOX")
+			timers.fire()
+			if r := result(t, done); r.err != nil || r.wake != (mailstore.Wake{}) {
+				t.Errorf("Idle = %+v, %v, want the max to pass: the pass accounted for the expunge", r.wake, r.err)
+			}
+		})
+	}
+}
+
+// TestIdleCancelWithReadyWake checks that an Idle whose context ends while
+// a wake is ready returns ctx.Err() and leaves the wake pending for the
+// next Idle, as imapstore rechecks ctx before it takes the report.
+func TestIdleCancelWithReadyWake(t *testing.T) {
+	t.Parallel()
+	for i := range 20 {
+		s := newHost()
+		s.SetAfter((&manualAfter{}).After)
+		c := openWatch(t, s, "INBOX")
+		syncConn(t, c, mailstore.SyncRequest{})
+		ctx, cancel := context.WithCancel(t.Context())
+		out := make(chan idleResult, 1)
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			w, err := c.Idle(ctx, time.Minute)
+			out <- idleResult{w, err}
+		})
+		waitIdle(t, s, "INBOX")
+		// The wake is ready before ctx ends, and Idle cannot look at it
+		// until both have happened.
+		s.mu.Lock()
+		s.changedLocked("INBOX", false)
+		cancel()
+		s.mu.Unlock()
+		wg.Wait()
+		if r := <-out; !errors.Is(r.err, context.Canceled) {
+			t.Fatalf("round %d: Idle with a ready wake and an ended ctx = %+v, %v, want context.Canceled", i, r.wake, r.err)
+		}
+		if w, err := c.Idle(t.Context(), time.Minute); err != nil || w != (mailstore.Wake{Changed: true}) {
+			t.Fatalf("round %d: next Idle = %+v, %v, want the wake still pending", i, w, err)
+		}
+	}
 }
 
 func TestDropWatches(t *testing.T) {

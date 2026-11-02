@@ -214,7 +214,12 @@ func TestWatchSyncGmail(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := []mailstore.FlagState{{UID: r.UID, GmailMsgID: r.GmailMsgID, Labels: []string{`\Inbox`}}}
+			// With CONDSTORE a rebase fetches (UID X-GM-MSGID) alone, as
+			// imapstore does: identifiers, no flags or labels.
+			want := []mailstore.FlagState{{UID: r.UID, GmailMsgID: r.GmailMsgID}}
+			if !condstore {
+				want[0].Labels = []string{`\Inbox`}
+			}
 			if !d.Rebased || d.FullFlags != !condstore || !reflect.DeepEqual(d.Changed, want) || !slices.Equal(d.UIDs, []uint32{r.UID}) {
 				t.Errorf("baseline = %+v, want Changed %+v, FullFlags %v and UIDs [%d]", d, want, !condstore, r.UID)
 			}

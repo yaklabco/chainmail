@@ -122,6 +122,9 @@ func (s *Store) FolderState(ctx context.Context, folder string) (mailstore.Folde
 	if err := s.begin(opFolderState); err != nil {
 		return mailstore.FolderState{}, err
 	}
+	if err := s.closedErrLocked(); err != nil {
+		return mailstore.FolderState{}, err
+	}
 	if err := ctx.Err(); err != nil {
 		return mailstore.FolderState{}, err
 	}
@@ -143,10 +146,13 @@ func (s *Store) SyncFolder(ctx context.Context, folder string, req mailstore.Syn
 	return s.syncLocked(folder, req, s.condstore)
 }
 
-// watchErrLocked is the error a pass or OpenWatch fails with: a standing
-// Fail for method, else a pending FailWatch, which it clears, else a done
-// context.
+// watchErrLocked is the error a pass or OpenWatch fails with: a closed
+// store, else a standing Fail for method, else a pending FailWatch, which
+// it clears, else a done context.
 func (s *Store) watchErrLocked(ctx context.Context, method string) error {
+	if err := s.closedErrLocked(); err != nil {
+		return err
+	}
 	if err := s.fail[method]; err != nil {
 		return err
 	}
@@ -155,6 +161,15 @@ func (s *Store) watchErrLocked(ctx context.Context, method string) error {
 		return err
 	}
 	return ctx.Err()
+}
+
+// closedErrLocked refuses watch work on a closed store, as imapstore's
+// closed pool does, with an error matching mailstore.ErrUnavailable.
+func (s *Store) closedErrLocked() error {
+	if s.closed {
+		return fmt.Errorf("%w: the fake store %s is closed", mailstore.ErrUnavailable, s.account)
+	}
+	return nil
 }
 
 // watchableLocked refuses a folder the fake cannot sync: a missing one,
@@ -200,8 +215,9 @@ func (s *Store) syncLocked(folder string, req mailstore.SyncRequest, condstore b
 			d.Changed, d.FullFlags = s.flagStates(msgs), true
 		case s.gmail:
 			// Gmail rebases list every X-GM-MSGID, so expunged refs stay
-			// complete. FullFlags stays false: no flags compare needs it.
-			d.Changed = s.flagStates(msgs)
+			// complete. As imapstore fetches (UID X-GM-MSGID) alone, the
+			// entries carry no flags or labels, and FullFlags stays false.
+			d.Changed = idStates(msgs)
 		}
 		return d, nil
 	}
@@ -279,6 +295,16 @@ func (s *Store) flagStates(msgs []*Message) []mailstore.FlagState {
 	out := make([]mailstore.FlagState, 0, len(msgs))
 	for _, m := range msgs {
 		out = append(out, s.flagState(m))
+	}
+	return out
+}
+
+// idStates is each Gmail message's UID and X-GM-MSGID alone, as UID FETCH
+// (UID X-GM-MSGID) reports them, never nil.
+func idStates(msgs []*Message) []mailstore.FlagState {
+	out := make([]mailstore.FlagState, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, mailstore.FlagState{UID: m.uid, GmailMsgID: m.GmailMsgID})
 	}
 	return out
 }
@@ -420,8 +446,8 @@ type watchConn struct {
 	// wake holds a token when a waiting Idle should look again: a change
 	// to the folder, a drop or Close.
 	wake chan struct{}
-	// Guarded by s.mu. pending is the wake the changes since the last Sync
-	// add up to.
+	// Guarded by s.mu. pending is the wake the changes since Idle last took
+	// it add up to, less what a Sync since then settled.
 	pending mailstore.Wake
 	dropped bool
 	closed  bool
@@ -453,8 +479,22 @@ func (c *watchConn) takeLocked() mailstore.Wake {
 	return w
 }
 
-// Sync implements mailstore.WatchConn. A pass reports every change made
-// before it, so it clears the pending wake.
+// settleLocked updates the pending wake after a pass that returned d for
+// req. The pass reports every arrival and flag change made before it, so a
+// pending Changed alone clears. A pending Expunged clears only when the
+// pass returned the full UID set (a rebase, a sweep, or the full-flags
+// path), from which deletions show. Otherwise the whole wake stays for the
+// next Idle, as imapstore keeps an EXPUNGE report until Idle takes it, so
+// the watcher still learns that it should sweep.
+func (c *watchConn) settleLocked(req mailstore.SyncRequest, d mailstore.Delta) {
+	if c.pending.Expunged && !d.Rebased && !d.FullFlags && !req.Sweep {
+		return
+	}
+	c.takeLocked()
+}
+
+// Sync implements mailstore.WatchConn. It settles the pending wake as
+// settleLocked says.
 func (c *watchConn) Sync(ctx context.Context, req mailstore.SyncRequest) (mailstore.Delta, error) {
 	s := c.s
 	s.mu.Lock()
@@ -470,17 +510,18 @@ func (c *watchConn) Sync(ctx context.Context, req mailstore.SyncRequest) (mailst
 	if err != nil {
 		return mailstore.Delta{}, err
 	}
-	c.takeLocked()
+	c.settleLocked(req, d)
 	return d, nil
 }
 
 // IdleSupported implements mailstore.WatchConn.
 func (c *watchConn) IdleSupported() bool { return c.idle }
 
-// Idle implements mailstore.WatchConn. A change to the folder since the
-// last Sync returns at once. Otherwise Idle starts the store's After timer
-// for limit, tells IdleStarted, and waits for a change, the timer, a drop,
-// Close or ctx.
+// Idle implements mailstore.WatchConn. A pending wake (see settleLocked)
+// returns at once. Otherwise Idle starts the store's After timer for
+// limit, tells IdleStarted, and waits for a change, the timer, a drop,
+// Close or ctx. An ended ctx wins over a ready wake or timer and leaves
+// the wake pending.
 func (c *watchConn) Idle(ctx context.Context, limit time.Duration) (mailstore.Wake, error) {
 	s := c.s
 	s.mu.Lock()
@@ -503,12 +544,22 @@ func (c *watchConn) Idle(ctx context.Context, limit time.Duration) (mailstore.Wa
 		case <-ctx.Done():
 			return mailstore.Wake{}, ctx.Err()
 		case <-timer:
-			return mailstore.Wake{}, nil
+			// ctx may have ended as the timer fired; it wins, as in imapstore.
+			return mailstore.Wake{}, ctx.Err()
 		case <-c.wake:
 		}
 		s.mu.Lock()
 		err := c.errLocked()
-		w := c.takeLocked()
+		if err == nil {
+			// Recheck ctx before taking the wake, as imapstore does after
+			// DONE: an Idle whose ctx ended returns ctx.Err() and leaves
+			// the wake pending for the next one.
+			err = ctx.Err()
+		}
+		var w mailstore.Wake
+		if err == nil {
+			w = c.takeLocked()
+		}
 		s.mu.Unlock()
 		if err != nil {
 			return mailstore.Wake{}, err
