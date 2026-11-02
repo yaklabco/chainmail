@@ -265,3 +265,33 @@ func TestSupervisorOptionsWiring(t *testing.T) {
 		})
 	}
 }
+
+// startBackground trims the event log every trimInterval: an event older
+// than the retention window goes.
+func TestStartBackgroundTrimsTheEventLog(t *testing.T) {
+	t.Parallel()
+	s, stateDB := newTestServer(t)
+	s.trimInterval = time.Millisecond
+	retention := s.opts.Config.WatchSettings().Retention
+	old := s.opts.Now().Add(-retention - time.Hour).UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+	if _, err := stateDB.ExecContext(t.Context(),
+		"INSERT INTO events (at, account, folder, kind) VALUES (?, 'host', 'INBOX', 'expunged')", old); err != nil {
+		t.Fatal(err)
+	}
+	stop := s.startBackground(t.Context())
+	defer stop()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var n int
+		if err := stateDB.QueryRowContext(t.Context(), "SELECT count(*) FROM events").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the expired event is still there after 5s (%d events)", n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
