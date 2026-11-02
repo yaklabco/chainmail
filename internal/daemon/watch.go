@@ -41,6 +41,10 @@ const (
 	// recovering a stale group first. One retry is all a single recovery
 	// race needs.
 	staleReadTries = 3
+	// settleTimeout bounds writing down a ReadEvents read that has already
+	// happened, the group's acknowledgement, once the request's own
+	// deadline no longer applies.
+	settleTimeout = 5 * time.Second
 )
 
 var (
@@ -247,7 +251,7 @@ func (w *watchService) Subscribe(ctx context.Context, req *connect.Request[chain
 		return w.streamEnd(ctx, err)
 	}
 	if st.gap != nil {
-		if stream.Send(&chainmailv1.SubscribeResponse{Item: &chainmailv1.SubscribeResponse_Event{Event: eventToProto(*st.gap)}}) != nil {
+		if w.sendItem(stream, &chainmailv1.SubscribeResponse{Item: &chainmailv1.SubscribeResponse_Event{Event: eventToProto(*st.gap)}}) != nil {
 			return toConnectError(clientGone())
 		}
 	}
@@ -286,7 +290,7 @@ func (w *watchService) send(ctx context.Context, f watch.Filter, pos int64, stre
 			return w.streamEnd(ctx, err)
 		}
 		for _, e := range page.Events {
-			if stream.Send(&chainmailv1.SubscribeResponse{Item: &chainmailv1.SubscribeResponse_Event{Event: eventToProto(e)}}) != nil {
+			if w.sendItem(stream, &chainmailv1.SubscribeResponse{Item: &chainmailv1.SubscribeResponse_Event{Event: eventToProto(e)}}) != nil {
 				return toConnectError(clientGone())
 			}
 		}
@@ -296,7 +300,7 @@ func (w *watchService) send(ctx context.Context, f watch.Filter, pos int64, stre
 			continue
 		}
 		hb := &chainmailv1.Heartbeat{At: timestamppb.New(w.s.opts.Now()), Position: pos}
-		if stream.Send(&chainmailv1.SubscribeResponse{Item: &chainmailv1.SubscribeResponse_Heartbeat{Heartbeat: hb}}) != nil {
+		if w.sendItem(stream, &chainmailv1.SubscribeResponse{Item: &chainmailv1.SubscribeResponse_Heartbeat{Heartbeat: hb}}) != nil {
 			return toConnectError(clientGone())
 		}
 		if err := w.wait(ctx, pos, w.s.opts.WatchHeartbeat); err != nil {
@@ -453,6 +457,9 @@ func (w *watchService) waitRead(ctx context.Context, query watch.Query, page wat
 	defer cancel()
 	for len(page.Events) == 0 {
 		waitErr := w.s.watchLog.Wait(waitCtx, page.Next)
+		if w.s.watchAfterWait != nil {
+			w.s.watchAfterWait(ctx)
+		}
 		switch {
 		case errors.Is(ctx.Err(), context.Canceled):
 			return watch.Page{}, fmt.Errorf("waiting for events: %w", ctx.Err())
@@ -575,10 +582,11 @@ func (w *watchService) DeleteGroup(ctx context.Context, req *connect.Request[cha
 // ack moves a group past a page ReadEvents has read and audited: an Ack to
 // id, or for a stale group a reset from the acknowledged ID start found to
 // id. It reports false when the reset did not apply because another reader
-// recovered or acknowledged the group first. A failure is the client's
-// error, with fixed text.
+// recovered or acknowledged the group first. It runs under settleContext,
+// so a read whose quiet wait outlived the request's deadline is still
+// acknowledged. A failure is the client's error, with fixed text.
 func (w *watchService) ack(ctx context.Context, group string, st readStart, id int64) (bool, error) {
-	ctx, cancel := withDeadline(ctx, callTimeout)
+	ctx, cancel := settleContext(ctx)
 	defer cancel()
 	moved := true
 	var err error
@@ -591,4 +599,39 @@ func (w *watchService) ack(ctx context.Context, group string, st readStart, id i
 		return false, toConnectError(w.s.watchLogErr(err))
 	}
 	return moved, nil
+}
+
+// sendItem sends one Subscribe item. Server.watchSendHook, set only by
+// tests, can fail the send first.
+func (w *watchService) sendItem(stream *connect.ServerStream[chainmailv1.SubscribeResponse], item *chainmailv1.SubscribeResponse) error {
+	if hook := w.s.watchSendHook; hook != nil {
+		if err := hook(item); err != nil {
+			return err
+		}
+	}
+	return stream.Send(item)
+}
+
+// settleContext returns the context for writing down a read that has
+// already happened. It ignores ctx's deadline, since a quiet wait may end
+// at or just past it and must still be acknowledged (contract C8), and is
+// bounded by settleTimeout instead. It still ends as soon as ctx is
+// cancelled, when the client went away or the daemon is shutting down. The
+// returned cancel stops the watch on ctx and waits for it, so nothing
+// outlives the call.
+func settleContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	settled, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+	done := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(done)
+		if errors.Is(ctx.Err(), context.Canceled) {
+			cancel()
+		}
+	})
+	return settled, func() {
+		if !stop() {
+			<-done // the watch ran or is running: join it
+		}
+		cancel()
+	}
 }

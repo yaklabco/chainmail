@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -701,5 +702,172 @@ func TestWaitReadQuietWhenTheDeadlinePassesToo(t *testing.T) {
 	page, err := w.waitRead(ctx, watch.Query{After: 0}, watch.Page{Next: 0}, time.Second)
 	if err != nil || len(page.Events) != 0 || page.Next != 0 {
 		t.Errorf("waitRead = %+v, %v; want an empty page at 0 and no error", page, err)
+	}
+}
+
+// lateCtx is a request context whose deadline the test passes by hand,
+// so a deadline that passes during a late wakeup is deterministic. It
+// reports a deadline an hour away until expire, then ends with
+// DeadlineExceeded. Values come from the parent; its cancellation does not.
+type lateCtx struct {
+	context.Context
+	deadline time.Time
+	done     chan struct{}
+	once     sync.Once
+}
+
+func newLateCtx(parent context.Context) *lateCtx {
+	return &lateCtx{Context: parent, deadline: time.Now().Add(time.Hour), done: make(chan struct{})}
+}
+
+func (c *lateCtx) Deadline() (time.Time, bool) { return c.deadline, true }
+
+func (c *lateCtx) Done() <-chan struct{} { return c.done }
+
+func (c *lateCtx) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (c *lateCtx) expire() { c.once.Do(func() { close(c.done) }) }
+
+// TestReadEventsGroupQuietPastTheDeadline checks a group read whose wait
+// wakes late, after the request's deadline: it is still a quiet result,
+// an empty page with no error, and the group is acknowledged at the page's
+// Next, past the events its filter dropped. The acknowledgement must not
+// fail on the expired deadline.
+func TestReadEventsGroupQuietPastTheDeadline(t *testing.T) {
+	t.Parallel()
+	s, stateDB := newTestServer(t)
+	w := &watchService{s: s}
+	base := peerContext(t.Context())
+	if _, _, err := s.watchLog.Group(base, "bot"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.watchLog.Publish(base, testWatchEvent("a"), testWatchEvent("b")); err != nil {
+		t.Fatal(err)
+	}
+	// The request's deadline passes while the wait wakes, as on a loaded
+	// machine. The wait itself is wait_seconds 20 of a millisecond each.
+	s.watchWaitUnit = time.Millisecond
+	ctx := newLateCtx(base)
+	s.watchAfterWait = func(context.Context) { ctx.expire() }
+	resp, err := w.ReadEvents(ctx, connect.NewRequest(&chainmailv1.ReadEventsRequest{
+		Group: "bot", WaitSeconds: 20, Filter: &chainmailv1.WatchFilter{Kinds: []string{"flags"}},
+	}))
+	if err != nil {
+		t.Fatalf("ReadEvents: %v, want an empty page", err)
+	}
+	if len(resp.Msg.GetEvents()) != 0 || resp.Msg.GetNextCursor() != 2 {
+		t.Errorf("resp = %v, want nothing at cursor 2", resp.Msg)
+	}
+	groups, err := s.watchLog.Groups(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].AckedID != 2 {
+		t.Errorf("groups = %+v, want bot acknowledged at 2", groups)
+	}
+	var result string
+	if err := stateDB.QueryRowContext(base, "SELECT result FROM audit WHERE action = 'watch.read'").Scan(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result != "ok" {
+		t.Errorf("audit result = %s, want ok", result)
+	}
+}
+
+// TestSubscribeGapSendFailureLeavesTheGroupStale checks the order of a
+// stale group's gap and its recovery: a gap send that fails while the
+// stream is still live leaves the group stale, so the reconnect gets the
+// gap, and only a delivered gap recovers the group.
+func TestSubscribeGapSendFailureLeavesTheGroupStale(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServerOptions(t, passwordConfig, Options{WatchHeartbeat: time.Hour})
+	ctx := peerContext(t.Context())
+	if err := s.watchLog.Publish(ctx, testWatchEvent("a"), testWatchEvent("b"), testWatchEvent("c")); err != nil {
+		t.Fatal(err)
+	}
+	seedStaleGroup(t, s, "bot", 50)
+	var failed atomic.Bool
+	s.watchSendHook = func(item *chainmailv1.SubscribeResponse) error {
+		if item.GetEvent().GetKind() == "gap" && failed.CompareAndSwap(false, true) {
+			return errors.New("send failed")
+		}
+		return nil
+	}
+	c := serveWatchTest(t, s)
+	acked := func() int64 {
+		t.Helper()
+		groups, err := s.watchLog.Groups(ctx)
+		if err != nil || len(groups) != 1 {
+			t.Fatalf("groups = %+v, %v", groups, err)
+		}
+		return groups[0].AckedID
+	}
+	first, err := c.Watch.Subscribe(ctx, connect.NewRequest(&chainmailv1.SubscribeRequest{Group: "bot"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for first.Receive() {
+		t.Errorf("first stream sent %v", first.Msg())
+	}
+	if first.Err() == nil {
+		t.Error("first stream ended without an error")
+	}
+	_ = first.Close()
+	if got := acked(); got != 50 {
+		t.Fatalf("after the failed gap send bot is at %d, want still stale at 50", got)
+	}
+	sctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	stream, err := c.Watch.Subscribe(sctx, connect.NewRequest(&chainmailv1.SubscribeRequest{Group: "bot"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stream.Close() }()
+	if !stream.Receive() || stream.Msg().GetEvent().GetKind() != "gap" {
+		t.Fatalf("reconnect first item = %v (%v), want the gap", stream.Msg(), stream.Err())
+	}
+	if !stream.Receive() || stream.Msg().GetHeartbeat().GetPosition() != 3 {
+		t.Fatalf("reconnect second item = %v (%v), want a heartbeat at 3", stream.Msg(), stream.Err())
+	}
+	if got := acked(); got != 3 {
+		t.Errorf("after the delivered gap bot is at %d, want recovered at 3", got)
+	}
+}
+
+// TestSettleContext checks the context a group's acknowledgement runs
+// under: it outlives ctx's deadline, it ends when ctx is cancelled, and
+// its cancel returns promptly either way.
+func TestSettleContext(t *testing.T) {
+	t.Parallel()
+	expired, cancelExpired := context.WithTimeout(t.Context(), time.Millisecond)
+	defer cancelExpired()
+	<-expired.Done()
+	settled, cancel := settleContext(expired)
+	if err := settled.Err(); err != nil {
+		t.Errorf("past the deadline: settled ended with %v, want it live", err)
+	}
+	if dl, ok := settled.Deadline(); !ok || time.Until(dl) > settleTimeout {
+		t.Errorf("deadline = %v, %v; want one within %v", dl, ok, settleTimeout)
+	}
+	cancel()
+
+	live, cancelLive := context.WithCancel(t.Context())
+	settled, cancel = settleContext(live)
+	defer cancel()
+	cancelLive()
+	select {
+	case <-settled.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("a cancelled ctx did not end the settle context")
+	}
+	if !errors.Is(settled.Err(), context.Canceled) {
+		t.Errorf("settled.Err() = %v, want Canceled", settled.Err())
 	}
 }

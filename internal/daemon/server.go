@@ -15,6 +15,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/gen/chainmail/v1/chainmailv1connect"
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/audit"
@@ -120,6 +121,13 @@ type Server struct {
 	// tail and recovering a group left past it. Internal tests land an
 	// event or a cancellation in that window.
 	watchAfterTail func(context.Context)
+	// watchAfterWait, when set, runs in a ReadEvents wait each time the log's
+	// Wait returns. Internal tests make the wakeup late with it.
+	watchAfterWait func(context.Context)
+	// watchSendHook, when set, runs before each Subscribe send and fails
+	// it with any error it returns. Internal tests fail a send with it while
+	// the stream is still live.
+	watchSendHook func(*chainmailv1.SubscribeResponse) error
 }
 
 // New wires up a Server. Call Serve to run it.
