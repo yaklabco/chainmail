@@ -1080,3 +1080,126 @@ func TestSupervisorRetriesFailedStatusWrites(t *testing.T) {
 		})
 	}
 }
+
+// supStatuses lists folder's status events as "state" strings, in order.
+func supStatuses(events []Event, folder string) []string {
+	var out []string
+	for _, e := range events {
+		if e.Kind == KindStatus && e.Folder == folder {
+			out = append(out, e.State)
+		}
+	}
+	return out
+}
+
+// An outage whose reconnecting row lands but whose event does not leaves no
+// stale row: the next transition completes or undoes it, so after recovery
+// the row says watching with no error, and the log holds exactly the events
+// that were published.
+func TestSupervisorRepairsPartialStatusTransition(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// failReconnect makes the first reconnect fail too, so the outage
+		// asks for reconnecting a second time.
+		failReconnect bool
+		want          []string
+	}{
+		{name: "the next connection works", want: []string{StateBaselined, StateWatching}},
+		{
+			name: "the next connection fails too", failReconnect: true,
+			want: []string{StateBaselined, StateWatching, StateReconnecting, StateWatching},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fs := supFake(false)
+			r := newSupRig(t, fs, supAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+			var failed atomic.Bool
+			next := r.sup.publishEvents
+			r.sup.publishEvents = func(ctx context.Context, events ...Event) error {
+				if len(events) == 1 && events[0].State == StateReconnecting && failed.CompareAndSwap(false, true) {
+					return errors.New("disk full")
+				}
+				return next(ctx, events...)
+			}
+			r.start()
+			r.waitFor("INBOX watching", supStatus("INBOX", StateWatching))
+			r.waitIdle("INBOX")
+
+			if tt.failReconnect {
+				fs.FailWatch(fmt.Errorf("%w: test outage", mailstore.ErrUnavailable)) // one-shot: the first reconnect
+			}
+			fs.DropWatches()
+			r.clock.expectAfter(t, Backoff(0, 0.5))
+			if !failed.Load() {
+				t.Fatal("publishing reconnecting never failed")
+			}
+			if row := r.row("INBOX"); row.State != StateReconnecting || row.LastError != "SERVER_UNAVAILABLE" {
+				t.Fatalf("row after the half-written transition = state %q last_error %q, want reconnecting and SERVER_UNAVAILABLE", row.State, row.LastError)
+			}
+			r.clock.Advance(Backoff(0, 0.5))
+			if tt.failReconnect {
+				r.waitFor("INBOX reconnecting, published on the next attempt", supStatus("INBOX", StateReconnecting))
+				r.clock.expectAfter(t, Backoff(1, 0.5))
+				r.clock.Advance(Backoff(1, 0.5))
+			}
+			r.waitIdle("INBOX") // the new connection has passed and settled
+			if row := r.row("INBOX"); row.State != StateWatching || row.LastError != "" {
+				t.Errorf("row after recovery = state %q last_error %q, want watching and no error", row.State, row.LastError)
+			}
+			if got := supStatuses(r.all(), "INBOX"); !slices.Equal(got, tt.want) {
+				t.Errorf("INBOX status events = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// supSlowStatus is a fake store whose FolderState takes d on the test clock
+// while slow is set, as a STATUS that times out would.
+type supSlowStatus struct {
+	*fake.Store
+	clock *supClock
+	d     time.Duration
+	slow  atomic.Bool
+}
+
+func (s *supSlowStatus) FolderState(ctx context.Context, folder string) (mailstore.FolderState, error) {
+	if s.slow.Load() {
+		s.clock.Advance(s.d)
+	}
+	return s.Store.FolderState(ctx, folder)
+}
+
+// A poll that takes time to fail waits its whole backoff after the failure,
+// not from when the tick began.
+func TestSupervisorPollerBackoffStartsAfterTheFailure(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	acct := supAccount(t, "hostinger", nil, []string{"Sent"})
+	r := newSupRig(t, fs, acct)
+	slow := &supSlowStatus{Store: fs, clock: r.clock, d: 5 * time.Second}
+	r.store = slow
+	r.start()
+	r.waitFor("Sent polling", supStatus("Sent", StatePolling))
+	r.clock.expectAfter(t, acct.SyncPoll)
+
+	slow.slow.Store(true)
+	fs.Fail("FolderState", fmt.Errorf("%w: STATUS timed out", mailstore.ErrUnavailable))
+	r.clock.Advance(acct.SyncPoll) // the STATUS takes 5s, then fails
+	r.waitFor("Sent reconnecting", supStatus("Sent", StateReconnecting))
+	r.clock.expectAfter(t, Backoff(0, 0.5))
+	slow.slow.Store(false)
+	fs.Fail("FolderState", nil)
+	calls := fs.Calls("FolderState")
+	r.clock.Advance(Backoff(0, 0.5) - time.Millisecond)
+	if got := fs.Calls("FolderState"); got != calls {
+		t.Fatalf("FolderState ran %d times before the backoff ran out, want 0", got-calls)
+	}
+	r.clock.Advance(time.Millisecond)
+	r.waitFor("Sent polling again", supStatus("Sent", StatePolling))
+	if got := fs.Calls("FolderState"); got != calls+1 {
+		t.Errorf("FolderState ran %d times after the backoff, want 1", got-calls)
+	}
+}
