@@ -104,6 +104,30 @@ func statusTable(w io.Writer, loc *time.Location, r *chainmailv1.GetStatusRespon
 	_, _ = fmt.Fprintf(tw, "started\t%s\n", longDate(r.GetStartedAt(), loc))
 	_, _ = fmt.Fprintf(tw, "dev mode\t%t\n", r.GetDevMode())
 	_, _ = fmt.Fprintf(tw, "secrets\t%s\n", strings.Join(r.GetSecretNames(), ", "))
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if len(r.GetSync()) == 0 {
+		return nil
+	}
+	if err := writeString(w, "\n"); err != nil {
+		return err
+	}
+	return statusSyncTable(w, loc, r.GetSync())
+}
+
+// statusSyncTable lists each synced folder's mode, state, last sync and
+// last error. It has its own columns, so it is a table of its own below the
+// daemon's details. Folder names can come from the server, so they are
+// cleaned like other server text.
+func statusSyncTable(w io.Writer, loc *time.Location, folders []*chainmailv1.FolderSyncStatus) error {
+	tw := newTable(w)
+	_, _ = fmt.Fprintln(tw, "ACCOUNT\tFOLDER\tMODE\tSTATE\tLAST SYNC\tERROR")
+	for _, f := range folders {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			termText(f.GetAccount()), termText(f.GetFolder()), f.GetMode(), f.GetState(),
+			shortDate(f.GetLastSyncAt(), loc), termText(f.GetLastError()))
+	}
 	return tw.Flush()
 }
 

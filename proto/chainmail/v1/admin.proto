@@ -81,7 +81,8 @@ service AdminService {
   rpc BeginAuthLogin(BeginAuthLoginRequest) returns (BeginAuthLoginResponse);
   // FinishAuthLogin completes the flow with the URL the browser landed on.
   rpc FinishAuthLogin(FinishAuthLoginRequest) returns (FinishAuthLoginResponse);
-  // GetStatus reports daemon version, uptime and stored secret names.
+  // GetStatus reports daemon version, uptime, stored secret names and the
+  // sync state of each synced folder.
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
   // ReadAudit returns audit rows, newest first, paged by before_id.
   rpc ReadAudit(ReadAuditRequest) returns (ReadAuditResponse);

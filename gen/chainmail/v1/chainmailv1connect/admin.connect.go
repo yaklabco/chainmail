@@ -55,7 +55,8 @@ type AdminServiceClient interface {
 	BeginAuthLogin(context.Context, *connect.Request[v1.BeginAuthLoginRequest]) (*connect.Response[v1.BeginAuthLoginResponse], error)
 	// FinishAuthLogin completes the flow with the URL the browser landed on.
 	FinishAuthLogin(context.Context, *connect.Request[v1.FinishAuthLoginRequest]) (*connect.Response[v1.FinishAuthLoginResponse], error)
-	// GetStatus reports daemon version, uptime and stored secret names.
+	// GetStatus reports daemon version, uptime, stored secret names and the
+	// sync state of each synced folder.
 	GetStatus(context.Context, *connect.Request[v1.GetStatusRequest]) (*connect.Response[v1.GetStatusResponse], error)
 	// ReadAudit returns audit rows, newest first, paged by before_id.
 	ReadAudit(context.Context, *connect.Request[v1.ReadAuditRequest]) (*connect.Response[v1.ReadAuditResponse], error)
@@ -147,7 +148,8 @@ type AdminServiceHandler interface {
 	BeginAuthLogin(context.Context, *connect.Request[v1.BeginAuthLoginRequest]) (*connect.Response[v1.BeginAuthLoginResponse], error)
 	// FinishAuthLogin completes the flow with the URL the browser landed on.
 	FinishAuthLogin(context.Context, *connect.Request[v1.FinishAuthLoginRequest]) (*connect.Response[v1.FinishAuthLoginResponse], error)
-	// GetStatus reports daemon version, uptime and stored secret names.
+	// GetStatus reports daemon version, uptime, stored secret names and the
+	// sync state of each synced folder.
 	GetStatus(context.Context, *connect.Request[v1.GetStatusRequest]) (*connect.Response[v1.GetStatusResponse], error)
 	// ReadAudit returns audit rows, newest first, paged by before_id.
 	ReadAudit(context.Context, *connect.Request[v1.ReadAuditRequest]) (*connect.Response[v1.ReadAuditResponse], error)

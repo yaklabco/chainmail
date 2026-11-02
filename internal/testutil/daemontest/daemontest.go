@@ -45,6 +45,14 @@ type Options struct {
 	// Watch starts the watch supervisors. It is off by default, so tests
 	// that count mail store calls see no sync traffic.
 	Watch bool
+	// WatchSweepFloor replaces the 5 minute floor between expunge sweeps
+	// after a server EXPUNGE. Zero keeps 5 minutes.
+	WatchSweepFloor time.Duration
+	// Secrets are stored in the vault before the daemon starts, by secret
+	// name such as "accounts/host". A watching test sets the account's
+	// password, so its supervisor does not park the account as needing
+	// authentication before the test could set it.
+	Secrets map[string]string
 }
 
 // Harness is a running daemon and a client connected to it.
@@ -88,6 +96,11 @@ func Start(t testing.TB, configTOML string, opts Options) *Harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for name, value := range opts.Secrets {
+		if err := v.Set(name, []byte(value)); err != nil {
+			t.Fatalf("secret %s: %v", name, err)
+		}
+	}
 	stateDB, err := db.OpenState(t.Context(), filepath.Join(dir, "state.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -118,6 +131,7 @@ func Start(t testing.TB, configTOML string, opts Options) *Harness {
 		Logger:                opts.Logger,
 		WatchHeartbeat:        opts.WatchHeartbeat,
 		DisableWatch:          !opts.Watch,
+		WatchSweepFloor:       opts.WatchSweepFloor,
 	})
 	if err != nil {
 		t.Fatal(err)

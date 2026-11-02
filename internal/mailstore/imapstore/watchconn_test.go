@@ -128,6 +128,44 @@ func TestWatchOpenConnsCountsWatchConn(t *testing.T) {
 	}
 }
 
+// TestWatchConnPeakCountsWatchConns checks that ConnPeak counts watch
+// connections with the pooled ones, as OpenConns does: a probe adds the
+// peak to its own count, so leaving watchers out would read the server's
+// cap low. ResetConnPeak starts from every connection open, watchers
+// included, and one that closed since still counts.
+func TestWatchConnPeakCountsWatchConns(t *testing.T) {
+	t.Parallel()
+	s, _, _ := watchFixture(t)
+	wc, err := s.OpenWatch(t.Context(), storetest.GmailAllMail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wc.Close() })
+	if n := s.ConnPeak(); n != 1 {
+		t.Errorf("ConnPeak after OpenWatch = %d, want 1", n)
+	}
+	s.ResetConnPeak()
+	if n := s.ConnPeak(); n != 1 {
+		t.Errorf("ConnPeak after ResetConnPeak with a watch connection open = %d, want 1", n)
+	}
+	if _, err := s.FolderState(t.Context(), storetest.GmailAllMail); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.ConnPeak(); n != 2 {
+		t.Errorf("ConnPeak with a watch connection and a pooled one = %d, want 2", n)
+	}
+	if err := wc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.ConnPeak(); n != 2 {
+		t.Errorf("ConnPeak after the watch connection closed = %d, want 2", n)
+	}
+	s.ResetConnPeak()
+	if n := s.ConnPeak(); n != 1 {
+		t.Errorf("ConnPeak after a reset with only the pooled connection = %d, want 1", n)
+	}
+}
+
 func TestWatchStoreCloseClosesWatchConns(t *testing.T) {
 	t.Parallel()
 	s, _, _ := watchFixture(t)
@@ -356,6 +394,133 @@ func TestWatchIdleLimitUsesStoreClock(t *testing.T) {
 	}
 	if _, err := wc.Sync(t.Context(), mailstore.SyncRequest{}); err != nil {
 		t.Errorf("Sync after the Idle = %v; the connection must stay usable", err)
+	}
+}
+
+// TestWatchCloseWhileDoneIsUnanswered cancels an Idle whose DONE the server
+// never answers, which leaves Idle waiting out the command timeout. Close
+// during that wait shuts the connection at once, as a supervisor stopping
+// within its shutdown bound needs, and Idle returns.
+func TestWatchCloseWhileDoneIsUnanswered(t *testing.T) {
+	t.Parallel()
+	s, srv, _ := watchFixture(t)
+	running := make(chan struct{}, 1)
+	s.after = func(time.Duration) <-chan time.Time {
+		running <- struct{}{} // Idle asks for its limit once IDLE is running
+		return nil
+	}
+	wc, err := s.OpenWatch(t.Context(), storetest.GmailAllMail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wc.Close() })
+	if _, err := wc.Sync(t.Context(), mailstore.SyncRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+	wg.Go(func() {
+		_, err := wc.Idle(ctx, time.Minute)
+		done <- err
+	})
+	select {
+	case <-running:
+	case err := <-done:
+		t.Fatalf("Idle returned %v before IDLE was running", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("IDLE was not running within 2s")
+	}
+	held, release := srv.HoldReads()
+	defer release()
+	cancel() // Idle sends DONE, which the server now holds unanswered
+	select {
+	case <-held:
+	case err := <-done:
+		t.Fatalf("Idle returned %v before the server got DONE", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the server did not get DONE within 2s")
+	}
+	start := time.Now()
+	closed := make(chan error, 1)
+	wg.Go(func() { closed <- wc.Close() })
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Errorf("Close while DONE was unanswered = %v, want nil: it shuts the socket rather than log out", err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("Close took %v while DONE was unanswered, want well under 1s", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return within 2s while DONE was unanswered")
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("Idle closed during DONE = nil, want an error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Idle did not return within 2s of Close")
+	}
+	if n := s.OpenConns(); n != 0 {
+		t.Errorf("OpenConns after Close = %d, want 0", n)
+	}
+}
+
+// TestWatchAbortEndsAnUnansweredLogout closes a watch connection whose
+// LOGOUT the server never answers, which leaves Close waiting out its 5
+// second bound. Abort, the optional mailstore.Aborter, shuts the connection
+// at once: Close returns promptly and the connection is released.
+func TestWatchAbortEndsAnUnansweredLogout(t *testing.T) {
+	t.Parallel()
+	s, srv, _ := watchFixture(t)
+	wc, err := s.OpenWatch(t.Context(), storetest.GmailAllMail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, ok := wc.(mailstore.Aborter)
+	if !ok {
+		_ = wc.Close()
+		t.Fatal("imapstore's watch connection does not implement mailstore.Aborter")
+	}
+	if _, err := wc.Sync(t.Context(), mailstore.SyncRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	held, release := srv.HoldReads()
+	defer release()
+	closed := make(chan error, 1)
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+	wg.Go(func() { closed <- wc.Close() })
+	select {
+	case <-held:
+	case err := <-closed:
+		t.Fatalf("Close returned %v before the server got LOGOUT", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the server did not get LOGOUT within 2s")
+	}
+	start := time.Now()
+	a.Abort()
+	a.Abort() // idempotent
+	select {
+	case err := <-closed:
+		if err == nil {
+			t.Error("Close cut short by Abort = nil, want the failed LOGOUT reported")
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("Close returned %v after Abort, want well under 1s", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return within 2s of Abort")
+	}
+	if n := s.OpenConns(); n != 0 {
+		t.Errorf("OpenConns after Abort and Close = %d, want 0", n)
+	}
+	if _, err := wc.Sync(t.Context(), mailstore.SyncRequest{}); !errors.Is(err, mailstore.ErrUnavailable) {
+		t.Errorf("Sync after Abort = %v, want ErrUnavailable", err)
 	}
 }
 
