@@ -295,3 +295,45 @@ func TestStartBackgroundTrimsTheEventLog(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// A refusal while the account watches records the connections the server
+// accepted, pool and watchers together, so the store rebuilt from it keeps
+// pool plus watchers within that, a configured pool included.
+func TestRefusalLeavesRoomForWatchers(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		account  string
+		newMax   int // the pool after the refusal shrank it
+		wantCap  int
+		wantPool int
+	}{
+		{name: "configured pool shrunk to 1", account: "fixed", newMax: 1, wantCap: 2, wantPool: 1},
+		{name: "configured pool shrunk to 3", account: "fixed", newMax: 3, wantCap: 4, wantPool: 3},
+		{name: "preset pool shrunk to 2", account: "host", newMax: 2, wantCap: 3, wantPool: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// Cap 0 keeps the background probe from storing anything.
+			s, log := newLimitsServerWatch(t, limitsConfig, probeable(&capServer{cap: 0}), true)
+			acct := mustAccount(t, s, tt.account)
+			if _, err := s.stores.get(acct).ListFolders(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			s.lim.wait()
+			log.of(tt.account)[0].params.onConnLimit(tt.newMax)
+			l, ok := storedLimit(t, s, tt.account)
+			if !ok || l.IMAPCap != tt.wantCap {
+				t.Errorf("stored = %+v (ok %v), want cap %d", l, ok, tt.wantCap)
+			}
+			// The server accepted the shrunk pool and the watchers.
+			watchers := acct.WatchCount()
+			observed := tt.newMax + watchers
+			pool := s.storeParams(acct).poolSize
+			if pool != tt.wantPool || pool+watchers > observed {
+				t.Errorf("rebuilt pool = %d with %d watchers, want %d, within the %d connections the server accepted", pool, watchers, tt.wantPool, observed)
+			}
+		})
+	}
+}

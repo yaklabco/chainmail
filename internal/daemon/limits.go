@@ -213,7 +213,7 @@ func (s *Server) buildSized(acct config.ResolvedAccount, poolSize int) mailstore
 func (s *Server) paramsWithPool(acct config.ResolvedAccount, poolSize int) storeParams {
 	return storeParams{
 		poolSize:    poolSize,
-		onConnLimit: func(newMax int) { s.recordConnLimit(acct.Name, newMax) },
+		onConnLimit: func(newMax int) { s.recordConnLimit(acct, newMax) },
 	}
 }
 
@@ -253,9 +253,9 @@ func watchBudget(pool int, acct config.ResolvedAccount, stored *limits.Limit, wa
 	return min(pool, max(1, connCap-watchers))
 }
 
-// recordConnLimit stores a cap of newMax plus the reserved connections,
-// or the stored cap when that is lower, after the server refused a
-// connection and the pool shrank to newMax. A refusal never raises a stored
+// recordConnLimit stores refusalCap(acct, newMax), or the stored cap when
+// that is lower, after the server refused a connection and the pool shrank
+// to newMax. A refusal never raises a stored
 // cap, but it always records the time: the refusal is a fresh observation
 // of the limit, so it postpones the next background probe. While a probe
 // measures the account, nothing is recorded: the probe's own connections
@@ -263,7 +263,8 @@ func watchBudget(pool int, acct config.ResolvedAccount, stored *limits.Limit, wa
 // that was refused still shrank. This never waits for the probe, so a call
 // can record a refusal while it holds the read lock a probe's replace waits
 // for.
-func (s *Server) recordConnLimit(account string, newMax int) {
+func (s *Server) recordConnLimit(acct config.ResolvedAccount, newMax int) {
+	account := acct.Name
 	ctx, cancel := context.WithTimeout(context.Background(), auditTimeout)
 	defer cancel()
 	s.lim.connMu.Lock()
@@ -272,7 +273,7 @@ func (s *Server) recordConnLimit(account string, newMax int) {
 		s.opts.Logger.Info("server refused a connection while a probe measures the account; the probe's result stands", "account", account, "pool", newMax)
 		return
 	}
-	newCap := newMax + connsReserved
+	newCap := s.refusalCap(acct, newMax)
 	l, ok, err := s.lim.store.Get(ctx, account)
 	if err != nil {
 		s.opts.Logger.Warn("reading the connection limit", "account", account, "err", err)
@@ -286,6 +287,26 @@ func (s *Server) recordConnLimit(account string, newMax int) {
 		return
 	}
 	s.opts.Logger.Info("server refused a connection; recorded the connection limit", "account", account, "imap_cap", newCap)
+}
+
+// refusalCap is the cap a refusal records for acct once its pool shrank to
+// newMax. Without watchers it is newMax plus the reserved connections, so a
+// store rebuilt from it gets a pool of newMax again (limits.PoolSize takes
+// the reserve back off). With watchers it is what the server accepted:
+// newMax pooled connections and the account's watcher connections, which
+// are dialed outside the pool. watchBudget takes the watchers straight off
+// the stored cap, a configured pool included, so adding the reserve there
+// would let the rebuilt pool and its watchers exceed what the server just
+// refused.
+func (s *Server) refusalCap(acct config.ResolvedAccount, newMax int) int {
+	watchers := 0
+	if !s.opts.DisableWatch {
+		watchers = acct.WatchCount()
+	}
+	if watchers == 0 {
+		return newMax + connsReserved
+	}
+	return newMax + watchers
 }
 
 // probeIfStale starts a background probe of acct when it has no stored
