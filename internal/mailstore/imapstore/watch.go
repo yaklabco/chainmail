@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapclient"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 )
@@ -172,7 +173,7 @@ func (s *Store) syncChanged(ctx context.Context, c *conn, exists uint32, from ma
 	}
 	var set imap.UIDSet
 	set.AddRange(1, imap.UID(from.UIDNext-1))
-	d.Changed, err = s.fetchStates(ctx, c, set, s.stateItems(true, from.HighestModSeq))
+	d.Changed, err = s.fetchStates(ctx, c, set, s.stateItems(true, from.HighestModSeq), 0)
 	return err
 }
 
@@ -197,7 +198,7 @@ func (s *Store) allStates(ctx context.Context, c *conn, exists uint32, flags boo
 	if exists == 0 {
 		return nil, []uint32{}, nil
 	}
-	states, err := s.fetchStates(ctx, c, imap.UIDSet{imap.UIDRange{Start: 1, Stop: 0}}, s.stateItems(flags, 0))
+	states, err := s.fetchStates(ctx, c, imap.UIDSet{imap.UIDRange{Start: 1, Stop: 0}}, s.stateItems(flags, 0), int(exists))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -219,21 +220,24 @@ func (s *Store) stateItems(flags bool, changedSince uint64) *imap.FetchOptions {
 }
 
 // fetchStates fetches items for set and returns the states, ascending by UID.
-func (s *Store) fetchStates(ctx context.Context, c *conn, set imap.UIDSet, items *imap.FetchOptions) ([]mailstore.FlagState, error) {
-	bufs, err := c.fetch(ctx, set, items)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]mailstore.FlagState, 0, len(bufs))
-	for _, b := range bufs {
+// It reads the answer a message at a time (conn.fetchEach), so a folder of
+// hundreds of thousands of messages, whose answer takes longer than the
+// command timeout, syncs while the server keeps answering. expect is how
+// many messages the answer likely holds, 0 when unknown, to size the result.
+func (s *Store) fetchStates(ctx context.Context, c *conn, set imap.UIDSet, items *imap.FetchOptions, expect int) ([]mailstore.FlagState, error) {
+	out := make([]mailstore.FlagState, 0, expect)
+	err := c.fetchEach(ctx, set, items, func(b *imapclient.FetchMessageBuffer) {
 		if b.UID == 0 {
-			continue // not an answer to this FETCH
+			return // not an answer to this FETCH
 		}
 		state := mailstore.FlagState{UID: uint32(b.UID), GmailMsgID: b.GmailMsgID, Labels: b.GmailLabels}
 		if items.Flags {
 			state.Flags = flagStrings(b.Flags)
 		}
 		out = append(out, state)
+	})
+	if err != nil {
+		return nil, err
 	}
 	slices.SortFunc(out, func(a, b mailstore.FlagState) int { return cmp.Compare(a.UID, b.UID) })
 	return out, nil

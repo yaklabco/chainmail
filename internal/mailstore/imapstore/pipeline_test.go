@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"regexp"
 	"strconv"
@@ -59,6 +60,15 @@ type scriptServer struct {
 	// encoding is every message's Content-Transfer-Encoding, 7bit if unset,
 	// and text, when set, is every message's body instead of scriptBody.
 	encoding, text string
+	// condstore advertises CONDSTORE, and SELECT and EXAMINE report a
+	// HIGHESTMODSEQ and a UIDNEXT.
+	condstore bool
+	// stateDelay is how long a state FETCH, one with no body items, waits
+	// before answering for each message.
+	stateDelay time.Duration
+	// stallAfter, when set, makes a state FETCH go silent after answering
+	// for that many messages, until the client hangs up.
+	stallAfter int
 
 	conns, searches, fetches atomic.Int32
 
@@ -67,6 +77,9 @@ type scriptServer struct {
 }
 
 const scriptUIDValidity = 7
+
+// scriptModSeq is the HIGHESTMODSEQ a CONDSTORE script server reports.
+const scriptModSeq = 9
 
 func startScriptServer(t *testing.T, srv *scriptServer) *scriptServer {
 	t.Helper()
@@ -141,7 +154,7 @@ func (srv *scriptServer) serve(conn net.Conn) {
 		}
 		return w.Flush() == nil
 	}
-	if !send("* OK [CAPABILITY IMAP4rev1] ready\r\n") {
+	if !send("* OK [CAPABILITY " + srv.caps() + "] ready\r\n") {
 		return
 	}
 	r := bufio.NewReader(conn)
@@ -159,9 +172,13 @@ func (srv *scriptServer) serve(conn net.Conn) {
 		case "LOGIN":
 			reply = tag + " OK logged in\r\n"
 		case "CAPABILITY":
-			reply = "* CAPABILITY IMAP4rev1\r\n" + tag + " OK done\r\n"
+			reply = "* CAPABILITY " + srv.caps() + "\r\n" + tag + " OK done\r\n"
 		case "EXAMINE", "SELECT":
-			reply = fmt.Sprintf("* %d EXISTS\r\n* OK [UIDVALIDITY %d] ok\r\n%s OK [READ-ONLY] done\r\n", srv.n, scriptUIDValidity, tag)
+			reply = fmt.Sprintf("* %d EXISTS\r\n* OK [UIDVALIDITY %d] ok\r\n", srv.n, scriptUIDValidity)
+			if srv.condstore {
+				reply += fmt.Sprintf("* OK [UIDNEXT %d] ok\r\n* OK [HIGHESTMODSEQ %d] ok\r\n", srv.n+1, scriptModSeq)
+			}
+			reply += tag + " OK [READ-ONLY] done\r\n"
 		case "LOGOUT":
 			send("* BYE bye\r\n" + tag + " OK bye\r\n")
 			return
@@ -176,6 +193,11 @@ func (srv *scriptServer) serve(conn net.Conn) {
 			switch {
 			case kind == srv.refuse:
 				reply = tag + " " + srv.refusal + "\r\n"
+			case kind == "FETCH" && !strings.Contains(strings.ToUpper(rest), "BODY"):
+				if !srv.states(tag, rest, send, r) {
+					return
+				}
+				continue
 			case kind == "SEARCH":
 				reply = "* SEARCH 1\r\n" + tag + " OK done\r\n"
 			case strings.Contains(rest, "BODYSTRUCTURE"):
@@ -444,4 +466,46 @@ func TestFetchMessagesRefusalOfOneMessageIsPerItem(t *testing.T) {
 	if n := srv.conns.Load(); n != 1 {
 		t.Errorf("%d connections, want 1: a refusal is final", n)
 	}
+}
+
+// caps is what the server advertises.
+func (srv *scriptServer) caps() string {
+	if srv.condstore {
+		return "IMAP4rev1 CONDSTORE"
+	}
+	return "IMAP4rev1"
+}
+
+// scriptMsgID is the X-GM-MSGID of message uid.
+func scriptMsgID(uid int) uint64 { return 1000 + uint64(uid) }
+
+// states streams the answer to a state FETCH, one with no body items: UID
+// for every message, with FLAGS and X-GM-MSGID when asked, each sent on its
+// own after stateDelay. With stallAfter set it goes silent after that many
+// messages and waits for the client to hang up. It reports whether the
+// connection is still usable.
+//
+// It answers for every message whatever UID set and CHANGEDSINCE were asked
+// for: the tests that use it bound timing, not which messages a pass asks
+// about.
+func (srv *scriptServer) states(tag, rest string, send func(string) bool, r *bufio.Reader) bool {
+	items := strings.ToUpper(rest)
+	for uid := 1; uid <= srv.n; uid++ {
+		if srv.stallAfter > 0 && uid > srv.stallAfter {
+			_, _ = io.Copy(io.Discard, r) // silent until the client hangs up; its error is that hang-up
+			return false
+		}
+		time.Sleep(srv.stateDelay)
+		data := fmt.Sprintf("UID %d", uid)
+		if strings.Contains(items, "FLAGS") {
+			data += ` FLAGS (\Seen)`
+		}
+		if strings.Contains(items, "X-GM-MSGID") {
+			data += fmt.Sprintf(" X-GM-MSGID %d", scriptMsgID(uid))
+		}
+		if !send(fmt.Sprintf("* %d FETCH (%s)\r\n", uid, data)) {
+			return false
+		}
+	}
+	return send(tag + " OK done\r\n")
 }
