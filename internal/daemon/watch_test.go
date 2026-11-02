@@ -44,7 +44,7 @@ func startWatch(t *testing.T, heartbeat time.Duration) *daemontest.Harness {
 // watchLog is a Log on the harness's state database, as a sync pass would
 // write through. Its notify does not reach the daemon's own Log, so a live
 // stream finds what it publishes at the stream's next heartbeat.
-func watchLog(h *daemontest.Harness) *watch.Log { return watch.NewLog(h.DB, time.Now) }
+func watchLog(h *daemontest.Harness) *watch.Log { return watch.NewLog(h.DB, time.Now, nil) }
 
 func watchPublish(t *testing.T, h *daemontest.Harness, events ...watch.Event) {
 	t.Helper()

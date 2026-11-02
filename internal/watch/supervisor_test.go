@@ -145,7 +145,7 @@ func newSupRig(t *testing.T, fs *fake.Store, acct config.ResolvedAccount, tweak 
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	r := &supRig{t: t, fs: fs, store: fs, clock: newSupClock()}
-	r.log = NewLog(conn, r.clock.Now)
+	r.log = NewLog(conn, r.clock.Now, nil)
 	r.state = NewState(conn)
 	o := SupervisorOptions{
 		Account: acct,

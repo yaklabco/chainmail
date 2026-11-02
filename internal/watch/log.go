@@ -63,13 +63,11 @@ type GroupInfo struct {
 // only wakes on Notify calls made on the same *Log, so the daemon builds
 // exactly one and shares it.
 type Log struct {
-	// Logger receives failures of the trims in Run. Records never hold
-	// event content. Set it before calling Run. A nil Logger discards
-	// them.
-	Logger *slog.Logger
-
 	db  *sql.DB
 	now func() time.Time
+	// logger receives failures of the trims in Run. Records never hold
+	// event content.
+	logger *slog.Logger
 
 	// trimBatch is the most events one Trim transaction deletes: 0 means
 	// defaultTrimBatch. afterTrimBatch, when set, runs after each batch
@@ -84,12 +82,16 @@ type Log struct {
 }
 
 // NewLog returns a Log over db, which must hold the state schema. now
-// supplies event and group times. A nil now uses time.Now.
-func NewLog(db *sql.DB, now func() time.Time) *Log {
+// supplies event and group times, and logger receives the failed trims of
+// Run. A nil now uses time.Now, and a nil logger discards.
+func NewLog(db *sql.DB, now func() time.Time, logger *slog.Logger) *Log {
 	if now == nil {
 		now = time.Now
 	}
-	return &Log{db: db, now: now, notify: make(chan struct{})}
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	return &Log{db: db, now: now, logger: logger, notify: make(chan struct{})}
 }
 
 // Append inserts events in tx and sets their IDs. The caller commits, then
@@ -381,15 +383,10 @@ func (l *Log) deleteBelow(ctx context.Context, id int64) (int64, error) {
 }
 
 // Run trims every interval until ctx ends. It trims once on entry too, so a
-// daemon that restarts often still trims. A failed trim is logged to Logger
-// and retried at the next tick; one cut short because ctx ended is not
-// logged. A nil Logger discards failures. A non-positive interval means
-// an hour.
+// daemon that restarts often still trims. A failed trim is logged to the
+// Log's logger and retried at the next tick; one cut short because ctx
+// ended is not logged. A non-positive interval means an hour.
 func (l *Log) Run(ctx context.Context, interval, retention time.Duration, maxEvents int) {
-	logger := l.Logger
-	if logger == nil {
-		logger = slog.New(slog.DiscardHandler)
-	}
 	if interval <= 0 {
 		interval = time.Hour
 	}
@@ -397,7 +394,7 @@ func (l *Log) Run(ctx context.Context, interval, retention time.Duration, maxEve
 	defer ticker.Stop()
 	for {
 		if _, err := l.Trim(ctx, retention, maxEvents); err != nil && ctx.Err() == nil {
-			logger.ErrorContext(ctx, "trimming the event log failed", "err", err)
+			l.logger.ErrorContext(ctx, "trimming the event log failed", "err", err)
 		}
 		select {
 		case <-ctx.Done():

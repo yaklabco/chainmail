@@ -1,7 +1,11 @@
 package daemon
 
 import (
+	"context"
+	"log/slog"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -230,8 +234,7 @@ func TestStartWatchSupervisesSyncedAccounts(t *testing.T) {
 }
 
 // Each supervisor gets the daemon's engine, log, state and sweep floor
-// (5 minutes unless Options.WatchSweepFloor shortens it), and the event
-// log logs through the daemon's logger.
+// (5 minutes unless Options.WatchSweepFloor shortens it).
 func TestSupervisorOptionsWiring(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -258,9 +261,6 @@ func TestSupervisorOptionsWiring(t *testing.T) {
 			}
 			if o.Store == nil || o.AuthRequired == nil || o.Clock == nil || o.Logger != s.opts.Logger {
 				t.Errorf("options = %+v, want Store, AuthRequired, Clock and the daemon's logger set", o)
-			}
-			if s.watchLog.Logger != s.opts.Logger {
-				t.Error("the event log does not log through the daemon's logger")
 			}
 		})
 	}
@@ -335,5 +335,25 @@ func TestRefusalLeavesRoomForWatchers(t *testing.T) {
 				t.Errorf("rebuilt pool = %d with %d watchers, want %d, within the %d connections the server accepted", pool, watchers, tt.wantPool, observed)
 			}
 		})
+	}
+}
+
+// The event log logs its failed trims through the daemon's logger.
+func TestEventLogLogsThroughTheDaemonLogger(t *testing.T) {
+	t.Parallel()
+	var logs lockedBuffer
+	s, _ := newTestServerOptions(t, watchRunConfig, Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	wg.Go(func() { s.watchLog.Run(ctx, time.Hour, 0, 1000) }) // a zero retention fails every trim
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
+	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(logs.String(), "trimming the event log failed"); {
+		if time.Now().After(deadline) {
+			t.Fatalf("no trim failure in the daemon's log: %q", logs.String())
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

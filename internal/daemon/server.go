@@ -176,7 +176,7 @@ func New(opts Options) (*Server, error) {
 		auditReader:   audit.NewReader(opts.StateDB),
 		started:       opts.Now(),
 		policy:        pol,
-		watchLog:      watch.NewLog(opts.StateDB, opts.Now),
+		watchLog:      watch.NewLog(opts.StateDB, opts.Now, opts.Logger),
 		watchState:    watch.NewState(opts.StateDB),
 		watchWaitUnit: time.Second,
 		trimInterval:  eventTrimInterval,
@@ -192,8 +192,6 @@ func New(opts Options) (*Server, error) {
 		s.newStore = func(acct config.ResolvedAccount, _ storeParams) mailstore.Store { return opts.NewStore(acct) }
 	}
 	s.stores = &storeSet{build: s.buildStore, buildSized: s.buildSized, firstUse: s.probeIfStale, logger: opts.Logger}
-	// Log.Run reports failed trims here. Set before Serve starts it.
-	s.watchLog.Logger = opts.Logger
 	s.engine = watch.NewEngine(opts.StateDB, s.watchLog, s.watchState, watch.EngineOptions{Now: opts.Now, Snippet: snippetOf})
 	if err := s.openSendState(); err != nil {
 		return nil, err

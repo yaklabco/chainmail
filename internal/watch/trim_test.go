@@ -219,9 +219,8 @@ func (b *syncBuffer) String() string {
 // A trim that fails while ctx is live is logged at error level.
 func TestRunLogsTrimFailure(t *testing.T) {
 	t.Parallel()
-	l, _, _ := newLog(t)
 	var logs syncBuffer
-	l.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	l := NewLog(openDB(t), nil, slog.New(slog.NewTextHandler(&logs, nil)))
 	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup
 	wg.Go(func() { l.Run(ctx, time.Hour, 0, 1000) }) // a zero retention fails every trim
@@ -242,20 +241,18 @@ func TestRunLogsTrimFailure(t *testing.T) {
 }
 
 // A trim cut short by shutdown is expected and is not reported, and a nil
-// Logger is safe.
+// logger is safe.
 func TestRunDoesNotLogCancellation(t *testing.T) {
 	t.Parallel()
-	l, _, _ := newLog(t)
 	var logs syncBuffer
-	l.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	l := NewLog(openDB(t), nil, slog.New(slog.NewTextHandler(&logs, nil)))
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	l.Run(ctx, time.Hour, 0, 1000)
 	if got := logs.String(); got != "" {
 		t.Errorf("log = %q, want nothing on cancellation", got)
 	}
-	l.Logger = nil
-	l.Run(ctx, time.Hour, 0, 1000)
+	NewLog(openDB(t), nil, nil).Run(ctx, time.Hour, 0, 1000)
 }
 
 // The age trim removes only a prefix of IDs, so a reader whose start is

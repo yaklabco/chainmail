@@ -49,7 +49,7 @@ func newLog(t *testing.T) (*Log, *sql.DB, *testClock) {
 	t.Helper()
 	conn := openDB(t)
 	c := &testClock{now: t0}
-	return NewLog(conn, c.Now), conn, c
+	return NewLog(conn, c.Now, nil), conn, c
 }
 
 // newEvent is a new-mail event for UID uid in account/folder.

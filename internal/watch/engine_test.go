@@ -95,7 +95,7 @@ func newEngineHarness(t *testing.T, opts EngineOptions) engineHarness {
 	if opts.Now == nil {
 		opts.Now = now
 	}
-	lg := NewLog(conn, now)
+	lg := NewLog(conn, now, nil)
 	st := NewState(conn)
 	return engineHarness{db: conn, log: lg, state: st, engine: NewEngine(conn, lg, st, opts)}
 }
