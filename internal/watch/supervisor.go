@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"time"
 
@@ -134,11 +135,15 @@ func (s *Supervisor) Run(ctx context.Context) {
 	}
 	var wg sync.WaitGroup
 	if s.o.Account.Provider.Gmail {
-		// One watcher on the \All folder covers every Gmail label.
+		// One watcher on the \All folder covers every Gmail label, so a
+		// Gmail account polls nothing.
 		wg.Go(func() { s.watchLoop(ctx, "") })
 	} else {
 		for _, folder := range s.o.Account.Watch {
 			wg.Go(func() { s.watchLoop(ctx, folder) })
+		}
+		if polled := polledFolders(s.o.Account); len(polled) > 0 {
+			wg.Go(func() { s.pollLoop(ctx, polled) })
 		}
 	}
 	wg.Wait()
@@ -240,6 +245,114 @@ func (s *Supervisor) authHint(err error) string {
 // authFailure reports whether err needs a human rather than a retry.
 func authFailure(err error) bool {
 	return errors.Is(err, auth.ErrAuthRequired) || errors.Is(err, auth.ErrRejected)
+}
+
+// polledFolders are the synced folders that are not watched, in config order.
+func polledFolders(a config.ResolvedAccount) []string {
+	var out []string
+	for _, f := range a.SyncFolders {
+		if !slices.Contains(a.Watch, f) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// pollLoop checks folders every sync.poll until ctx ends, starting at once
+// so they catch up from their checkpoints. A folder's failure stays its
+// own, except auth, which parks every folder.
+func (s *Supervisor) pollLoop(ctx context.Context, folders []string) {
+	lastSweep := make(map[string]time.Time, len(folders))
+	for {
+		wait := s.syncPoll
+		if need, hint := s.o.AuthRequired(s.o.Account.Name); need {
+			s.parkAll(ctx, folders, hint)
+			wait = AuthRecheck
+		} else {
+			for _, f := range folders {
+				err := s.pollFolder(ctx, f, lastSweep)
+				if ctx.Err() != nil {
+					return
+				}
+				if errors.Is(err, errNoWatcher) {
+					s.logger.Error("the account's store cannot sync folders")
+					return
+				}
+				if authFailure(err) {
+					s.logger.Warn("polling is parked until the account is authenticated", "reason", failureReason(err))
+					s.parkAll(ctx, folders, s.authHint(err))
+					wait = AuthRecheck
+					break
+				}
+			}
+		}
+		if !s.sleep(ctx, wait) {
+			return
+		}
+	}
+}
+
+// parkAll records every polled folder as needing a human.
+func (s *Supervisor) parkAll(ctx context.Context, folders []string, hint string) {
+	for _, f := range folders {
+		s.transition(ctx, f, passModePoll, StateAuthRequired, hint, api.ReasonAuthRequired)
+	}
+}
+
+// pollFolder polls one folder and records its status. A missing folder and
+// other failures stay with the folder; the error is returned so pollLoop
+// can stop for auth or a store that cannot sync. The first poll of a folder
+// sweeps, then one every ExpungeSweep.
+func (s *Supervisor) pollFolder(ctx context.Context, folder string, lastSweep map[string]time.Time) error {
+	sweep := !s.clock.Now().Before(lastSweep[folder].Add(s.settings.ExpungeSweep))
+	res, err := s.pollPass(ctx, folder, sweep)
+	if err == nil {
+		if sweep || res.Baselined {
+			lastSweep[folder] = s.clock.Now()
+		}
+		s.settled(ctx, folder, passModePoll, res)
+		return nil
+	}
+	if ctx.Err() != nil || errors.Is(err, errNoWatcher) || authFailure(err) {
+		return err // pollLoop handles these for every folder at once
+	}
+	var notFound *mailstore.FolderNotFoundError
+	if errors.As(err, &notFound) {
+		s.transition(ctx, folder, passModePoll, StateError, ReasonFolderNotFound, ReasonFolderNotFound)
+	} else {
+		s.logger.Warn("polling a folder failed", "folder", folder, "reason", failureReason(err))
+	}
+	return err
+}
+
+// pollPass runs STATUS on folder and then a pass when a sweep is due, the
+// folder has no CONDSTORE or no checkpoint, or its UIDVALIDITY, UIDNEXT or
+// HIGHESTMODSEQ moved. Each call holds the store only while it runs.
+func (s *Supervisor) pollPass(ctx context.Context, folder string, sweep bool) (PassResult, error) {
+	w, release, err := s.watcherStore(ctx)
+	if err != nil {
+		return PassResult{}, err
+	}
+	st, err := w.FolderState(ctx, folder)
+	release()
+	if err != nil {
+		return PassResult{}, err
+	}
+	if !sweep && st.CondStore {
+		row, ok, rerr := s.o.State.Folder(ctx, s.o.Account.Name, folder)
+		if rerr != nil {
+			return PassResult{}, rerr
+		}
+		if ok && row.UIDValidity == st.UIDValidity && row.UIDNext == st.UIDNext && row.HighestModSeq == st.HighestModSeq {
+			return PassResult{}, nil
+		}
+	}
+	w, release, err = s.watcherStore(ctx)
+	if err != nil {
+		return PassResult{}, err
+	}
+	defer release()
+	return s.o.Engine.Pass(ctx, s.o.Account.Name, folder, StoreSource{W: w, Folder: folder}, PassOptions{Sweep: sweep, Mode: passModePoll})
 }
 
 // session runs one connection on the folder: open, sync, then IDLE or poll

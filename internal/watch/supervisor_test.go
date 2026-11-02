@@ -775,3 +775,109 @@ func TestSupervisorGmailReresolvesAllMail(t *testing.T) {
 		t.Errorf("ListFolders ran %d times after the error, want 1", got-lists)
 	}
 }
+
+// A synced folder that is not watched is checked with STATUS on a pooled
+// connection every sync.poll. New mail shows on the next tick. With
+// CONDSTORE an unchanged folder gets no pass; without, every tick passes,
+// since STATUS cannot show flag changes.
+func TestSupervisorPollsUnwatchedFolders(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		condStore bool
+		idlePass  int // SyncFolder calls on a tick with no change
+	}{
+		{name: "condstore skips an unchanged folder", condStore: true, idlePass: 0},
+		{name: "without condstore every tick passes", condStore: false, idlePass: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fs := supFake(false)
+			fs.SetCondStore(tt.condStore)
+			acct := supAccount(t, "hostinger", nil, []string{"Sent"})
+			r := newSupRig(t, fs, acct)
+			r.start()
+			r.waitFor("Sent polling", supStatus("Sent", StatePolling))
+			r.clock.expectAfter(t, acct.SyncPoll)
+			if n := r.held.Load(); n != 0 {
+				t.Errorf("store held %d times between ticks, want 0", n)
+			}
+			if n := fs.WatchConns(); n != 0 {
+				t.Errorf("WatchConns() = %d, want 0: polled folders use the pool", n)
+			}
+			if row := r.row("Sent"); row.Mode != passModePoll {
+				t.Errorf("Sent mode = %q, want poll", row.Mode)
+			}
+			fs.Add(supMsg("Sent", "report"))
+			r.clock.Advance(acct.SyncPoll)
+			r.waitFor("new event for report", supNew("Sent", "report"))
+			r.clock.expectAfter(t, acct.SyncPoll)
+			states, syncs := fs.Calls("FolderState"), fs.Calls("SyncFolder")
+			r.clock.Advance(acct.SyncPoll)
+			r.clock.expectAfter(t, acct.SyncPoll)
+			if got := fs.Calls("FolderState") - states; got != 1 {
+				t.Errorf("FolderState ran %d times on a tick, want 1", got)
+			}
+			if got := fs.Calls("SyncFolder") - syncs; got != tt.idlePass {
+				t.Errorf("SyncFolder ran %d times on an unchanged tick, want %d", got, tt.idlePass)
+			}
+		})
+	}
+}
+
+// A polled folder that does not exist reports FOLDER_NOT_FOUND once, the
+// other polled folder keeps working, and the folder recovers on the tick
+// after it appears.
+func TestSupervisorPolledFolderNotFound(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	acct := supAccount(t, "hostinger", nil, []string{"Reports", "Sent"})
+	r := newSupRig(t, fs, acct)
+	r.start()
+	e := r.waitSeen("Reports error", supStatus("Reports", StateError))
+	if e.Detail != ReasonFolderNotFound {
+		t.Errorf("detail = %q, want %q", e.Detail, ReasonFolderNotFound)
+	}
+	r.waitSeen("Sent polling", supStatus("Sent", StatePolling))
+	r.clock.expectAfter(t, acct.SyncPoll)
+	fs.Add(supMsg("Sent", "report"))
+	r.clock.Advance(acct.SyncPoll)
+	r.waitSeen("new event for report", supNew("Sent", "report"))
+	r.clock.expectAfter(t, acct.SyncPoll)
+	if n := supCount(r.all(), supStatus("Reports", StateError)); n != 1 {
+		t.Errorf("%d error events for Reports over two ticks, want 1", n)
+	}
+	fs.AddFolder("Reports", mailstore.RoleNone)
+	r.clock.Advance(acct.SyncPoll)
+	r.waitSeen("Reports polling", supStatus("Reports", StatePolling))
+	if row := r.row("Reports"); row.LastError != "" {
+		t.Errorf("Reports last_error = %q, want empty", row.LastError)
+	}
+}
+
+// The poller parks every polled folder while the account needs a human,
+// without opening the store, and resumes when the state clears.
+func TestSupervisorPollerParksWhileAuthRequired(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	var required atomic.Bool
+	required.Store(true)
+	acct := supAccount(t, "hostinger", nil, []string{"Sent"})
+	r := newSupRig(t, fs, acct, func(o *SupervisorOptions) {
+		o.AuthRequired = func(string) (bool, string) { return required.Load(), supHint }
+	})
+	r.start()
+	e := r.waitFor("Sent auth_required", supStatus("Sent", StateAuthRequired))
+	if e.Detail != supHint {
+		t.Errorf("detail = %q, want %q", e.Detail, supHint)
+	}
+	r.clock.expectAfter(t, AuthRecheck)
+	if n := r.acquired.Load(); n != 0 {
+		t.Errorf("Store opened %d times while parked, want 0", n)
+	}
+	required.Store(false)
+	r.clock.Advance(AuthRecheck)
+	r.waitFor("Sent polling", supStatus("Sent", StatePolling))
+	r.clock.expectAfter(t, acct.SyncPoll)
+}
