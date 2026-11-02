@@ -266,7 +266,7 @@ func (w *watchService) Subscribe(ctx context.Context, req *connect.Request[chain
 			return w.streamEnd(ctx, err)
 		}
 	}
-	return w.send(ctx, q.filter, pos, stream)
+	return w.send(ctx, q, pos, stream)
 }
 
 // recoverGroup resets a stale group from the acknowledged ID start found
@@ -282,11 +282,14 @@ func (w *watchService) recoverGroup(ctx context.Context, group string, st readSt
 	return acked, err
 }
 
-// send streams the events after pos that match f, with heartbeats, until
-// ctx ends or the client goes away.
-func (w *watchService) send(ctx context.Context, f watch.Filter, pos int64, stream *connect.ServerStream[chainmailv1.SubscribeResponse]) error {
+// send streams the events after pos that match q's filter, with
+// heartbeats, until ctx ends or the client goes away. A group stream
+// refreshes its group's last use before each heartbeat: the client
+// acknowledges only positions that move, so a quiet group would otherwise
+// look unused and be pruned by Log.Trim while its stream is open.
+func (w *watchService) send(ctx context.Context, q watchQuery, pos int64, stream *connect.ServerStream[chainmailv1.SubscribeResponse]) error {
 	for {
-		page, err := w.s.watchLog.Read(ctx, watch.Query{After: pos, Filter: f, Limit: subscribePage})
+		page, err := w.s.watchLog.Read(ctx, watch.Query{After: pos, Filter: q.filter, Limit: subscribePage})
 		if err != nil {
 			return w.streamEnd(ctx, err)
 		}
@@ -299,6 +302,11 @@ func (w *watchService) send(ctx context.Context, f watch.Filter, pos int64, stre
 			// The read examined events, so more may follow at once.
 			pos = page.Next
 			continue
+		}
+		if q.group != "" {
+			if err := w.s.watchLog.TouchGroup(ctx, q.group); err != nil {
+				return w.streamEnd(ctx, err)
+			}
 		}
 		hb := &chainmailv1.Heartbeat{At: timestamppb.New(w.s.opts.Now()), Position: pos}
 		if w.sendItem(stream, &chainmailv1.SubscribeResponse{Item: &chainmailv1.SubscribeResponse_Heartbeat{Heartbeat: hb}}) != nil {

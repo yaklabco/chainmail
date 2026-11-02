@@ -432,6 +432,21 @@ func (l *Log) Group(ctx context.Context, name string) (acked int64, created bool
 	return acked, created, nil
 }
 
+// TouchGroup stamps the group's last_seen_at, in one UPDATE, and changes
+// nothing else. A stream that holds a group open calls it at every
+// heartbeat, so Trim never prunes a group that is in use but quiet. An
+// unknown group is not created: one deleted while its stream runs stays
+// deleted.
+func (l *Log) TouchGroup(ctx context.Context, name string) error {
+	if !ValidGroupName(name) {
+		return fmt.Errorf("invalid group name %q", name)
+	}
+	if _, err := l.db.ExecContext(ctx, "UPDATE event_groups SET last_seen_at = ? WHERE name = ?", formatTime(l.now()), name); err != nil {
+		return fmt.Errorf("touching group %s: %w", name, err)
+	}
+	return nil
+}
+
 // Ack raises the group's acknowledged ID to id. It never lowers it, and
 // never raises it above Tail. An unknown group is created. Ack stamps
 // last_seen_at.

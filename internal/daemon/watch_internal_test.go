@@ -1023,3 +1023,59 @@ func TestSettleBound(t *testing.T) {
 			deadline, ok, before.Add(bound), after.Add(bound))
 	}
 }
+
+// TestQuietGroupStreamOutlivesRetention checks that a group stream that
+// stays open past the retention window with nothing to send keeps its group:
+// each heartbeat refreshes the group's last use, so Trim does not prune it,
+// and a short disconnect then resumes after the group's acknowledged event
+// instead of starting over at the tail.
+func TestQuietGroupStreamOutlivesRetention(t *testing.T) {
+	t.Parallel()
+	var now atomic.Pointer[time.Time]
+	start := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	now.Store(&start)
+	clock := func() time.Time { return *now.Load() }
+	s, _ := newTestServerOptions(t, passwordConfig, Options{Now: clock, WatchHeartbeat: 5 * time.Millisecond, DisableWatch: true})
+	c := serveWatchTest(t, s)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	open := func() *connect.ServerStreamForClient[chainmailv1.SubscribeResponse] {
+		stream, err := c.Watch.Subscribe(ctx, connect.NewRequest(&chainmailv1.SubscribeRequest{Group: "bot"}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return stream
+	}
+	heartbeat := func(stream *connect.ServerStreamForClient[chainmailv1.SubscribeResponse]) {
+		t.Helper()
+		if !stream.Receive() || stream.Msg().GetHeartbeat() == nil {
+			t.Fatalf("item = %v (%v), want a heartbeat", stream.Msg(), stream.Err())
+		}
+	}
+	stream := open()
+	heartbeat(stream)
+	later := start.Add(200 * time.Hour)
+	now.Store(&later)
+	// The first heartbeat after the jump may have stamped the old time.
+	heartbeat(stream)
+	heartbeat(stream)
+	if _, err := s.watchLog.Trim(ctx, 168*time.Hour, 1000); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := s.watchLog.Groups(ctx)
+	if err != nil || len(groups) != 1 || groups[0].Name != "bot" {
+		t.Fatalf("Groups after Trim = %+v, %v; want bot kept", groups, err)
+	}
+	_ = stream.Close() // a short disconnect
+	if err := s.watchLog.Publish(ctx, testWatchEvent("while away")); err != nil {
+		t.Fatal(err)
+	}
+	stream = open()
+	defer func() { _ = stream.Close() }()
+	if !stream.Receive() {
+		t.Fatalf("stream ended: %v", stream.Err())
+	}
+	if e := stream.Msg().GetEvent(); e.GetId() != 1 || e.GetMessage().GetSubject().GetUntrusted() != "while away" {
+		t.Errorf("first item after the reconnect = %v, want event 1", stream.Msg())
+	}
+}

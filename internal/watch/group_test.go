@@ -221,3 +221,36 @@ func TestResetGroup(t *testing.T) {
 		t.Error("ResetGroup accepted a negative id")
 	}
 }
+
+// TouchGroup stamps last_seen_at and nothing else, so a group a stream
+// keeps open outlives the retention window without an Ack. It never
+// creates a group: one deleted while its stream runs stays deleted.
+func TestTouchGroup(t *testing.T) {
+	t.Parallel()
+	l, _, clock := newLog(t)
+	publish(t, l, newEvent("a", "INBOX", 1), newEvent("a", "INBOX", 2))
+	if _, _, err := l.Group(t.Context(), "bot"); err != nil {
+		t.Fatal(err)
+	}
+	clock.Set(t0.Add(200 * time.Hour))
+	if err := l.TouchGroup(t.Context(), "bot"); err != nil {
+		t.Fatalf("TouchGroup: %v", err)
+	}
+	if err := l.TouchGroup(t.Context(), "gone"); err != nil {
+		t.Fatalf("TouchGroup(unknown group): %v", err)
+	}
+	if _, err := l.Trim(t.Context(), 168*time.Hour, 1000); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := l.Groups(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []GroupInfo{{Name: "bot", AckedID: 2, Lag: 0, CreatedAt: t0, LastSeenAt: t0.Add(200 * time.Hour)}}
+	if !reflect.DeepEqual(groups, want) {
+		t.Errorf("Groups =\n%+v\nwant\n%+v", groups, want)
+	}
+	if err := l.TouchGroup(t.Context(), "Bad Name"); err == nil {
+		t.Error("TouchGroup accepted an invalid name")
+	}
+}
