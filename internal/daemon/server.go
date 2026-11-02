@@ -128,6 +128,10 @@ type Server struct {
 	// it with any error it returns. Internal tests fail a send with it while
 	// the stream is still live.
 	watchSendHook func(*chainmailv1.SubscribeResponse) error
+	// shutdown is closed when the daemon begins to shut down, before it
+	// drains: the Done channel of Serve's base context. Nil until Serve
+	// runs, and then it never closes.
+	shutdown <-chan struct{}
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -218,6 +222,10 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	base, cancelBase := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelBase()
+	// Watch settlement watches base, so a shutdown ends it even after a
+	// request's own context has ended with its deadline. Set before any
+	// handler runs.
+	s.shutdown = base.Done()
 	defer s.startBackground(base)()
 	s.httpSrv.BaseContext = func(net.Listener) context.Context { return base }
 	errc := make(chan error, 1)

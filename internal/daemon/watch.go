@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -582,19 +583,20 @@ func (w *watchService) DeleteGroup(ctx context.Context, req *connect.Request[cha
 // ack moves a group past a page ReadEvents has read and audited: an Ack to
 // id, or for a stale group a reset from the acknowledged ID start found to
 // id. It reports false when the reset did not apply because another reader
-// recovered or acknowledged the group first. It runs under settleContext,
-// so a read whose quiet wait outlived the request's deadline is still
-// acknowledged. A failure is the client's error, with fixed text.
+// recovered or acknowledged the group first. It runs under settle, so a
+// read whose quiet wait outlived the request's deadline is still
+// acknowledged, and one whose client went away is not. A failure is the
+// client's error, with fixed text.
 func (w *watchService) ack(ctx context.Context, group string, st readStart, id int64) (bool, error) {
-	ctx, cancel := settleContext(ctx)
-	defer cancel()
 	moved := true
-	var err error
-	if st.stale {
-		moved, err = w.s.watchLog.ResetGroup(ctx, group, st.from, id)
-	} else {
-		err = w.s.watchLog.Ack(ctx, group, id)
-	}
+	err := w.s.settle(ctx, func(ctx context.Context) error {
+		if st.stale {
+			var err error
+			moved, err = w.s.watchLog.ResetGroup(ctx, group, st.from, id)
+			return err
+		}
+		return w.s.watchLog.Ack(ctx, group, id)
+	})
 	if err != nil {
 		return false, toConnectError(w.s.watchLogErr(err))
 	}
@@ -612,26 +614,70 @@ func (w *watchService) sendItem(stream *connect.ServerStream[chainmailv1.Subscri
 	return stream.Send(item)
 }
 
-// settleContext returns the context for writing down a read that has
-// already happened. It ignores ctx's deadline, since a quiet wait may end
-// at or just past it and must still be acknowledged (contract C8), and is
-// bounded by settleTimeout instead. It still ends as soon as ctx is
-// cancelled, when the client went away or the daemon is shutting down. The
-// returned cancel stops the watch on ctx and waits for it, so nothing
-// outlives the call.
-func settleContext(ctx context.Context) (context.Context, context.CancelFunc) {
+// settle runs write, which writes down a group read that has already
+// happened: its acknowledgement or a stale group's reset.
+//
+// The request's deadline does not stop it, since a quiet wait may end at
+// or just past the deadline and must still be acknowledged (contract C8).
+// settleTimeout bounds it instead. A request that ended with
+// context.Canceled, because the client went away, is never written down:
+// that is checked synchronously just before write, and a cancellation
+// during write ends it too. A daemon shutdown ends it as well, through
+// the server's shutdown channel, which still reports a shutdown after
+// the request's own context has ended with DeadlineExceeded.
+//
+// One window remains, by design: a disconnect after write and before the
+// response reaches the client loses that page, since a group read
+// acknowledges what it returns before it responds. Under a disconnect a
+// group read is at most once.
+func (s *Server) settle(ctx context.Context, write func(context.Context) error) error {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return fmt.Errorf("settling a read: %w", ctx.Err())
+	}
+	select {
+	case <-s.shutdown:
+		return fmt.Errorf("settling a read during shutdown: %w", context.Canceled)
+	default:
+	}
 	settled, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
-	done := make(chan struct{})
-	stop := context.AfterFunc(ctx, func() {
-		defer close(done)
+	defer cancel()
+	stopRequest := afterJoined(ctx, func() {
 		if errors.Is(ctx.Err(), context.Canceled) {
 			cancel()
 		}
 	})
-	return settled, func() {
+	defer stopRequest()
+	if s.shutdown != nil {
+		// A shutdown ends settlement, joined.
+		finished := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			select {
+			case <-s.shutdown:
+				cancel()
+			case <-finished:
+			}
+		})
+		defer func() {
+			close(finished)
+			wg.Wait()
+		}()
+	}
+	return write(settled)
+}
+
+// afterJoined runs f once ctx is done, as context.AfterFunc does, and
+// returns a stop that prevents f or, when f has started, waits for it to
+// return, so f never outlives the caller.
+func afterJoined(ctx context.Context, f func()) func() {
+	done := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(done)
+		f()
+	})
+	return func() {
 		if !stop() {
-			<-done // the watch ran or is running: join it
+			<-done
 		}
-		cancel()
 	}
 }

@@ -841,33 +841,80 @@ func TestSubscribeGapSendFailureLeavesTheGroupStale(t *testing.T) {
 	}
 }
 
-// TestSettleContext checks the context a group's acknowledgement runs
-// under: it outlives ctx's deadline, it ends when ctx is cancelled, and
-// its cancel returns promptly either way.
-func TestSettleContext(t *testing.T) {
-	t.Parallel()
-	expired, cancelExpired := context.WithTimeout(t.Context(), time.Millisecond)
-	defer cancelExpired()
-	<-expired.Done()
-	settled, cancel := settleContext(expired)
-	if err := settled.Err(); err != nil {
-		t.Errorf("past the deadline: settled ended with %v, want it live", err)
+// ackedAt is the acknowledged ID of the only group.
+func ackedAt(t *testing.T, s *Server) int64 {
+	t.Helper()
+	groups, err := s.watchLog.Groups(t.Context())
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("groups = %+v, %v", groups, err)
 	}
-	if dl, ok := settled.Deadline(); !ok || time.Until(dl) > settleTimeout {
-		t.Errorf("deadline = %v, %v; want one within %v", dl, ok, settleTimeout)
-	}
-	cancel()
+	return groups[0].AckedID
+}
 
-	live, cancelLive := context.WithCancel(t.Context())
-	settled, cancel = settleContext(live)
-	defer cancel()
-	cancelLive()
-	select {
-	case <-settled.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("a cancelled ctx did not end the settle context")
+// TestSettleSkipsCancelledReads checks that a read whose client has gone
+// away is never acknowledged, neither by an Ack nor by a stale group's
+// reset, even though a read whose deadline merely passed still is.
+func TestSettleSkipsCancelledReads(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		seed  int64 // the group's acknowledged ID before the read
+		st    readStart
+		id    int64
+		after int64 // the group's acknowledged ID after a cancelled read
+	}{
+		{name: "ack", seed: 1, id: 3, after: 1},
+		{name: "stale reset", seed: 50, st: readStart{after: 3, stale: true, from: 50}, id: 3, after: 50},
 	}
-	if !errors.Is(settled.Err(), context.Canceled) {
-		t.Errorf("settled.Err() = %v, want Canceled", settled.Err())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s, _ := newTestServer(t)
+			w := &watchService{s: s}
+			if err := s.watchLog.Publish(t.Context(), testWatchEvent("a"), testWatchEvent("b"), testWatchEvent("c")); err != nil {
+				t.Fatal(err)
+			}
+			seedStaleGroup(t, s, "bot", tt.seed)
+			ctx, cancel := context.WithCancel(peerContext(t.Context()))
+			cancel()
+			if _, err := w.ack(ctx, "bot", tt.st, tt.id); connect.CodeOf(err) != connect.CodeCanceled {
+				t.Errorf("ack = %v, want Canceled", err)
+			}
+			if got := ackedAt(t, s); got != tt.after {
+				t.Errorf("bot is at %d after a cancelled read, want %d", got, tt.after)
+			}
+			late := newLateCtx(peerContext(t.Context()))
+			late.expire()
+			if _, err := w.ack(late, "bot", tt.st, tt.id); err != nil {
+				t.Errorf("ack past the deadline = %v, want it settled", err)
+			}
+			if got := ackedAt(t, s); got != tt.id {
+				t.Errorf("bot is at %d after a read past its deadline, want %d", got, tt.id)
+			}
+		})
+	}
+}
+
+// TestSettleEndsOnShutdown checks that a daemon shutdown ends settlement
+// even once the request's deadline has passed, when the request context
+// itself no longer reports the shutdown: nothing is acknowledged.
+func TestSettleEndsOnShutdown(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServer(t)
+	w := &watchService{s: s}
+	if err := s.watchLog.Publish(t.Context(), testWatchEvent("a"), testWatchEvent("b")); err != nil {
+		t.Fatal(err)
+	}
+	seedStaleGroup(t, s, "bot", 0)
+	shutdown := make(chan struct{})
+	s.shutdown = shutdown
+	late := newLateCtx(peerContext(t.Context()))
+	late.expire()
+	close(shutdown)
+	if _, err := w.ack(late, "bot", readStart{}, 2); connect.CodeOf(err) != connect.CodeCanceled {
+		t.Errorf("ack during shutdown = %v, want Canceled", err)
+	}
+	if got := ackedAt(t, s); got != 0 {
+		t.Errorf("bot is at %d after a shutdown, want 0", got)
 	}
 }
