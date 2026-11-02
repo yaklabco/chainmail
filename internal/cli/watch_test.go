@@ -1089,9 +1089,12 @@ func (l *resetLog) serve(f *fakeWatch, end error, more func(send func(*chainmail
 func subjects(stdout string) []string {
 	var out []string
 	for line := range strings.SplitSeq(strings.TrimSpace(stdout), "\n") {
-		if i := strings.Index(line, `"subject":{"untrusted":"`); i >= 0 {
-			rest := line[i+len(`"subject":{"untrusted":"`):]
-			out = append(out, rest[:strings.Index(rest, `"`)])
+		_, rest, ok := strings.Cut(line, `"subject":{"untrusted":"`)
+		if !ok {
+			continue
+		}
+		if subject, _, ok := strings.Cut(rest, `"`); ok {
+			out = append(out, subject)
 		}
 	}
 	return out
