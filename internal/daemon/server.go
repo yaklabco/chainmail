@@ -26,6 +26,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/policy"
 	"github.com/jamesainslie/chainmail/internal/upload"
 	"github.com/jamesainslie/chainmail/internal/vault"
+	"github.com/jamesainslie/chainmail/internal/watch"
 )
 
 // Options configures a Server. Config, Vault, StateDB, Listener and Authorizer are required.
@@ -54,6 +55,13 @@ type Options struct {
 	// search for a send whose outcome is unknown. Zero means 5 seconds,
 	// which makes 3 tries over 10 seconds. Tests shorten it.
 	OutcomeSearchInterval time.Duration
+	// WatchHeartbeat is how often a Subscribe stream with nothing to send
+	// sends a heartbeat. Zero means 30 seconds. Tests shorten it.
+	WatchHeartbeat time.Duration
+	// DisableWatch starts no watch supervisors, so no account is watched or
+	// synced. The WatchService handlers and the event log still work. Tests
+	// that count mail store calls set it.
+	DisableWatch bool
 }
 
 const (
@@ -101,6 +109,13 @@ type Server struct {
 	// policy decides which sends are held and which destructive actions
 	// are refused.
 	policy *policy.Policy
+	// watchLog is the durable event log WatchService reads.
+	watchLog *watch.Log
+	// watchState holds each synced folder's checkpoint and status.
+	watchState *watch.State
+	// watchWaitUnit is one ReadEvents wait_seconds: a second. Internal
+	// tests shorten it.
+	watchWaitUnit time.Duration
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -114,18 +129,24 @@ func New(opts Options) (*Server, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
+	if opts.WatchHeartbeat <= 0 {
+		opts.WatchHeartbeat = defaultWatchHeartbeat
+	}
 	pol, err := policy.New(opts.Config)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: policy: %w", err)
 	}
 	authOpts := append([]auth.Option{auth.WithClock(opts.Now)}, opts.AuthOptions...)
 	s := &Server{
-		opts:        opts,
-		auth:        auth.NewManager(opts.Config, opts.Vault, authOpts...),
-		audit:       audit.NewWriter(opts.StateDB, opts.Now),
-		auditReader: audit.NewReader(opts.StateDB),
-		started:     opts.Now(),
-		policy:      pol,
+		opts:          opts,
+		auth:          auth.NewManager(opts.Config, opts.Vault, authOpts...),
+		audit:         audit.NewWriter(opts.StateDB, opts.Now),
+		auditReader:   audit.NewReader(opts.StateDB),
+		started:       opts.Now(),
+		policy:        pol,
+		watchLog:      watch.NewLog(opts.StateDB, opts.Now),
+		watchState:    watch.NewState(opts.StateDB),
+		watchWaitUnit: time.Second,
 	}
 	s.lim = newLimitState(opts.StateDB, opts.Now)
 	s.newStore = func(acct config.ResolvedAccount, p storeParams) mailstore.Store {
@@ -152,13 +173,15 @@ func New(opts Options) (*Server, error) {
 	// UploadAttachment ends a stalled stream's body read itself.
 	mux.Handle(composePath, withReadAbort(composeHandler))
 	mux.Handle(chainmailv1connect.NewOrganizeServiceHandler(&organizeService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
+	mux.Handle(chainmailv1connect.NewWatchServiceHandler(&watchService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
 	// ReadTimeout and WriteTimeout stay unset. The socket is local, and a
 	// unary call such as accounts test legitimately runs for up to a
-	// minute, which a whole-request timeout would cut off. Handlers bound
-	// their own work instead, and shutdown cancels it.
+	// minute, which a whole-request timeout would cut off, and a watch
+	// Subscribe stream stays open for as long as its watcher runs. Handlers
+	// bound their own work instead, and shutdown cancels it.
 	s.httpSrv = &http.Server{
 		Handler:           s.handlers.track(opts.Authorizer.Middleware(mux)),
 		ConnContext:       connContext,

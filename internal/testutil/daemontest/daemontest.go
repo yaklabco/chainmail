@@ -40,6 +40,11 @@ type Options struct {
 	OutcomeSearchInterval time.Duration
 	// Logger receives the daemon's logs. Nil discards them.
 	Logger *slog.Logger
+	// WatchHeartbeat replaces the 30 second heartbeat of Subscribe streams.
+	WatchHeartbeat time.Duration
+	// Watch starts the watch supervisors. It is off by default, so tests
+	// that count mail store calls see no sync traffic.
+	Watch bool
 }
 
 // Harness is a running daemon and a client connected to it.
@@ -111,6 +116,8 @@ func Start(t testing.TB, configTOML string, opts Options) *Harness {
 		StateDir:              dir,
 		OutcomeSearchInterval: opts.OutcomeSearchInterval,
 		Logger:                opts.Logger,
+		WatchHeartbeat:        opts.WatchHeartbeat,
+		DisableWatch:          !opts.Watch,
 	})
 	if err != nil {
 		t.Fatal(err)
