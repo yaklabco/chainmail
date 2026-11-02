@@ -680,9 +680,10 @@ func TestWatchReconnectResumes(t *testing.T) {
 			start:  "live", resume: "since=9",
 		},
 		{
+			// The stream goes on from the gap's next ID: 2 and 3 are gone.
 			name: "trimmed gap", args: []string{"--since", "1"},
 			stream: playThen(unavailable(), eventItem(gapEvent(4))),
-			start:  "since=1", resume: "since=1",
+			start:  "since=1", resume: "since=3",
 		},
 		{
 			name: "stream ended",
@@ -1010,5 +1011,176 @@ func TestWatchGroupNeverAcksUnwrittenEvent(t *testing.T) {
 	}
 	if acks := f.ackIDs(t, "bot"); !slices.Equal(acks, []int64{2}) {
 		t.Errorf("acks = %v, want [2]: event 3 was never written", acks)
+	}
+}
+
+// resetLog is a daemon whose event log holds events 1 to tail and a group
+// acknowledged at acked, as the daemon's Subscribe and Ack treat them: a
+// start past the tail is capped there, after a trimmed gap unless the
+// filter drops it, and a group found past the tail is reset to it.
+type resetLog struct {
+	mu    sync.Mutex
+	tail  int64
+	acked int64
+}
+
+// add appends one event, as mail arriving does.
+func (l *resetLog) add() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.tail++
+}
+
+// ack raises the group as Log.Ack does: never lower, never past the tail.
+func (l *resetLog) ack(id int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.acked = max(l.acked, min(id, l.tail))
+}
+
+// serve plays the stream f's latest Subscribe asks for: the gap, the
+// events after the start, a heartbeat, then whatever more does (such as
+// mail arriving), then end.
+func (l *resetLog) serve(f *fakeWatch, end error, more func(send func(*chainmailv1.SubscribeResponse) error) error) watchScript {
+	return func(_ context.Context, send func(*chainmailv1.SubscribeResponse) error) error {
+		reqs := f.requests()
+		req := reqs[len(reqs)-1]
+		l.mu.Lock()
+		tail := l.tail
+		after := tail
+		switch {
+		case req.GetGroup() != "":
+			after = l.acked
+		case req.Since != nil:
+			after = req.GetSince()
+		}
+		stale := after > tail
+		if stale {
+			after = tail
+			if req.GetGroup() != "" {
+				l.acked = tail
+			}
+		}
+		l.mu.Unlock()
+		kinds := req.GetFilter().GetKinds()
+		if stale && !slices.Contains(kinds, "status") && !slices.Contains(kinds, "gap") {
+			if err := send(eventItem(gapEvent(tail + 1))); err != nil {
+				return err
+			}
+		}
+		for id := after + 1; id <= tail; id++ {
+			if err := send(eventItem(newEvent(id, fmt.Sprintf("mail %d", id)))); err != nil {
+				return err
+			}
+		}
+		if err := send(heartbeatItem(tail)); err != nil {
+			return err
+		}
+		if more != nil {
+			if err := more(send); err != nil {
+				return err
+			}
+		}
+		return end
+	}
+}
+
+// subjects lists the subjects of the new events in JSON lines.
+func subjects(stdout string) []string {
+	var out []string
+	for line := range strings.SplitSeq(strings.TrimSpace(stdout), "\n") {
+		if i := strings.Index(line, `"subject":{"untrusted":"`); i >= 0 {
+			rest := line[i+len(`"subject":{"untrusted":"`):]
+			out = append(out, rest[:strings.Index(rest, `"`)])
+		}
+	}
+	return out
+}
+
+// A --since start past a reset log's tail resumes from what the daemon
+// reports, the trimmed gap's next ID or the heartbeat's position, not from
+// --since. Otherwise mail that arrives during a later disconnect sits below
+// the old position, and the daemon's recovery skips straight past it.
+func TestWatchSinceFollowsAResetLog(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "gap delivered", args: []string{"--since", "100"}},
+		{name: "kind filter drops the gap", args: []string{"--since", "100", "--kind", "new,status"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			l := &resetLog{tail: 3}
+			f := newFakeWatch()
+			f.streams = []watchScript{
+				l.serve(f, unavailable(), nil),
+				l.serve(f, unavailable(), func(func(*chainmailv1.SubscribeResponse) error) error {
+					l.add() // mail arrives while the watch is away
+					return nil
+				}),
+				l.serve(f, authRequired(), nil),
+			}
+			socket := startFakeWatch(t, f)
+			args := append([]string{"--socket", socket, "watch"}, tt.args...)
+			got := runCLI(t, Env{After: newFakeClock(allButHeartbeat).After}, args...)
+			if got.code != api.ExitAuth {
+				t.Fatalf("watch: %+v, want exit 5 from the third stream", got)
+			}
+			var starts []string
+			for _, r := range f.requests() {
+				starts = append(starts, position(r))
+			}
+			if want := []string{"since=100", "since=3", "since=3"}; !slices.Equal(starts, want) {
+				t.Errorf("streams start %v, want %v", starts, want)
+			}
+			if s := subjects(got.stdout); !slices.Equal(s, []string{"mail 4"}) {
+				t.Errorf("new events printed = %v, want [mail 4]: nothing may be lost\n%s", s, got.stdout)
+			}
+		})
+	}
+}
+
+// A group the daemon recovered from past a reset log's tail acknowledges
+// again from the recovered position: what it acknowledged before the reset
+// no longer holds anything back.
+func TestWatchGroupAcksAfterAResetLog(t *testing.T) {
+	t.Parallel()
+	l := &resetLog{tail: 100}
+	f := newFakeWatch()
+	f.ack = func(_ context.Context, n int) error {
+		f.mu.Lock()
+		id := f.acks[n].GetId()
+		f.mu.Unlock()
+		l.ack(id)
+		return nil
+	}
+	f.streams = []watchScript{
+		playThen(unavailable(), eventItem(newEvent(100, "mail 100")), heartbeatItem(100)),
+		func(ctx context.Context, send func(*chainmailv1.SubscribeResponse) error) error {
+			// The daemon's state was reset while the watch was away.
+			l.mu.Lock()
+			l.tail = 3
+			l.mu.Unlock()
+			return l.serve(f, unavailable(), func(send func(*chainmailv1.SubscribeResponse) error) error {
+				l.add()
+				return send(eventItem(newEvent(4, "mail 4")))
+			})(ctx, send)
+		},
+		l.serve(f, authRequired(), nil),
+	}
+	socket := startFakeWatch(t, f)
+	got := runCLI(t, Env{After: newFakeClock(func(d time.Duration) bool { return d != watchHeartbeatTimeout && d != watchAckTimeout }).After}, "--socket", socket, "watch", "--group", "bot")
+	if got.code != api.ExitAuth {
+		t.Fatalf("watch: %+v, want exit 5 from the third stream", got)
+	}
+	acks := f.ackIDs(t, "bot")
+	if !slices.Contains(acks, 4) {
+		t.Errorf("acks = %v, want event 4 acknowledged after the recovery", acks)
+	}
+	if s := subjects(got.stdout); !slices.Equal(s, []string{"mail 100", "mail 4"}) {
+		t.Errorf("new events printed = %v, want [mail 100 mail 4]", s)
 	}
 }

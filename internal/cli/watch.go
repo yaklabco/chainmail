@@ -140,8 +140,9 @@ type watcher struct {
 	env   Env
 	watch chainmailv1connect.WatchServiceClient
 	opts  watchOptions
-	// pos is the highest event ID or heartbeat position seen, or --since
-	// before any. hasPos says there is one.
+	// pos is where the stream stands: the last heartbeat position or trimmed
+	// gap seen, raised by each event ID since, or --since before any. hasPos
+	// says there is one.
 	pos    int64
 	hasPos bool
 	// acked is the highest position the group has acknowledged in this
@@ -322,8 +323,12 @@ func (w *watcher) handle(ctx context.Context, m *chainmailv1.SubscribeResponse) 
 		if err := w.printEvent(e); err != nil {
 			return stopError{err}
 		}
-		if id := e.GetId(); id > 0 { // a trimmed gap has no ID
-			w.seen(id)
+		switch {
+		case e.GetId() > 0:
+			w.seen(e.GetId())
+		case e.GetKind() == "gap" && e.GetReason() == "trimmed":
+			// A trimmed gap has no ID: the stream goes on from NextID.
+			w.moveTo(e.GetNextId() - 1)
 		}
 		w.queueAck(ctx, true)
 		return nil
@@ -337,7 +342,7 @@ func (w *watcher) handle(ctx context.Context, m *chainmailv1.SubscribeResponse) 
 			return stopError{err}
 		}
 	}
-	w.seen(hb.GetPosition())
+	w.moveTo(hb.GetPosition())
 	w.queueAck(ctx, false)
 	if w.opts.once {
 		return errWatchOnce
@@ -345,10 +350,31 @@ func (w *watcher) handle(ctx context.Context, m *chainmailv1.SubscribeResponse) 
 	return nil
 }
 
-// seen raises the position the watch resumes after.
-func (w *watcher) seen(pos int64) {
-	if w.hasPos && pos <= w.pos {
+// seen raises the position the watch resumes after to an event's ID. A
+// group stream that replays events after a failed acknowledgement sends
+// IDs at or below it, which leave it where it is.
+func (w *watcher) seen(id int64) {
+	if w.hasPos && id <= w.pos {
 		return
+	}
+	w.pos, w.hasPos = id, true
+}
+
+// moveTo sets the position the watch resumes after to pos, which the stream
+// itself reports: a heartbeat's position, or a trimmed gap's NextID - 1.
+// Either says where the stream stands, so it replaces the position even
+// when it is lower. A lower one means the daemon's log was reset under the
+// watch: the daemon capped the start at its tail, and recovered a group to
+// it. Resuming from the old position would skip whatever arrives below it,
+// and acknowledging it would let the daemon cap it to a tail with events
+// not yet printed, so the pending acknowledgement is dropped and the group
+// counts as acknowledged no further than pos. A --kind filter can drop the
+// gap, but never the heartbeat that follows it.
+func (w *watcher) moveTo(pos int64) {
+	if w.hasPos && pos < w.pos {
+		w.acked = min(w.acked, pos)
+		w.unacked = 0
+		w.ackDue = nil
 	}
 	w.pos, w.hasPos = pos, true
 }
