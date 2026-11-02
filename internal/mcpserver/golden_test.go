@@ -69,6 +69,7 @@ func TestAnnotationsMatchTheSpec(t *testing.T) {
 		"trash": {false, false, true, true}, "set_flags": {false, false, true, true}, "set_labels": {false, false, true, true},
 		"create_folder": {false, false, true, true}, "rename_folder": {false, false, false, true},
 		"expunge": {false, true, true, true}, "delete_folder": {false, true, true, true},
+		"read_events": {true, false, false, true},
 	}
 	for name, st := range map[string]struct {
 		policy  *gatePolicy

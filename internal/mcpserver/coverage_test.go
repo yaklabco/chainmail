@@ -43,6 +43,7 @@ var toolRPC = map[string]string{
 	"rename_folder":       chainmailv1connect.OrganizeServiceRenameFolderProcedure,
 	"expunge":             chainmailv1connect.OrganizeServiceExpungeProcedure,
 	"delete_folder":       chainmailv1connect.OrganizeServiceDeleteFolderProcedure,
+	"read_events":         chainmailv1connect.WatchServiceReadEventsProcedure,
 }
 
 // leftOut lists agent-facing RPCs with no tool, and why (spec section 4).
@@ -50,6 +51,11 @@ var leftOut = map[string]string{
 	chainmailv1connect.AccountServiceProbeLimitsProcedure:      "an operator diagnostic that opens connections until the server refuses one",
 	chainmailv1connect.ComposeServiceSendRawProcedure:          "sends arbitrary headers; agents compose with send_email",
 	chainmailv1connect.ComposeServiceUploadAttachmentProcedure: "the compose tools stream attachment files with it; it is not a tool of its own",
+	chainmailv1connect.WatchServiceSubscribeProcedure:          "a stream for long-running watchers; agents poll with read_events",
+	chainmailv1connect.WatchServiceAckProcedure:                "read_events with a group acknowledges what it returns",
+	chainmailv1connect.WatchServiceGetWatchStatusProcedure:     "an operator diagnostic",
+	chainmailv1connect.WatchServiceListGroupsProcedure:         "group administration for operators",
+	chainmailv1connect.WatchServiceDeleteGroupProcedure:        "group administration for operators",
 }
 
 // ignored lists request fields no tool sets, keyed "<procedure> <field path>", and why.
@@ -67,6 +73,7 @@ var agentServices = []protoreflect.ServiceDescriptor{
 	chainmailv1.File_chainmail_v1_message_proto.Services().ByName("MessageService"),
 	chainmailv1.File_chainmail_v1_compose_proto.Services().ByName("ComposeService"),
 	chainmailv1.File_chainmail_v1_organize_proto.Services().ByName("OrganizeService"),
+	chainmailv1.File_chainmail_v1_watch_proto.Services().ByName("WatchService"),
 }
 
 func procedure(sd protoreflect.ServiceDescriptor, md protoreflect.MethodDescriptor) string {
@@ -186,6 +193,10 @@ func coverageSamples(file string) map[string][]map[string]any {
 		"rename_folder":       {{"account": "work", "from": "F", "to": "G"}},
 		"expunge":             {{"refs": []string{testRef}}},
 		"delete_folder":       {{"account": "work", "name": "F", "force": true}},
+		"read_events": {
+			{"group": "triage", "kinds": []string{"new", "flags"}, "accounts": []string{"work"}, "in": "inbox", "wait_seconds": 1, "limit": 5},
+			{"cursor": 7},
+		},
 	}
 }
 
