@@ -61,7 +61,7 @@ type SupervisorOptions struct {
 	State *State
 	// AuthRequired reports whether the account needs a human, and the hint.
 	AuthRequired func(account string) (bool, string)
-	// Clock is what the supervisor waits on. Nil means RealClock.
+	// Clock is what the supervisor waits on. Nil means the system clock.
 	Clock Clock
 	// Jitter returns a value in [0, 1). Nil means math/rand/v2.
 	Jitter func() float64
@@ -104,7 +104,7 @@ func NewSupervisor(o SupervisorOptions) *Supervisor {
 		settings: o.Settings, syncPoll: o.Account.SyncPoll, statuses: map[string]folderStatus{},
 	}
 	if s.clock == nil {
-		s.clock = RealClock
+		s.clock = realClock
 	}
 	if s.jitter == nil {
 		s.jitter = rand.Float64

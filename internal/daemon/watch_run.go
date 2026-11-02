@@ -105,7 +105,6 @@ func (s *Server) supervisorOptions(acct config.ResolvedAccount, settings config.
 		Log:          s.watchLog,
 		State:        s.watchState,
 		AuthRequired: s.authRequired,
-		Clock:        watch.RealClock,
 		SweepFloor:   s.opts.WatchSweepFloor,
 		Logger:       s.opts.Logger,
 	}

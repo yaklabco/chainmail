@@ -54,15 +54,15 @@ func TestBackoffJitterBounds(t *testing.T) {
 	}
 }
 
-func TestRealClock(t *testing.T) {
+func TestSystemClock(t *testing.T) {
 	t.Parallel()
 	before := time.Now()
-	if now := RealClock.Now(); now.Before(before) {
-		t.Errorf("RealClock.Now() = %v, before %v", now, before)
+	if now := realClock.Now(); now.Before(before) {
+		t.Errorf("realClock.Now() = %v, before %v", now, before)
 	}
 	select {
-	case <-RealClock.After(time.Millisecond):
+	case <-realClock.After(time.Millisecond):
 	case <-time.After(5 * time.Second):
-		t.Fatal("RealClock.After(1ms) never fired")
+		t.Fatal("realClock.After(1ms) never fired")
 	}
 }

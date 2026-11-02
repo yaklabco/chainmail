@@ -11,8 +11,8 @@ type Clock interface {
 	After(d time.Duration) <-chan time.Time
 }
 
-// RealClock is the system clock.
-var RealClock Clock = systemClock{}
+// realClock is the system clock, which a nil SupervisorOptions.Clock means.
+var realClock Clock = systemClock{}
 
 // systemClock is Clock over package time.
 type systemClock struct{}

@@ -259,8 +259,8 @@ func TestSupervisorOptionsWiring(t *testing.T) {
 			if o.Account.Name != "host" || o.Engine != s.engine || o.Log != s.watchLog || o.State != s.watchState {
 				t.Errorf("options = %+v, want host with the daemon's engine, log and state", o)
 			}
-			if o.Store == nil || o.AuthRequired == nil || o.Clock == nil || o.Logger != s.opts.Logger {
-				t.Errorf("options = %+v, want Store, AuthRequired, Clock and the daemon's logger set", o)
+			if o.Store == nil || o.AuthRequired == nil || o.Clock != nil || o.Logger != s.opts.Logger {
+				t.Errorf("options = %+v, want Store, AuthRequired and the daemon's logger set, and no Clock, which means the system clock", o)
 			}
 		})
 	}
