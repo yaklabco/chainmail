@@ -17,7 +17,10 @@ func TestWaitWakesOnNotify(t *testing.T) {
 	done := make(chan error, 1)
 	var wg sync.WaitGroup
 	wg.Go(func() { done <- l.Wait(ctx, 0) })
-	defer wg.Wait()
+	defer func() {
+		cancel() // a failed step must not leave Wait blocked until the timeout
+		wg.Wait()
+	}()
 
 	select {
 	case err := <-done:
@@ -43,6 +46,7 @@ func TestWaitReturnsWhenContextEnds(t *testing.T) {
 	done := make(chan error, 1)
 	var wg sync.WaitGroup
 	wg.Go(func() { done <- l.Wait(ctx, 0) })
+	time.Sleep(20 * time.Millisecond) // let Wait block, so cancel exercises the blocked path
 	cancel()
 	wg.Wait()
 	if err := <-done; !errors.Is(err, context.Canceled) {
@@ -73,6 +77,7 @@ func TestConcurrentWaitersAllWake(t *testing.T) {
 	for i := range waiters {
 		wg.Go(func() { errs[i] = l.Wait(ctx, 0) })
 	}
+	time.Sleep(20 * time.Millisecond) // let the waiters block, so Publish must wake them
 	publish(t, l, newEvent("a", "INBOX", 1))
 	wg.Wait()
 	for i, err := range errs {
