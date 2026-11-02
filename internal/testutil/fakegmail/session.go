@@ -777,9 +777,27 @@ func (sess *session) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
 	return w.WriteNumMessages(uint32(sess.known))
 }
 
-func (sess *session) Idle(_ *imapserver.UpdateWriter, stop <-chan struct{}) error {
-	<-stop
-	return nil
+// idlePoll is how often a session in IDLE looks for changes other sessions
+// made.
+const idlePoll = 10 * time.Millisecond
+
+// Idle tells the client of changes other sessions make to the selected
+// folder while it idles, as EXISTS and EXPUNGE, within idlePoll, by running
+// Poll as the end of a command does. Like Poll it says nothing of flag
+// changes.
+func (sess *session) Idle(w *imapserver.UpdateWriter, stop <-chan struct{}) error {
+	ticker := time.NewTicker(idlePoll)
+	defer ticker.Stop()
+	for {
+		if err := sess.Poll(w, true); err != nil {
+			return err
+		}
+		select {
+		case <-stop:
+			return nil
+		case <-ticker.C:
+		}
+	}
 }
 
 // Subscribe and Unsubscribe succeed and change nothing: Gmail treats every
