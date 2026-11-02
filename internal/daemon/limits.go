@@ -188,7 +188,8 @@ func (s *Server) buildStore(acct config.ResolvedAccount) mailstore.Store {
 }
 
 // storeParams sizes acct's pool: pool from config, else from the stored
-// limit, else the preset default.
+// limit, else the preset default, less what the account's watchers need
+// (poolSize).
 func (s *Server) storeParams(acct config.ResolvedAccount) storeParams {
 	ctx, cancel := context.WithTimeout(context.Background(), auditTimeout)
 	defer cancel()
@@ -199,7 +200,7 @@ func (s *Server) storeParams(acct config.ResolvedAccount) storeParams {
 	case ok:
 		stored = &l
 	}
-	return s.paramsWithPool(acct, limits.PoolSize(acct.Pool, stored, acct.Provider.DefaultPool))
+	return s.paramsWithPool(acct, s.poolSize(acct, stored))
 }
 
 // buildSized builds acct's store with a pool of poolSize, which a probe
@@ -214,6 +215,42 @@ func (s *Server) paramsWithPool(acct config.ResolvedAccount, poolSize int) store
 		poolSize:    poolSize,
 		onConnLimit: func(newMax int) { s.recordConnLimit(acct.Name, newMax) },
 	}
+}
+
+// poolSize sizes acct's pool with limits.PoolSize, from config, the stored
+// limit or the preset, then fits it into the connection budget the
+// account's watchers leave (watchBudget). Every store the daemon builds or
+// a probe installs is sized here.
+func (s *Server) poolSize(acct config.ResolvedAccount, stored *limits.Limit) int {
+	pool := limits.PoolSize(acct.Pool, stored, acct.Provider.DefaultPool)
+	return watchBudget(pool, acct, stored, !s.opts.DisableWatch)
+}
+
+// watchBudget shrinks pool so that the account's watcher connections,
+// which are dialed outside the pool, fit under its connection cap with it.
+// The cap is the probed IMAPCap when one is stored, which counts watch
+// connections already, else the preset's MaxConnections. The watchers
+// never shrink, and the pool never drops below 1. A configured pool is
+// capped too: pool plus watchers above the server's cap would make logins
+// fail once every connection is in use, so config cannot ask for that. A
+// daemon that runs no supervisors (watching false) has no watchers to make
+// room for.
+func watchBudget(pool int, acct config.ResolvedAccount, stored *limits.Limit, watching bool) int {
+	watchers := 0
+	if watching {
+		watchers = acct.WatchCount()
+	}
+	if watchers == 0 {
+		return pool
+	}
+	connCap := acct.Provider.MaxConnections
+	if stored != nil {
+		connCap = stored.IMAPCap
+	}
+	if connCap < 1 {
+		return pool
+	}
+	return min(pool, max(1, connCap-watchers))
 }
 
 // recordConnLimit stores a cap of newMax plus the reserved connections,
@@ -357,7 +394,7 @@ func (s *Server) probeLocked(ctx context.Context, acct config.ResolvedAccount, o
 	}
 	n += inUse()
 	l := limits.Limit{Account: acct.Name, IMAPCap: n, ProbedAt: s.opts.Now().UTC()}
-	pool := limits.PoolSize(acct.Pool, &l, acct.Provider.DefaultPool)
+	pool := s.poolSize(acct, &l)
 	if err := s.lim.store.Put(ctx, l); err != nil {
 		return err
 	}

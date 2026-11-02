@@ -129,8 +129,18 @@ func newLimitsServer(t *testing.T, mk func(config.ResolvedAccount) mailstore.Sto
 	return newLimitsServerWith(t, limitsConfig, mk)
 }
 
-// newLimitsServerWith is newLimitsServer with the config text given.
+// newLimitsServerWith is newLimitsServer with the config text given. It
+// runs with DisableWatch, so the pools these tests expect come from the
+// probe, the config and the preset alone. watchBudget has its own tests.
 func newLimitsServerWith(t *testing.T, cfgText string, mk func(config.ResolvedAccount) mailstore.Store) (*Server, *buildLog) {
+	t.Helper()
+	return newLimitsServerWatch(t, cfgText, mk, false)
+}
+
+// newLimitsServerWatch is newLimitsServerWith with watching on or off.
+// With watching on, pools leave room for the accounts' watcher connections.
+// The server is never served, so no supervisor runs either way.
+func newLimitsServerWatch(t *testing.T, cfgText string, mk func(config.ResolvedAccount) mailstore.Store, watching bool) (*Server, *buildLog) {
 	t.Helper()
 	cfg, err := config.Parse([]byte(cfgText))
 	if err != nil {
@@ -156,12 +166,13 @@ func newLimitsServerWith(t *testing.T, cfgText string, mk func(config.ResolvedAc
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	s, err := New(Options{
-		Config:     cfg,
-		Vault:      v,
-		StateDB:    stateDB,
-		Listener:   ln,
-		Authorizer: NewAuthorizer(uint32(os.Getuid()), -1),
-		Now:        func() time.Time { return limitsNow },
+		Config:       cfg,
+		Vault:        v,
+		StateDB:      stateDB,
+		Listener:     ln,
+		Authorizer:   NewAuthorizer(uint32(os.Getuid()), -1),
+		Now:          func() time.Time { return limitsNow },
+		DisableWatch: !watching,
 	})
 	if err != nil {
 		t.Fatal(err)
