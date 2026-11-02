@@ -382,3 +382,142 @@ func (l *Log) Wait(ctx context.Context, after int64) error {
 		}
 	}
 }
+
+// Group returns the group's acknowledged ID, creating the group at Tail
+// when it does not exist, and stamps last_seen_at.
+func (l *Log) Group(ctx context.Context, name string) (acked int64, created bool, err error) {
+	if !ValidGroupName(name) {
+		return 0, false, fmt.Errorf("watch: invalid group name %q", name)
+	}
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, fmt.Errorf("watch: beginning group %s: %w", name, err)
+	}
+	defer func() { _ = tx.Rollback() }() // a no-op after Commit; an earlier error is the one to report
+
+	now := formatTime(l.now())
+	err = tx.QueryRowContext(ctx, "SELECT acked_id FROM event_groups WHERE name = ?", name).Scan(&acked)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		if acked, err = tailOf(ctx, tx); err != nil {
+			return 0, false, err
+		}
+		created = true
+		_, err = tx.ExecContext(ctx,
+			"INSERT INTO event_groups (name, acked_id, created_at, last_seen_at) VALUES (?, ?, ?, ?)",
+			name, acked, now, now)
+	case err == nil:
+		_, err = tx.ExecContext(ctx, "UPDATE event_groups SET last_seen_at = ? WHERE name = ?", now, name)
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("watch: group %s: %w", name, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, fmt.Errorf("watch: committing group %s: %w", name, err)
+	}
+	return acked, created, nil
+}
+
+// Ack raises the group's acknowledged ID to id. It never lowers it, and
+// never raises it above Tail. An unknown group is created. Ack stamps
+// last_seen_at.
+func (l *Log) Ack(ctx context.Context, name string, id int64) error {
+	if !ValidGroupName(name) {
+		return fmt.Errorf("watch: invalid group name %q", name)
+	}
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("watch: beginning ack for %s: %w", name, err)
+	}
+	defer func() { _ = tx.Rollback() }() // a no-op after Commit; an earlier error is the one to report
+
+	tail, err := tailOf(ctx, tx)
+	if err != nil {
+		return err
+	}
+	id = max(0, min(id, tail))
+	now := formatTime(l.now())
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO event_groups (name, acked_id, created_at, last_seen_at) VALUES (?, ?, ?, ?)
+		 ON CONFLICT (name) DO UPDATE SET acked_id = max(acked_id, excluded.acked_id), last_seen_at = excluded.last_seen_at`,
+		name, id, now, now)
+	if err != nil {
+		return fmt.Errorf("watch: acknowledging %s: %w", name, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("watch: committing ack for %s: %w", name, err)
+	}
+	return nil
+}
+
+// Groups lists every group by name, with its lag in retained events.
+func (l *Log) Groups(ctx context.Context) ([]GroupInfo, error) {
+	rows, err := l.db.QueryContext(ctx,
+		`SELECT g.name, g.acked_id, g.created_at, g.last_seen_at,
+		        (SELECT count(*) FROM events e WHERE e.id > g.acked_id)
+		 FROM event_groups g ORDER BY g.name`)
+	if err != nil {
+		return nil, fmt.Errorf("watch: listing groups: %w", err)
+	}
+	defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
+	type row struct {
+		info              GroupInfo
+		created, lastSeen string
+	}
+	var raw []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.info.Name, &r.info.AckedID, &r.created, &r.lastSeen, &r.info.Lag); err != nil {
+			return nil, fmt.Errorf("watch: listing groups: %w", err)
+		}
+		raw = append(raw, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("watch: listing groups: %w", err)
+	}
+	out := make([]GroupInfo, 0, len(raw))
+	for _, r := range raw {
+		if r.info.CreatedAt, err = parseTime(r.created); err != nil {
+			return nil, fmt.Errorf("watch: group %s: %w", r.info.Name, err)
+		}
+		if r.info.LastSeenAt, err = parseTime(r.lastSeen); err != nil {
+			return nil, fmt.Errorf("watch: group %s: %w", r.info.Name, err)
+		}
+		out = append(out, r.info)
+	}
+	return out, nil
+}
+
+// DeleteGroup reports whether the group existed.
+func (l *Log) DeleteGroup(ctx context.Context, name string) (bool, error) {
+	res, err := l.db.ExecContext(ctx, "DELETE FROM event_groups WHERE name = ?", name)
+	if err != nil {
+		return false, fmt.Errorf("watch: deleting group %s: %w", name, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("watch: deleting group %s: %w", name, err)
+	}
+	return n > 0, nil
+}
+
+// maxGroupName is the longest group name ValidGroupName accepts.
+const maxGroupName = 64
+
+// ValidGroupName reports whether name is a valid group name:
+// ^[a-z0-9][a-z0-9._-]{0,63}$
+func ValidGroupName(name string) bool {
+	if name == "" || len(name) > maxGroupName {
+		return false
+	}
+	for i := range len(name) {
+		c := name[i]
+		switch {
+		case 'a' <= c && c <= 'z', '0' <= c && c <= '9':
+		case i > 0 && (c == '.' || c == '_' || c == '-'):
+		default:
+			return false
+		}
+	}
+	return true
+}
