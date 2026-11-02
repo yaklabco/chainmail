@@ -173,3 +173,43 @@ func TestValidGroupName(t *testing.T) {
 		}
 	}
 }
+
+// TestResetGroup checks the recovery for a group left past the tail: it
+// sets the acknowledged ID to exactly id, lowering it if need be, stamps
+// last_seen_at, keeps created_at, creates an unknown group, and refuses an
+// invalid name or a negative id.
+func TestResetGroup(t *testing.T) {
+	t.Parallel()
+	l, conn, clock := newLog(t)
+	publish(t, l, newEvent("a", "INBOX", 1), newEvent("a", "INBOX", 2), newEvent("a", "INBOX", 3))
+	if _, _, err := l.Group(t.Context(), "bot"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(t.Context(), "UPDATE event_groups SET acked_id = 50 WHERE name = 'bot'"); err != nil {
+		t.Fatal(err)
+	}
+	clock.Set(t0.Add(time.Hour))
+	if err := l.ResetGroup(t.Context(), "bot", 2); err != nil {
+		t.Fatalf("ResetGroup(bot): %v", err)
+	}
+	if err := l.ResetGroup(t.Context(), "fresh", 1); err != nil {
+		t.Fatalf("ResetGroup(fresh): %v", err)
+	}
+	groups, err := l.Groups(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []GroupInfo{
+		{Name: "bot", AckedID: 2, Lag: 1, CreatedAt: t0, LastSeenAt: t0.Add(time.Hour)},
+		{Name: "fresh", AckedID: 1, Lag: 2, CreatedAt: t0.Add(time.Hour), LastSeenAt: t0.Add(time.Hour)},
+	}
+	if !reflect.DeepEqual(groups, want) {
+		t.Errorf("Groups =\n%+v\nwant\n%+v", groups, want)
+	}
+	if err := l.ResetGroup(t.Context(), "Bad Name", 1); err == nil {
+		t.Error("ResetGroup accepted an invalid name")
+	}
+	if err := l.ResetGroup(t.Context(), "bot", -1); err == nil {
+		t.Error("ResetGroup accepted a negative id")
+	}
+}

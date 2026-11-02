@@ -464,6 +464,31 @@ func (l *Log) Ack(ctx context.Context, name string, id int64) error {
 	return nil
 }
 
+// ResetGroup sets the group's acknowledged ID to exactly id and stamps
+// last_seen_at, creating the group when it does not exist. It is the
+// recovery for a group left acknowledged past the tail, as a reset of the
+// state database leaves one: such a group belongs to a log that no longer
+// exists. It is not an acknowledgement, so unlike Ack it can lower the ID,
+// and it does not cap id at Tail. One statement does it, so no reader ever
+// sees the group missing or half reset.
+func (l *Log) ResetGroup(ctx context.Context, name string, id int64) error {
+	if !ValidGroupName(name) {
+		return fmt.Errorf("watch: invalid group name %q", name)
+	}
+	if id < 0 {
+		return fmt.Errorf("watch: group %s reset to negative ID %d", name, id)
+	}
+	now := formatTime(l.now())
+	_, err := l.db.ExecContext(ctx,
+		`INSERT INTO event_groups (name, acked_id, created_at, last_seen_at) VALUES (?, ?, ?, ?)
+		 ON CONFLICT (name) DO UPDATE SET acked_id = excluded.acked_id, last_seen_at = excluded.last_seen_at`,
+		name, id, now, now)
+	if err != nil {
+		return fmt.Errorf("watch: resetting group %s: %w", name, err)
+	}
+	return nil
+}
+
 // Groups lists every group by name, with its lag in retained events.
 func (l *Log) Groups(ctx context.Context) ([]GroupInfo, error) {
 	rows, err := l.db.QueryContext(ctx,
