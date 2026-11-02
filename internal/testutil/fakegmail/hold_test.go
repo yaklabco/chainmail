@@ -18,7 +18,14 @@ func TestFakeGmailHoldReads(t *testing.T) {
 	held, release := s.HoldReads()
 	answered := make(chan error, 1)
 	var wg sync.WaitGroup
-	t.Cleanup(wg.Wait)
+	// A failed assertion below must not leave the NOOP held: release the
+	// hold and close the client, which ends the NOOP either way, before
+	// joining its goroutine.
+	t.Cleanup(func() {
+		release()
+		_ = c.Close() // the test is over; only ending the NOOP matters
+		wg.Wait()
+	})
 	wg.Go(func() { answered <- c.Noop().Wait() })
 	select {
 	case <-held:
