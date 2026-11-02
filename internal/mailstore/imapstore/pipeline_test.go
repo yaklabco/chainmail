@@ -69,6 +69,9 @@ type scriptServer struct {
 	// stallAfter, when set, makes a state FETCH go silent after answering
 	// for that many messages, until the client hangs up.
 	stallAfter int
+	// stallBeforeDone makes a state FETCH go silent after answering for
+	// every message, before the tagged OK, until the client hangs up.
+	stallBeforeDone bool
 
 	conns, searches, fetches atomic.Int32
 
@@ -482,7 +485,8 @@ func scriptMsgID(uid int) uint64 { return 1000 + uint64(uid) }
 // states streams the answer to a state FETCH, one with no body items: UID
 // for every message, with FLAGS and X-GM-MSGID when asked, each sent on its
 // own after stateDelay. With stallAfter set it goes silent after that many
-// messages and waits for the client to hang up. It reports whether the
+// messages, and with stallBeforeDone after the last one, before the tagged
+// OK, and waits for the client to hang up. It reports whether the
 // connection is still usable.
 //
 // It answers for every message whatever UID set and CHANGEDSINCE were asked
@@ -506,6 +510,10 @@ func (srv *scriptServer) states(tag, rest string, send func(string) bool, r *buf
 		if !send(fmt.Sprintf("* %d FETCH (%s)\r\n", uid, data)) {
 			return false
 		}
+	}
+	if srv.stallBeforeDone {
+		_, _ = io.Copy(io.Discard, r) // silent until the client hangs up; its error is that hang-up
+		return false
 	}
 	return send(tag + " OK done\r\n")
 }

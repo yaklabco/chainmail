@@ -1,9 +1,11 @@
 package imapstore
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -161,23 +163,32 @@ func TestWatchStateItems(t *testing.T) {
 	}
 }
 
-// syncWithin runs sync and fails the test if it is still running after
-// limit.
-func syncWithin(t *testing.T, limit time.Duration, sync func() (mailstore.Delta, error)) (mailstore.Delta, error) {
+// syncWithin runs run on a worker it joins before returning, and fails the
+// test if run is still running after limit. On timeout it cancels run's
+// context and calls abort, which must unblock run even if cancelling does
+// not, then waits for the worker before reporting the failure.
+func syncWithin(t *testing.T, limit time.Duration, abort func(), run func(context.Context) (mailstore.Delta, error)) (mailstore.Delta, error) {
 	t.Helper()
-	type result struct {
-		d   mailstore.Delta
-		err error
-	}
-	got := make(chan result, 1)
-	go func() {
-		d, err := sync()
-		got <- result{d, err}
-	}()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var (
+		d    mailstore.Delta
+		err  error
+		wg   sync.WaitGroup
+		done = make(chan struct{})
+	)
+	wg.Go(func() {
+		defer close(done)
+		d, err = run(ctx)
+	})
 	select {
-	case r := <-got:
-		return r.d, r.err
+	case <-done:
+		wg.Wait()
+		return d, err
 	case <-time.After(limit):
+		cancel()
+		abort()
+		wg.Wait()
 		t.Fatalf("sync still running after %v", limit)
 		return mailstore.Delta{}, nil
 	}
@@ -214,16 +225,18 @@ func TestWatchStateFetchOutlastsCommandTimeout(t *testing.T) {
 				Options{RootCAs: srv.ca.Pool, Backoff: noBackoff, CommandTimeout: timeout, Retries: -1})
 			t.Cleanup(func() { _ = s.Close() })
 			req := mailstore.SyncRequest{From: tc.from}
-			sync := func() (mailstore.Delta, error) { return s.SyncFolder(t.Context(), "INBOX", req) }
+			abort := func() { _ = s.Close() }
+			run := func(ctx context.Context) (mailstore.Delta, error) { return s.SyncFolder(ctx, "INBOX", req) }
 			if tc.watch {
 				w, err := s.OpenWatch(t.Context(), "INBOX")
 				if err != nil {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { _ = w.Close() })
-				sync = func() (mailstore.Delta, error) { return w.Sync(t.Context(), req) }
+				abort = func() { _ = w.Close() }
+				run = func(ctx context.Context) (mailstore.Delta, error) { return w.Sync(ctx, req) }
 			}
-			d, err := syncWithin(t, 5*time.Second, sync)
+			d, err := syncWithin(t, 5*time.Second, abort, run)
 			if err != nil {
 				t.Fatalf("sync: %v", err)
 			}
@@ -248,27 +261,38 @@ func TestWatchStateFetchOutlastsCommandTimeout(t *testing.T) {
 	}
 }
 
-// TestWatchStateFetchStallTimesOut checks a server that goes silent midway
-// through a state FETCH still runs into the command timeout, and the watch
+// TestWatchStateFetchStallTimesOut checks a server that goes silent during
+// a state FETCH, midway through the messages or after the last one and
+// before the tagged OK, still runs into the command timeout, and the watch
 // connection reports the account unavailable.
 func TestWatchStateFetchStallTimesOut(t *testing.T) {
 	t.Parallel()
 	const timeout = 400 * time.Millisecond
-	srv := startScriptServer(t, &scriptServer{n: 10, condstore: true, stallAfter: 3})
-	s := New(testAccount("host", srv.ep, true), passwordCreds("host@example.test", "pw"),
-		Options{RootCAs: srv.ca.Pool, Backoff: noBackoff, CommandTimeout: timeout, Retries: -1})
-	t.Cleanup(func() { _ = s.Close() })
-	w, err := s.OpenWatch(t.Context(), "INBOX")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = w.Close() })
-	start := time.Now()
-	_, err = syncWithin(t, 5*time.Second, func() (mailstore.Delta, error) { return w.Sync(t.Context(), mailstore.SyncRequest{}) })
-	if !errors.Is(err, mailstore.ErrUnavailable) || !errors.Is(err, errCommandTimeout) {
-		t.Errorf("Sync = %v, want ErrUnavailable from the command timeout", err)
-	}
-	if elapsed := time.Since(start); elapsed > 10*timeout {
-		t.Errorf("Sync took %v with a %v command timeout", elapsed, timeout)
+	for name, srv := range map[string]*scriptServer{
+		"midway":           {n: 10, condstore: true, stallAfter: 3},
+		"before tagged OK": {n: 10, condstore: true, stallBeforeDone: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			startScriptServer(t, srv)
+			s := New(testAccount("host", srv.ep, true), passwordCreds("host@example.test", "pw"),
+				Options{RootCAs: srv.ca.Pool, Backoff: noBackoff, CommandTimeout: timeout, Retries: -1})
+			t.Cleanup(func() { _ = s.Close() })
+			w, err := s.OpenWatch(t.Context(), "INBOX")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = w.Close() })
+			start := time.Now()
+			_, err = syncWithin(t, 5*time.Second, func() { _ = w.Close() }, func(ctx context.Context) (mailstore.Delta, error) {
+				return w.Sync(ctx, mailstore.SyncRequest{})
+			})
+			if !errors.Is(err, mailstore.ErrUnavailable) || !errors.Is(err, errCommandTimeout) {
+				t.Errorf("Sync = %v, want ErrUnavailable from the command timeout", err)
+			}
+			if elapsed := time.Since(start); elapsed > 10*timeout {
+				t.Errorf("Sync took %v with a %v command timeout", elapsed, timeout)
+			}
+		})
 	}
 }
