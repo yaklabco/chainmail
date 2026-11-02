@@ -190,7 +190,7 @@ func (w *watcher) run(ctx context.Context) error {
 	attempt := 0
 	for {
 		got, err := w.session(ctx)
-		if signalled(ctx) {
+		if ctx.Err() != nil {
 			return nil // a signal ended the watch, as it ends mcp
 		}
 		if errors.Is(err, errWatchOnce) {
@@ -243,16 +243,6 @@ func watchBackoff(n int) time.Duration {
 		}
 	}
 	return d
-}
-
-// signalled reports whether ctx has ended, as a signal ends it.
-func signalled(ctx context.Context) bool {
-	select {
-	case <-ctx.Done():
-		return true
-	default:
-		return false
-	}
 }
 
 // request is the SubscribeRequest for the next stream: the group, else
