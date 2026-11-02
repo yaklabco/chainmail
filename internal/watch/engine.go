@@ -38,7 +38,9 @@ type EngineOptions struct {
 	// Snippet renders a summary's snippet: the daemon passes the function
 	// search rows use. Nil means no snippets.
 	Snippet func(mailstore.Summary) string
-	// Batch caps new messages per transaction. 0 means mailstore.DefaultSyncBatch.
+	// Batch caps new messages per transaction. 0 or less means
+	// mailstore.DefaultSyncBatch, which is also the most it may be: a larger
+	// value is lowered to it.
 	Batch int
 }
 
@@ -72,7 +74,7 @@ func NewEngine(db *sql.DB, log *Log, state *State, opts EngineOptions) *Engine {
 	if e.now == nil {
 		e.now = time.Now
 	}
-	if e.batch <= 0 {
+	if e.batch <= 0 || e.batch > mailstore.DefaultSyncBatch {
 		e.batch = mailstore.DefaultSyncBatch
 	}
 	return e

@@ -368,20 +368,52 @@ func TestPassFailureLeavesStateUntouched(t *testing.T) {
 	}
 }
 
-// A committed pass wakes a reader blocked in Wait.
+// A committed pass wakes a reader blocked in Wait through Notify, not
+// because Wait happened to read the log after the commit.
 func TestPassWakesWaiters(t *testing.T) {
 	t.Parallel()
 	h := newEngineHarness(t, watch.EngineOptions{})
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
+
+	// Hold state.db's one connection, so the waiter's first Tail queues
+	// for it. Wait takes its wake channel before that Tail, and the
+	// connection goes to the queued Tail ahead of the pass, so the waiter
+	// sees an empty log: only the pass's Notify can wake it.
+	hold, err := h.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	queued := h.db.Stats().WaitCount
 	woke := make(chan error, 1)
 	var wg sync.WaitGroup
 	wg.Go(func() { woke <- h.log.Wait(ctx, 0) })
+	defer func() {
+		cancel() // a failed step must not leave Wait blocked until the timeout
+		wg.Wait()
+	}()
+	engineAwaitConnQueue(ctx, t, h.db, queued+1)
+	if err := hold.Close(); err != nil {
+		t.Fatalf("releasing the connection: %v", err)
+	}
+
 	h.pass(t, &scriptSource{results: []scriptResult{{delta: baselineDelta(1)}}}, watch.PassOptions{Mode: "idle"})
 	if err := <-woke; err != nil {
-		t.Errorf("Wait = %v, want it woken by the pass's commit", err)
+		t.Errorf("Wait = %v, want it woken by the pass's Notify", err)
 	}
-	wg.Wait()
+}
+
+// engineAwaitConnQueue polls until db has queued want requests for a
+// connection in total, or ctx ends.
+func engineAwaitConnQueue(ctx context.Context, t *testing.T, db *sql.DB, want int64) {
+	t.Helper()
+	for db.Stats().WaitCount < want {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("connection queue never reached %d: %v", want, ctx.Err())
+		case <-time.After(time.Millisecond):
+		}
+	}
 }
 
 // Pass holds no transaction while the source runs: state.db has one
@@ -513,5 +545,33 @@ func TestPassRerunAfterFailedCommitEmitsEachEventOnce(t *testing.T) {
 	}
 	if got := h.uids(t); !slices.Equal(got, []uint32{1, 2, 3, 4, 5, 6, 7}) {
 		t.Errorf("known UIDs = %v, want 1 to 7", got)
+	}
+}
+
+// The batch reaching the source never exceeds the 500 messages one
+// transaction may hold, whatever EngineOptions.Batch says.
+func TestPassCapsBatch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		batch int
+		want  int
+	}{
+		{name: "oversized", batch: mailstore.DefaultSyncBatch + 1, want: mailstore.DefaultSyncBatch},
+		{name: "at the cap", batch: mailstore.DefaultSyncBatch, want: mailstore.DefaultSyncBatch},
+		{name: "below the cap", batch: 2, want: 2},
+		{name: "zero", batch: 0, want: mailstore.DefaultSyncBatch},
+		{name: "negative", batch: -1, want: mailstore.DefaultSyncBatch},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newEngineHarness(t, watch.EngineOptions{Batch: tt.batch})
+			src := &scriptSource{results: []scriptResult{{delta: baselineDelta(1)}}}
+			h.pass(t, src, watch.PassOptions{Mode: "idle"})
+			if got := src.reqs[0].Batch; got != tt.want {
+				t.Errorf("SyncRequest.Batch = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
