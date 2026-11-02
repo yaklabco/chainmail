@@ -340,7 +340,9 @@ type GetStatusResponse struct {
 	StartedAt *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
 	DevMode   bool                   `protobuf:"varint,3,opt,name=dev_mode,json=devMode,proto3" json:"dev_mode,omitempty"`
 	// Names of stored secrets. Values are never returned.
-	SecretNames   []string `protobuf:"bytes,4,rep,name=secret_names,json=secretNames,proto3" json:"secret_names,omitempty"`
+	SecretNames []string `protobuf:"bytes,4,rep,name=secret_names,json=secretNames,proto3" json:"secret_names,omitempty"`
+	// Sync state of each synced folder, as GetWatchStatus reports it.
+	Sync          []*FolderSyncStatus `protobuf:"bytes,5,rep,name=sync,proto3" json:"sync,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -399,6 +401,13 @@ func (x *GetStatusResponse) GetDevMode() bool {
 func (x *GetStatusResponse) GetSecretNames() []string {
 	if x != nil {
 		return x.SecretNames
+	}
+	return nil
+}
+
+func (x *GetStatusResponse) GetSync() []*FolderSyncStatus {
+	if x != nil {
+		return x.Sync
 	}
 	return nil
 }
@@ -654,7 +663,7 @@ var File_chainmail_v1_admin_proto protoreflect.FileDescriptor
 
 const file_chainmail_v1_admin_proto_rawDesc = "" +
 	"\n" +
-	"\x18chainmail/v1/admin.proto\x12\fchainmail.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"A\n" +
+	"\x18chainmail/v1/admin.proto\x12\fchainmail.v1\x1a\x18chainmail/v1/watch.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"A\n" +
 	"\x10SetSecretRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x19\n" +
 	"\x05value\x18\x02 \x01(\fB\x03\x80\x01\x01R\x05value\"\x13\n" +
@@ -670,13 +679,14 @@ const file_chainmail_v1_admin_proto_rawDesc = "" +
 	"\aaccount\x18\x01 \x01(\tR\aaccount\x12&\n" +
 	"\fredirect_url\x18\x02 \x01(\tB\x03\x80\x01\x01R\vredirectUrl\"\x19\n" +
 	"\x17FinishAuthLoginResponse\"\x12\n" +
-	"\x10GetStatusRequest\"\xa6\x01\n" +
+	"\x10GetStatusRequest\"\xda\x01\n" +
 	"\x11GetStatusResponse\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\tR\aversion\x129\n" +
 	"\n" +
 	"started_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12\x19\n" +
 	"\bdev_mode\x18\x03 \x01(\bR\adevMode\x12!\n" +
-	"\fsecret_names\x18\x04 \x03(\tR\vsecretNames\"\xa9\x01\n" +
+	"\fsecret_names\x18\x04 \x03(\tR\vsecretNames\x122\n" +
+	"\x04sync\x18\x05 \x03(\v2\x1e.chainmail.v1.FolderSyncStatusR\x04sync\"\xa9\x01\n" +
 	"\x10ReadAuditRequest\x120\n" +
 	"\x05since\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x05since\x12\x18\n" +
 	"\aaccount\x18\x02 \x01(\tR\aaccount\x12\x16\n" +
@@ -735,28 +745,30 @@ var file_chainmail_v1_admin_proto_goTypes = []any{
 	(*ReadAuditResponse)(nil),       // 9: chainmail.v1.ReadAuditResponse
 	(*AuditEntry)(nil),              // 10: chainmail.v1.AuditEntry
 	(*timestamppb.Timestamp)(nil),   // 11: google.protobuf.Timestamp
+	(*FolderSyncStatus)(nil),        // 12: chainmail.v1.FolderSyncStatus
 }
 var file_chainmail_v1_admin_proto_depIdxs = []int32{
 	11, // 0: chainmail.v1.BeginAuthLoginResponse.expires_at:type_name -> google.protobuf.Timestamp
 	11, // 1: chainmail.v1.GetStatusResponse.started_at:type_name -> google.protobuf.Timestamp
-	11, // 2: chainmail.v1.ReadAuditRequest.since:type_name -> google.protobuf.Timestamp
-	10, // 3: chainmail.v1.ReadAuditResponse.entries:type_name -> chainmail.v1.AuditEntry
-	11, // 4: chainmail.v1.AuditEntry.at:type_name -> google.protobuf.Timestamp
-	0,  // 5: chainmail.v1.AdminService.SetSecret:input_type -> chainmail.v1.SetSecretRequest
-	2,  // 6: chainmail.v1.AdminService.BeginAuthLogin:input_type -> chainmail.v1.BeginAuthLoginRequest
-	4,  // 7: chainmail.v1.AdminService.FinishAuthLogin:input_type -> chainmail.v1.FinishAuthLoginRequest
-	6,  // 8: chainmail.v1.AdminService.GetStatus:input_type -> chainmail.v1.GetStatusRequest
-	8,  // 9: chainmail.v1.AdminService.ReadAudit:input_type -> chainmail.v1.ReadAuditRequest
-	1,  // 10: chainmail.v1.AdminService.SetSecret:output_type -> chainmail.v1.SetSecretResponse
-	3,  // 11: chainmail.v1.AdminService.BeginAuthLogin:output_type -> chainmail.v1.BeginAuthLoginResponse
-	5,  // 12: chainmail.v1.AdminService.FinishAuthLogin:output_type -> chainmail.v1.FinishAuthLoginResponse
-	7,  // 13: chainmail.v1.AdminService.GetStatus:output_type -> chainmail.v1.GetStatusResponse
-	9,  // 14: chainmail.v1.AdminService.ReadAudit:output_type -> chainmail.v1.ReadAuditResponse
-	10, // [10:15] is the sub-list for method output_type
-	5,  // [5:10] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	12, // 2: chainmail.v1.GetStatusResponse.sync:type_name -> chainmail.v1.FolderSyncStatus
+	11, // 3: chainmail.v1.ReadAuditRequest.since:type_name -> google.protobuf.Timestamp
+	10, // 4: chainmail.v1.ReadAuditResponse.entries:type_name -> chainmail.v1.AuditEntry
+	11, // 5: chainmail.v1.AuditEntry.at:type_name -> google.protobuf.Timestamp
+	0,  // 6: chainmail.v1.AdminService.SetSecret:input_type -> chainmail.v1.SetSecretRequest
+	2,  // 7: chainmail.v1.AdminService.BeginAuthLogin:input_type -> chainmail.v1.BeginAuthLoginRequest
+	4,  // 8: chainmail.v1.AdminService.FinishAuthLogin:input_type -> chainmail.v1.FinishAuthLoginRequest
+	6,  // 9: chainmail.v1.AdminService.GetStatus:input_type -> chainmail.v1.GetStatusRequest
+	8,  // 10: chainmail.v1.AdminService.ReadAudit:input_type -> chainmail.v1.ReadAuditRequest
+	1,  // 11: chainmail.v1.AdminService.SetSecret:output_type -> chainmail.v1.SetSecretResponse
+	3,  // 12: chainmail.v1.AdminService.BeginAuthLogin:output_type -> chainmail.v1.BeginAuthLoginResponse
+	5,  // 13: chainmail.v1.AdminService.FinishAuthLogin:output_type -> chainmail.v1.FinishAuthLoginResponse
+	7,  // 14: chainmail.v1.AdminService.GetStatus:output_type -> chainmail.v1.GetStatusResponse
+	9,  // 15: chainmail.v1.AdminService.ReadAudit:output_type -> chainmail.v1.ReadAuditResponse
+	11, // [11:16] is the sub-list for method output_type
+	6,  // [6:11] is the sub-list for method input_type
+	6,  // [6:6] is the sub-list for extension type_name
+	6,  // [6:6] is the sub-list for extension extendee
+	0,  // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_chainmail_v1_admin_proto_init() }
@@ -764,6 +776,7 @@ func file_chainmail_v1_admin_proto_init() {
 	if File_chainmail_v1_admin_proto != nil {
 		return
 	}
+	file_chainmail_v1_watch_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

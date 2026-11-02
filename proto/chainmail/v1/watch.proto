@@ -1,0 +1,156 @@
+syntax = "proto3";
+
+package chainmail.v1;
+
+import "chainmail/v1/message.proto";
+import "google/protobuf/timestamp.proto";
+
+// WatchFilter selects events. Empty fields match everything. Status and gap
+// events pass a kinds filter unless kinds names them.
+message WatchFilter {
+  repeated string accounts = 1;
+  // new, flags, expunged, status, gap
+  repeated string kinds = 2;
+  // A folder name or label. inbox also matches the Gmail label \Inbox.
+  string in = 3;
+}
+
+// WatchEvent is one event. Which fields are set depends on kind.
+message WatchEvent {
+  // 0 for a trimmed gap, which is generated at read time.
+  int64 id = 1;
+  google.protobuf.Timestamp at = 2;
+  // new, flags, expunged, status or gap.
+  string kind = 3;
+  string account = 4;
+  string folder = 5;
+  string ref = 6;
+  // new: the search row summary of the message.
+  MessageRow message = 7;
+  // flags: current system flags and keywords.
+  repeated string flags = 8;
+  // flags: current Gmail labels.
+  repeated string labels = 9;
+  // status: baselined, catching_up, watching, polling, reconnecting,
+  // auth_required or error.
+  string state = 10;
+  // status: what to do, such as the command to run.
+  string detail = 11;
+  // gap: uidvalidity or trimmed.
+  string reason = 12;
+  // gap: the next event ID to read from.
+  int64 next_id = 13;
+}
+
+// SubscribeRequest starts a stream. Set at most one of group and since.
+// Neither streams events from now on.
+message SubscribeRequest {
+  // Resume after the group's acknowledged event. A new group starts now.
+  string group = 1;
+  // Resume after this event ID.
+  optional int64 since = 2;
+  WatchFilter filter = 3;
+}
+
+// Heartbeat proves the stream is alive and reports its position. The
+// daemon sends one as soon as it has sent every event already in the log
+// (so a client knows it has caught up), then every 30 seconds while idle.
+message Heartbeat {
+  google.protobuf.Timestamp at = 1;
+  // Every event with an ID up to position has been sent or filtered out.
+  // A live client resumes with since = position; a group client may
+  // acknowledge it.
+  int64 position = 2;
+}
+
+message SubscribeResponse {
+  oneof item {
+    WatchEvent event = 1;
+    Heartbeat heartbeat = 2;
+  }
+}
+
+// ReadEventsRequest reads one page. Set at most one of group and cursor.
+// Neither returns only events that arrive during the wait.
+message ReadEventsRequest {
+  // Read after the group's acknowledged event, and acknowledge what is
+  // returned.
+  string group = 1;
+  optional int64 cursor = 2;
+  WatchFilter filter = 3;
+  // 0 to 60. 0 returns at once.
+  int32 wait_seconds = 4;
+  // 1 to 200. 0 means 50.
+  int32 limit = 5;
+}
+
+message ReadEventsResponse {
+  repeated WatchEvent events = 1;
+  // Pass as cursor to continue.
+  int64 next_cursor = 2;
+}
+
+// AckRequest raises a group's acknowledged event. It never lowers it.
+message AckRequest {
+  string group = 1;
+  int64 id = 2;
+}
+
+message AckResponse {}
+
+message GetWatchStatusRequest {}
+
+// FolderSyncStatus is one synced folder.
+message FolderSyncStatus {
+  string account = 1;
+  string folder = 2;
+  // idle or poll.
+  string mode = 3;
+  // The last status state.
+  string state = 4;
+  bool condstore = 5;
+  google.protobuf.Timestamp last_sync_at = 6;
+  google.protobuf.Timestamp last_sweep_at = 7;
+  // An error reason such as FOLDER_NOT_FOUND. Empty when healthy.
+  string last_error = 8;
+}
+
+message GetWatchStatusResponse {
+  repeated FolderSyncStatus folders = 1;
+}
+
+message ListGroupsRequest {}
+
+message GroupStatus {
+  string name = 1;
+  int64 acked_id = 2;
+  int64 lag = 3;
+  google.protobuf.Timestamp created_at = 4;
+  google.protobuf.Timestamp last_seen_at = 5;
+}
+
+message ListGroupsResponse {
+  repeated GroupStatus groups = 1;
+}
+
+message DeleteGroupRequest {
+  string name = 1;
+}
+
+message DeleteGroupResponse {
+  bool deleted = 1;
+}
+
+// WatchService delivers mail events from the daemon's durable event log.
+service WatchService {
+  // Subscribe streams events, with a heartbeat every 30 seconds.
+  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+  // ReadEvents returns one page, waiting up to wait_seconds for the first event.
+  rpc ReadEvents(ReadEventsRequest) returns (ReadEventsResponse);
+  // Ack raises a group's acknowledged event. It is not audited.
+  rpc Ack(AckRequest) returns (AckResponse);
+  // GetWatchStatus reports each synced folder. It is not audited.
+  rpc GetWatchStatus(GetWatchStatusRequest) returns (GetWatchStatusResponse);
+  rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
+  rpc DeleteGroup(DeleteGroupRequest) returns (DeleteGroupResponse);
+}
