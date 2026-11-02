@@ -16,6 +16,7 @@ import (
 
 	"github.com/jamesainslie/chainmail/internal/db"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/ref"
 	"github.com/jamesainslie/chainmail/internal/watch"
 )
 
@@ -399,4 +400,118 @@ func TestPassHoldsNoTransactionAcrossSync(t *testing.T) {
 		},
 	}
 	h.pass(t, src, watch.PassOptions{Mode: "idle"})
+}
+
+// folderSource is a CONDSTORE INBOX at UIDVALIDITY 7 that answers sync
+// requests as C1 describes, for new mail and sweeps (its flags never change).
+type folderSource struct {
+	uids []uint32
+	reqs []mailstore.SyncRequest
+}
+
+// add delivers n messages.
+func (f *folderSource) add(n int) {
+	for range n {
+		f.uids = append(f.uids, uint32(len(f.uids)+1))
+	}
+}
+
+func (f *folderSource) Sync(_ context.Context, req mailstore.SyncRequest) (mailstore.Delta, error) {
+	f.reqs = append(f.reqs, req)
+	d := mailstore.Delta{State: diffState(uint32(len(f.uids)+1), 10, true)}
+	if req.From == (mailstore.Checkpoint{}) || req.From.UIDValidity != d.State.UIDValidity {
+		d.Rebased = true
+		d.UIDs = slices.Clone(f.uids)
+		return d, nil
+	}
+	batch := req.Batch
+	if batch == 0 {
+		batch = mailstore.DefaultSyncBatch
+	}
+	for _, uid := range f.uids {
+		if uid < req.From.UIDNext {
+			continue
+		}
+		if len(d.New) == batch {
+			d.More = true
+			break
+		}
+		d.New = append(d.New, diffSummary(uid, 0))
+	}
+	if req.Sweep {
+		d.UIDs = slices.Clone(f.uids)
+	}
+	return d, nil
+}
+
+// newUIDs lists the UIDs of the new events, in log order.
+func newUIDs(t *testing.T, events []watch.Event) []uint32 {
+	t.Helper()
+	var uids []uint32
+	for _, e := range events {
+		if e.Kind != watch.KindNew {
+			continue
+		}
+		r, err := ref.Parse(e.Ref)
+		if err != nil {
+			t.Fatalf("new event ref %q: %v", e.Ref, err)
+		}
+		uids = append(uids, r.UID)
+	}
+	return uids
+}
+
+// A commit that fails part way through a catch-up keeps the batches before
+// it and loses the failed one whole. Running Pass again then emits every
+// message exactly once overall.
+func TestPassRerunAfterFailedCommitEmitsEachEventOnce(t *testing.T) {
+	t.Parallel()
+	h := newEngineHarness(t, watch.EngineOptions{Batch: 2})
+	src := &folderSource{}
+	src.add(2)
+	h.pass(t, src, watch.PassOptions{Mode: "idle"}) // baseline: UIDs 1 and 2
+	src.add(5)                                      // UIDs 3 to 7 arrive
+
+	errCrash := errors.New("disk I/O error")
+	commits := 0
+	watch.SetCommit(h.engine, func(tx *sql.Tx) error {
+		commits++
+		if commits == 2 {
+			_ = tx.Rollback() // the crash: this batch never lands
+			return errCrash
+		}
+		return tx.Commit()
+	})
+	res, err := h.engine.Pass(t.Context(), "host", "INBOX", src, watch.PassOptions{Mode: "idle"})
+	if !errors.Is(err, errCrash) {
+		t.Fatalf("Pass err = %v, want %v", err, errCrash)
+	}
+	if want := (watch.PassResult{Events: 2, CondStore: true, Batches: 1}); res != want {
+		t.Errorf("failed Pass = %+v, want the first batch only: %+v", res, want)
+	}
+	if got := newUIDs(t, h.events(t)); !slices.Equal(got, []uint32{3, 4}) {
+		t.Errorf("after the failure, new UIDs = %v, want [3 4]", got)
+	}
+	if row := h.row(t); row.UIDNext != 5 {
+		t.Errorf("after the failure, UIDNEXT = %d, want 5 (the last committed batch)", row.UIDNext)
+	}
+
+	watch.SetCommit(h.engine, (*sql.Tx).Commit)
+	src.reqs = nil
+	res = h.pass(t, src, watch.PassOptions{Mode: "idle"})
+	if want := (watch.PassResult{Events: 3, CondStore: true, Batches: 2}); res != want {
+		t.Errorf("rerun = %+v, want %+v", res, want)
+	}
+	if got := src.reqs[0].From.UIDNext; got != 5 {
+		t.Errorf("rerun started at UIDNEXT %d, want 5", got)
+	}
+	if got := newUIDs(t, h.events(t)); !slices.Equal(got, []uint32{3, 4, 5, 6, 7}) {
+		t.Errorf("new UIDs = %v, want each of 3 to 7 exactly once", got)
+	}
+	if row := h.row(t); row.UIDNext != 8 {
+		t.Errorf("UIDNEXT = %d, want 8", row.UIDNext)
+	}
+	if got := h.uids(t); !slices.Equal(got, []uint32{1, 2, 3, 4, 5, 6, 7}) {
+		t.Errorf("known UIDs = %v, want 1 to 7", got)
+	}
 }

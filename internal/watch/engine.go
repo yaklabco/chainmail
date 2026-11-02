@@ -57,12 +57,18 @@ type Engine struct {
 	now     func() time.Time
 	snippet func(mailstore.Summary) string
 	batch   int
+	// commitTx commits a batch's transaction. Tests replace it to fail a
+	// commit the way a crash or a full disk would.
+	commitTx func(*sql.Tx) error
 }
 
 // NewEngine returns an Engine writing to db, which must hold the state
 // schema, through log and state.
 func NewEngine(db *sql.DB, log *Log, state *State, opts EngineOptions) *Engine {
-	e := &Engine{db: db, log: log, state: state, now: opts.Now, snippet: opts.Snippet, batch: opts.Batch}
+	e := &Engine{
+		db: db, log: log, state: state, now: opts.Now, snippet: opts.Snippet, batch: opts.Batch,
+		commitTx: (*sql.Tx).Commit,
+	}
 	if e.now == nil {
 		e.now = time.Now
 	}
@@ -190,7 +196,7 @@ func (e *Engine) commit(ctx context.Context, dr DiffResult) error {
 			return fmt.Errorf("storing known UIDs: %w", err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if err := e.commitTx(tx); err != nil {
 		return fmt.Errorf("committing sync batch: %w", err)
 	}
 	e.log.Notify()
