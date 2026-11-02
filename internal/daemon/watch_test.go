@@ -430,3 +430,127 @@ func TestSubscribeAudit(t *testing.T) {
 		}
 	}
 }
+
+func readEvents(t *testing.T, h *daemontest.Harness, req *chainmailv1.ReadEventsRequest) *chainmailv1.ReadEventsResponse {
+	t.Helper()
+	resp, err := h.Client.Watch.ReadEvents(t.Context(), connect.NewRequest(req))
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	return resp.Msg
+}
+
+// TestReadEventsPages checks the limit, its default of 50, the cursor, and
+// that a read with neither cursor nor group and no wait returns nothing,
+// with the tail as its cursor.
+func TestReadEventsPages(t *testing.T) {
+	t.Parallel()
+	h := startWatch(t, 0)
+	events := make([]watch.Event, 60)
+	for i := range events {
+		events[i] = watchNew("host", "INBOX", uint32(i+1), "m")
+	}
+	watchPublish(t, h, events...)
+	tests := []struct {
+		name              string
+		req               *chainmailv1.ReadEventsRequest
+		count             int
+		first, last, next int64
+	}{
+		{name: "limit", req: &chainmailv1.ReadEventsRequest{Cursor: proto.Int64(0), Limit: 2}, count: 2, first: 1, last: 2, next: 2},
+		{name: "default limit", req: &chainmailv1.ReadEventsRequest{Cursor: proto.Int64(0)}, count: 50, first: 1, last: 50, next: 50},
+		{name: "cursor", req: &chainmailv1.ReadEventsRequest{Cursor: proto.Int64(58)}, count: 2, first: 59, last: 60, next: 60},
+		{name: "live", req: &chainmailv1.ReadEventsRequest{}, count: 0, next: 60},
+	}
+	for _, tt := range tests {
+		resp := readEvents(t, h, tt.req)
+		ids := eventIDs(resp.GetEvents())
+		if len(ids) != tt.count || resp.GetNextCursor() != tt.next {
+			t.Errorf("%s: %d events, next %d; want %d, next %d", tt.name, len(ids), resp.GetNextCursor(), tt.count, tt.next)
+			continue
+		}
+		if tt.count > 0 && (ids[0] != tt.first || ids[len(ids)-1] != tt.last) {
+			t.Errorf("%s: ids %d to %d, want %d to %d", tt.name, ids[0], ids[len(ids)-1], tt.first, tt.last)
+		}
+	}
+}
+
+// TestReadEventsGroupAcknowledges checks that a group read starts after the
+// group's acknowledged event, a new group at the tail, and acknowledges the
+// page it returns.
+func TestReadEventsGroupAcknowledges(t *testing.T) {
+	t.Parallel()
+	h := startWatch(t, 0)
+	watchPublish(t, h, watchNew("host", "INBOX", 1, "a"), watchNew("host", "INBOX", 2, "b"), watchNew("host", "INBOX", 3, "c"))
+	if resp := readEvents(t, h, &chainmailv1.ReadEventsRequest{Group: "mcp"}); len(resp.GetEvents()) != 0 || resp.GetNextCursor() != 3 {
+		t.Fatalf("new group: %v, want nothing at 3", resp)
+	}
+	watchPublish(t, h, watchNew("host", "INBOX", 4, "d"), watchNew("host", "INBOX", 5, "e"))
+	resp := readEvents(t, h, &chainmailv1.ReadEventsRequest{Group: "mcp", Limit: 1})
+	if ids := eventIDs(resp.GetEvents()); !slices.Equal(ids, []int64{4}) || resp.GetNextCursor() != 4 {
+		t.Fatalf("group read: ids %v next %d, want [4] next 4", ids, resp.GetNextCursor())
+	}
+	groups, err := watchLog(h).Groups(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].Name != "mcp" || groups[0].AckedID != 4 || groups[0].Lag != 1 {
+		t.Errorf("groups = %+v, want mcp acked at 4 with lag 1", groups)
+	}
+	if ids := eventIDs(readEvents(t, h, &chainmailv1.ReadEventsRequest{Group: "mcp"}).GetEvents()); !slices.Equal(ids, []int64{5}) {
+		t.Errorf("next group read: ids %v, want [5]", ids)
+	}
+}
+
+func TestReadEventsRefusesBadArguments(t *testing.T) {
+	t.Parallel()
+	h := startWatch(t, 0)
+	tests := []struct {
+		name   string
+		req    *chainmailv1.ReadEventsRequest
+		reason string
+	}{
+		{name: "wait too long", req: &chainmailv1.ReadEventsRequest{WaitSeconds: 61}, reason: api.ReasonInvalidArgument},
+		{name: "negative wait", req: &chainmailv1.ReadEventsRequest{WaitSeconds: -1}, reason: api.ReasonInvalidArgument},
+		{name: "limit too big", req: &chainmailv1.ReadEventsRequest{Limit: 201}, reason: api.ReasonInvalidArgument},
+		{name: "negative limit", req: &chainmailv1.ReadEventsRequest{Limit: -1}, reason: api.ReasonInvalidArgument},
+		{name: "group and cursor", req: &chainmailv1.ReadEventsRequest{Group: "mcp", Cursor: proto.Int64(1)}, reason: api.ReasonInvalidArgument},
+		{name: "negative cursor", req: &chainmailv1.ReadEventsRequest{Cursor: proto.Int64(-1)}, reason: api.ReasonInvalidArgument},
+		{name: "bad group", req: &chainmailv1.ReadEventsRequest{Group: "-starts-with-dash"}, reason: api.ReasonInvalidArgument},
+		{name: "unknown kind", req: &chainmailv1.ReadEventsRequest{Filter: &chainmailv1.WatchFilter{Kinds: []string{"NEW"}}}, reason: api.ReasonInvalidArgument},
+		{name: "unknown account", req: &chainmailv1.ReadEventsRequest{Filter: &chainmailv1.WatchFilter{Accounts: []string{"nope"}}}, reason: api.ReasonNotFound},
+	}
+	for _, tt := range tests {
+		_, err := h.Client.Watch.ReadEvents(t.Context(), connect.NewRequest(tt.req))
+		if got := reasonOf(err); got != tt.reason {
+			t.Errorf("%s: reason = %s (%v), want %s", tt.name, got, err, tt.reason)
+		}
+	}
+	rows := h.AuditRows(t)
+	if len(rows) != len(tests) {
+		t.Fatalf("audit rows = %+v, want %d", rows, len(tests))
+	}
+	for i, tt := range tests {
+		r := rows[i]
+		if r.Action != "watch.read" || r.Result != "error" || r.Reason != tt.reason || !strings.HasSuffix(r.Targets, `"events=0"]`) {
+			t.Errorf("%s: audit = %+v", tt.name, r)
+		}
+	}
+}
+
+// TestReadEventsAudit checks the watch.read row: the start and filter as
+// watch.subscribe records them, plus the number of events returned.
+func TestReadEventsAudit(t *testing.T) {
+	t.Parallel()
+	h := startWatch(t, 0)
+	watchPublish(t, h, watchNew("host", "INBOX", 1, "a"), watchNew("work", "INBOX", 1, "b"), watchNew("host", "INBOX", 2, "c"))
+	readEvents(t, h, &chainmailv1.ReadEventsRequest{Cursor: proto.Int64(0), Filter: &chainmailv1.WatchFilter{Accounts: []string{"host"}}})
+	readEvents(t, h, &chainmailv1.ReadEventsRequest{Group: "mcp", Filter: &chainmailv1.WatchFilter{In: "Private"}})
+	want := []daemontest.AuditRow{
+		{Client: "test", Account: "host", Action: "watch.read", Targets: `["since=0","accounts=1","kinds=","in=unset","events=2"]`, Result: "ok"},
+		{Client: "test", Action: "watch.read", Targets: `["group=mcp","accounts=0","kinds=","in=set","events=0"]`, Result: "ok"},
+	}
+	if rows := h.AuditRows(t); !slices.Equal(rows, want) {
+		t.Errorf("audit = %+v, want %+v", rows, want)
+	}
+}

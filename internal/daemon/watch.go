@@ -27,11 +27,23 @@ const (
 	subscribePage = 100
 	// groupHint answers an invalid group name.
 	groupHint = "group names are lowercase letters, digits, dot, dash and underscore"
+	// maxReadWaitSeconds is the longest ReadEvents wait.
+	maxReadWaitSeconds = 60
+	// defaultReadLimit is the ReadEvents page size when a request sets none.
+	defaultReadLimit = 50
+	// maxReadLimit is the largest ReadEvents page.
+	maxReadLimit = 200
+	// readWaitReserve is how long before its deadline a ReadEvents wait
+	// ends, so the acknowledgement and the response still fit. When less
+	// than twice that remains, the wait keeps half of what is left.
+	readWaitReserve = time.Second
 )
 
 var (
 	errGroupName = &argError{msg: "invalid group name", hint: groupHint}
 	errWatchKind = &argError{msg: "kinds must be new, flags, expunged, status or gap", hint: "leave kinds empty for every kind"}
+	errReadWait  = &argError{msg: "wait_seconds must be 0 to 60", hint: "0 returns at once"}
+	errReadLimit = &argError{msg: "limit must be 0 to 200", hint: "0 means 50"}
 )
 
 // kindNames maps the API's event kind names to the log's.
@@ -238,4 +250,116 @@ func (w *watchService) streamEnd(ctx context.Context, err error) error {
 		return toConnectError(w.s.watchLogErr(err))
 	}
 	return nil // err is only the stream's own end
+}
+
+// ReadEvents implements chainmailv1connect.WatchServiceHandler. It returns
+// one page, waiting up to wait_seconds for the first event, and records
+// watch.read with the number of events returned. A client cancelling the
+// call ends the wait.
+func (w *watchService) ReadEvents(ctx context.Context, req *connect.Request[chainmailv1.ReadEventsRequest]) (*connect.Response[chainmailv1.ReadEventsResponse], error) {
+	c, err := callerOf(ctx, req.Header())
+	if err != nil {
+		return nil, err
+	}
+	m := req.Msg
+	q, entry, readErr := w.parse("cursor", m.GetGroup(), m.Cursor, m.GetFilter())
+	entry.Action = "watch.read"
+	wait, limit, boundsErr := readBounds(m.GetWaitSeconds(), m.GetLimit(), w.s.watchWaitUnit)
+	readErr = cmp.Or(readErr, boundsErr)
+	var page watch.Page
+	if readErr == nil {
+		page, readErr = w.read(ctx, q, wait, limit)
+	}
+	entry.Targets = append(entry.Targets, tally("events", len(page.Events)))
+	if err := w.s.record(ctx, c, entry, messageErr(readErr)); err != nil {
+		return nil, err
+	}
+	resp := &chainmailv1.ReadEventsResponse{Events: make([]*chainmailv1.WatchEvent, 0, len(page.Events)), NextCursor: page.Next}
+	for _, e := range page.Events {
+		resp.Events = append(resp.Events, eventToProto(e))
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// readBounds checks a ReadEvents wait and limit and fills the default limit.
+func readBounds(waitSeconds, limit int32, unit time.Duration) (time.Duration, int, error) {
+	switch {
+	case waitSeconds < 0 || waitSeconds > maxReadWaitSeconds:
+		return 0, 0, errReadWait
+	case limit < 0 || limit > maxReadLimit:
+		return 0, 0, errReadLimit
+	case limit == 0:
+		limit = defaultReadLimit
+	}
+	return time.Duration(waitSeconds) * unit, int(limit), nil
+}
+
+// read runs a ReadEvents query: one page after the start and, when it is
+// empty and wait is positive, the first events that arrive within wait.
+// The wait ends before the request's deadline when that comes first, so a
+// client that set a short deadline gets what there is, not TIMEOUT. A
+// group read acknowledges the page's Next, so events the filter dropped
+// move the group too. The page is lost if the acknowledgement fails, and
+// the next read returns the same events: delivery is at least once.
+func (w *watchService) read(ctx context.Context, q watchQuery, wait time.Duration, limit int) (watch.Page, error) {
+	ctx, cancel := withDeadline(ctx, wait+callTimeout)
+	defer cancel()
+	after, err := w.start(ctx, q)
+	if err != nil {
+		return watch.Page{}, w.s.watchLogErr(err)
+	}
+	query := watch.Query{After: after, Filter: q.filter, Limit: limit}
+	page, err := w.s.watchLog.Read(ctx, query)
+	if err != nil {
+		return watch.Page{}, w.s.watchLogErr(err)
+	}
+	if wait = waitBudget(ctx, wait); len(page.Events) == 0 && wait > 0 {
+		if page, err = w.waitRead(ctx, query, page, wait); err != nil {
+			return watch.Page{}, err
+		}
+	}
+	if q.group != "" {
+		if err := w.s.watchLog.Ack(ctx, q.group, page.Next); err != nil {
+			return watch.Page{}, w.s.watchLogErr(err)
+		}
+	}
+	return page, nil
+}
+
+// waitRead waits up to wait for the first events after page, reading on
+// past events the filter drops. It returns page as it stands when wait
+// passes, and an error when ctx ends first.
+func (w *watchService) waitRead(ctx context.Context, query watch.Query, page watch.Page, wait time.Duration) (watch.Page, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	for len(page.Events) == 0 {
+		waitErr := w.s.watchLog.Wait(waitCtx, page.Next)
+		switch {
+		case ctx.Err() != nil:
+			return watch.Page{}, fmt.Errorf("waiting for events: %w", ctx.Err())
+		case waitCtx.Err() != nil:
+			return page, nil // wait passed with nothing new
+		case waitErr != nil:
+			return watch.Page{}, w.s.watchLogErr(waitErr)
+		}
+		query.After = page.Next
+		next, err := w.s.watchLog.Read(ctx, query)
+		if err != nil {
+			return watch.Page{}, w.s.watchLogErr(err)
+		}
+		page = next
+	}
+	return page, nil
+}
+
+// waitBudget is how long a read may wait for events: wait, cut short to
+// end readWaitReserve before ctx's deadline, or half the time left when
+// less than twice the reserve remains. It is never negative.
+func waitBudget(ctx context.Context, wait time.Duration) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return wait
+	}
+	left := time.Until(deadline)
+	return max(0, min(wait, left-min(readWaitReserve, left/2)))
 }

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -240,5 +241,153 @@ func TestSubscribeFailsWhenTheAuditWriteFails(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "audit write failed") {
 		t.Errorf("err = %v, want the audit failure", err)
+	}
+}
+
+// TestReadEventsWaitEndsWhenAnEventArrives checks that a waiting read
+// returns as soon as an event is published, long before its 60 seconds.
+// It reads from cursor 0, so the result is the same if the publish wins
+// the race with the first read.
+func TestReadEventsWaitEndsWhenAnEventArrives(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServer(t)
+	w := &watchService{s: s}
+	ctx, cancel := context.WithTimeout(peerContext(t.Context()), 10*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	wg.Go(func() {
+		time.Sleep(20 * time.Millisecond)
+		if err := s.watchLog.Publish(ctx, testWatchEvent("late")); err != nil {
+			t.Error(err)
+		}
+	})
+	start := time.Now()
+	resp, err := w.ReadEvents(ctx, connect.NewRequest(&chainmailv1.ReadEventsRequest{Cursor: proto.Int64(0), WaitSeconds: 60}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev := resp.Msg.GetEvents(); len(ev) != 1 || ev[0].GetId() != 1 || resp.Msg.GetNextCursor() != 1 {
+		t.Errorf("resp = %v, want event 1 and cursor 1", resp.Msg)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("returned after %v, want soon after the publish", elapsed)
+	}
+}
+
+// TestReadEventsWaitTimesOutEmpty checks that a wait with nothing arriving
+// returns no events and the tail as its cursor, after the whole wait. The
+// wait unit is a millisecond here, so wait_seconds 30 is 30ms.
+func TestReadEventsWaitTimesOutEmpty(t *testing.T) {
+	t.Parallel()
+	s, stateDB := newTestServer(t)
+	s.watchWaitUnit = time.Millisecond
+	w := &watchService{s: s}
+	start := time.Now()
+	resp, err := w.ReadEvents(peerContext(t.Context()), connect.NewRequest(&chainmailv1.ReadEventsRequest{WaitSeconds: 30}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Msg.GetEvents()) != 0 || resp.Msg.GetNextCursor() != 0 {
+		t.Errorf("resp = %v, want nothing at cursor 0", resp.Msg)
+	}
+	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {
+		t.Errorf("returned after %v, want the whole 30ms wait", elapsed)
+	}
+	var targets string
+	if err := stateDB.QueryRowContext(t.Context(), "SELECT targets FROM audit WHERE action = 'watch.read'").Scan(&targets); err != nil {
+		t.Fatal(err)
+	}
+	if targets != `["live","accounts=0","kinds=","in=unset","events=0"]` {
+		t.Errorf("targets = %s", targets)
+	}
+}
+
+// TestReadEventsCancelEndsTheWait checks that a client cancelling a read
+// ends its wait, and that the read is audited as a TIMEOUT error.
+func TestReadEventsCancelEndsTheWait(t *testing.T) {
+	t.Parallel()
+	s, stateDB := newTestServer(t)
+	w := &watchService{s: s}
+	ctx, cancel := context.WithCancel(peerContext(t.Context()))
+	defer cancel()
+	timer := time.AfterFunc(20*time.Millisecond, cancel)
+	defer timer.Stop()
+	start := time.Now()
+	_, err := w.ReadEvents(ctx, connect.NewRequest(&chainmailv1.ReadEventsRequest{WaitSeconds: 60}))
+	if connect.CodeOf(err) != connect.CodeCanceled {
+		t.Errorf("err = %v, want Canceled", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("returned after %v, want soon after the cancel", elapsed)
+	}
+	var result, reason string
+	if err := stateDB.QueryRowContext(t.Context(), "SELECT result, reason FROM audit WHERE action = 'watch.read'").Scan(&result, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if result != "error" || reason != api.ReasonTimeout {
+		t.Errorf("audit = %s %s, want error TIMEOUT", result, reason)
+	}
+}
+
+// TestReadEventsWaitEndsBeforeTheDeadline checks that a wait longer than
+// the time the request's deadline leaves ends before the deadline and
+// returns what it has: a quiet wait is a normal result, never TIMEOUT
+// (contract C8).
+func TestReadEventsWaitEndsBeforeTheDeadline(t *testing.T) {
+	t.Parallel()
+	s, stateDB := newTestServer(t)
+	w := &watchService{s: s}
+	const deadline = 40 * time.Millisecond
+	ctx, cancel := context.WithTimeout(peerContext(t.Context()), deadline)
+	defer cancel()
+	start := time.Now()
+	resp, err := w.ReadEvents(ctx, connect.NewRequest(&chainmailv1.ReadEventsRequest{WaitSeconds: 60}))
+	if err != nil {
+		t.Fatalf("ReadEvents: %v, want an empty page", err)
+	}
+	if elapsed := time.Since(start); elapsed >= deadline {
+		t.Errorf("returned after %v, want before the %v deadline", elapsed, deadline)
+	}
+	if len(resp.Msg.GetEvents()) != 0 || resp.Msg.GetNextCursor() != 0 {
+		t.Errorf("resp = %v, want nothing at cursor 0", resp.Msg)
+	}
+	var result, reason string
+	if err := stateDB.QueryRowContext(t.Context(), "SELECT result, reason FROM audit WHERE action = 'watch.read'").Scan(&result, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if result != "ok" || reason != "" {
+		t.Errorf("audit = %s %s, want ok", result, reason)
+	}
+}
+
+// TestWaitBudget checks how long a ReadEvents read may wait: the whole
+// wait without a deadline, else ending before the deadline with a second
+// to spare, or half the time left when less than two seconds remain.
+func TestWaitBudget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		left     time.Duration // 0 means no deadline
+		wait     time.Duration
+		min, max time.Duration
+	}{
+		{name: "no deadline", wait: time.Minute, min: time.Minute, max: time.Minute},
+		{name: "deadline far off", left: time.Minute + 30*time.Second, wait: time.Minute, min: time.Minute, max: time.Minute},
+		{name: "deadline first", left: 10 * time.Second, wait: time.Minute, min: 8 * time.Second, max: 9 * time.Second},
+		{name: "little time left", left: time.Second, wait: time.Minute, min: 400 * time.Millisecond, max: 500 * time.Millisecond},
+		{name: "no wait", left: time.Minute, wait: 0, min: 0, max: 0},
+		{name: "deadline passed", left: -time.Second, wait: time.Minute, min: 0, max: 0},
+	}
+	for _, tt := range tests {
+		ctx := t.Context()
+		if tt.left != 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithDeadline(ctx, time.Now().Add(tt.left))
+			defer cancel()
+		}
+		if got := waitBudget(ctx, tt.wait); got < tt.min || got > tt.max {
+			t.Errorf("%s: waitBudget = %v, want %v to %v", tt.name, got, tt.min, tt.max)
+		}
 	}
 }
