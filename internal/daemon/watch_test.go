@@ -719,3 +719,91 @@ func TestWatchForbiddenPeer(t *testing.T) {
 		t.Errorf("audit rows = %+v, want none", rows)
 	}
 }
+
+// wantPastTailGap checks that e is the trimmed gap a start past the tail
+// gets: ID 0, reason trimmed, next_id one past the tail.
+func wantPastTailGap(t *testing.T, e *chainmailv1.WatchEvent, tail int64) {
+	t.Helper()
+	if e.GetKind() != "gap" || e.GetId() != 0 || e.GetReason() != "trimmed" || e.GetNextId() != tail+1 || e.GetAt() == nil {
+		t.Errorf("event = %v, want a trimmed gap with next_id %d", e, tail+1)
+	}
+}
+
+// TestSubscribeSinceAboveTailReportsAGap checks that a since past the tail,
+// which only a reset of the daemon's state can produce, gets a trimmed gap
+// first and then the events that arrive after the tail, rather than
+// silently skipping every ID up to since.
+func TestSubscribeSinceAboveTailReportsAGap(t *testing.T) {
+	t.Parallel()
+	h := startWatch(t, 20*time.Millisecond)
+	watchPublish(t, h, watchNew("host", "INBOX", 1, "a"), watchNew("host", "INBOX", 2, "b"), watchNew("host", "INBOX", 3, "c"))
+	stream := subscribe(t, h, &chainmailv1.SubscribeRequest{Since: proto.Int64(50)})
+	got := untilHeartbeat(t, stream)
+	if len(got.events) != 1 || got.heartbeat.GetPosition() != 3 {
+		t.Fatalf("since past tail: events %v then position %d, want one gap then 3", got.events, got.heartbeat.GetPosition())
+	}
+	wantPastTailGap(t, got.events[0], 3)
+	watchPublish(t, h, watchNew("host", "INBOX", 4, "d"))
+	var events []*chainmailv1.WatchEvent
+	for len(events) == 0 {
+		events = append(events, untilHeartbeat(t, stream).events...)
+	}
+	if ids := eventIDs(events); !slices.Equal(ids, []int64{4}) {
+		t.Errorf("later ids = %v, want [4]", ids)
+	}
+}
+
+// TestReadEventsCursorAboveTailReportsAGap checks that a cursor past the
+// tail returns a trimmed gap with the tail as the next cursor, and that
+// reading on from there returns the later events. The gap counts toward
+// the limit.
+func TestReadEventsCursorAboveTailReportsAGap(t *testing.T) {
+	t.Parallel()
+	h := startWatch(t, 0)
+	watchPublish(t, h, watchNew("host", "INBOX", 1, "a"), watchNew("host", "INBOX", 2, "b"), watchNew("host", "INBOX", 3, "c"))
+	for _, limit := range []int32{0, 1} {
+		resp := readEvents(t, h, &chainmailv1.ReadEventsRequest{Cursor: proto.Int64(50), Limit: limit})
+		if len(resp.GetEvents()) != 1 || resp.GetNextCursor() != 3 {
+			t.Fatalf("limit %d: %v, want one gap and cursor 3", limit, resp)
+		}
+		wantPastTailGap(t, resp.GetEvents()[0], 3)
+	}
+	watchPublish(t, h, watchNew("host", "INBOX", 4, "d"), watchNew("host", "INBOX", 5, "e"))
+	resp := readEvents(t, h, &chainmailv1.ReadEventsRequest{Cursor: proto.Int64(3)})
+	if ids := eventIDs(resp.GetEvents()); !slices.Equal(ids, []int64{4, 5}) || resp.GetNextCursor() != 5 {
+		t.Errorf("read on: ids %v next %d, want [4 5] next 5", ids, resp.GetNextCursor())
+	}
+}
+
+// TestGroupAckedAboveTailReportsAGap checks that a group whose acknowledged
+// ID is past the tail, as after a reset of the daemon's state, starts at
+// the tail with a trimmed gap, on both ReadEvents and Subscribe. Ack never
+// lowers a group, so its acknowledged ID stays where it was.
+func TestGroupAckedAboveTailReportsAGap(t *testing.T) {
+	t.Parallel()
+	h := startWatch(t, 0)
+	watchPublish(t, h, watchNew("host", "INBOX", 1, "a"), watchNew("host", "INBOX", 2, "b"), watchNew("host", "INBOX", 3, "c"))
+	if _, _, err := watchLog(h).Group(t.Context(), "bot"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.DB.ExecContext(t.Context(), "UPDATE event_groups SET acked_id = 50 WHERE name = 'bot'"); err != nil {
+		t.Fatal(err)
+	}
+	resp := readEvents(t, h, &chainmailv1.ReadEventsRequest{Group: "bot"})
+	if len(resp.GetEvents()) != 1 || resp.GetNextCursor() != 3 {
+		t.Fatalf("ReadEvents: %v, want one gap and cursor 3", resp)
+	}
+	wantPastTailGap(t, resp.GetEvents()[0], 3)
+	got := untilHeartbeat(t, subscribe(t, h, &chainmailv1.SubscribeRequest{Group: "bot"}))
+	if len(got.events) != 1 || got.heartbeat.GetPosition() != 3 {
+		t.Fatalf("Subscribe: events %v then position %d, want one gap then 3", got.events, got.heartbeat.GetPosition())
+	}
+	wantPastTailGap(t, got.events[0], 3)
+	groups, err := watchLog(h).Groups(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].AckedID != 50 {
+		t.Errorf("groups = %+v, want bot still at 50", groups)
+	}
+}

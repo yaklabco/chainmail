@@ -149,16 +149,39 @@ func watchKinds(names []string) ([]watch.Kind, string, error) {
 // start returns the ID a request reads after: the group's acknowledged
 // event, which creates the group at the tail when it is new, the request's
 // since or cursor, or the tail for a live read.
-func (w *watchService) start(ctx context.Context, q watchQuery) (int64, error) {
+//
+// A client only ever learns IDs up to the tail, so a start past it means
+// the daemon's state was reset under the client. Such a start is capped at
+// the tail, and start also returns the trimmed gap that reports the loss,
+// unless the filter drops it, as Log.Read reports a start below the oldest
+// event. A group's acknowledged ID stays where it is, since Ack never
+// lowers it.
+func (w *watchService) start(ctx context.Context, q watchQuery) (int64, *watch.Event, error) {
+	var after int64
 	switch {
 	case q.group != "":
 		acked, _, err := w.s.watchLog.Group(ctx, q.group)
-		return acked, err
+		if err != nil {
+			return 0, nil, err
+		}
+		after = acked
 	case q.since != nil:
-		return *q.since, nil
-	default:
-		return w.s.watchLog.Tail(ctx)
+		after = *q.since
 	}
+	tail, err := w.s.watchLog.Tail(ctx)
+	switch {
+	case err != nil:
+		return 0, nil, err
+	case q.group == "" && q.since == nil:
+		return tail, nil, nil // a live read
+	case after <= tail:
+		return after, nil, nil
+	}
+	gap := watch.Event{At: w.s.opts.Now().UTC(), Kind: watch.KindGap, Reason: watch.GapTrimmed, NextID: tail + 1}
+	if !q.filter.Match(gap) {
+		return tail, nil, nil
+	}
+	return tail, &gap, nil
 }
 
 // watchLogErr is the error for a failed event log call. The client sees
@@ -195,9 +218,14 @@ func (w *watchService) Subscribe(ctx context.Context, req *connect.Request[chain
 	if err := w.s.record(ctx, c, entry, messageErr(parseErr)); err != nil {
 		return err
 	}
-	pos, err := w.start(ctx, q)
+	pos, gap, err := w.start(ctx, q)
 	if err != nil {
 		return w.streamEnd(ctx, err)
+	}
+	if gap != nil {
+		if stream.Send(&chainmailv1.SubscribeResponse{Item: &chainmailv1.SubscribeResponse_Event{Event: eventToProto(*gap)}}) != nil {
+			return toConnectError(clientGone())
+		}
 	}
 	return w.send(ctx, q.filter, pos, stream)
 }
@@ -304,14 +332,23 @@ func readBounds(waitSeconds, limit int32, unit time.Duration) (time.Duration, in
 func (w *watchService) read(ctx context.Context, q watchQuery, wait time.Duration, limit int) (watch.Page, error) {
 	ctx, cancel := withDeadline(ctx, wait+callTimeout)
 	defer cancel()
-	after, err := w.start(ctx, q)
+	after, gap, err := w.start(ctx, q)
 	if err != nil {
 		return watch.Page{}, w.s.watchLogErr(err)
 	}
+	if gap != nil {
+		// The gap counts toward the limit, as one from Log.Read does.
+		limit--
+	}
 	query := watch.Query{After: after, Filter: q.filter, Limit: limit}
-	page, err := w.s.watchLog.Read(ctx, query)
-	if err != nil {
-		return watch.Page{}, w.s.watchLogErr(err)
+	page := watch.Page{Next: after}
+	if limit > 0 {
+		if page, err = w.s.watchLog.Read(ctx, query); err != nil {
+			return watch.Page{}, w.s.watchLogErr(err)
+		}
+	}
+	if gap != nil {
+		page.Events = append([]watch.Event{*gap}, page.Events...)
 	}
 	if wait = waitBudget(ctx, wait); len(page.Events) == 0 && wait > 0 {
 		if page, err = w.waitRead(ctx, query, page, wait); err != nil {
