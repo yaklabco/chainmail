@@ -20,7 +20,7 @@ var _ mailstore.Watcher = (*Store)(nil)
 
 // OpenWatch implements mailstore.Watcher. The connection logs in through
 // the same login gate and credentials as the pool, outside the pool: it
-// takes no pool slot, and OpenConns counts it. Store.Close closes it under
+// takes no pool slot, and OpenConns and ConnPeak count it. Store.Close closes it under
 // its owner without waiting for the owner to stop, so a watcher that is
 // syncing or idling on it gets ErrUnavailable and dials again, through
 // whatever store it holds by then.
@@ -30,14 +30,12 @@ func (s *Store) OpenWatch(ctx context.Context, folder string) (mailstore.WatchCo
 		s.mu.Unlock()
 		return nil, fmt.Errorf("%w: %w", mailstore.ErrUnavailable, errPoolClosed)
 	}
-	s.watchOpen++
+	s.pool.holdOutside()
 	s.mu.Unlock()
 	w := &watchConn{s: s, folder: folder, signal: make(chan struct{}, 1)}
 	c, err := s.connectWith(ctx, w.handler())
 	if err != nil {
-		s.mu.Lock()
-		s.watchOpen--
-		s.mu.Unlock()
+		s.pool.releaseOutside()
 		return nil, s.watchError(err)
 	}
 	w.c = c
@@ -87,7 +85,7 @@ func (s *Store) forgetWatch(w *watchConn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.watches, w)
-	s.watchOpen--
+	s.pool.releaseOutside()
 }
 
 // watchConn is a mailstore.WatchConn: a connection outside the pool that

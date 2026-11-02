@@ -180,11 +180,11 @@ type Store struct {
 	// included. drained, when set, is closed when it reaches zero.
 	borrowed int
 	drained  chan struct{}
-	// watches are the open watch connections, which Close logs out.
-	// watchOpen counts them and the ones still dialing, for OpenConns.
-	// watchesClosed, set by Close, refuses new ones.
+	// watches are the open watch connections, which Close logs out. The
+	// pool counts them, and the ones still dialing, as outside connections
+	// (holdOutside), for OpenConns and ConnPeak. watchesClosed, set by
+	// Close, refuses new ones.
 	watches       map[*watchConn]struct{}
-	watchOpen     int
 	watchesClosed bool
 }
 
@@ -251,22 +251,18 @@ func (s *Store) Close() error {
 // watch connections from the start of OpenWatch until they have logged out.
 // A borrowed one, such as a stream reader's, counts until it comes back and
 // has logged out, after Close too. ProbeDial's connections do not count.
-func (s *Store) OpenConns() int {
-	s.mu.Lock()
-	watching := s.watchOpen
-	s.mu.Unlock()
-	return s.pool.openCount() + watching
-}
+func (s *Store) OpenConns() int { return s.pool.openCount() }
 
-// ResetConnPeak starts a new ConnPeak from the pooled connections holding a
-// slot now.
+// ResetConnPeak starts a new ConnPeak from the connections holding a slot
+// now, pooled and watch.
 func (s *Store) ResetConnPeak() { s.pool.resetConnPeak() }
 
-// ConnPeak returns the most pooled connections that held a slot on the
-// server at once since the last ResetConnPeak, or since the store was made,
-// as OpenConns counts them. Connections that have closed since still count,
-// so a connection-limit probe that adds it to its own count cannot read the
-// limit low because the account's connections came and went while it dialed.
+// ConnPeak returns the most connections, pooled and watch, that held a slot
+// on the server at once since the last ResetConnPeak, or since the store was
+// made, as OpenConns counts them. Connections that have closed since still
+// count, so a connection-limit probe that adds it to its own count cannot
+// read the limit low because the account's connections came and went while
+// it dialed. Leaving the watch connections out would read it low as well.
 func (s *Store) ConnPeak() int { return s.pool.connPeak() }
 
 // PoolSize returns the most connections the store opens at once:

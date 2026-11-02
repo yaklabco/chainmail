@@ -128,6 +128,44 @@ func TestWatchOpenConnsCountsWatchConn(t *testing.T) {
 	}
 }
 
+// TestWatchConnPeakCountsWatchConns checks that ConnPeak counts watch
+// connections with the pooled ones, as OpenConns does: a probe adds the
+// peak to its own count, so leaving watchers out would read the server's
+// cap low. ResetConnPeak starts from every connection open, watchers
+// included, and one that closed since still counts.
+func TestWatchConnPeakCountsWatchConns(t *testing.T) {
+	t.Parallel()
+	s, _, _ := watchFixture(t)
+	wc, err := s.OpenWatch(t.Context(), storetest.GmailAllMail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wc.Close() })
+	if n := s.ConnPeak(); n != 1 {
+		t.Errorf("ConnPeak after OpenWatch = %d, want 1", n)
+	}
+	s.ResetConnPeak()
+	if n := s.ConnPeak(); n != 1 {
+		t.Errorf("ConnPeak after ResetConnPeak with a watch connection open = %d, want 1", n)
+	}
+	if _, err := s.FolderState(t.Context(), storetest.GmailAllMail); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.ConnPeak(); n != 2 {
+		t.Errorf("ConnPeak with a watch connection and a pooled one = %d, want 2", n)
+	}
+	if err := wc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.ConnPeak(); n != 2 {
+		t.Errorf("ConnPeak after the watch connection closed = %d, want 2", n)
+	}
+	s.ResetConnPeak()
+	if n := s.ConnPeak(); n != 1 {
+		t.Errorf("ConnPeak after a reset with only the pooled connection = %d, want 1", n)
+	}
+}
+
 func TestWatchStoreCloseClosesWatchConns(t *testing.T) {
 	t.Parallel()
 	s, _, _ := watchFixture(t)
