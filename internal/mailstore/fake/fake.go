@@ -111,6 +111,13 @@ type Store struct {
 	modseq    map[string]uint64
 	condstore bool
 	watchFail error
+	// idle is whether the server advertises IDLE, after the timer Idle
+	// waits on, watches the open watch connections, and idleStarted the
+	// channel IdleStarted returns.
+	idle        bool
+	after       func(time.Duration) <-chan time.Time
+	watches     map[*watchConn]bool
+	idleStarted chan string
 }
 
 var _ mailstore.Store = (*Store)(nil)
@@ -126,7 +133,8 @@ func New(account string, gmail bool) *Store {
 		msgIDs: map[uint64]bool{}, threadIDs: map[uint64]bool{}, nextMsgID: 1000,
 		fail: map[string]error{}, folderFail: map[string]error{}, calls: map[string]int{},
 		everValidity: map[string]uint32{}, writeFail: map[string]error{},
-		modseq: map[string]uint64{}, condstore: true,
+		modseq: map[string]uint64{}, condstore: true, idle: true, after: time.After,
+		watches: map[*watchConn]bool{}, idleStarted: make(chan string, idleStartedCap),
 	}
 	if gmail {
 		s.AddFolder("INBOX", mailstore.RoleInbox)

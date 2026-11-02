@@ -16,16 +16,34 @@ package fake
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 )
 
 // Watch method names, as Calls counts them and Fail takes them.
 const (
+	opOpenWatch   = "OpenWatch"
 	opFolderState = "FolderState"
 	opSyncFolder  = "SyncFolder"
+	opSync        = "Sync"
+	opIdle        = "Idle"
+)
+
+// idleStartedCap is how many Idle starts IdleStarted holds unread.
+const idleStartedCap = 64
+
+// errWatchClosed is what a watch connection returns once closed. It does
+// not match mailstore.ErrUnavailable, so a caller that uses a connection
+// after Close fails its test instead of reconnecting.
+var errWatchClosed = errors.New("fake: watch connection used after Close")
+
+var (
+	_ mailstore.Watcher   = (*Store)(nil)
+	_ mailstore.WatchConn = (*watchConn)(nil)
 )
 
 // SetCondStore says whether the server advertises CONDSTORE. FolderState
@@ -272,11 +290,19 @@ func uidsOf(msgs []*Message) []uint32 {
 	return out
 }
 
-// changedLocked records a change to folder: its HIGHESTMODSEQ rises.
-// expunged says a message left it. It returns the new HIGHESTMODSEQ.
+// changedLocked records a change to folder: its HIGHESTMODSEQ rises, and
+// every watch connection on it gets a pending wake, with Expunged when a
+// message left it. It returns the new HIGHESTMODSEQ.
 func (s *Store) changedLocked(folder string, expunged bool) uint64 {
-	_ = expunged // used once watch connections exist
 	s.modseq[folder]++
+	for c := range s.watches {
+		if c.folder != folder {
+			continue
+		}
+		c.pending.Changed = true
+		c.pending.Expunged = c.pending.Expunged || expunged
+		c.notifyLocked()
+	}
 	return s.modseq[folder]
 }
 
@@ -284,4 +310,219 @@ func (s *Store) changedLocked(folder string, expunged bool) uint64 {
 // there or its flags or labels changed.
 func (s *Store) touchLocked(m *Message) {
 	m.modseq = s.changedLocked(m.Folder, false)
+}
+
+// SetIdle says whether the server advertises IDLE, for watch connections
+// opened after the call. The default is true.
+func (s *Store) SetIdle(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.idle = on
+}
+
+// SetAfter replaces the timer Idle waits on for its max, so a test with a
+// fake clock can end an Idle without waiting. Nil restores time.After.
+func (s *Store) SetAfter(after func(time.Duration) <-chan time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if after == nil {
+		after = time.After
+	}
+	s.after = after
+}
+
+// DropWatches drops every open watch connection, as a network failure
+// would: an Idle in progress returns, and each one's next Sync or Idle
+// fails with an error matching mailstore.ErrUnavailable. A dropped
+// connection counts in WatchConns until it is closed. Connections opened
+// afterwards work.
+func (s *Store) DropWatches() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for c := range s.watches {
+		c.dropped = true
+		c.notifyLocked()
+	}
+}
+
+// WatchConns returns how many watch connections are open: opened and not
+// yet closed, dropped ones included.
+func (s *Store) WatchConns() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.watches)
+}
+
+// IdleStarted delivers the folder of each Idle that starts to wait, once
+// its max timer is running, so a test can change the folder or fire the
+// timer knowing the Idle is in progress. An Idle that returns a pending
+// change at once sends nothing. It holds the latest 64 unread starts and
+// drops older ones, so it never blocks an Idle.
+func (s *Store) IdleStarted() <-chan string { return s.idleStarted }
+
+// noteIdle sends folder to IdleStarted, dropping the oldest unread start
+// when it is full.
+func (s *Store) noteIdle(folder string) {
+	for {
+		select {
+		case s.idleStarted <- folder:
+			return
+		default:
+		}
+		select {
+		case <-s.idleStarted:
+		default:
+		}
+	}
+}
+
+// OpenWatch implements mailstore.Watcher. The connection keeps the
+// CONDSTORE and IDLE the store advertised when it opened.
+func (s *Store) OpenWatch(ctx context.Context, folder string) (mailstore.WatchConn, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls[opOpenWatch]++
+	if err := s.watchErrLocked(ctx, opOpenWatch); err != nil {
+		return nil, err
+	}
+	if err := s.watchableLocked(folder); err != nil {
+		return nil, err
+	}
+	c := &watchConn{s: s, folder: folder, condstore: s.condstore, idle: s.idle, wake: make(chan struct{}, 1)}
+	s.watches[c] = true
+	return c, nil
+}
+
+// watchConn is a fake watch connection. It stays on one folder.
+type watchConn struct {
+	s         *Store
+	folder    string
+	condstore bool
+	idle      bool
+	// wake holds a token when a waiting Idle should look again: a change
+	// to the folder, a drop or Close.
+	wake chan struct{}
+	// Guarded by s.mu. pending is the wake the changes since the last Sync
+	// add up to.
+	pending mailstore.Wake
+	dropped bool
+	closed  bool
+}
+
+// notifyLocked wakes a waiting Idle without blocking.
+func (c *watchConn) notifyLocked() {
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
+}
+
+// errLocked is the error a closed or dropped connection fails with.
+func (c *watchConn) errLocked() error {
+	switch {
+	case c.closed:
+		return errWatchClosed
+	case c.dropped:
+		return fmt.Errorf("%w: watch connection on %s dropped", mailstore.ErrUnavailable, c.folder)
+	}
+	return nil
+}
+
+// takeLocked returns the pending wake and clears it.
+func (c *watchConn) takeLocked() mailstore.Wake {
+	w := c.pending
+	c.pending = mailstore.Wake{}
+	return w
+}
+
+// Sync implements mailstore.WatchConn. A pass reports every change made
+// before it, so it clears the pending wake.
+func (c *watchConn) Sync(ctx context.Context, req mailstore.SyncRequest) (mailstore.Delta, error) {
+	s := c.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls[opSync]++
+	if err := c.errLocked(); err != nil {
+		return mailstore.Delta{}, err
+	}
+	if err := s.watchErrLocked(ctx, opSync); err != nil {
+		return mailstore.Delta{}, err
+	}
+	d, err := s.syncLocked(c.folder, req, c.condstore)
+	if err != nil {
+		return mailstore.Delta{}, err
+	}
+	c.takeLocked()
+	return d, nil
+}
+
+// IdleSupported implements mailstore.WatchConn.
+func (c *watchConn) IdleSupported() bool { return c.idle }
+
+// Idle implements mailstore.WatchConn. A change to the folder since the
+// last Sync returns at once. Otherwise Idle starts the store's After timer
+// for limit, tells IdleStarted, and waits for a change, the timer, a drop,
+// Close or ctx.
+func (c *watchConn) Idle(ctx context.Context, limit time.Duration) (mailstore.Wake, error) {
+	s := c.s
+	s.mu.Lock()
+	s.calls[opIdle]++
+	if err := c.idleErrLocked(ctx); err != nil {
+		s.mu.Unlock()
+		return mailstore.Wake{}, err
+	}
+	if w := c.takeLocked(); w != (mailstore.Wake{}) {
+		s.mu.Unlock()
+		return w, nil
+	}
+	after := s.after
+	s.mu.Unlock()
+
+	timer := after(limit)
+	s.noteIdle(c.folder)
+	for {
+		select {
+		case <-ctx.Done():
+			return mailstore.Wake{}, ctx.Err()
+		case <-timer:
+			return mailstore.Wake{}, nil
+		case <-c.wake:
+		}
+		s.mu.Lock()
+		err := c.errLocked()
+		w := c.takeLocked()
+		s.mu.Unlock()
+		if err != nil {
+			return mailstore.Wake{}, err
+		}
+		if w != (mailstore.Wake{}) {
+			return w, nil
+		}
+	}
+}
+
+// idleErrLocked is the error Idle fails with before it waits.
+func (c *watchConn) idleErrLocked(ctx context.Context) error {
+	if err := c.errLocked(); err != nil {
+		return err
+	}
+	if !c.idle {
+		return fmt.Errorf("%w: the server has no IDLE", mailstore.ErrUnsupported)
+	}
+	if err := c.s.fail[opIdle]; err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+// Close implements mailstore.WatchConn. It is idempotent, and an Idle in
+// progress then fails as closed.
+func (c *watchConn) Close() error {
+	s := c.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c.closed = true
+	delete(s.watches, c)
+	c.notifyLocked()
+	return nil
 }
