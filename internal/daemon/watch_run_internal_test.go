@@ -63,7 +63,7 @@ pool = 10
 // The pool gets what the account's cap leaves after its watchers: the
 // probed cap when one is stored, else the preset's MaxConnections. It never
 // grows, never drops below 1, and is left alone when nothing watches.
-func TestWatchBudget(t *testing.T) {
+func TestPoolAfterWatchers(t *testing.T) {
 	t.Parallel()
 	cfg, err := config.Parse([]byte(budgetConfig))
 	if err != nil {
@@ -104,8 +104,12 @@ func TestWatchBudget(t *testing.T) {
 				stored = &limits.Limit{Account: tt.account, IMAPCap: tt.stored}
 			}
 			pool := limits.PoolSize(acct.Pool, stored, acct.Provider.DefaultPool)
-			if got := watchBudget(pool, acct, stored, tt.watching); got != tt.want {
-				t.Errorf("watchBudget(%d, %s, cap %d, watching %v) = %d, want %d", pool, tt.account, tt.stored, tt.watching, got, tt.want)
+			watchers := 0
+			if tt.watching {
+				watchers = acct.WatchCount()
+			}
+			if got := poolAfterWatchers(pool, acct, stored, watchers); got != tt.want {
+				t.Errorf("poolAfterWatchers(%d, %s, cap %d, %d watchers) = %d, want %d", pool, tt.account, tt.stored, watchers, got, tt.want)
 			}
 		})
 	}
@@ -355,5 +359,30 @@ func TestEventLogLogsThroughTheDaemonLogger(t *testing.T) {
 			t.Fatalf("no trim failure in the daemon's log: %q", logs.String())
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// watcherConns counts the account's watchers, or none when the daemon runs
+// no supervisors, for both the pool size and the cap a refusal records.
+func TestWatcherConns(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		account      string
+		disableWatch bool
+		want         int
+	}{
+		{account: "two", want: 2},
+		{account: "two", disableWatch: true, want: 0},
+		{account: "off", want: 0},
+		{account: "gmail", want: 1},
+	} {
+		s, _ := newTestServerOptions(t, budgetConfig, Options{DisableWatch: tt.disableWatch})
+		acct, err := s.opts.Config.Account(tt.account)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := s.watcherConns(acct); got != tt.want {
+			t.Errorf("watcherConns(%s) with DisableWatch %v = %d, want %d", tt.account, tt.disableWatch, got, tt.want)
+		}
 	}
 }

@@ -131,7 +131,7 @@ func newLimitsServer(t *testing.T, mk func(config.ResolvedAccount) mailstore.Sto
 
 // newLimitsServerWith is newLimitsServer with the config text given. It
 // runs with DisableWatch, so the pools these tests expect come from the
-// probe, the config and the preset alone. watchBudget has its own tests.
+// probe, the config and the preset alone. poolAfterWatchers has its own tests.
 func newLimitsServerWith(t *testing.T, cfgText string, mk func(config.ResolvedAccount) mailstore.Store) (*Server, *buildLog) {
 	t.Helper()
 	return newLimitsServerWatch(t, cfgText, mk, false)

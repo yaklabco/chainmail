@@ -219,27 +219,32 @@ func (s *Server) paramsWithPool(acct config.ResolvedAccount, poolSize int) store
 
 // poolSize sizes acct's pool with limits.PoolSize, from config, the stored
 // limit or the preset, then fits it into the connection budget the
-// account's watchers leave (watchBudget). Every store the daemon builds or
-// a probe installs is sized here.
+// account's watchers leave (poolAfterWatchers). Every store the daemon
+// builds or a probe installs is sized here.
 func (s *Server) poolSize(acct config.ResolvedAccount, stored *limits.Limit) int {
 	pool := limits.PoolSize(acct.Pool, stored, acct.Provider.DefaultPool)
-	return watchBudget(pool, acct, stored, !s.opts.DisableWatch)
+	return poolAfterWatchers(pool, acct, stored, s.watcherConns(acct))
 }
 
-// watchBudget shrinks pool so that the account's watcher connections,
-// which are dialed outside the pool, fit under its connection cap with it.
+// watcherConns is how many watcher connections acct holds open outside its
+// pool: one per watched folder, one for a Gmail preset, none with sync off
+// (config.ResolvedAccount.WatchCount), and none at all when the daemon runs
+// no supervisors.
+func (s *Server) watcherConns(acct config.ResolvedAccount) int {
+	if s.opts.DisableWatch {
+		return 0
+	}
+	return acct.WatchCount()
+}
+
+// poolAfterWatchers shrinks pool so that the account's watchers, which are
+// dialed outside the pool, fit under the account's connection cap with it.
 // The cap is the probed IMAPCap when one is stored, which counts watch
 // connections already, else the preset's MaxConnections. The watchers
 // never shrink, and the pool never drops below 1. A configured pool is
 // capped too: pool plus watchers above the server's cap would make logins
-// fail once every connection is in use, so config cannot ask for that. A
-// daemon that runs no supervisors (watching false) has no watchers to make
-// room for.
-func watchBudget(pool int, acct config.ResolvedAccount, stored *limits.Limit, watching bool) int {
-	watchers := 0
-	if watching {
-		watchers = acct.WatchCount()
-	}
+// fail once every connection is in use, so config cannot ask for that.
+func poolAfterWatchers(pool int, acct config.ResolvedAccount, stored *limits.Limit, watchers int) int {
 	if watchers == 0 {
 		return pool
 	}
@@ -294,15 +299,12 @@ func (s *Server) recordConnLimit(acct config.ResolvedAccount, newMax int) {
 // store rebuilt from it gets a pool of newMax again (limits.PoolSize takes
 // the reserve back off). With watchers it is what the server accepted:
 // newMax pooled connections and the account's watcher connections, which
-// are dialed outside the pool. watchBudget takes the watchers straight off
-// the stored cap, a configured pool included, so adding the reserve there
-// would let the rebuilt pool and its watchers exceed what the server just
-// refused.
+// are dialed outside the pool. poolAfterWatchers takes the watchers
+// straight off the stored cap, a configured pool included, so adding the
+// reserve there would let the rebuilt pool and its watchers exceed what the
+// server just refused.
 func (s *Server) refusalCap(acct config.ResolvedAccount, newMax int) int {
-	watchers := 0
-	if !s.opts.DisableWatch {
-		watchers = acct.WatchCount()
-	}
+	watchers := s.watcherConns(acct)
 	if watchers == 0 {
 		return newMax + connsReserved
 	}
