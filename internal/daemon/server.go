@@ -128,9 +128,11 @@ type Server struct {
 	// it with any error it returns. Internal tests fail a send with it while
 	// the stream is still live.
 	watchSendHook func(*chainmailv1.SubscribeResponse) error
-	// shutdown is closed when the daemon begins to shut down, before it
-	// drains: the Done channel of Serve's base context. Nil until Serve
-	// runs, and then it never closes.
+	// shutdown is the Done channel of Serve's base context. Serve sets it
+	// once, before any handler runs, and it stays the same channel from
+	// then on; it closes when the daemon begins to shut down, before it
+	// drains. It is nil on a server that is not serving, as in internal
+	// tests, and a nil channel never closes.
 	shutdown <-chan struct{}
 }
 

@@ -918,3 +918,93 @@ func TestSettleEndsOnShutdown(t *testing.T) {
 		t.Errorf("bot is at %d after a shutdown, want 0", got)
 	}
 }
+
+// settleAsync runs s.settle in a goroutine with a write that signals when
+// it starts, then blocks until its context ends and returns that context's
+// error. It returns the started signal and the channel settle's result
+// arrives on; the test joins the goroutine by receiving it.
+func settleAsync(ctx context.Context, s *Server) (started <-chan struct{}, result <-chan error) {
+	start := make(chan struct{})
+	res := make(chan error, 1)
+	go func() {
+		res <- s.settle(ctx, func(wctx context.Context) error {
+			close(start)
+			<-wctx.Done()
+			return wctx.Err()
+		})
+	}()
+	return start, res
+}
+
+// settleResult waits for settle to return, failing the test if it hangs.
+func settleResult(t *testing.T, result <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(settleTimeout / 2):
+		t.Fatal("settle did not return after its write's context should have ended")
+		return nil
+	}
+}
+
+// TestSettleCancelDuringWrite checks that a client going away while a
+// settlement write runs ends the write's context, and that settle then
+// returns the cancellation, with its watchers joined.
+func TestSettleCancelDuringWrite(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServer(t)
+	ctx, cancel := context.WithCancel(peerContext(t.Context()))
+	defer cancel()
+	started, result := settleAsync(ctx, s)
+	<-started
+	cancel()
+	if err := settleResult(t, result); !errors.Is(err, context.Canceled) {
+		t.Errorf("settle = %v, want Canceled", err)
+	}
+}
+
+// TestSettleShutdownDuringWrite checks that a shutdown while a settlement
+// write runs ends it, even though the request's context had already ended
+// with DeadlineExceeded when settlement began, so the request context
+// itself never reports the shutdown.
+func TestSettleShutdownDuringWrite(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServer(t)
+	shutdown := make(chan struct{})
+	s.shutdown = shutdown
+	late := newLateCtx(peerContext(t.Context()))
+	late.expire()
+	started, result := settleAsync(late, s)
+	<-started
+	close(shutdown)
+	if err := settleResult(t, result); !errors.Is(err, context.Canceled) {
+		t.Errorf("settle = %v, want Canceled", err)
+	}
+}
+
+// TestSettleBound checks the bound on a settlement write: a deadline
+// settleTimeout from when it starts, in place of the request's deadline,
+// which has already passed. Only the deadline is read, so nothing waits
+// the 5 seconds out.
+func TestSettleBound(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServer(t)
+	expired, cancel := context.WithTimeout(peerContext(t.Context()), -time.Second)
+	defer cancel()
+	before := time.Now()
+	var deadline time.Time
+	var ok bool
+	err := s.settle(expired, func(wctx context.Context) error {
+		deadline, ok = wctx.Deadline()
+		return wctx.Err()
+	})
+	after := time.Now()
+	if err != nil {
+		t.Fatalf("settle past the request's deadline = %v, want nil", err)
+	}
+	if !ok || deadline.Before(before.Add(settleTimeout)) || deadline.After(after.Add(settleTimeout)) {
+		t.Errorf("write deadline = %v, %v; want %v after the call, between %v and %v",
+			deadline, ok, settleTimeout, before.Add(settleTimeout), after.Add(settleTimeout))
+	}
+}
