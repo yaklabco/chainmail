@@ -36,6 +36,9 @@ func (s *Store) OpenWatch(ctx context.Context, folder string) (mailstore.WatchCo
 	c, err := s.connectWith(ctx, w.handler())
 	if err != nil {
 		s.pool.releaseOutside()
+		if errors.Is(err, mailstore.ErrConnLimit) {
+			s.makeRoomForWatch()
+		}
 		return nil, s.watchError(err)
 	}
 	w.c = c
@@ -52,6 +55,22 @@ func (s *Store) OpenWatch(ctx context.Context, folder string) (mailstore.WatchCo
 		return nil, s.watchError(err)
 	}
 	return w, nil
+}
+
+// makeRoomForWatch answers a watch connection the server refused for
+// being over its connection limit. Watchers never shrink, so the pool
+// gives up a slot: its cap drops to one below the slots it holds, and an
+// idle connection over the new cap logs out before this returns, so the
+// watcher's next dial can get in. A borrowed one over the cap logs out
+// when it comes back. OnConnLimit hears the new cap, which with the
+// account's watchers adds up to the total the server accepted, as it does
+// for a refused pooled dial.
+func (s *Store) makeRoomForWatch() {
+	n, retire := s.pool.yieldSlot()
+	for _, c := range retire {
+		s.pool.logout(c)
+	}
+	s.connLimited(n)
 }
 
 // watchError is what a watch connection's caller sees for err: a dropped

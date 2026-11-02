@@ -302,21 +302,23 @@ func (s *Store) release(c *conn) {
 	s.mu.Unlock()
 }
 
-// errConnLimit marks a server refusing a connection for being over its limit.
-var errConnLimit = errors.New("over the server's connection limit")
-
 // dial opens a pooled connection. A refusal for being over the server's
 // connection limit shrinks the pool and tells OnConnLimit.
 func (s *Store) dial(ctx context.Context) (*conn, error) {
 	c, err := s.connect(ctx)
-	if errors.Is(err, errConnLimit) {
-		n := s.pool.shrink()
-		s.opts.Logger.Warn("server refused another connection; pool shrunk", "account", s.acct.Name, "pool", n)
-		if s.opts.OnConnLimit != nil {
-			s.opts.OnConnLimit(n)
-		}
+	if errors.Is(err, mailstore.ErrConnLimit) {
+		s.connLimited(s.pool.shrink())
 	}
 	return c, err
+}
+
+// connLimited logs that the server refused a connection for being over
+// its limit and the pool's cap is now n, and tells OnConnLimit.
+func (s *Store) connLimited(n int) {
+	s.opts.Logger.Warn("server refused another connection; pool shrunk", "account", s.acct.Name, "pool", n)
+	if s.opts.OnConnLimit != nil {
+		s.opts.OnConnLimit(n)
+	}
 }
 
 // ProbeDial connects and logs in outside the pool, checks the connection
@@ -365,7 +367,7 @@ func (s *Store) connectWith(ctx context.Context, unilateral *imapclient.Unilater
 		s.creds.Rejected(s.acct.Name, creds)
 		return nil, &auth.RejectedError{Hint: rejectedHint(s.acct), Err: err}
 	case isConnLimit(err):
-		return nil, fmt.Errorf("%w: %w: %s refused another connection: %w", mailstore.ErrUnavailable, errConnLimit, s.acct.Name, err)
+		return nil, fmt.Errorf("%w: %w: %s refused another connection: %w", mailstore.ErrUnavailable, mailstore.ErrConnLimit, s.acct.Name, err)
 	case ctx.Err() != nil:
 		return nil, ctx.Err()
 	case isRefusal(err):

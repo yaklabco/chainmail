@@ -33,6 +33,10 @@ var (
 	ErrRefused = errors.New("refused")
 	// ErrExists means a folder with that name already exists.
 	ErrExists = errors.New("already exists")
+	// ErrConnLimit means the server refused a connection for being over its
+	// connection limit. It comes wrapped in ErrUnavailable: the refusal is
+	// temporary, and a later try can get in once a connection closes.
+	ErrConnLimit = errors.New("over the server's connection limit")
 )
 
 // FolderNotFoundError is ErrNotFound for a folder the account does not

@@ -456,3 +456,51 @@ func TestPoolConnPeakCountsDials(t *testing.T) {
 		t.Errorf("peak = %d, want 1 for the dial", got)
 	}
 }
+
+// yieldSlot lowers the cap to one below the slots the pool holds, never
+// below one and never above the old cap, and hands over idle connections
+// until open fits it. Borrowed ones stay out and log out on return.
+func TestPoolYieldSlot(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		size           int
+		borrowed, idle int
+		wantCap        int
+		wantRetired    int
+	}{
+		{name: "full pool of idle connections", size: 3, idle: 3, wantCap: 2, wantRetired: 1},
+		{name: "fewer open than the cap", size: 5, idle: 3, wantCap: 2, wantRetired: 1},
+		{name: "borrowed connections are not taken", size: 3, borrowed: 2, idle: 1, wantCap: 2, wantRetired: 1},
+		{name: "all borrowed", size: 3, borrowed: 3, wantCap: 2, wantRetired: 0},
+		{name: "empty pool keeps one", size: 3, wantCap: 1, wantRetired: 0},
+		{name: "one connection keeps one", size: 1, idle: 1, wantCap: 1, wantRetired: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := newTestPool(tt.size, &fakeDialer{}, &testClock{t: time.Unix(0, 0)}, time.Hour)
+			var out []*fakeConn
+			for range tt.borrowed + tt.idle {
+				c, err := p.get(t.Context(), "", false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out = append(out, c)
+			}
+			for _, c := range out[tt.borrowed:] {
+				p.put(c)
+			}
+			n, retired := p.yieldSlot()
+			if n != tt.wantCap || len(retired) != tt.wantRetired || p.size() != tt.wantCap {
+				t.Errorf("yieldSlot() = %d, %d retired (size %d); want %d, %d", n, len(retired), p.size(), tt.wantCap, tt.wantRetired)
+			}
+			for _, c := range retired {
+				p.logout(c)
+			}
+			if open := p.openCount(); open != tt.borrowed+tt.idle-tt.wantRetired {
+				t.Errorf("openCount() = %d after logging out the retired, want %d", open, tt.borrowed+tt.idle-tt.wantRetired)
+			}
+		})
+	}
+}

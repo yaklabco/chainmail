@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -540,5 +541,72 @@ func TestStoreOpenConnsCountsIdleAndBorrowedConnections(t *testing.T) {
 	}
 	if n := s.OpenConns(); n != 0 {
 		t.Errorf("OpenConns after the stream closed = %d, want 0", n)
+	}
+}
+
+// A watch connection the server refuses for being over its connection
+// limit, while the pool's idle connections hold every slot, shrinks the
+// pool to make room, logs out an idle connection over the new cap, and
+// tells OnConnLimit, as a refused pooled dial does. The watcher's next dial
+// then gets in.
+func TestOpenWatchRefusedForConnLimitMakesRoom(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	conns := new(atomic.Int32)
+	ep := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{Username: "host@example.test", Password: "pw", MaxConns: 3, Conns: conns})
+	var (
+		mu    sync.Mutex
+		heard []int
+	)
+	s := New(testAccount("host", ep, false), passwordCreds("host@example.test", "pw"), Options{
+		RootCAs: ca.Pool, Backoff: noBackoff,
+		OnConnLimit: func(n int) {
+			mu.Lock()
+			defer mu.Unlock()
+			heard = append(heard, n)
+		},
+	})
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := t.Context()
+	// Three borrowed connections, back in the pool idle, fill the server.
+	var cs []*conn
+	for range defaultPoolSize {
+		c, err := s.borrow(ctx, "", false)
+		if err != nil {
+			t.Fatalf("borrow: %v", err)
+		}
+		cs = append(cs, c)
+	}
+	for _, c := range cs {
+		s.release(c)
+	}
+	if n := conns.Load(); n != 3 {
+		t.Fatalf("server sessions = %d, want 3", n)
+	}
+	if _, err := s.OpenWatch(ctx, "INBOX"); !errors.Is(err, mailstore.ErrUnavailable) || !errors.Is(err, mailstore.ErrConnLimit) {
+		t.Fatalf("OpenWatch with the server full = %v, want ErrUnavailable and ErrConnLimit", err)
+	}
+	if got, open := s.PoolSize(), s.OpenConns(); got != 2 || open != 2 {
+		t.Errorf("after the refusal: pool size %d, open %d; want 2 and 2", got, open)
+	}
+	mu.Lock()
+	got := slices.Clone(heard)
+	mu.Unlock()
+	if !slices.Equal(got, []int{2}) {
+		t.Errorf("OnConnLimit heard %v, want [2]", got)
+	}
+	// The server ends the logged-out session once its socket closes.
+	for deadline := time.Now().Add(10 * time.Second); conns.Load() != 2; {
+		if time.Now().After(deadline) {
+			t.Fatalf("server sessions = %d, want 2 once the idle connection logged out", conns.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	w, err := s.OpenWatch(ctx, "INBOX")
+	if err != nil {
+		t.Fatalf("OpenWatch after the pool made room: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Errorf("Close: %v", err)
 	}
 }

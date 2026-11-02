@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -1390,4 +1391,38 @@ func TestSupervisorShutdownIsOneDeadline(t *testing.T) {
 	if n := fs.WatchConns(); n != 0 {
 		t.Errorf("WatchConns() after Run = %d, want 0", n)
 	}
+}
+
+// supBudgetStore is a fake store that reports a connection budget, as
+// imapstore.Store does.
+type supBudgetStore struct{ *fake.Store }
+
+func (supBudgetStore) PoolSize() int  { return 2 }
+func (supBudgetStore) OpenConns() int { return 3 }
+
+// A watch connection the server refuses for its connection limit logs the
+// account's budget at that moment, in fixed fields and without the
+// server's text, then backs off and reconnects like any outage.
+func TestSupervisorLogsTheBudgetOnAConnLimit(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	fs.FailWatch(fmt.Errorf("%w: %w: acme refused another connection: NO [LIMIT] server says hello", mailstore.ErrUnavailable, mailstore.ErrConnLimit))
+	var logs syncBuffer
+	r := newSupRig(t, fs, supAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}), func(o *SupervisorOptions) {
+		o.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	})
+	r.store = supBudgetStore{fs}
+	r.start()
+	r.waitFor("INBOX reconnecting", supStatus("INBOX", StateReconnecting))
+	got := logs.String()
+	want := `msg="server refused a watch connection for its connection limit" account=acme folder=INBOX pool=2 open=3 watchers=1`
+	if !strings.Contains(got, want) {
+		t.Errorf("logs =\n%s\nwant a line with\n%s", got, want)
+	}
+	if strings.Contains(got, "hello") {
+		t.Errorf("logs carry the server's text:\n%s", got)
+	}
+	r.clock.expectAfter(t, Backoff(0, 0.5))
+	r.clock.Advance(Backoff(0, 0.5))
+	r.waitFor("INBOX watching after the refusal", supStatus("INBOX", StateWatching))
 }
