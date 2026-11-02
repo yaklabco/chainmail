@@ -612,7 +612,7 @@ func TestStaleGroupTwoReadersReadEvents(t *testing.T) {
 // group's 5 rather than lowering it to 3 and replaying 4 and 5.
 func TestStaleGroupTwoReadersSubscribe(t *testing.T) {
 	t.Parallel()
-	s, _ := newTestServerOptions(t, passwordConfig, Options{WatchHeartbeat: time.Hour})
+	s, _ := newTestServerOptions(t, passwordConfig, Options{WatchHeartbeat: time.Hour, DisableWatch: true})
 	ctx := peerContext(t.Context())
 	if err := s.watchLog.Publish(ctx, testWatchEvent("a"), testWatchEvent("b"), testWatchEvent("c")); err != nil {
 		t.Fatal(err)
@@ -652,7 +652,7 @@ func TestStaleGroupTwoReadersSubscribe(t *testing.T) {
 // its start is read, and the hook waits for the daemon to see that.
 func TestSubscribeStaleGroupStaysStaleUntilTheGapIsSent(t *testing.T) {
 	t.Parallel()
-	s, _ := newTestServerOptions(t, passwordConfig, Options{WatchHeartbeat: time.Hour})
+	s, _ := newTestServerOptions(t, passwordConfig, Options{WatchHeartbeat: time.Hour, DisableWatch: true})
 	ctx := peerContext(t.Context())
 	if err := s.watchLog.Publish(ctx, testWatchEvent("a"), testWatchEvent("b"), testWatchEvent("c")); err != nil {
 		t.Fatal(err)

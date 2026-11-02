@@ -95,6 +95,9 @@ func TestWatchConformance(t *testing.T) {
 				CondStore: mode.condstore,
 				Idle:      mode.idle,
 				Gmail:     mode.gmail,
+				// The fake renumbers in place, so the watch connection must
+				// keep working across it.
+				RenumberDropsSessions: false,
 				New: func(_ *testing.T) (mailstore.Watcher, storetest.WatchRemote) {
 					s := fake.New("conformance", mode.gmail)
 					s.SetCondStore(mode.condstore)

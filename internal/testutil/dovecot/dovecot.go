@@ -417,6 +417,40 @@ func (s *Server) Flags(user, folder string, uid imap.UID) ([]imap.Flag, error) {
 	return flags, err
 }
 
+// SetFlag adds flag to a message, or removes it when on is false, from a
+// session of its own, as another mail client would, so a session watching
+// the folder sees the change.
+func (s *Server) SetFlag(user, folder string, uid imap.UID, flag imap.Flag, on bool) error {
+	return s.with(user, func(c *imapclient.Client) error {
+		if _, err := c.Select(folder, nil).Wait(); err != nil {
+			return err
+		}
+		op := imap.StoreFlagsAdd
+		if !on {
+			op = imap.StoreFlagsDel
+		}
+		store := &imap.StoreFlags{Op: op, Silent: true, Flags: []imap.Flag{flag}}
+		return c.Store(imap.UIDSetNum(uid), store, nil).Close()
+	})
+}
+
+// Expunge removes one message for good from a session of its own: it marks
+// it \Deleted and expunges that UID only, so other messages marked
+// \Deleted stay. A session in IDLE on the folder gets an EXPUNGE.
+func (s *Server) Expunge(user, folder string, uid imap.UID) error {
+	return s.with(user, func(c *imapclient.Client) error {
+		if _, err := c.Select(folder, nil).Wait(); err != nil {
+			return err
+		}
+		set := imap.UIDSetNum(uid)
+		store := &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagDeleted}}
+		if err := c.Store(set, store, nil).Close(); err != nil {
+			return err
+		}
+		return c.UIDExpunge(set).Close()
+	})
+}
+
 // UIDValidity returns a folder's UIDVALIDITY.
 func (s *Server) UIDValidity(user, folder string) (uint32, error) {
 	var v uint32
