@@ -2,6 +2,7 @@ package watch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/db"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
@@ -604,5 +606,172 @@ func TestSupervisorStoreWithoutWatcherEndsRun(t *testing.T) {
 	}
 	if n := r.held.Load(); n != 0 {
 		t.Errorf("store held %d times, want 0", n)
+	}
+}
+
+// A dropped connection reports reconnecting once per outage, backs off 1s
+// then 2s while reconnects fail, catches up on mail that arrived during
+// the outage, and starts the backoff over after a successful pass.
+func TestSupervisorReconnectsAfterDrop(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	r := newSupRig(t, fs, supAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	r.start()
+	r.waitFor("INBOX watching", supStatus("INBOX", StateWatching))
+	r.waitIdle("INBOX")
+
+	// FailWatch is one-shot: it fails the first reconnect only.
+	fs.FailWatch(fmt.Errorf("%w: test outage", mailstore.ErrUnavailable))
+	fs.DropWatches()
+	r.waitFor("INBOX reconnecting", supStatus("INBOX", StateReconnecting))
+	fs.Add(supMsg("INBOX", "during one"))
+	fs.Add(supMsg("INBOX", "during two"))
+	r.clock.expectAfter(t, Backoff(0, 0.5))
+	r.clock.Advance(Backoff(0, 0.5)) // this reconnect fails
+	r.clock.expectAfter(t, Backoff(1, 0.5))
+	if n := fs.WatchConns(); n != 0 {
+		t.Errorf("WatchConns() during the outage = %d, want 0", n)
+	}
+	if row := r.row("INBOX"); row.State != StateReconnecting || row.LastError != "SERVER_UNAVAILABLE" {
+		t.Errorf("row = state %q last_error %q, want reconnecting and SERVER_UNAVAILABLE", row.State, row.LastError)
+	}
+	r.clock.Advance(Backoff(1, 0.5))
+	r.waitFor("new event for during one", supNew("INBOX", "during one"))
+	r.waitFor("new event for during two", supNew("INBOX", "during two"))
+	r.waitFor("INBOX watching again", supStatus("INBOX", StateWatching))
+	if n := supCount(r.all(), supStatus("INBOX", StateReconnecting)); n != 1 {
+		t.Errorf("%d reconnecting events for one outage, want 1:%s", n, supDump(r.all()))
+	}
+	if row := r.row("INBOX"); row.LastError != "" {
+		t.Errorf("last_error after recovery = %q, want empty", row.LastError)
+	}
+
+	// The pass after the reconnect succeeded, so the next outage waits 1s again.
+	r.waitIdle("INBOX")
+	fs.DropWatches()
+	r.waitFor("INBOX reconnecting again", supStatus("INBOX", StateReconnecting))
+	r.clock.expectAfter(t, Backoff(0, 0.5))
+	r.clock.Advance(Backoff(0, 0.5))
+	r.waitFor("INBOX watching after the second outage", supStatus("INBOX", StateWatching))
+}
+
+// While the auth state says the account needs a human, the watcher opens
+// nothing, reports auth_required once with the hint, and checks again
+// every AuthRecheck. It resumes once the state clears.
+func TestSupervisorParksWhileAuthRequired(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	var required atomic.Bool
+	required.Store(true)
+	r := newSupRig(t, fs, supAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}), func(o *SupervisorOptions) {
+		o.AuthRequired = func(account string) (bool, string) {
+			if account != "acme" {
+				t.Errorf("AuthRequired(%q), want acme", account)
+			}
+			return required.Load(), supHint
+		}
+	})
+	r.start()
+	e := r.waitFor("INBOX auth_required", supStatus("INBOX", StateAuthRequired))
+	if e.Detail != supHint {
+		t.Errorf("detail = %q, want %q", e.Detail, supHint)
+	}
+	r.clock.expectAfter(t, AuthRecheck)
+	if n := r.acquired.Load(); n != 0 {
+		t.Errorf("Store opened %d times while parked, want 0", n)
+	}
+	if row := r.row("INBOX"); row.State != StateAuthRequired || row.LastError != "AUTH_REQUIRED" {
+		t.Errorf("row = state %q last_error %q, want auth_required and AUTH_REQUIRED", row.State, row.LastError)
+	}
+	r.clock.Advance(AuthRecheck) // still required
+	r.clock.expectAfter(t, AuthRecheck)
+	required.Store(false)
+	r.clock.Advance(AuthRecheck)
+	r.waitFor("INBOX watching after auth", supStatus("INBOX", StateWatching))
+	if n := supCount(r.all(), supStatus("INBOX", StateAuthRequired)); n != 1 {
+		t.Errorf("%d auth_required events, want 1:%s", n, supDump(r.all()))
+	}
+}
+
+// A refusal of the credentials parks the watcher with the error's hint,
+// with no reconnect backoff, and a later connection resumes it.
+func TestSupervisorParksOnRejectedCredentials(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	// One-shot: the first OpenWatch is refused, the next one works.
+	fs.FailWatch(&auth.RejectedError{Hint: supHint, Err: errors.New("LOGIN refused")})
+	r := newSupRig(t, fs, supAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	r.start()
+	e := r.waitFor("INBOX auth_required", supStatus("INBOX", StateAuthRequired))
+	if e.Detail != supHint {
+		t.Errorf("detail = %q, want %q", e.Detail, supHint)
+	}
+	r.clock.expectAfter(t, AuthRecheck)
+	r.clock.Advance(AuthRecheck)
+	r.waitFor("INBOX watching", supStatus("INBOX", StateWatching))
+	if n := supCount(r.all(), supStatus("INBOX", StateReconnecting)); n != 0 {
+		t.Errorf("%d reconnecting events for an auth refusal, want 0", n)
+	}
+}
+
+// A watched folder that does not exist reports FOLDER_NOT_FOUND and retries
+// every sync.poll, while the account's other folder keeps running.
+func TestSupervisorFolderNotFoundIsolated(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	acct := supAccount(t, "hostinger", []string{"INBOX", "Projects"}, []string{"INBOX", "Projects"})
+	r := newSupRig(t, fs, acct)
+	r.start()
+	e := r.waitSeen("Projects error", supStatus("Projects", StateError))
+	if e.Detail != ReasonFolderNotFound {
+		t.Errorf("detail = %q, want %q", e.Detail, ReasonFolderNotFound)
+	}
+	r.waitSeen("INBOX watching", supStatus("INBOX", StateWatching))
+	r.waitIdle("INBOX")
+	fs.Add(supMsg("INBOX", "still flowing"))
+	r.waitSeen("new event for still flowing", supNew("INBOX", "still flowing"))
+	r.clock.expectAfter(t, acct.SyncPoll)
+	if row := r.row("Projects"); row.State != StateError || row.LastError != ReasonFolderNotFound {
+		t.Errorf("Projects row = state %q last_error %q, want error and %s", row.State, row.LastError, ReasonFolderNotFound)
+	}
+	fs.AddFolder("Projects", mailstore.RoleNone)
+	r.clock.Advance(acct.SyncPoll)
+	r.waitSeen("Projects watching", supStatus("Projects", StateWatching))
+	if row := r.row("Projects"); row.LastError != "" {
+		t.Errorf("Projects last_error = %q, want empty", row.LastError)
+	}
+	for _, folder := range []string{"INBOX", "Projects"} {
+		if n := supCount(r.all(), supStatus(folder, StateReconnecting)); n != 0 {
+			t.Errorf("%d reconnecting events for %s, want 0", n, folder)
+		}
+	}
+}
+
+// After FolderNotFound a Gmail watcher resolves its \All folder again from
+// ListFolders before the next connection.
+func TestSupervisorGmailReresolvesAllMail(t *testing.T) {
+	t.Parallel()
+	fs := supFake(true)
+	acct := supAccount(t, "gmail", nil, nil)
+	r := newSupRig(t, fs, acct)
+	r.start()
+	r.waitFor("All Mail watching", supStatus(supAllMail, StateWatching))
+	r.waitIdle(supAllMail)
+	// One-shot: the first reconnect finds no folder; the next one resolves again.
+	fs.FailWatch(&mailstore.FolderNotFoundError{Name: supAllMail, Requested: supAllMail})
+	fs.DropWatches()
+	r.waitFor("All Mail reconnecting", supStatus(supAllMail, StateReconnecting))
+	r.clock.expectAfter(t, Backoff(0, 0.5))
+	r.clock.Advance(Backoff(0, 0.5))
+	e := r.waitFor("All Mail error", supStatus(supAllMail, StateError))
+	if e.Detail != ReasonFolderNotFound {
+		t.Errorf("detail = %q, want %q", e.Detail, ReasonFolderNotFound)
+	}
+	r.clock.expectAfter(t, acct.SyncPoll)
+	lists := fs.Calls("ListFolders")
+	r.clock.Advance(acct.SyncPoll)
+	r.waitFor("All Mail watching again", supStatus(supAllMail, StateWatching))
+	if got := fs.Calls("ListFolders"); got != lists+1 {
+		t.Errorf("ListFolders ran %d times after the error, want 1", got-lists)
 	}
 }

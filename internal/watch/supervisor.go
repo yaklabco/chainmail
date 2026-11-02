@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
@@ -156,24 +157,89 @@ type watcher struct {
 	expungeAt time.Time
 }
 
-// watchLoop keeps one folder watched until ctx ends, reconnecting after a
-// failed connection. folder is "" on Gmail, which resolves its \All folder.
+// watchLoop keeps one folder watched until ctx ends. folder is "" on Gmail,
+// which resolves its \All folder before each connection that lacks it.
+// Auth failures park the loop, a missing folder retries every sync.poll,
+// and anything else reconnects with backoff, reset by a successful pass.
 func (s *Supervisor) watchLoop(ctx context.Context, folder string) {
 	w := &watcher{s: s, folder: folder, mode: passModeIdle}
+	failures := 0
 	for {
-		_, err := w.session(ctx)
+		if !s.waitAuth(ctx, w.folder, w.mode) {
+			return
+		}
+		healthy, err := w.session(ctx)
 		if ctx.Err() != nil {
 			return
 		}
-		if errors.Is(err, errNoWatcher) {
+		if healthy {
+			failures = 0
+		}
+		var wait time.Duration
+		var notFound *mailstore.FolderNotFoundError
+		switch {
+		case errors.Is(err, errNoWatcher):
 			s.logger.Error("the account's store cannot watch folders", "folder", w.folder)
 			return
+		case authFailure(err):
+			s.logger.Warn("watching is parked until the account is authenticated", "folder", w.folder, "reason", failureReason(err))
+			s.transition(ctx, w.folder, w.mode, StateAuthRequired, s.authHint(err), api.ReasonAuthRequired)
+			wait = AuthRecheck
+		case errors.As(err, &notFound):
+			s.logger.Warn("a watched folder does not exist", "folder", w.folder)
+			s.transition(ctx, w.folder, w.mode, StateError, ReasonFolderNotFound, ReasonFolderNotFound)
+			if s.o.Account.Provider.Gmail {
+				w.folder = "" // resolve the \All folder again
+			}
+			wait = s.syncPoll
+		default:
+			s.logger.Warn("watch connection failed", "folder", w.folder, "reason", failureReason(err))
+			s.transition(ctx, w.folder, w.mode, StateReconnecting, "", api.ReasonServerUnavailable)
+			wait = Backoff(failures, s.jitter())
+			failures++
 		}
-		s.logger.Warn("watch connection failed", "folder", w.folder, "reason", failureReason(err))
-		if !s.sleep(ctx, Backoff(0, s.jitter())) {
+		if !s.sleep(ctx, wait) {
 			return
 		}
 	}
+}
+
+// waitAuth parks while the account needs a human: it records auth_required
+// once, then asks again every AuthRecheck. It reports false when ctx ends.
+func (s *Supervisor) waitAuth(ctx context.Context, folder, mode string) bool {
+	for {
+		need, hint := s.o.AuthRequired(s.o.Account.Name)
+		if !need {
+			return true
+		}
+		s.transition(ctx, folder, mode, StateAuthRequired, hint, api.ReasonAuthRequired)
+		if !s.sleep(ctx, AuthRecheck) {
+			return false
+		}
+	}
+}
+
+// authHint is what to run to authenticate the account: the auth state's
+// hint, else the one err carries. Both are written by package auth, never
+// by a server.
+func (s *Supervisor) authHint(err error) string {
+	if need, hint := s.o.AuthRequired(s.o.Account.Name); need && hint != "" {
+		return hint
+	}
+	var required *auth.RequiredError
+	if errors.As(err, &required) {
+		return required.Hint
+	}
+	var rejected *auth.RejectedError
+	if errors.As(err, &rejected) {
+		return rejected.Hint
+	}
+	return ""
+}
+
+// authFailure reports whether err needs a human rather than a retry.
+func authFailure(err error) bool {
+	return errors.Is(err, auth.ErrAuthRequired) || errors.Is(err, auth.ErrRejected)
 }
 
 // session runs one connection on the folder: open, sync, then IDLE or poll
