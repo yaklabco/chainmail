@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,13 +92,10 @@ func textOf(res *mcp.CallToolResult) string {
 	return b.String()
 }
 
-// TestMCPAgainstDovecot runs the built binary as chainmail mcp, the way an
-// agent's MCP client starts it, against a real daemon, Dovecot and an SMTP
-// sink. The agent searches, reads, files and archives a message, saves a
-// draft, and has a send off the allowlist held in Drafts. The audit log
-// records every call with client kind mcp.
-func TestMCPAgainstDovecot(t *testing.T) {
-	bin := buildChainmail(t)
+// startDovecot runs a Dovecot container for the test and removes it
+// afterwards.
+func startDovecot(t *testing.T) *dovecot.Server {
+	t.Helper()
 	dove, err := dovecot.Start()
 	if err != nil {
 		t.Fatalf("starting Dovecot: %v", err)
@@ -107,21 +105,16 @@ func TestMCPAgainstDovecot(t *testing.T) {
 			t.Errorf("stopping Dovecot: %v", err)
 		}
 	})
-	const user = "mcp@example.test"
-	sink := smtptest.StartWith(t, dove.CA, provider.SecurityStartTLS, smtptest.Options{},
-		smtptest.User{Username: user, Password: dovecot.Password})
-	h := daemontest.Start(t, fmt.Sprintf(mcpDoveConfig, user, dove.Endpoint.Port, sink.Endpoint().Port),
-		daemontest.Options{RootCAs: dove.CA.Pool})
-	if _, err := h.Client.Admin.SetSecret(t.Context(), connect.NewRequest(&chainmailv1.SetSecretRequest{
-		Name: "accounts/dove", Value: []byte(dovecot.Password),
-	})); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dove.Append(user, "INBOX", invoice, time.Now()); err != nil {
-		t.Fatal(err)
-	}
+	return dove
+}
 
-	cmd := exec.Command(bin, "--socket", h.Socket, "mcp")
+// connectMCP starts bin as chainmail mcp against the daemon at socket, the
+// way an agent's MCP client starts it, and returns a session on it. The
+// test's cleanup closes the session, and logs the process's stderr when
+// the test failed.
+func connectMCP(t *testing.T, bin, socket string) session {
+	t.Helper()
+	cmd := exec.Command(bin, "--socket", socket, "mcp")
 	cmd.Env = append(os.Environ(), "XDG_CACHE_HOME="+t.TempDir())
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -141,7 +134,32 @@ func TestMCPAgainstDovecot(t *testing.T) {
 	if v := cs.InitializeResult().ProtocolVersion; v != "2026-07-28" {
 		t.Errorf("negotiated %q, want 2026-07-28", v)
 	}
-	s := session{t: t, cs: cs}
+	return session{t: t, cs: cs}
+}
+
+// TestMCPAgainstDovecot runs the built binary as chainmail mcp, the way an
+// agent's MCP client starts it, against a real daemon, Dovecot and an SMTP
+// sink. The agent searches, reads, files and archives a message, saves a
+// draft, and has a send off the allowlist held in Drafts. The audit log
+// records every call with client kind mcp.
+func TestMCPAgainstDovecot(t *testing.T) {
+	bin := buildChainmail(t)
+	dove := startDovecot(t)
+	const user = "mcp@example.test"
+	sink := smtptest.StartWith(t, dove.CA, provider.SecurityStartTLS, smtptest.Options{},
+		smtptest.User{Username: user, Password: dovecot.Password})
+	h := daemontest.Start(t, fmt.Sprintf(mcpDoveConfig, user, dove.Endpoint.Port, sink.Endpoint().Port),
+		daemontest.Options{RootCAs: dove.CA.Pool})
+	if _, err := h.Client.Admin.SetSecret(t.Context(), connect.NewRequest(&chainmailv1.SetSecretRequest{
+		Name: "accounts/dove", Value: []byte(dovecot.Password),
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dove.Append(user, "INBOX", invoice, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	s := connectMCP(t, bin, h.Socket)
 
 	// 1. search and read.
 	var found struct {
@@ -242,5 +260,120 @@ func TestMCPAgainstDovecot(t *testing.T) {
 	}
 	if !sawHeld {
 		t.Error("no audit row records the held send")
+	}
+}
+
+// eventsPage is read_events' structured output (T8's eventsOut), as far
+// as the test reads it.
+type eventsPage struct {
+	Events []struct {
+		ID      int64                      `json:"id"`
+		Kind    string                     `json:"kind"`
+		Account string                     `json:"account"`
+		Folder  struct{ Untrusted string } `json:"folder"`
+		Ref     string                     `json:"ref"`
+		Message struct {
+			Subject struct{ Untrusted string } `json:"subject"`
+		} `json:"message"`
+	} `json:"events"`
+	NextCursor int64 `json:"next_cursor"`
+}
+
+// waitInboxWatched polls GetWatchStatus until dove's INBOX is watched, so
+// mail appended afterwards is new rather than part of the baseline.
+func waitInboxWatched(t *testing.T, h *daemontest.Harness) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		resp, err := h.Client.Watch.GetWatchStatus(t.Context(), connect.NewRequest(&chainmailv1.GetWatchStatusRequest{}))
+		if err != nil {
+			t.Fatalf("GetWatchStatus: %v", err)
+		}
+		for _, f := range resp.Msg.GetFolders() {
+			if f.GetAccount() == "dove" && f.GetFolder() == "INBOX" && f.GetState() == "watching" {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("dove/INBOX not watching within 30s: %v", resp.Msg.GetFolders())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestMCPReadEventsAgainstDovecot has an agent wait for mail the way spec
+// section 4 describes: repeated read_events with a group and a wait. The
+// built binary runs as chainmail mcp against a watching daemon on
+// Dovecot. Mail delivered after the group exists comes back once, the
+// group acknowledges it, and every read is audited as watch.read with
+// client kind mcp.
+func TestMCPReadEventsAgainstDovecot(t *testing.T) {
+	bin := buildChainmail(t)
+	dove := startDovecot(t)
+	const user = "events@example.test"
+	sink := smtptest.StartWith(t, dove.CA, provider.SecurityStartTLS, smtptest.Options{},
+		smtptest.User{Username: user, Password: dovecot.Password})
+	h := daemontest.Start(t, fmt.Sprintf(mcpDoveConfig, user, dove.Endpoint.Port, sink.Endpoint().Port),
+		daemontest.Options{RootCAs: dove.CA.Pool, Watch: true, Secrets: map[string]string{"accounts/dove": dovecot.Password}})
+	waitInboxWatched(t, h)
+	s := connectMCP(t, bin, h.Socket)
+
+	// 1. The first read creates the group at the end of the log.
+	var page eventsPage
+	s.call("read_events", map[string]any{"group": "agent"}, &page)
+
+	// 2. Mail delivered now comes back from a waiting read. Status events
+	// pass a kinds filter, so a read may return only those; read again.
+	if _, err := dove.Append(user, "INBOX", invoice, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	ref := ""
+	deadline := time.Now().Add(30 * time.Second)
+	for ref == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("read_events returned no new event within 30s")
+		}
+		page = eventsPage{}
+		s.call("read_events", map[string]any{"group": "agent", "kinds": []string{"new"}, "wait_seconds": 10}, &page)
+		for _, e := range page.Events {
+			if e.Kind != "new" {
+				continue
+			}
+			if e.Account != "dove" || e.Folder.Untrusted != "INBOX" || e.Message.Subject.Untrusted != "Invoice 42" || e.Ref == "" || e.ID == 0 {
+				t.Fatalf("new event = %+v, want Invoice 42 in dove/INBOX with a ref and an ID", e)
+			}
+			if page.NextCursor < e.ID {
+				t.Errorf("next_cursor %d is below the returned event %d", page.NextCursor, e.ID)
+			}
+			ref = e.Ref
+		}
+	}
+
+	// 3. The group read acknowledged it, so the next read does not return it.
+	page = eventsPage{}
+	s.call("read_events", map[string]any{"group": "agent", "kinds": []string{"new"}}, &page)
+	for _, e := range page.Events {
+		if e.Kind == "new" {
+			t.Errorf("read_events returned new event %s again after the group read it", e.Ref)
+		}
+	}
+
+	// 4. Every read is audited as watch.read, with client kind mcp and the
+	// group, and never the subject.
+	reads := 0
+	for _, r := range h.AuditRows(t) {
+		if strings.Contains(fmt.Sprintf("%+v", r), "Invoice") {
+			t.Errorf("audit row %+v holds message content", r)
+		}
+		if r.Action != "watch.read" {
+			continue
+		}
+		reads++
+		if r.Client != "mcp" || !strings.Contains(r.Targets, "group=agent") {
+			t.Errorf("watch.read row %+v, want client mcp and target group=agent", r)
+		}
+	}
+	if reads < 3 {
+		t.Errorf("%d watch.read audit rows, want at least 3", reads)
 	}
 }
