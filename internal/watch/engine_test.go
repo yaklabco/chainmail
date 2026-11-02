@@ -402,6 +402,31 @@ func TestPassWakesWaiters(t *testing.T) {
 	}
 }
 
+// A message that arrives between a baseline's SELECT and its FETCH is past
+// the UIDNEXT the checkpoint stores, so the baseline leaves it out of the
+// known UIDs and the next pass reports it as new. Known, it would never be
+// reported as new, and if it left before the next SELECT it would come back
+// later as an expunged event the message count could not explain.
+func TestBaselineKeepsOnlyUIDsBelowItsUIDNext(t *testing.T) {
+	t.Parallel()
+	h := newEngineHarness(t, EngineOptions{})
+	baseline := mailstore.Delta{State: diffState(2, 10, true), Rebased: true, UIDs: []uint32{1, 2}}
+	h.pass(t, &scriptSource{results: []scriptResult{{delta: baseline}}}, PassOptions{Mode: "idle"})
+	if got := h.uids(t); !slices.Equal(got, []uint32{1}) {
+		t.Errorf("known UIDs after the baseline = %v, want [1]: UID 2 is at the selected UIDNEXT", got)
+	}
+	// UID 2 leaves before the next SELECT, which then reports UIDNEXT 3
+	// and no new mail. Sweeps find nothing gone.
+	gone := mailstore.Delta{State: diffState(3, 12, true), UIDs: []uint32{1}}
+	h.pass(t, &scriptSource{results: []scriptResult{{delta: gone}}}, PassOptions{Mode: "idle", Sweep: true})
+	h.pass(t, &scriptSource{results: []scriptResult{{delta: gone}}}, PassOptions{Mode: "idle", Sweep: true})
+	for _, e := range h.events(t) {
+		if e.Kind == KindExpunged {
+			t.Errorf("expunged event for %s, a message no new event reported", e.Ref)
+		}
+	}
+}
+
 // A pass that appends no events, such as a Google account's check every
 // google_check that finds nothing, still commits its checkpoint but wakes
 // no reader: Wait has nothing new to return.
