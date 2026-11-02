@@ -17,6 +17,7 @@ import (
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/gen/chainmail/v1/chainmailv1connect"
+	"github.com/jamesainslie/chainmail/internal/api"
 )
 
 const watchHelp = `Stream mail events from the daemon's event log: one JSON line per event,
@@ -169,21 +170,67 @@ type stopError struct{ err error }
 func (e stopError) Error() string { return e.err.Error() }
 func (e stopError) Unwrap() error { return e.err }
 
-// run streams until --once sees its first heartbeat, a signal ends ctx,
-// or the stream fails.
+// run streams until --once sees its first heartbeat or a signal ends ctx.
+// A stream that fails, ends, or stays silent for watchHeartbeatTimeout is
+// reopened after a backoff, from the group or the last position seen.
+// Only a refusal the daemon would repeat, or a failure to write output,
+// ends the watch with an error.
 func (w *watcher) run(ctx context.Context) error {
-	_, err := w.session(ctx)
-	if signalled(ctx) {
-		return nil // a signal ended the watch, as it ends mcp
+	attempt := 0
+	for {
+		got, err := w.session(ctx)
+		if signalled(ctx) {
+			return nil // a signal ended the watch, as it ends mcp
+		}
+		var stop stopError
+		switch {
+		case errors.Is(err, errWatchOnce):
+			return nil
+		case errors.As(err, &stop):
+			return stop.err
+		case watchFatal(err):
+			return err
+		}
+		if got {
+			attempt = 0
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-w.env.after(watchBackoff(attempt)):
+		}
+		attempt++
 	}
-	var stop stopError
-	switch {
-	case errors.Is(err, errWatchOnce):
-		return nil
-	case errors.As(err, &stop):
-		return stop.err
+}
+
+// watchFatal reports whether the daemon refused the stream in a way a
+// retry would repeat: a bad request, a refused peer or policy, an account
+// that needs a login, or an unknown account. Everything else, an
+// unreachable daemon included, is retried.
+func watchFatal(err error) bool {
+	var cerr *connect.Error
+	if !errors.As(err, &cerr) {
+		return false
 	}
-	return err
+	switch api.ExitCode(api.Detail(cerr).GetReason()) {
+	case api.ExitUsage, api.ExitDenied, api.ExitAuth, api.ExitNotFound:
+		return true
+	default:
+		return false
+	}
+}
+
+// watchBackoff is the wait before reconnect attempt n (0-based): 1s,
+// doubling, capped at watchBackoffMax.
+func watchBackoff(n int) time.Duration {
+	d := watchBackoffStart
+	for range n {
+		d *= 2
+		if d >= watchBackoffMax {
+			return watchBackoffMax
+		}
+	}
+	return d
 }
 
 // signalled reports whether ctx has ended, as a signal ends it.

@@ -541,12 +541,16 @@ func TestWatchExitsOnRefusals(t *testing.T) {
 			t.Parallel()
 			f := newFakeWatch(playThen(tt.err))
 			socket := startFakeWatch(t, f)
-			got := runCLI(t, Env{After: newFakeClock(nil).After}, "--socket", socket, "watch")
+			clock := newFakeClock(allButHeartbeat)
+			got := runCLI(t, Env{After: clock.After}, "--socket", socket, "watch")
 			if got.code != tt.code || errorReason(t, got.stderr) != tt.reason {
 				t.Errorf("watch: %+v, want exit %d %s", got, tt.code, tt.reason)
 			}
 			if n := len(f.requests()); n != 1 {
 				t.Errorf("%d Subscribe calls, want 1", n)
+			}
+			if b := clock.backoffs(); len(b) != 0 {
+				t.Errorf("backoffs = %v after a refusal, want none", b)
 			}
 		})
 	}
@@ -579,5 +583,178 @@ func TestWatchUsageErrors(t *testing.T) {
 				t.Errorf("stderr = %s, want it to mention %q", got.stderr, tt.want)
 			}
 		})
+	}
+}
+
+// backoffs lists the waits the watch asked for other than heartbeat
+// timeouts. Without --group those are the reconnect backoffs.
+func (c *fakeClock) backoffs() []time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []time.Duration
+	for _, d := range c.asked {
+		if d != watchHeartbeatTimeout {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// allButHeartbeat makes every wait but the heartbeat timeout fire at once.
+func allButHeartbeat(d time.Duration) bool { return d != watchHeartbeatTimeout }
+
+// unavailable is a stream failure the watch retries.
+func unavailable() error {
+	return connect.NewError(connect.CodeUnavailable, errors.New("daemon restarting"))
+}
+
+// runCLIAsync runs chainmail with ctx in the background, as runCLI does,
+// and delivers its result once it exits.
+func runCLIAsync(ctx context.Context, env Env, args ...string) <-chan cliResult {
+	var out, errOut syncBuffer
+	env.Stdout, env.Stderr = &out, &errOut
+	env.Stdin = strings.NewReader("")
+	env.Getenv = func(string) string { return "" }
+	res := make(chan cliResult, 1)
+	go func() {
+		code := Execute(ctx, args, env)
+		res <- cliResult{stdout: out.String(), stderr: errOut.String(), code: code}
+	}()
+	return res
+}
+
+func waitResult(t *testing.T, res <-chan cliResult) cliResult {
+	t.Helper()
+	select {
+	case r := <-res:
+		return r
+	case <-time.After(10 * time.Second):
+		t.Fatal("chainmail watch did not exit")
+		return cliResult{}
+	}
+}
+
+func TestWatchBackoff(t *testing.T) {
+	t.Parallel()
+	for n, want := range map[int]time.Duration{
+		0: time.Second, 1: 2 * time.Second, 2: 4 * time.Second, 3: 8 * time.Second,
+		4: 16 * time.Second, 5: 30 * time.Second, 6: 30 * time.Second, 100: 30 * time.Second,
+	} {
+		if got := watchBackoff(n); got != want {
+			t.Errorf("watchBackoff(%d) = %v, want %v", n, got, want)
+		}
+	}
+}
+
+// A failed or ended stream reconnects from the group, else the last event
+// ID or heartbeat position seen, else live.
+func TestWatchReconnectResumes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		args   []string
+		stream watchScript
+		start  string
+		resume string
+	}{
+		{name: "nothing seen", stream: playThen(unavailable()), start: "live", resume: "live"},
+		{name: "since flag", args: []string{"--since", "5"}, stream: playThen(unavailable()), start: "since=5", resume: "since=5"},
+		{
+			name:   "last event",
+			stream: playThen(unavailable(), eventItem(newEvent(1, "a")), eventItem(newEvent(2, "b"))),
+			start:  "live", resume: "since=2",
+		},
+		{name: "heartbeat position", stream: playThen(unavailable(), heartbeatItem(7)), start: "live", resume: "since=7"},
+		{
+			name:   "heartbeat after an event",
+			stream: playThen(unavailable(), eventItem(newEvent(3, "a")), heartbeatItem(9)),
+			start:  "live", resume: "since=9",
+		},
+		{
+			name: "trimmed gap", args: []string{"--since", "1"},
+			stream: playThen(unavailable(), eventItem(gapEvent(4))),
+			start:  "since=1", resume: "since=1",
+		},
+		{
+			name: "stream ended",
+			stream: func(_ context.Context, send func(*chainmailv1.SubscribeResponse) error) error {
+				return send(eventItem(newEvent(4, "a")))
+			},
+			start: "live", resume: "since=4",
+		},
+		{
+			name: "group", args: []string{"--group", "bot"},
+			stream: playThen(unavailable(), eventItem(newEvent(1, "a"))),
+			start:  "group=bot", resume: "group=bot",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeWatch(tt.stream, playThen(authRequired()))
+			socket := startFakeWatch(t, f)
+			args := append([]string{"--socket", socket, "watch"}, tt.args...)
+			got := runCLI(t, Env{After: newFakeClock(allButHeartbeat).After}, args...)
+			if got.code != api.ExitAuth {
+				t.Fatalf("watch: %+v, want exit 5 from the second stream", got)
+			}
+			reqs := f.requests()
+			if len(reqs) != 2 {
+				t.Fatalf("%d Subscribe calls, want 2", len(reqs))
+			}
+			if p := position(reqs[0]); p != tt.start {
+				t.Errorf("first stream starts %s, want %s", p, tt.start)
+			}
+			if p := position(reqs[1]); p != tt.resume {
+				t.Errorf("reconnect starts %s, want %s", p, tt.resume)
+			}
+		})
+	}
+}
+
+// Backoff doubles while streams fail without a message, and starts over
+// once a stream delivers one.
+func TestWatchBackoffResetsAfterMessages(t *testing.T) {
+	t.Parallel()
+	f := newFakeWatch(
+		playThen(unavailable()),
+		playThen(unavailable()),
+		playThen(unavailable(), eventItem(newEvent(1, "a"))),
+		playThen(unavailable()),
+		playThen(unavailable()),
+		playThen(authRequired()),
+	)
+	socket := startFakeWatch(t, f)
+	clock := newFakeClock(allButHeartbeat)
+	got := runCLI(t, Env{After: clock.After}, "--socket", socket, "watch")
+	if got.code != api.ExitAuth {
+		t.Fatalf("watch: %+v, want exit 5", got)
+	}
+	want := []time.Duration{time.Second, 2 * time.Second, time.Second, 2 * time.Second, 4 * time.Second}
+	if b := clock.backoffs(); !slices.Equal(b, want) {
+		t.Errorf("backoffs = %v, want %v", b, want)
+	}
+}
+
+// A stream silent for 75 seconds is abandoned and reopened from the last
+// event seen.
+func TestWatchReconnectsAfterHeartbeatTimeout(t *testing.T) {
+	t.Parallel()
+	f := newFakeWatch(playThen(nil, eventItem(newEvent(1, "a"))), playThen(authRequired()))
+	socket := startFakeWatch(t, f)
+	clock := newFakeClock(allButHeartbeat)
+	res := runCLIAsync(t.Context(), Env{After: clock.After}, "--socket", socket, "watch")
+	clock.waitCount(t, watchHeartbeatTimeout, 2) // the stream's start and its one event
+	if n := len(f.requests()); n != 1 {
+		t.Fatalf("%d Subscribe calls before the timeout, want 1", n)
+	}
+	clock.fire(watchHeartbeatTimeout)
+	got := waitResult(t, res)
+	if got.code != api.ExitAuth {
+		t.Fatalf("watch: %+v, want exit 5 from the second stream", got)
+	}
+	reqs := f.requests()
+	if len(reqs) != 2 || position(reqs[1]) != "since=1" {
+		t.Errorf("requests = %v, want a reconnect since=1", reqs)
 	}
 }
