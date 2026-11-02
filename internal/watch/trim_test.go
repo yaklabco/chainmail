@@ -283,3 +283,37 @@ func TestTrimByAgeKeepsAPrefix(t *testing.T) {
 		t.Errorf("Trim once all are old = %d, %v, want 3", n, err)
 	}
 }
+
+// A trim larger than one batch deletes in batches, each committed on its
+// own, so it never holds the only connection for the whole trim. The age
+// trim still removes only a prefix: a backdated event after a retained one
+// stays.
+func TestTrimDeletesInBatches(t *testing.T) {
+	t.Parallel()
+	l, conn, clock := newLog(t)
+	l.trimBatch = 4
+	var left []int
+	l.afterTrimBatch = func() { left = append(left, countEvents(t, conn)) }
+	old := make([]Event, 10)
+	for i := range old {
+		old[i] = newEvent("a", "INBOX", uint32(i+1))
+	}
+	publish(t, l, old...) // 1 to 10
+	clock.Set(t0.Add(100 * time.Hour))
+	backdated := newEvent("a", "INBOX", 14)
+	backdated.At = t0
+	publish(t, l, newEvent("a", "INBOX", 11), newEvent("a", "INBOX", 12), newEvent("a", "INBOX", 13),
+		backdated, newEvent("a", "INBOX", 15))
+	clock.Set(t0.Add(week + time.Hour))
+	n, err := l.Trim(t.Context(), week, 3)
+	if err != nil || n != 12 {
+		t.Fatalf("Trim = %d, %v, want 12", n, err)
+	}
+	// Age: 1 to 4, 5 to 8, 9 and 10. Count: 11 and 12.
+	if want := []int{11, 7, 5, 3}; !slices.Equal(left, want) {
+		t.Errorf("events left after each batch = %v, want %v", left, want)
+	}
+	if got, _ := readIDs(t, l, Query{After: 12}); !slices.Equal(got, []int64{13, 14, 15}) {
+		t.Errorf("left %v, want [13 14 15]", got)
+	}
+}

@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -69,6 +70,12 @@ type Log struct {
 
 	db  *sql.DB
 	now func() time.Time
+
+	// trimBatch is the most events one Trim transaction deletes: 0 means
+	// defaultTrimBatch. afterTrimBatch, when set, runs after each batch
+	// commits. Tests set both.
+	trimBatch      int
+	afterTrimBatch func()
 
 	// mu guards notify, which Notify closes and replaces so that every
 	// Wait blocked on the old channel wakes at once.
@@ -298,48 +305,79 @@ func tailOf(ctx context.Context, q queryer) (int64, error) {
 // IDs, oldest first, so the trimmed gap in Read reports every loss: an
 // event older than retention that follows a retained one (a caller-supplied
 // At, or a clock that stepped back) stays until those before it go.
+//
+// Each trim finds its bound first, then deletes below it in batches of at
+// most 5000 events, each its own transaction, so a large trim never holds
+// the only connection for long and readers and writers get turns between
+// batches. A batch is a prefix too, so a trim cut short by an error or by
+// ctx leaves the log trimmed from its oldest end, and the count returned
+// with the error is what it deleted.
 func (l *Log) Trim(ctx context.Context, retention time.Duration, maxEvents int) (int64, error) {
 	if retention <= 0 || maxEvents < 1 {
-		return 0, fmt.Errorf("watch: trim needs a positive retention and max events, got %s and %d", retention, maxEvents)
+		return 0, fmt.Errorf("trim needs a positive retention and max events, got %s and %d", retention, maxEvents)
 	}
 	cutoff := formatTime(l.now().Add(-retention))
-	tx, err := l.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("watch: beginning trim: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }() // a no-op after Commit; an earlier error is the one to report
-
 	var deleted int64
-	for _, del := range []struct {
+	for _, bound := range []struct {
 		query string
 		args  []any
 	}{
-		// Everything below the oldest ID still inside retention, or every
-		// event when none is. id < NULL, on an empty log, deletes nothing.
-		{`DELETE FROM events WHERE id < COALESCE(
-			(SELECT MIN(id) FROM events WHERE at >= ?),
-			(SELECT MAX(id) + 1 FROM events))`, []any{cutoff}},
-		// The subquery is the newest ID beyond the cap, NULL when there are
-		// not that many events, and id <= NULL deletes nothing.
-		{"DELETE FROM events WHERE id <= (SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET ?)", []any{maxEvents}},
+		// The oldest ID still inside retention, or one past the newest when
+		// none is: everything below it goes. NULL on an empty log.
+		{`SELECT COALESCE((SELECT MIN(id) FROM events WHERE at >= ?), (SELECT MAX(id) + 1 FROM events))`, []any{cutoff}},
+		// One past the newest ID beyond the cap, NULL when there are not
+		// that many events.
+		{"SELECT (SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET ?) + 1", []any{maxEvents}},
 	} {
-		res, err := tx.ExecContext(ctx, del.query, del.args...)
+		var below sql.NullInt64
+		if err := l.db.QueryRowContext(ctx, bound.query, bound.args...).Scan(&below); err != nil {
+			return deleted, fmt.Errorf("trimming events: %w", err)
+		}
+		if !below.Valid {
+			continue
+		}
+		n, err := l.deleteBelow(ctx, below.Int64)
+		deleted += n
 		if err != nil {
-			return 0, fmt.Errorf("watch: trimming events: %w", err)
+			return deleted, err
+		}
+	}
+	if _, err := l.db.ExecContext(ctx, "DELETE FROM event_groups WHERE last_seen_at < ?", cutoff); err != nil {
+		return deleted, fmt.Errorf("pruning groups: %w", err)
+	}
+	return deleted, nil
+}
+
+// defaultTrimBatch is the most events one Trim transaction deletes.
+const defaultTrimBatch = 5000
+
+// deleteBelow deletes every event with an ID below id, lowest first, in
+// batches of trimBatch, each a transaction of its own, and returns how many
+// it deleted.
+func (l *Log) deleteBelow(ctx context.Context, id int64) (int64, error) {
+	batch := cmp.Or(l.trimBatch, defaultTrimBatch)
+	var deleted int64
+	for {
+		res, err := l.db.ExecContext(ctx,
+			"DELETE FROM events WHERE id IN (SELECT id FROM events WHERE id < ? ORDER BY id LIMIT ?)", id, batch)
+		if err != nil {
+			return deleted, fmt.Errorf("trimming events: %w", err)
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			return 0, fmt.Errorf("watch: trimming events: %w", err)
+			return deleted, fmt.Errorf("trimming events: %w", err)
 		}
 		deleted += n
+		if n == 0 {
+			return deleted, nil
+		}
+		if l.afterTrimBatch != nil {
+			l.afterTrimBatch()
+		}
+		if n < int64(batch) {
+			return deleted, nil
+		}
 	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM event_groups WHERE last_seen_at < ?", cutoff); err != nil {
-		return 0, fmt.Errorf("watch: pruning groups: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("watch: committing trim: %w", err)
-	}
-	return deleted, nil
 }
 
 // Run trims every interval until ctx ends. It trims once on entry too, so a
