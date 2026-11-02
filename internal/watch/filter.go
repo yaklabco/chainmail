@@ -57,8 +57,8 @@ func (f Filter) Match(e Event) bool {
 	return slices.ContainsFunc(labels, func(l string) bool { return labelMatches(f.In, l) })
 }
 
-// labelMatches reports whether the label is the one in names, either by
-// name or through the inbox and sent aliases.
+// labelMatches reports whether label is the label in names, by name or
+// through the inbox and sent aliases.
 func labelMatches(in, label string) bool {
 	switch {
 	case strings.EqualFold(label, in):
