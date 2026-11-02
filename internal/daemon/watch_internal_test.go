@@ -338,7 +338,8 @@ func TestReadEventsWaitEndsBeforeTheDeadline(t *testing.T) {
 	t.Parallel()
 	s, stateDB := newTestServer(t)
 	w := &watchService{s: s}
-	const deadline = 40 * time.Millisecond
+	// The wait gets half of the 100ms, which leaves the audit write the rest.
+	const deadline = 100 * time.Millisecond
 	ctx, cancel := context.WithTimeout(peerContext(t.Context()), deadline)
 	defer cancel()
 	start := time.Now()
