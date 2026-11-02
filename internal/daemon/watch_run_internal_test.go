@@ -1,10 +1,15 @@
 package daemon
 
 import (
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/limits"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
+	"github.com/jamesainslie/chainmail/internal/watch"
 )
 
 // budgetConfig has one account per budget case: the preset's cap with one,
@@ -161,6 +166,101 @@ func TestProbeLeavesRoomForWatchers(t *testing.T) {
 			stores := log.of("fixed")
 			if len(stores) == 0 || stores[len(stores)-1].params.poolSize != tt.want {
 				t.Errorf("stores = %+v, want the last sized %d", stores, tt.want)
+			}
+		})
+	}
+}
+
+// watchRunConfig has two synced accounts and one with sync off.
+const watchRunConfig = `
+[accounts.host]
+provider = "hostinger"
+address = "me@example.com"
+
+[accounts.gm]
+provider = "gmail"
+address = "me@gmail.example"
+auth = "password"
+
+[accounts.off]
+provider = "hostinger"
+address = "off@example.com"
+sync = { enabled = false }
+`
+
+// supervised returns the accounts with a supervisor, in start order.
+func supervised(s *Server) []string {
+	s.supervisors.mu.Lock()
+	defer s.supervisors.mu.Unlock()
+	return slices.Clone(s.supervisors.accounts)
+}
+
+// startWatch runs one supervisor per account with sync enabled, in name
+// order, and none with DisableWatch. Once stopWatch has run it starts no
+// more, as drain needs.
+func TestStartWatchSupervisesSyncedAccounts(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		disable bool
+		want    []string
+	}{
+		{name: "every account with sync enabled", want: []string{"gm", "host"}},
+		{name: "none with DisableWatch", disable: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s, _ := newTestServerOptions(t, watchRunConfig, Options{
+				DisableWatch: tt.disable,
+				NewStore:     func(a config.ResolvedAccount) mailstore.Store { return fake.New(a.Name, a.Provider.Gmail) },
+			})
+			s.startWatch(t.Context())
+			got := supervised(s)
+			s.stopWatch()
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("supervised accounts = %v, want %v", got, tt.want)
+			}
+			s.startWatch(t.Context())
+			if again := supervised(s); !slices.Equal(again, got) {
+				t.Errorf("after stopWatch, startWatch supervised %v, want %v unchanged", again, got)
+			}
+		})
+	}
+}
+
+// Each supervisor gets the daemon's engine, log, state and sweep floor
+// (5 minutes unless Options.WatchSweepFloor shortens it), and the event
+// log logs through the daemon's logger.
+func TestSupervisorOptionsWiring(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		set, want time.Duration
+	}{
+		{name: "zero means 5 minutes", want: watch.ExpungeSweepFloor},
+		{name: "tests shorten it", set: 10 * time.Millisecond, want: 10 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s, _ := newTestServerOptions(t, watchRunConfig, Options{WatchSweepFloor: tt.set})
+			acct, err := s.opts.Config.Account("host")
+			if err != nil {
+				t.Fatal(err)
+			}
+			o := s.supervisorOptions(acct, s.opts.Config.WatchSettings())
+			if o.SweepFloor != tt.want {
+				t.Errorf("SweepFloor = %v, want %v", o.SweepFloor, tt.want)
+			}
+			if o.Account.Name != "host" || o.Engine != s.engine || o.Log != s.watchLog || o.State != s.watchState {
+				t.Errorf("options = %+v, want host with the daemon's engine, log and state", o)
+			}
+			if o.Store == nil || o.AuthRequired == nil || o.Clock == nil || o.Logger != s.opts.Logger {
+				t.Errorf("options = %+v, want Store, AuthRequired, Clock and the daemon's logger set", o)
+			}
+			if s.watchLog.Logger != s.opts.Logger {
+				t.Error("the event log does not log through the daemon's logger")
 			}
 		})
 	}

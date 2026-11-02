@@ -63,6 +63,10 @@ type Options struct {
 	// WatchService handlers, the event log and its trimmer still work.
 	// Tests that count mail store calls set it, through daemontest.
 	DisableWatch bool
+	// WatchSweepFloor is the shortest wait between expunge sweeps of a
+	// watched folder after the server reports an EXPUNGE. Zero means 5
+	// minutes (watch.ExpungeSweepFloor). Integration tests shorten it.
+	WatchSweepFloor time.Duration
 }
 
 const (
@@ -117,6 +121,12 @@ type Server struct {
 	// watchWaitUnit is one ReadEvents wait_seconds: a second. Internal
 	// tests shorten it.
 	watchWaitUnit time.Duration
+	// engine turns sync passes into events and checkpoints.
+	engine *watch.Engine
+	// supervisors watch and sync the accounts while Serve runs.
+	supervisors supervisorSet
+	// trimInterval is how often the event log is trimmed. Tests shorten it.
+	trimInterval time.Duration
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -133,6 +143,9 @@ func New(opts Options) (*Server, error) {
 	if opts.WatchHeartbeat <= 0 {
 		opts.WatchHeartbeat = defaultWatchHeartbeat
 	}
+	if opts.WatchSweepFloor <= 0 {
+		opts.WatchSweepFloor = watch.ExpungeSweepFloor
+	}
 	pol, err := policy.New(opts.Config)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: policy: %w", err)
@@ -148,6 +161,7 @@ func New(opts Options) (*Server, error) {
 		watchLog:      watch.NewLog(opts.StateDB, opts.Now),
 		watchState:    watch.NewState(opts.StateDB),
 		watchWaitUnit: time.Second,
+		trimInterval:  eventTrimInterval,
 	}
 	s.lim = newLimitState(opts.StateDB, opts.Now)
 	s.newStore = func(acct config.ResolvedAccount, p storeParams) mailstore.Store {
@@ -160,6 +174,9 @@ func New(opts Options) (*Server, error) {
 		s.newStore = func(acct config.ResolvedAccount, _ storeParams) mailstore.Store { return opts.NewStore(acct) }
 	}
 	s.stores = &storeSet{build: s.buildStore, buildSized: s.buildSized, firstUse: s.probeIfStale, logger: opts.Logger}
+	// Log.Run reports failed trims here. Set before Serve starts it.
+	s.watchLog.Logger = opts.Logger
+	s.engine = watch.NewEngine(opts.StateDB, s.watchLog, s.watchState, watch.EngineOptions{Now: opts.Now, Snippet: snippetOf})
 	if err := s.openSendState(); err != nil {
 		return nil, err
 	}
@@ -208,6 +225,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	base, cancelBase := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelBase()
 	defer s.startBackground(base)()
+	// Supervisors start once sends are recovered, on base, so a shutdown
+	// cancels them with the requests. drain joins them.
+	s.startWatch(base)
 	s.httpSrv.BaseContext = func(net.Listener) context.Context { return base }
 	errc := make(chan error, 1)
 	go func() { errc <- s.httpSrv.Serve(s.opts.Listener) }()
@@ -240,11 +260,14 @@ func (s *Server) Serve(ctx context.Context) error {
 	return err
 }
 
-// drain waits for every handler to return, stops the background probes,
-// then logs out of the mail servers. Each store logs out within 5 seconds,
-// all in parallel.
+// drain waits for every handler to return, stops the supervisors and the
+// background probes, then logs out of the mail servers. The supervisors
+// stop first, closing their watch connections within
+// watch.ShutdownLogout, so none holds a store closeAll is closing. Each
+// store logs out within 5 seconds, all in parallel.
 func (s *Server) drain() {
 	s.handlers.wait()
+	s.stopWatch()
 	s.lim.stop()
 	if err := s.stores.closeAll(); err != nil {
 		s.opts.Logger.Warn("logging out of mail servers", "reason", apiReason(err))
