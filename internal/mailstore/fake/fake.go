@@ -576,11 +576,14 @@ func (s *Store) inThreadLocked(seed *Message, root string, m *Message) bool {
 	return trimID(m.MessageID) == root || slices.Contains(mailstore.MessageIDs(m.References), root)
 }
 
-// Close implements mailstore.Store.
+// Close implements mailstore.Store. It closes every open watch connection
+// without waiting for its owner, so a watcher sees ErrUnavailable and
+// reconnects through a replacement store.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
+	s.closeWatchesLocked()
 	return nil
 }
 

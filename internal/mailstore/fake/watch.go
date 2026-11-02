@@ -93,9 +93,11 @@ func (s *Store) ExternalExpunge(folder string, uid uint32) {
 
 // NewUIDValidity gives folder a new UIDVALIDITY, one above any it has had,
 // and renumbers its messages from UID 1 in their UID order, as a server
-// that rebuilt the folder would. Old refs into it go stale, and Gmail label
-// views of it are forgotten. SetUIDValidity, by contrast, keeps the UIDs.
-// It panics when the folder does not exist.
+// that rebuilt the folder would. Old refs into it go stale. A Gmail label
+// folder stores no messages, so there it renumbers none: it forgets the UIDs
+// the folder's views gave out, and they are numbered again from 1 as refs
+// into it are next needed. SetUIDValidity, by contrast, keeps the UIDs. It
+// panics when the folder does not exist.
 func (s *Store) NewUIDValidity(folder string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -339,10 +341,26 @@ func (s *Store) SetAfter(after func(time.Duration) <-chan time.Time) {
 func (s *Store) DropWatches() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.dropWatchesLocked()
+}
+
+// dropWatchesLocked marks every open watch connection dropped and wakes
+// any Idle waiting on one.
+func (s *Store) dropWatchesLocked() {
 	for c := range s.watches {
 		c.dropped = true
 		c.notifyLocked()
 	}
+}
+
+// closeWatchesLocked closes every open watch connection without waiting
+// for its owner, as Store.Close does: each is dropped, so an Idle in
+// progress returns and the next Sync or Idle fails with an error matching
+// mailstore.ErrUnavailable, and it no longer counts in WatchConns. The
+// owner's own Close still succeeds.
+func (s *Store) closeWatchesLocked() {
+	s.dropWatchesLocked()
+	clear(s.watches)
 }
 
 // WatchConns returns how many watch connections are open: opened and not

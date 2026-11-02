@@ -232,6 +232,44 @@ func TestFailWatchConns(t *testing.T) {
 	}
 }
 
+// TestCloseClosesWatches checks that Store.Close closes every open watch
+// connection without waiting for its owner, as C1 has it: an Idle blocked
+// at the time returns, the connections no longer count, and their next
+// Sync or Idle fails with ErrUnavailable so a supervisor reconnects.
+func TestCloseClosesWatches(t *testing.T) {
+	t.Parallel()
+	s, _ := seedWatch(t)
+	s.SetAfter((&manualAfter{}).After)
+	ctx := t.Context()
+	idling, other := openWatch(t, s, "INBOX"), openWatch(t, s, "Projects")
+	syncConn(t, idling, mailstore.SyncRequest{})
+	done := idleAsync(t, idling, time.Minute)
+	waitIdle(t, s, "INBOX")
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if r := result(t, done); !errors.Is(r.err, mailstore.ErrUnavailable) {
+		t.Errorf("Idle blocked during Close = %+v, %v, want ErrUnavailable", r.wake, r.err)
+	}
+	if n := s.WatchConns(); n != 0 {
+		t.Errorf("WatchConns after Close = %d, want 0", n)
+	}
+	for _, c := range []mailstore.WatchConn{idling, other} {
+		if _, err := c.Sync(ctx, mailstore.SyncRequest{}); !errors.Is(err, mailstore.ErrUnavailable) {
+			t.Errorf("Sync after Close = %v, want ErrUnavailable", err)
+		}
+		if _, err := c.Idle(ctx, time.Minute); !errors.Is(err, mailstore.ErrUnavailable) {
+			t.Errorf("Idle after Close = %v, want ErrUnavailable", err)
+		}
+		if err := c.Close(); err != nil {
+			t.Errorf("connection Close after Store.Close = %v", err)
+		}
+	}
+	if n := s.WatchConns(); n != 0 {
+		t.Errorf("WatchConns after the owners closed = %d, want 0", n)
+	}
+}
+
 func TestDropWatches(t *testing.T) {
 	t.Parallel()
 	s, _ := seedWatch(t)
