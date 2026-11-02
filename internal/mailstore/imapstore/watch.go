@@ -7,7 +7,6 @@ import (
 	"slices"
 
 	"github.com/emersion/go-imap/v2"
-	"github.com/emersion/go-imap/v2/imapclient"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 )
@@ -150,27 +149,9 @@ func (s *Store) syncNew(ctx context.Context, c *conn, folder string, req mailsto
 	if len(uids) == 0 {
 		return nil
 	}
-	preview := req.Snippets && c.client().Caps().Has(imap.CapPreview)
-	bufs, err := c.fetch(ctx, uidSet(uids), s.summaryItems(preview, false))
+	sums, err := s.fetchSummaries(ctx, c, folder, uids, req.Snippets)
 	if err != nil {
 		return err
-	}
-	byUID := make(map[uint32]*imapclient.FetchMessageBuffer, len(bufs))
-	for _, b := range bufs {
-		byUID[uint32(b.UID)] = b
-	}
-	var sums []mailstore.Summary
-	var structures []imap.BodyStructure
-	for _, uid := range uids {
-		if b, ok := byUID[uid]; ok {
-			sums = append(sums, s.summary(folder, d.State.UIDValidity, b))
-			structures = append(structures, b.BodyStructure)
-		}
-	}
-	if req.Snippets && !preview {
-		if err := c.samples(ctx, sums, structures); err != nil {
-			return err
-		}
 	}
 	d.New = sums
 	return nil
