@@ -23,7 +23,9 @@ import (
 // pass takes the path without CONDSTORE.
 func TestWatchConformanceFakeGmail(t *testing.T) {
 	t.Parallel()
-	storetest.RunWatch(t, storetest.WatchHarness{Folder: storetest.GmailAllMail, Gmail: true, Idle: true, New: func(t *testing.T) (mailstore.Watcher, storetest.WatchRemote) {
+	// fakegmail renumbers with every connection open, so the watch
+	// connection must keep working across it.
+	storetest.RunWatch(t, storetest.WatchHarness{Folder: storetest.GmailAllMail, Gmail: true, Idle: true, RenumberDropsSessions: false, New: func(t *testing.T) (mailstore.Watcher, storetest.WatchRemote) {
 		s, srv, ca := watchFixture(t)
 		return s, fakeGmailRemote(t, srv, ca)
 	}})
@@ -228,6 +230,7 @@ func TestWatchRejectedCredentials(t *testing.T) {
 // watchdog spanning it would fire well inside it.
 func TestWatchIdleOutlastsCommandTimeout(t *testing.T) {
 	t.Parallel()
+	// The 600ms wait cannot use the injected clock: the watchdog it outlasts uses the real one.
 	const (
 		timeout = 200 * time.Millisecond
 		limit   = 3 * timeout

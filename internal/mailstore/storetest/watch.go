@@ -22,6 +22,12 @@ type WatchHarness struct {
 	Gmail     bool
 	CondStore bool
 	Idle      bool
+	// RenumberDropsSessions says WatchRemote.NewUIDValidity drops every
+	// session of the account, the Watcher's watch connection included, as
+	// Dovecot's does. Only then may the first watch pass after it redial
+	// once, as the supervisor would. Otherwise the same watch connection
+	// must keep working across the renumbering.
+	RenumberDropsSessions bool
 	// New returns a Watcher on an account of the case's own and a
 	// WatchRemote that changes the same account. The harness closes the
 	// Watcher when t ends.
@@ -40,8 +46,8 @@ type WatchRemote struct {
 	// Expunge removes the message with uid from folder.
 	Expunge func(t *testing.T, folder string, uid uint32)
 	// NewUIDValidity gives folder a new UIDVALIDITY and its messages new UIDs.
-	// It may drop the account's sessions, the Watcher's included, as a
-	// server-side reset can: RunWatch redials a dropped watch connection.
+	// When it drops the account's sessions, the Watcher's included, as a
+	// server-side reset can, the harness sets RenumberDropsSessions.
 	NewUIDValidity func(t *testing.T, folder string)
 	// Flags returns the flags of the message with uid in folder, read
 	// without changing them.
@@ -92,7 +98,7 @@ func RunWatch(t *testing.T, h WatchHarness) {
 				t.Run(c.name, func(t *testing.T) {
 					w, r := h.New(t)
 					pass, renumbered := p.open(t, w, h.Folder)
-					if renumbered != nil {
+					if renumbered != nil && h.RenumberDropsSessions {
 						renumber := r.NewUIDValidity
 						r.NewUIDValidity = func(t *testing.T, folder string) {
 							renumber(t, folder)
@@ -144,12 +150,12 @@ func openWatch(t *testing.T, w mailstore.Watcher, folder string) mailstore.Watch
 }
 
 // watchPass runs passes on one watch connection, as the supervisor does,
-// and returns the hook RunWatch calls after NewUIDValidity. A renumbering
-// may drop every session of the account, as Dovecot's does, and a dropped
-// watch connection is the caller's to redial (WatchConn.Sync), so the
-// first pass after one redials once when the connection was lost. Any
-// other pass that loses it fails the case, and a server that keeps the
-// session across the renumbering keeps the same connection.
+// and returns the hook RunWatch calls after NewUIDValidity when the
+// harness has RenumberDropsSessions. A dropped watch connection is the
+// caller's to redial (WatchConn.Sync), so the first pass after the hook
+// closes the lost connection and redials once. Any other pass that loses
+// the connection fails the case, and without RenumberDropsSessions the
+// hook never runs, so the same connection must keep working.
 func watchPass(t *testing.T, w mailstore.Watcher, folder string) (passFunc, func()) {
 	t.Helper()
 	wc := openWatch(t, w, folder)
@@ -159,6 +165,7 @@ func watchPass(t *testing.T, w mailstore.Watcher, folder string) (passFunc, func
 		d, err := wc.Sync(t.Context(), req)
 		if err != nil && renumbered && errors.Is(err, mailstore.ErrUnavailable) {
 			t.Logf("the renumbering dropped the watch connection (%v); dialing again", err)
+			_ = wc.Close() // release the lost connection; its error says only that it was lost
 			wc = openWatch(t, w, folder)
 			d, err = wc.Sync(t.Context(), req)
 		}

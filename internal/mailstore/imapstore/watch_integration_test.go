@@ -21,6 +21,9 @@ func TestWatchDovecot(t *testing.T) {
 		Folder:    "INBOX",
 		CondStore: true,
 		Idle:      true,
+		// SetUIDValidity kicks the user's sessions, the watch connection
+		// included, so the first watch pass after it may redial once.
+		RenumberDropsSessions: true,
 		New: func(t *testing.T) (mailstore.Watcher, storetest.WatchRemote) {
 			user := doveUser(t)
 			return doveStore(t, user), doveRemote(user)
@@ -54,7 +57,7 @@ func doveRemote(user string) storetest.WatchRemote {
 		},
 		// NewUIDValidity kicks the user's sessions, the Watcher's included:
 		// a session open across the change would see the folder without a
-		// HIGHESTMODSEQ. RunWatch redials the dropped watch connection.
+		// HIGHESTMODSEQ. The harness sets RenumberDropsSessions for it.
 		NewUIDValidity: func(t *testing.T, folder string) {
 			t.Helper()
 			v, err := dove().UIDValidity(user, folder)
