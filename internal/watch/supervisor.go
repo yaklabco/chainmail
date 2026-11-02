@@ -731,9 +731,11 @@ func (s *Supervisor) openWatch(ctx context.Context, folder string) (mailstore.Wa
 		return nil, err
 	}
 	defer release()
+	pool, open := budgetOf(w)
 	conn, err := w.OpenWatch(ctx, folder)
 	if errors.Is(err, mailstore.ErrConnLimit) {
-		s.logBudget(w, folder)
+		s.logger.Warn("server refused a watch connection for its connection limit",
+			"folder", folder, "pool", pool, "open", open, "watchers", s.o.Account.WatchCount())
 	}
 	return conn, err
 }
@@ -746,18 +748,17 @@ type budgeter interface {
 	OpenConns() int
 }
 
-// logBudget logs the account's connection budget as the server refuses a
-// watch connection for being over its limit (spec section 5): the pool's
-// cap and the open connections from st, -1 when st cannot say, and the
-// watcher connections the account needs. The fields are fixed and never
-// carry the server's text.
-func (s *Supervisor) logBudget(st mailstore.Watcher, folder string) {
-	pool, open := -1, -1
+// budgetOf is st's pool cap and open connections, or -1 for each when st
+// cannot say. openWatch takes it as a dial starts, so a refusal for the
+// server's connection limit logs the budget the server refused (spec
+// section 5), before the store makes room for the watcher's next try, with
+// the watcher connections the account needs. The fields are fixed and
+// never carry the server's text.
+func budgetOf(st mailstore.Watcher) (pool, open int) {
 	if b, ok := st.(budgeter); ok {
-		pool, open = b.PoolSize(), b.OpenConns()
+		return b.PoolSize(), b.OpenConns()
 	}
-	s.logger.Warn("server refused a watch connection for its connection limit",
-		"folder", folder, "pool", pool, "open", open, "watchers", s.o.Account.WatchCount())
+	return -1, -1
 }
 
 // resolveAll finds a Gmail account's \All folder by its role, never by name.

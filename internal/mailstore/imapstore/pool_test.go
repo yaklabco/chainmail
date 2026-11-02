@@ -457,9 +457,11 @@ func TestPoolConnPeakCountsDials(t *testing.T) {
 	}
 }
 
-// yieldSlot lowers the cap to one below the slots the pool holds, never
-// below one and never above the old cap, and hands over idle connections
-// until open fits it. Borrowed ones stay out and log out on return.
+// yieldSlot frees one slot for a refused watcher. A pool at its cap steps
+// the cap down by one, never below one, and says so; a pool below its cap
+// keeps the cap and hands over one idle connection; a pool holding nothing
+// changes nothing, since shrinking it frees nothing. Borrowed connections
+// stay out and log out on return, and the last connection stays.
 func TestPoolYieldSlot(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -468,13 +470,16 @@ func TestPoolYieldSlot(t *testing.T) {
 		borrowed, idle int
 		wantCap        int
 		wantRetired    int
+		wantAtCap      bool
 	}{
-		{name: "full pool of idle connections", size: 3, idle: 3, wantCap: 2, wantRetired: 1},
-		{name: "fewer open than the cap", size: 5, idle: 3, wantCap: 2, wantRetired: 1},
-		{name: "borrowed connections are not taken", size: 3, borrowed: 2, idle: 1, wantCap: 2, wantRetired: 1},
-		{name: "all borrowed", size: 3, borrowed: 3, wantCap: 2, wantRetired: 0},
-		{name: "empty pool keeps one", size: 3, wantCap: 1, wantRetired: 0},
-		{name: "one connection keeps one", size: 1, idle: 1, wantCap: 1, wantRetired: 0},
+		{name: "full pool of idle connections", size: 3, idle: 3, wantCap: 2, wantRetired: 1, wantAtCap: true},
+		{name: "below the cap keeps it and frees one", size: 5, idle: 3, wantCap: 5, wantRetired: 1},
+		{name: "below the cap with two of five open", size: 5, idle: 2, wantCap: 5, wantRetired: 1},
+		{name: "borrowed connections are not taken", size: 3, borrowed: 2, idle: 1, wantCap: 2, wantRetired: 1, wantAtCap: true},
+		{name: "all borrowed", size: 3, borrowed: 3, wantCap: 2, wantRetired: 0, wantAtCap: true},
+		{name: "empty pool changes nothing", size: 3, wantCap: 3, wantRetired: 0},
+		{name: "one connection keeps one", size: 1, idle: 1, wantCap: 1, wantRetired: 0, wantAtCap: true},
+		{name: "a lone idle connection below the cap stays", size: 5, idle: 1, wantCap: 5, wantRetired: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -491,9 +496,9 @@ func TestPoolYieldSlot(t *testing.T) {
 			for _, c := range out[tt.borrowed:] {
 				p.put(c)
 			}
-			n, retired := p.yieldSlot()
-			if n != tt.wantCap || len(retired) != tt.wantRetired || p.size() != tt.wantCap {
-				t.Errorf("yieldSlot() = %d, %d retired (size %d); want %d, %d", n, len(retired), p.size(), tt.wantCap, tt.wantRetired)
+			n, retired, atCap := p.yieldSlot()
+			if n != tt.wantCap || len(retired) != tt.wantRetired || atCap != tt.wantAtCap || p.size() != tt.wantCap {
+				t.Errorf("yieldSlot() = %d, %d retired, at cap %v (size %d); want %d, %d, %v", n, len(retired), atCap, p.size(), tt.wantCap, tt.wantRetired, tt.wantAtCap)
 			}
 			for _, c := range retired {
 				p.logout(c)

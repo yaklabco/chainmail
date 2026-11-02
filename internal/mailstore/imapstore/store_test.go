@@ -610,3 +610,28 @@ func TestOpenWatchRefusedForConnLimitMakesRoom(t *testing.T) {
 		t.Errorf("Close: %v", err)
 	}
 }
+
+// A watch connection refused while the pool holds nothing, as when the
+// server still counts sessions from before a restart, leaves the pool as
+// it is and records nothing: shrinking a pool that holds no slot frees
+// none, and a cap stored from it would pin the pool for a month.
+func TestOpenWatchRefusedWithNothingPooledChangesNothing(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	limit := &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeLimit, Text: "Too many simultaneous connections"}
+	ep := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{Username: "host@example.test", Password: "pw", LoginError: limit})
+	var heard atomic.Int32
+	s := New(testAccount("host", ep, false), passwordCreds("host@example.test", "pw"), Options{
+		RootCAs: ca.Pool, Backoff: noBackoff,
+		OnConnLimit: func(int) { heard.Add(1) },
+	})
+	t.Cleanup(func() { _ = s.Close() })
+	for range 3 {
+		if _, err := s.OpenWatch(t.Context(), "INBOX"); !errors.Is(err, mailstore.ErrConnLimit) {
+			t.Fatalf("OpenWatch = %v, want ErrConnLimit", err)
+		}
+	}
+	if got := s.PoolSize(); got != defaultPoolSize || heard.Load() != 0 {
+		t.Errorf("after refusals with nothing pooled: pool size %d, OnConnLimit calls %d; want %d and 0", got, heard.Load(), defaultPoolSize)
+	}
+}

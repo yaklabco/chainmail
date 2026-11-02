@@ -184,17 +184,27 @@ func (p *pool[C]) shrink() int {
 }
 
 // yieldSlot makes room for a connection dialed outside the pool that the
-// server refused for being over its limit. It lowers the cap to one below
-// the slots the pool holds, dialing, borrowed, idle or logging out, never
-// below one and never above the cap it had, and takes idle connections off
-// the pool until open fits the new cap. It returns the new cap and the
-// connections taken, counted as closing, for the caller to log out.
-func (p *pool[C]) yieldSlot() (int, []C) {
+// server refused for being over its limit, by at most one slot. A pool
+// that holds no open connection changes nothing: shrinking it frees no
+// slot, and the refusal is someone else's, such as sessions the server
+// still counts from before a restart. A pool at its cap steps the cap down
+// by one, never below one, and reports atCap, so the caller may record the
+// limit. A pool below its cap keeps the cap. Either way idle connections
+// are taken off the pool until one slot is free, never the last one, and
+// returned counted as closing, for the caller to log out.
+func (p *pool[C]) yieldSlot() (n int, retire []C, atCap bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.max = max(1, min(p.max, p.open+p.closing)-1)
-	var retire []C
-	for p.open > p.max && len(p.idle) > 0 {
+	if p.open == 0 {
+		return p.max, nil, false
+	}
+	atCap = p.open >= p.max
+	target := max(1, p.open-1)
+	if atCap {
+		p.max = max(1, p.max-1)
+		target = p.max
+	}
+	for p.open > target && len(p.idle) > 0 {
 		e := p.idle[0] // the oldest
 		p.idle = p.idle[1:]
 		if !e.timer.Stop() {
@@ -203,7 +213,7 @@ func (p *pool[C]) yieldSlot() (int, []C) {
 		p.startLogoutLocked()
 		retire = append(retire, e.c)
 	}
-	return p.max, retire
+	return p.max, retire, atCap
 }
 
 // openCount returns how many connections hold a slot on the server:

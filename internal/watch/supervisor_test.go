@@ -1394,14 +1394,25 @@ func TestSupervisorShutdownIsOneDeadline(t *testing.T) {
 }
 
 // supBudgetStore is a fake store that reports a connection budget, as
-// imapstore.Store does.
-type supBudgetStore struct{ *fake.Store }
+// imapstore.Store does. Its OpenWatch shrinks the budget before it fails,
+// as imapstore makes room in the pool for a refused watcher.
+type supBudgetStore struct {
+	*fake.Store
+	pool, open atomic.Int64
+}
 
-func (supBudgetStore) PoolSize() int  { return 2 }
-func (supBudgetStore) OpenConns() int { return 3 }
+func (s *supBudgetStore) PoolSize() int  { return int(s.pool.Load()) }
+func (s *supBudgetStore) OpenConns() int { return int(s.open.Load()) }
+
+func (s *supBudgetStore) OpenWatch(ctx context.Context, folder string) (mailstore.WatchConn, error) {
+	s.pool.Store(1)
+	s.open.Store(1)
+	return s.Store.OpenWatch(ctx, folder)
+}
 
 // A watch connection the server refuses for its connection limit logs the
-// account's budget at that moment, in fixed fields and without the
+// account's budget as the dial began, before the store made room, in
+// fixed fields and without the
 // server's text, then backs off and reconnects like any outage.
 func TestSupervisorLogsTheBudgetOnAConnLimit(t *testing.T) {
 	t.Parallel()
@@ -1411,7 +1422,10 @@ func TestSupervisorLogsTheBudgetOnAConnLimit(t *testing.T) {
 	r := newSupRig(t, fs, supAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}), func(o *SupervisorOptions) {
 		o.Logger = slog.New(slog.NewTextHandler(&logs, nil))
 	})
-	r.store = supBudgetStore{fs}
+	budget := &supBudgetStore{Store: fs}
+	budget.pool.Store(2)
+	budget.open.Store(3)
+	r.store = budget
 	r.start()
 	r.waitFor("INBOX reconnecting", supStatus("INBOX", StateReconnecting))
 	got := logs.String()
