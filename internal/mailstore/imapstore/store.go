@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapclient"
 
 	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/config"
@@ -176,6 +177,12 @@ type Store struct {
 	// included. drained, when set, is closed when it reaches zero.
 	borrowed int
 	drained  chan struct{}
+	// watches are the open watch connections, which Close logs out.
+	// watchOpen counts them and the ones still dialing, for OpenConns.
+	// watchesClosed, set by Close, refuses new ones.
+	watches       map[*watchConn]struct{}
+	watchOpen     int
+	watchesClosed bool
 }
 
 var _ mailstore.Store = (*Store)(nil)
@@ -186,22 +193,30 @@ const closeWait = 5 * time.Second
 // New returns a Store for acct. It connects on first use.
 func New(acct config.ResolvedAccount, creds Credentialer, opts Options) *Store {
 	opts = opts.withDefaults()
-	s := &Store{acct: acct, creds: creds, opts: opts, loginGate: make(chan struct{}, 1), nsGate: make(chan struct{}, 1), chunk: chunkSize, dialTimeout: dialTimeout}
+	s := &Store{acct: acct, creds: creds, opts: opts, loginGate: make(chan struct{}, 1), nsGate: make(chan struct{}, 1), chunk: chunkSize, dialTimeout: dialTimeout, watches: map[*watchConn]struct{}{}}
 	s.pool = newPool(s.dial, poolOptions{size: opts.PoolSize, noopAfter: opts.NoopAfter, idleLogout: opts.IdleLogout, now: opts.Now})
 	return s
 }
 
 func (s *Store) gmail() bool { return s.acct.Provider.Gmail }
 
-// Close refuses new work and logs out of every connection, in parallel.
+// Close refuses new work and logs out of every connection, pooled and
+// watch, in parallel.
 //
-// Call it once every operation has returned and every reader StreamPart
+// Watch connections are closed under their owners: Close never waits for a
+// watcher to stop. A watcher syncing or idling on one gets ErrUnavailable
+// at once and reconnects, through the store it holds by then, such as the
+// one that replaced this after a limits probe.
+//
+// Call it once every pooled operation has returned and every reader StreamPart
 // gave out is closed, as the daemon does by draining its handlers before it
 // closes stores. Close still waits up to 5 seconds for connections that are
 // out, logging each out as it comes back, and reports any that did not.
 func (s *Store) Close() error {
 	idle := make(chan error, 1)
 	go func() { idle <- s.pool.close() }()
+	watched := make(chan error, 1)
+	go func() { watched <- s.closeWatches() }()
 	s.mu.Lock()
 	var wait chan struct{}
 	if s.borrowed > 0 {
@@ -224,16 +239,21 @@ func (s *Store) Close() error {
 		}
 		timer.Stop()
 	}
-	errs = append(errs, <-idle)
+	errs = append(errs, <-idle, <-watched)
 	return errors.Join(errs...)
 }
 
-// OpenConns returns how many of the store's pooled connections hold a slot
-// on the server: dialing, borrowed, idle or still logging out. A borrowed
-// one, such as a stream reader's, counts until it comes back and has logged
-// out, after Close too. ProbeDial's connections are not pooled and do not
-// count.
-func (s *Store) OpenConns() int { return s.pool.openCount() }
+// OpenConns returns how many of the store's connections hold a slot on the
+// server: pooled ones dialing, borrowed, idle or still logging out, and
+// watch connections from the start of OpenWatch until they have logged out.
+// A borrowed one, such as a stream reader's, counts until it comes back and
+// has logged out, after Close too. ProbeDial's connections do not count.
+func (s *Store) OpenConns() int {
+	s.mu.Lock()
+	watching := s.watchOpen
+	s.mu.Unlock()
+	return s.pool.openCount() + watching
+}
 
 // ResetConnPeak starts a new ConnPeak from the pooled connections holding a
 // slot now.
@@ -323,7 +343,11 @@ func (s *Store) ProbeDial(ctx context.Context) (io.Closer, error) {
 }
 
 // connect logs in on a fresh connection and sorts what went wrong.
-func (s *Store) connect(ctx context.Context) (*conn, error) {
+func (s *Store) connect(ctx context.Context) (*conn, error) { return s.connectWith(ctx, nil) }
+
+// connectWith is connect, with unilateral, when set, hearing what the server
+// reports unprompted. Watch connections pass one.
+func (s *Store) connectWith(ctx context.Context, unilateral *imapclient.UnilateralDataHandler) (*conn, error) {
 	select {
 	case s.loginGate <- struct{}{}:
 		defer func() { <-s.loginGate }()
@@ -334,7 +358,7 @@ func (s *Store) connect(ctx context.Context) (*conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	sess, err := Dial(ctx, s.acct.IMAP, creds, DialOptions{RootCAs: s.opts.RootCAs, Timeout: s.dialTimeout})
+	sess, err := Dial(ctx, s.acct.IMAP, creds, DialOptions{RootCAs: s.opts.RootCAs, Timeout: s.dialTimeout, unilateral: unilateral})
 	switch {
 	case err == nil:
 		return newConn(sess, s.opts.CommandTimeout, s.opts.Now), nil

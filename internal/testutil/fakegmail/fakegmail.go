@@ -64,14 +64,15 @@
 // refused. It is still looser in some: matching is by substring where Gmail
 // tokenises, is: values other than read and unread mean starred, any has:
 // means an attachment, and LIST patterns are case-sensitive even for INBOX.
-// Another session learns of changes at its next command, as EXISTS and
-// EXPUNGE, but not of flag changes. Sequence sets reach only the messages
-// the last EXISTS announced, but a UID command can name a newer arrival, and
-// its FETCH answer then comes before the EXISTS: imapserver lets a session
-// write EXISTS only once the command is done. Options.LateArrivals makes it
-// stricter there, as Gmail can be: FETCH, STORE and SEARCH then neither see
-// nor announce a new arrival, and a NOOP does both. Options.LateExists is
-// stricter still: a NOOP announces it only at the end of the next command.
+// Another session learns of changes at its next command, or within 10ms
+// while it idles, as EXISTS and EXPUNGE, but not of flag changes. Sequence
+// sets reach only the messages the last EXISTS announced, but a UID command
+// can name a newer arrival, and its FETCH answer then comes before the
+// EXISTS: imapserver lets a session write EXISTS only once the command is
+// done. Options.LateArrivals makes it stricter there, as Gmail can be:
+// FETCH, STORE and SEARCH then neither see nor announce a new arrival, and a
+// NOOP does both. Options.LateExists is stricter still: a NOOP announces it
+// only at the end of the next command.
 package fakegmail
 
 import (
