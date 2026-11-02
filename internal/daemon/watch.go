@@ -128,7 +128,7 @@ func (w *watchService) filterAccounts(names []string) ([]string, error) {
 	if len(names) == 0 {
 		return nil, nil
 	}
-	accts, err := (&messageService{s: w.s}).accounts(names)
+	accts, err := w.s.resolveAccounts(names)
 	if err != nil {
 		return nil, err
 	}
