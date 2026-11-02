@@ -154,8 +154,9 @@ func watchKinds(names []string) ([]watch.Kind, string, error) {
 // the daemon's state was reset under the client. Such a start is capped at
 // the tail, and start also returns the trimmed gap that reports the loss,
 // unless the filter drops it, as Log.Read reports a start below the oldest
-// event. A group's acknowledged ID stays where it is, since Ack never
-// lowers it.
+// event. A group acknowledged past the tail belongs to a log that no longer
+// exists, so it is reset to the tail, which Ack could never do, and its
+// later reads resume normally with no second gap.
 func (w *watchService) start(ctx context.Context, q watchQuery) (int64, *watch.Event, error) {
 	var after int64
 	switch {
@@ -177,11 +178,27 @@ func (w *watchService) start(ctx context.Context, q watchQuery) (int64, *watch.E
 	case after <= tail:
 		return after, nil, nil
 	}
+	if q.group != "" {
+		if err := w.resetGroup(ctx, q.group); err != nil {
+			return 0, nil, err
+		}
+	}
 	gap := watch.Event{At: w.s.opts.Now().UTC(), Kind: watch.KindGap, Reason: watch.GapTrimmed, NextID: tail + 1}
 	if !q.filter.Match(gap) {
 		return tail, nil, nil
 	}
 	return tail, &gap, nil
+}
+
+// resetGroup recreates a group at the tail. The group is deleted first, so
+// Group creates it again at the tail. An Ack landing in between creates it
+// at most at the tail too, so the group never ends up past the tail.
+func (w *watchService) resetGroup(ctx context.Context, group string) error {
+	if _, err := w.s.watchLog.DeleteGroup(ctx, group); err != nil {
+		return err
+	}
+	_, _, err := w.s.watchLog.Group(ctx, group)
+	return err
 }
 
 // watchLogErr is the error for a failed event log call. The client sees

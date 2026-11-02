@@ -775,35 +775,69 @@ func TestReadEventsCursorAboveTailReportsAGap(t *testing.T) {
 	}
 }
 
-// TestGroupAckedAboveTailReportsAGap checks that a group whose acknowledged
-// ID is past the tail, as after a reset of the daemon's state, starts at
-// the tail with a trimmed gap, on both ReadEvents and Subscribe. Ack never
-// lowers a group, so its acknowledged ID stays where it was.
-func TestGroupAckedAboveTailReportsAGap(t *testing.T) {
-	t.Parallel()
-	h := startWatch(t, 0)
-	watchPublish(t, h, watchNew("host", "INBOX", 1, "a"), watchNew("host", "INBOX", 2, "b"), watchNew("host", "INBOX", 3, "c"))
-	if _, _, err := watchLog(h).Group(t.Context(), "bot"); err != nil {
+// seedGroupPastTail creates group with its acknowledged ID at acked, past
+// the tail, as a reset of the daemon's state leaves it.
+func seedGroupPastTail(t *testing.T, h *daemontest.Harness, group string, acked int64) {
+	t.Helper()
+	if _, _, err := watchLog(h).Group(t.Context(), group); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.DB.ExecContext(t.Context(), "UPDATE event_groups SET acked_id = 50 WHERE name = 'bot'"); err != nil {
+	if _, err := h.DB.ExecContext(t.Context(), "UPDATE event_groups SET acked_id = ? WHERE name = ?", acked, group); err != nil {
 		t.Fatal(err)
 	}
-	resp := readEvents(t, h, &chainmailv1.ReadEventsRequest{Group: "bot"})
-	if len(resp.GetEvents()) != 1 || resp.GetNextCursor() != 3 {
-		t.Fatalf("ReadEvents: %v, want one gap and cursor 3", resp)
-	}
-	wantPastTailGap(t, resp.GetEvents()[0], 3)
-	got := untilHeartbeat(t, subscribe(t, h, &chainmailv1.SubscribeRequest{Group: "bot"}))
-	if len(got.events) != 1 || got.heartbeat.GetPosition() != 3 {
-		t.Fatalf("Subscribe: events %v then position %d, want one gap then 3", got.events, got.heartbeat.GetPosition())
-	}
-	wantPastTailGap(t, got.events[0], 3)
+}
+
+func groupAcked(t *testing.T, h *daemontest.Harness, group string) int64 {
+	t.Helper()
 	groups, err := watchLog(h).Groups(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups) != 1 || groups[0].AckedID != 50 {
-		t.Errorf("groups = %+v, want bot still at 50", groups)
+	for _, g := range groups {
+		if g.Name == group {
+			return g.AckedID
+		}
+	}
+	t.Fatalf("no group %s in %+v", group, groups)
+	return 0
+}
+
+// TestGroupAckedAboveTailIsReset checks that a group whose acknowledged ID
+// is past the tail, so belongs to a log that no longer exists, is reset to
+// the tail on its first read, which reports one trimmed gap. Later reads
+// and reconnects resume normally, with no repeated gap and nothing skipped.
+func TestGroupAckedAboveTailIsReset(t *testing.T) {
+	t.Parallel()
+	h := startWatch(t, 0)
+	watchPublish(t, h, watchNew("host", "INBOX", 1, "a"), watchNew("host", "INBOX", 2, "b"), watchNew("host", "INBOX", 3, "c"))
+
+	seedGroupPastTail(t, h, "mcp", 50)
+	resp := readEvents(t, h, &chainmailv1.ReadEventsRequest{Group: "mcp"})
+	if len(resp.GetEvents()) != 1 || resp.GetNextCursor() != 3 {
+		t.Fatalf("first read: %v, want one gap and cursor 3", resp)
+	}
+	wantPastTailGap(t, resp.GetEvents()[0], 3)
+	if acked := groupAcked(t, h, "mcp"); acked != 3 {
+		t.Errorf("after the first read mcp is at %d, want reset to 3", acked)
+	}
+
+	seedGroupPastTail(t, h, "bot", 50)
+	got := untilHeartbeat(t, subscribe(t, h, &chainmailv1.SubscribeRequest{Group: "bot"}))
+	if len(got.events) != 1 || got.heartbeat.GetPosition() != 3 {
+		t.Fatalf("first stream: events %v then position %d, want one gap then 3", got.events, got.heartbeat.GetPosition())
+	}
+	wantPastTailGap(t, got.events[0], 3)
+
+	watchPublish(t, h, watchNew("host", "INBOX", 4, "d"), watchNew("host", "INBOX", 5, "e"))
+	resp = readEvents(t, h, &chainmailv1.ReadEventsRequest{Group: "mcp"})
+	if ids := eventIDs(resp.GetEvents()); !slices.Equal(ids, []int64{4, 5}) || resp.GetNextCursor() != 5 {
+		t.Errorf("second read: ids %v next %d, want [4 5] next 5 with no gap", ids, resp.GetNextCursor())
+	}
+	if acked := groupAcked(t, h, "mcp"); acked != 5 {
+		t.Errorf("after the second read mcp is at %d, want 5", acked)
+	}
+	got = untilHeartbeat(t, subscribe(t, h, &chainmailv1.SubscribeRequest{Group: "bot"}))
+	if ids := eventIDs(got.events); !slices.Equal(ids, []int64{4, 5}) || got.heartbeat.GetPosition() != 5 {
+		t.Errorf("reconnect: ids %v then position %d, want [4 5] then 5 with no gap", ids, got.heartbeat.GetPosition())
 	}
 }
