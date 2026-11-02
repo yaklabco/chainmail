@@ -44,6 +44,7 @@ var (
 	errWatchKind = &argError{msg: "kinds must be new, flags, expunged, status or gap", hint: "leave kinds empty for every kind"}
 	errReadWait  = &argError{msg: "wait_seconds must be 0 to 60", hint: "0 returns at once"}
 	errReadLimit = &argError{msg: "limit must be 0 to 200", hint: "0 means 50"}
+	errAckID     = &argError{msg: "id must be 0 or more", hint: "acknowledge an event ID or a heartbeat position"}
 )
 
 // kindNames maps the API's event kind names to the log's.
@@ -57,7 +58,6 @@ var kindNames = map[string]watch.Kind{
 
 // watchService implements chainmailv1connect.WatchServiceHandler.
 type watchService struct {
-	chainmailv1connect.UnimplementedWatchServiceHandler
 	s *Server
 }
 
@@ -362,4 +362,93 @@ func waitBudget(ctx context.Context, wait time.Duration) time.Duration {
 	}
 	left := time.Until(deadline)
 	return max(0, min(wait, left-min(readWaitReserve, left/2)))
+}
+
+// Ack implements chainmailv1connect.WatchServiceHandler. It raises a
+// group's acknowledged event, creating the group when it is new, and never
+// lowers it. Like GetStatus it is deliberately not audited: it changes no
+// mail and no policy state, only where the group's next read starts, and a
+// watcher acknowledges every second, which would flood the audit log.
+func (w *watchService) Ack(ctx context.Context, req *connect.Request[chainmailv1.AckRequest]) (*connect.Response[chainmailv1.AckResponse], error) {
+	group, id := req.Msg.GetGroup(), req.Msg.GetId()
+	switch {
+	case !watch.ValidGroupName(group):
+		return nil, toConnectError(errGroupName)
+	case id < 0:
+		return nil, toConnectError(errAckID)
+	}
+	ctx, cancel := withDeadline(ctx, callTimeout)
+	defer cancel()
+	if err := w.s.watchLog.Ack(ctx, group, id); err != nil {
+		return nil, toConnectError(w.s.watchLogErr(err))
+	}
+	return connect.NewResponse(&chainmailv1.AckResponse{}), nil
+}
+
+// GetWatchStatus implements chainmailv1connect.WatchServiceHandler. It
+// reports each synced folder's status, ordered by account then folder.
+// Like GetStatus it is read-only, returns no message content, and is
+// deliberately not audited: polling watch status would otherwise flood the
+// audit log.
+func (w *watchService) GetWatchStatus(ctx context.Context, _ *connect.Request[chainmailv1.GetWatchStatusRequest]) (*connect.Response[chainmailv1.GetWatchStatusResponse], error) {
+	ctx, cancel := withDeadline(ctx, callTimeout)
+	defer cancel()
+	rows, err := w.s.watchState.Folders(ctx)
+	if err != nil {
+		return nil, toConnectError(w.s.watchLogErr(err))
+	}
+	resp := &chainmailv1.GetWatchStatusResponse{Folders: make([]*chainmailv1.FolderSyncStatus, 0, len(rows))}
+	for _, r := range rows {
+		resp.Folders = append(resp.Folders, folderStatusProto(r))
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// ListGroups implements chainmailv1connect.WatchServiceHandler. It records
+// watch.groups.list with the number of groups.
+func (w *watchService) ListGroups(ctx context.Context, req *connect.Request[chainmailv1.ListGroupsRequest]) (*connect.Response[chainmailv1.ListGroupsResponse], error) {
+	c, err := callerOf(ctx, req.Header())
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := withDeadline(ctx, callTimeout)
+	defer cancel()
+	groups, listErr := w.s.watchLog.Groups(ctx)
+	if listErr != nil {
+		listErr = w.s.watchLogErr(listErr)
+	}
+	entry := audit.Entry{Action: "watch.groups.list", Targets: []string{tally("groups", len(groups))}}
+	if err := w.s.record(ctx, c, entry, listErr); err != nil {
+		return nil, err
+	}
+	resp := &chainmailv1.ListGroupsResponse{Groups: make([]*chainmailv1.GroupStatus, 0, len(groups))}
+	for _, g := range groups {
+		resp.Groups = append(resp.Groups, groupProto(g))
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// DeleteGroup implements chainmailv1connect.WatchServiceHandler. It records
+// watch.groups.delete with the group's name, or invalidTarget for a name
+// that is not valid. Deleting an unknown group succeeds with deleted false.
+func (w *watchService) DeleteGroup(ctx context.Context, req *connect.Request[chainmailv1.DeleteGroupRequest]) (*connect.Response[chainmailv1.DeleteGroupResponse], error) {
+	c, err := callerOf(ctx, req.Header())
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := withDeadline(ctx, callTimeout)
+	defer cancel()
+	name := req.Msg.GetName()
+	var deleted bool
+	target, delErr := "group="+invalidTarget, error(errGroupName)
+	if watch.ValidGroupName(name) {
+		target = "group=" + name
+		if deleted, delErr = w.s.watchLog.DeleteGroup(ctx, name); delErr != nil {
+			delErr = w.s.watchLogErr(delErr)
+		}
+	}
+	if err := w.s.record(ctx, c, audit.Entry{Action: "watch.groups.delete", Targets: []string{target}}, delErr); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&chainmailv1.DeleteGroupResponse{Deleted: deleted}), nil
 }

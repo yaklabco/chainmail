@@ -2,6 +2,7 @@ package daemon_test
 
 import (
 	"context"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -9,9 +10,11 @@ import (
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/api"
+	"github.com/jamesainslie/chainmail/internal/daemon"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/ref"
 	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
@@ -552,5 +555,167 @@ func TestReadEventsAudit(t *testing.T) {
 	}
 	if rows := h.AuditRows(t); !slices.Equal(rows, want) {
 		t.Errorf("audit = %+v, want %+v", rows, want)
+	}
+}
+
+func seedFolders(t *testing.T, h *daemontest.Harness, rows ...watch.FolderRow) {
+	t.Helper()
+	tx, err := h.DB.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if err := watch.PutFolder(t.Context(), tx, r); err != nil {
+			_ = tx.Rollback() // the put error is the one to report
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAckRaisesAGroupAndIsNotAudited checks that Ack creates an unknown
+// group, raises it, never lowers it, refuses bad arguments, and, like
+// GetWatchStatus, writes no audit row.
+func TestAckRaisesAGroupAndIsNotAudited(t *testing.T) {
+	t.Parallel()
+	h := startWatch(t, 0)
+	watchPublish(t, h, watchNew("host", "INBOX", 1, "a"), watchNew("host", "INBOX", 2, "b"), watchNew("host", "INBOX", 3, "c"))
+	ack := func(group string, id int64) error {
+		_, err := h.Client.Watch.Ack(t.Context(), connect.NewRequest(&chainmailv1.AckRequest{Group: group, Id: id}))
+		return err
+	}
+	if err := ack("bot", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := ack("bot", 1); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := watchLog(h).Groups(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].Name != "bot" || groups[0].AckedID != 2 || groups[0].Lag != 1 {
+		t.Errorf("groups = %+v, want bot at 2 with lag 1", groups)
+	}
+	for _, tt := range []struct {
+		group string
+		id    int64
+	}{{"Bad Name", 1}, {"", 1}, {"bot", -1}} {
+		if got := reasonOf(ack(tt.group, tt.id)); got != api.ReasonInvalidArgument {
+			t.Errorf("Ack(%q, %d): reason = %s, want INVALID_ARGUMENT", tt.group, tt.id, got)
+		}
+	}
+	if _, err := h.Client.Watch.GetWatchStatus(t.Context(), connect.NewRequest(&chainmailv1.GetWatchStatusRequest{})); err != nil {
+		t.Fatal(err)
+	}
+	if rows := h.AuditRows(t); len(rows) != 0 {
+		t.Errorf("audit rows = %+v, want none for Ack and GetWatchStatus", rows)
+	}
+}
+
+// TestGetWatchStatus checks that each sync_folders row is reported, ordered
+// by account then folder, with its status and no checkpoint.
+func TestGetWatchStatus(t *testing.T) {
+	t.Parallel()
+	h := startWatch(t, 0)
+	synced := time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC)
+	seedFolders(t, h,
+		watch.FolderRow{Account: "work", Folder: "INBOX", Mode: "poll", State: watch.StateError, LastError: "FOLDER_NOT_FOUND"},
+		watch.FolderRow{
+			Account: "host", Folder: "INBOX", UIDValidity: 7, UIDNext: 42, HighestModSeq: 900, CondStore: true,
+			Mode: "idle", State: watch.StateWatching, LastSyncAt: synced, LastSweepAt: synced.Add(-time.Hour),
+		},
+	)
+	resp, err := h.Client.Watch.GetWatchStatus(t.Context(), connect.NewRequest(&chainmailv1.GetWatchStatusRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []*chainmailv1.FolderSyncStatus{
+		{
+			Account: "host", Folder: "INBOX", Mode: "idle", State: "watching", Condstore: true,
+			LastSyncAt: timestamppb.New(synced), LastSweepAt: timestamppb.New(synced.Add(-time.Hour)),
+		},
+		{Account: "work", Folder: "INBOX", Mode: "poll", State: "error", LastError: "FOLDER_NOT_FOUND"},
+	}
+	got := resp.Msg.GetFolders()
+	if len(got) != len(want) {
+		t.Fatalf("folders = %v, want %d", got, len(want))
+	}
+	for i := range want {
+		if !proto.Equal(got[i], want[i]) {
+			t.Errorf("folder %d = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestListAndDeleteGroups checks both calls and their audit rows.
+func TestListAndDeleteGroups(t *testing.T) {
+	t.Parallel()
+	h := startWatch(t, 0)
+	for _, g := range []string{"alpha", "beta"} {
+		if _, _, err := watchLog(h).Group(t.Context(), g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp, err := h.Client.Watch.ListGroups(t.Context(), connect.NewRequest(&chainmailv1.ListGroupsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, g := range resp.Msg.GetGroups() {
+		names = append(names, g.GetName())
+		if g.GetAckedId() != 0 || g.GetCreatedAt() == nil || g.GetLastSeenAt() == nil {
+			t.Errorf("group = %v", g)
+		}
+	}
+	slices.Sort(names)
+	if !slices.Equal(names, []string{"alpha", "beta"}) {
+		t.Errorf("names = %v", names)
+	}
+	del := func(name string) (bool, error) {
+		resp, err := h.Client.Watch.DeleteGroup(t.Context(), connect.NewRequest(&chainmailv1.DeleteGroupRequest{Name: name}))
+		if err != nil {
+			return false, err
+		}
+		return resp.Msg.GetDeleted(), nil
+	}
+	if deleted, err := del("alpha"); err != nil || !deleted {
+		t.Errorf("delete alpha = %v, %v; want true", deleted, err)
+	}
+	if deleted, err := del("alpha"); err != nil || deleted {
+		t.Errorf("delete alpha again = %v, %v; want false", deleted, err)
+	}
+	if _, err := del("No Such"); reasonOf(err) != api.ReasonInvalidArgument {
+		t.Errorf("delete bad name: %v, want INVALID_ARGUMENT", err)
+	}
+	want := []daemontest.AuditRow{
+		{Client: "test", Action: "watch.groups.list", Targets: `["groups=2"]`, Result: "ok"},
+		{Client: "test", Action: "watch.groups.delete", Targets: `["group=alpha"]`, Result: "ok"},
+		{Client: "test", Action: "watch.groups.delete", Targets: `["group=alpha"]`, Result: "ok"},
+		{Client: "test", Action: "watch.groups.delete", Targets: `["group=(invalid)"]`, Result: "error", Reason: api.ReasonInvalidArgument},
+	}
+	if rows := h.AuditRows(t); !slices.Equal(rows, want) {
+		t.Errorf("audit = %+v, want %+v", rows, want)
+	}
+}
+
+// TestWatchForbiddenPeer checks that the watch routes sit behind the peer
+// check like every other: a peer the Authorizer refuses gets FORBIDDEN and
+// leaves no audit row. It passes as soon as the routes are mounted.
+func TestWatchForbiddenPeer(t *testing.T) {
+	t.Parallel()
+	other := daemon.NewAuthorizer(uint32(os.Getuid())+1, -1)
+	h := daemontest.Start(t, watchConfig, daemontest.Options{Authorizer: other})
+	_, err := h.Client.Watch.ReadEvents(t.Context(), connect.NewRequest(&chainmailv1.ReadEventsRequest{}))
+	if connect.CodeOf(err) != connect.CodePermissionDenied || reasonOf(err) != api.ReasonForbidden {
+		t.Errorf("ReadEvents: %v, want PermissionDenied FORBIDDEN", err)
+	}
+	if err := subscribeErr(t, h, &chainmailv1.SubscribeRequest{}); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Errorf("Subscribe: %v, want PermissionDenied", err)
+	}
+	if rows := h.AuditRows(t); len(rows) != 0 {
+		t.Errorf("audit rows = %+v, want none", rows)
 	}
 }
