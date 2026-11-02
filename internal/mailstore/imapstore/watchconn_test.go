@@ -221,19 +221,27 @@ func TestWatchRejectedCredentials(t *testing.T) {
 }
 
 // TestWatchIdleOutlastsCommandTimeout idles longer than the command
-// timeout: the timeout bounds starting and ending IDLE, not the wait.
+// timeout: the timeout bounds starting and ending IDLE, not the wait. The
+// command watchdog runs on the real clock, which Store.after does not
+// drive, so the margins are wide instead: the timeout leaves IDLE and DONE
+// room under -race and load, and the wait is three timeouts long, so a
+// watchdog spanning it would fire well inside it.
 func TestWatchIdleOutlastsCommandTimeout(t *testing.T) {
 	t.Parallel()
+	const (
+		timeout = 200 * time.Millisecond
+		limit   = 3 * timeout
+	)
 	s, _, _ := watchFixture(t)
 	wc, err := s.OpenWatch(t.Context(), storetest.GmailAllMail)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = wc.Close() })
-	wc.(*watchConn).c.timeout = 20 * time.Millisecond
-	wake, err := wc.Idle(t.Context(), 50*time.Millisecond)
+	wc.(*watchConn).c.timeout = timeout
+	wake, err := wc.Idle(t.Context(), limit)
 	if err != nil || wake != (mailstore.Wake{}) {
-		t.Fatalf("Idle(50ms) with a 20ms command timeout = %+v, %v; want Wake{} and nil", wake, err)
+		t.Fatalf("Idle(%v) with a %v command timeout = %+v, %v; want Wake{} and nil", limit, timeout, wake, err)
 	}
 	if _, err := wc.Sync(t.Context(), mailstore.SyncRequest{}); err != nil {
 		t.Errorf("Sync after the Idle = %v; the connection must stay usable", err)
