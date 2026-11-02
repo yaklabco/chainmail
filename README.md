@@ -1,8 +1,8 @@
 # chainmail
 
-Email for AI agents. chainmail is one Go binary that lets agents read, write and organize mail over IMAP and SMTP without ever holding a password or token. A long-running daemon owns every credential and every connection to the mail servers. Agents talk to it through the `chainmail` CLI or through `chainmail mcp`, an MCP server. Both are thin clients on a Unix socket. Every call except `admin status` and `audit` is written to an audit log.
+Email for AI agents. chainmail is one Go binary that lets agents read, write and organize mail over IMAP and SMTP without ever holding a password or token. A long-running daemon owns every credential and every connection to the mail servers. Agents talk to it through the `chainmail` CLI or through `chainmail mcp`, an MCP server. Both are thin clients on a Unix socket. Every call except `admin status`, `audit`, `watch status` and the acknowledgements a watch sends is written to an audit log.
 
-Five sub-projects exist today. Sub-project 1, the foundation, is the daemon and its socket, the vault, password and OAuth2 login, `secret set`, `auth login` and `accounts test`. Sub-project 2 reads mail: `folders`, `search`, `get`, `thread` and `attachment`. Sub-project 3 writes and organizes it: `send`, `send-raw`, `reply`, `forward` and `draft`, then `move`, `copy`, `archive`, `trash`, `expunge`, the flag and label commands, `folder`, and `accounts probe`. Sub-project 4 adds the send policy, which holds a send to anyone off an allowlist as a draft, the policy gates on `expunge` and `folder delete`, the `audit` command, and a NixOS module for production. Sub-project 5 adds `chainmail mcp`, which serves the same operations to AI agents as MCP tools (see [Agents over MCP](#agents-over-mcp)). Approvals arrive in a later sub-project.
+Six sub-projects exist today. Sub-project 1, the foundation, is the daemon and its socket, the vault, password and OAuth2 login, `secret set`, `auth login` and `accounts test`. Sub-project 2 reads mail: `folders`, `search`, `get`, `thread` and `attachment`. Sub-project 3 writes and organizes it: `send`, `send-raw`, `reply`, `forward` and `draft`, then `move`, `copy`, `archive`, `trash`, `expunge`, the flag and label commands, `folder`, and `accounts probe`. Sub-project 4 adds the send policy, which holds a send to anyone off an allowlist as a draft, the policy gates on `expunge` and `folder delete`, the `audit` command, and a NixOS module for production. Sub-project 5 adds `chainmail mcp`, which serves the same operations to AI agents as MCP tools (see [Agents over MCP](#agents-over-mcp)). Sub-project 6 watches for new mail: the daemon keeps a durable event log, which `chainmail watch` streams and the MCP tool `read_events` reads (see [Watching for mail](#watching-for-mail)). Approvals arrive in a later sub-project.
 
 ```mermaid
 flowchart LR
@@ -15,9 +15,10 @@ flowchart LR
   MCP -- "ConnectRPC over a Unix socket" --> D
   subgraph daemon["chainmail daemon"]
     D[daemon] --> V[(vault.age)]
-    D --> S[(state.db audit log)]
+    D --> S[(state.db audit log and event log)]
   end
   D -- "IMAP and SMTP over TLS" --> M[mail servers]
+  D -- "IMAP IDLE on watched folders" --> M
   D -- "OAuth2 token exchange and refresh" --> G[Google]
 ```
 
@@ -28,7 +29,7 @@ flowchart LR
 - **The vault is encrypted at rest.** `vault.age` is an [age](https://age-encryption.org) file. In production its key arrives through systemd `LoadCredentialEncrypted=`, sealed to the host's TPM2, at `$CREDENTIALS_DIRECTORY/vault-key`. In development it is a file passed with `--vault-key-file`. The daemon refuses a key file that others can access. The file must either be owned by the daemon's user with no group or other bits (`0600` or `0400`), or be owned by `root:root` with no other bits and at most group read. The second form exists because systemd delivers a `LoadCredential` file as `0440 root:root` and grants the service user read access through an ACL.
 - **The socket has a group and a peer check.** The daemon creates its socket with mode `0660`. In production it sets the socket's group to `client_group` (default `chainmail-clients`). On every connection it reads the peer's credentials with `SO_PEERCRED` and allows only its own user and members of the client group. Membership is looked up per request, so adding a user to the group takes effect without a restart. Release builds are pure Go (`CGO_ENABLED=0`), so users, groups and memberships are read from `/etc/passwd` and `/etc/group`, not through NSS. A user or membership that exists only in NSS, such as one from LDAP or SSSD, is refused. A dev daemon allows only your own user. A refused peer gets `FORBIDDEN` (exit 3).
 - **Sends off the allowlist are held, not sent.** A send to any recipient that is not on the policy's allowlist is never transmitted. The daemon saves the exact message to the account's Drafts folder, and you send, edit or delete it from your own mail client. A recipient that is not a plain `local@domain` address, such as one with a quoted local part, is always held, whatever the allowlist says. `expunge` and `folder delete` are refused unless the config enables them. See [Policy](#policy). Any client that passes the socket's peer check can still send as any configured account to anyone on the allowlist, and can move, archive, flag and trash mail. Give the socket only to users and agents you trust that far. Every send and every change is audited, so you can see afterwards what was done.
-- **Every change is audited.** The `audit` table in `state.db` records the time, caller UID, client kind (`cli`, `mcp`, `live-test`, or `daemon` for work the daemon starts itself, such as a background probe), account, action, targets, result and error reason for each call. The audited reads are `accounts.list`, `account.test`, `secret.set`, `auth.login.begin`, `auth.login.finish`, `folders.list`, `search`, `get`, `get.raw`, `thread` and `attachment`. The audited writes are `send`, `send_raw`, `reply`, `forward`, `upload`, `draft.create`, `draft.update`, `draft.send`, `draft.delete`, `move`, `copy`, `archive`, `trash`, `expunge`, `flags`, `labels`, `folders.create`, `folders.rename`, `folders.delete` and `limits.probe`. A send's row names the account and the Message-ID, never the recipients, subject or body. A reply or forward row also names the original's ref, and a draft row the draft's ref. A batch that spans accounts records one row per account, a repeated send records the decision `duplicate`, and a dry run the decision `dry_run`. A send the policy passed records `allowed`, a held send `held`, and a refused `expunge` or `folder delete` `denied` (see [Policy](#policy)). The client kind is self-reported in the `Chainmail-Client` header, so any local caller can claim any kind. The caller UID comes from the socket and is the authoritative identity. Rows never contain secret values or message content. A read's row holds counts and refs only, never subjects, addresses or the search query. An account or secret name that is not a valid name, or a client kind that is not a short lowercase name, is recorded as `(invalid)`, and the call fails with `INVALID_ARGUMENT`. The table is append-only: triggers refuse updates and deletes. If the audit write fails, the call fails too, so chainmail never reports success for something it could not record. Read the log with `chainmail audit` (see [Reading the audit log](#reading-the-audit-log)).
+- **Every change is audited.** The `audit` table in `state.db` records the time, caller UID, client kind (`cli`, `mcp`, `live-test`, or `daemon` for work the daemon starts itself, such as a background probe), account, action, targets, result and error reason for each call. The audited reads are `accounts.list`, `account.test`, `secret.set`, `auth.login.begin`, `auth.login.finish`, `folders.list`, `search`, `get`, `get.raw`, `thread`, `attachment`, `watch.subscribe`, `watch.read` and `watch.groups.list`. The audited writes are `send`, `send_raw`, `reply`, `forward`, `upload`, `draft.create`, `draft.update`, `draft.send`, `draft.delete`, `move`, `copy`, `archive`, `trash`, `expunge`, `flags`, `labels`, `folders.create`, `folders.rename`, `folders.delete`, `limits.probe` and `watch.groups.delete`. Every call except `admin status`, `audit`, `watch status` and a watch's acknowledgements (the `Ack` call) is recorded. A `watch.subscribe` or `watch.read` row names where the read starts (`group=<name>`, `since=<id>` or `live`), the number of accounts in the filter, the kinds and whether `in` was set, never the `in` value or any event content. A `watch.read` row also counts the events returned, a `watch.groups.list` row the groups, and a `watch.groups.delete` row names the group. A send's row names the account and the Message-ID, never the recipients, subject or body. A reply or forward row also names the original's ref, and a draft row the draft's ref. A batch that spans accounts records one row per account, a repeated send records the decision `duplicate`, and a dry run the decision `dry_run`. A send the policy passed records `allowed`, a held send `held`, and a refused `expunge` or `folder delete` `denied` (see [Policy](#policy)). The client kind is self-reported in the `Chainmail-Client` header, so any local caller can claim any kind. The caller UID comes from the socket and is the authoritative identity. Rows never contain secret values or message content. A read's row holds counts and refs only, never subjects, addresses or the search query. An account or secret name that is not a valid name, or a client kind that is not a short lowercase name, is recorded as `(invalid)`, and the call fails with `INVALID_ARGUMENT`. The table is append-only: triggers refuse updates and deletes. If the audit write fails, the call fails too, so chainmail never reports success for something it could not record. Read the log with `chainmail audit` (see [Reading the audit log](#reading-the-audit-log)).
 - **Root is out of scope.** chainmail stops accidents and prompt injection that run through chainmail. It does not stop an agent that can become root. If your user has passwordless sudo or is in the `docker` group, an agent with an unrestricted shell can read the vault through root. Closing that gap means running agents without sudo or docker, which is outside chainmail.
 
 ## Build
@@ -51,11 +52,13 @@ Other stave targets: `check` (the default, and what CI runs: generated code chec
 
 ## Development
 
-`check` runs the unit tests only. They include the IMAP store's tests against an in-memory fake Gmail server, which need nothing installed. `test:integration` runs the IMAP store's package, the daemon's package and the MCP server's package again with the `integration` tag, which adds tests against a real Dovecot server in a Docker container. The IMAP store's tests include a Dovecot whose personal namespace is under `INBOX.`. The daemon's test sends through the policy and checks that a held send lands in Dovecot's Drafts folder with its Bcc and reaches no SMTP server. The MCP server's test builds the binary, runs it as `chainmail mcp` against a real daemon, searches, reads, files and archives a message, saves a draft, has a send held, and checks that the audit log records every call with client kind `mcp`. It needs Docker. Each test binary starts its own container from a pinned image and removes it when the run ends, whether the tests pass or fail. If the run is killed before it can clean up, the container stops itself after 20 minutes, and the next run removes it. The run times out after 15 minutes and uses a quarter of the cores.
+`check` runs the unit tests only. They include the IMAP store's tests against an in-memory fake Gmail server, which need nothing installed. `test:integration` runs the IMAP store's package, the daemon's package and the MCP server's package again with the `integration` tag, which adds tests against a real Dovecot server in a Docker container. The IMAP store's tests include a Dovecot whose personal namespace is under `INBOX.`. The daemon's test sends through the policy and checks that a held send lands in Dovecot's Drafts folder with its Bcc and reaches no SMTP server. It also watches a Dovecot mailbox over IDLE with CONDSTORE: another IMAP client delivers, flags and expunges a message, and a group stream gets the `new`, `flags` and `expunged` events. Then the daemon stops, three messages arrive while it is down, and after a restart on the same state the group resumes with exactly those three. The MCP server's test builds the binary, runs it as `chainmail mcp` against a real daemon, searches, reads, files and archives a message, saves a draft, has a send held, and checks that the audit log records every call with client kind `mcp`. A second MCP test waits for mail with `read_events` and a group, and checks that each read is audited as `watch.read` with client kind `mcp`. It needs Docker. Each test binary starts its own container from a pinned image and removes it when the run ends, whether the tests pass or fail. If the run is killed before it can clean up, the container stops itself after 20 minutes, and the next run removes it. The run times out after 15 minutes and uses a quarter of the cores.
 
 ```fish
 nix develop -c go tool stave test:integration
 ```
+
+`test:live` runs against real accounts (see the [Dev quickstart](#dev-quickstart)). Among its write tests, a watch test opens a live stream of each account's `new` events, as `chainmail watch --account <account> --kind new` does, sends a message to the account's own address and requires the event for the delivered copy within 30 seconds. On Google that event is for the one All Mail message and must carry the `\Sent` label. Whether it also carries `\Inbox` is logged, not required.
 
 ## Provider setup
 
@@ -169,6 +172,8 @@ address = "me@example.com"
 archive_folder = "Archive"       # where archive moves mail; default the \Archive folder
 pool = 2                         # IMAP connections; default from the probe
 max_message_size = "35MiB"       # largest message it sends; default from the preset
+watch = ["INBOX"]                # folders watched with IDLE; [] watches nothing
+sync = { folders = ["INBOX", "Sent"], poll = "5m" }   # Sent is polled every 5m
 
 [accounts.lab]
 provider = "custom"
@@ -192,6 +197,12 @@ send_allow = ["*@example.org", "ann@example.com"]
 max_recipients = 10
 allow_expunge = false
 allow_folder_delete = false
+
+[watch]
+retention = "168h"               # events and idle groups older than this are removed
+max_events = 200000
+expunge_sweep = "1h"
+idle_fallback_poll = "30s"       # watched folders on servers without IDLE
 ```
 
 | Key | Required | Default | Meaning |
@@ -217,11 +228,19 @@ allow_folder_delete = false
 | `accounts.<name>.archive_folder` | no | the folder with the `\Archive` attribute | Where `archive` moves mail on accounts other than Google. Google archives by removing the Inbox label. |
 | `accounts.<name>.pool` | no | from the probe, else the preset | IMAP connections the daemon keeps for the account, 1 to 12. Set it to override the probed size. See [Connection probing and pool sizing](#connection-probing-and-pool-sizing). |
 | `accounts.<name>.max_message_size` | no | `25MiB` for Google and custom servers, `35MiB` for iCloud and Hostinger | The largest message the account sends, attachments included, between `1KiB` and `1024MiB`. Also caps each upload. Whatever it is set to, a `send-raw` message, a body or HTML file, and a dry run's output are limited to 40 MiB, the most one API request or response holds. |
+| `accounts.<name>.watch` | no | `["INBOX"]` | Folders watched with IDLE, each on a connection of its own. `[]` watches nothing. A folder may not be listed twice or be empty. Not allowed on the Google presets, which always watch All Mail. See [Watching for mail](#watching-for-mail). |
+| `accounts.<name>.sync.folders` | no | none, so only the watch list syncs | Folders synced as well as the watched ones. Every watched folder is synced. A synced folder that is not watched is polled every `sync.poll`. Not allowed on the Google presets. |
+| `accounts.<name>.sync.poll` | no | `5m` | How often synced folders that are not watched are checked, as a Go duration between `30s` and `24h`. Also how often a missing folder is tried again. |
+| `accounts.<name>.sync.enabled` | no | `true` | `false` turns off watching and syncing for the account, Google presets included. |
 | `accounts.<name>.policy.send_allow` | no | `[]` | Allowlist entries added to the global `policy.send_allow` for this account only. No other key is allowed in this table. See [Policy](#policy). |
 | `policy.send_allow` | no | `[]` | Allowlist entries for every account: bare addresses and `*@domain`. |
 | `policy.max_recipients` | no | `10` | The most distinct recipients, To, Cc and Bcc together, a send may have. A send with more is held. 1 to 500. |
 | `policy.allow_expunge` | no | `false` | Allows `expunge`, and lets draft removal expunge instead of moving to Trash. |
 | `policy.allow_folder_delete` | no | `false` | Allows `folder delete`, including `--force` on a folder that holds mail. |
+| `watch.retention` | no | `168h` | How long events are kept, and how long a group may go unused before it is removed. A Go duration between `1h` and `2160h`. |
+| `watch.max_events` | no | `200000` | The most events the log keeps, oldest removed first. 1000 to 10000000. |
+| `watch.expunge_sweep` | no | `1h` | How often synced folders are swept for expunged mail. Between `5m` and `24h`. |
+| `watch.idle_fallback_poll` | no | `30s` | How often a watched folder is synced on a server without IDLE. Between `10s` and `10m`. |
 
 Vault secret names:
 
@@ -233,7 +252,9 @@ Vault secret names:
 
 `secret set` accepts only names the config uses: `accounts/<account>` where the account has `auth = "password"`, and `oauth_clients/<client>` where the client is defined. It refuses `tokens/<account>`, because only `auth login` writes a refresh token.
 
-Keys from the full design, such as `watch`, `sync` and `rules`, belong to later sub-projects. This version rejects them as unknown.
+Each watched folder holds one IMAP connection of its own, outside the pool, and a Google account holds one for All Mail. These watcher connections count toward the account's connection cap: the probed cap when there is one, else the preset's (10 for Google, 3 for the others). The pool shrinks to fit what the watchers leave, never below 1, and a configured `pool` is capped the same way. The watchers never shrink. A Hostinger account watching only its inbox therefore runs 1 watcher and a pool of 2 until a probe measures it. See [Connection probing and pool sizing](#connection-probing-and-pool-sizing).
+
+Keys from the full design, such as `rules` and `prefetch_bodies`, belong to later sub-projects. This version rejects them as unknown.
 
 ## Dev quickstart
 
@@ -328,7 +349,11 @@ Every command accepts `--socket <path>` and `--output json|table`. Without `--ou
 | `chainmail accounts test <account>` | Logs in to the account's IMAP server, then its SMTP server, and reports each check. | `{"account":...,"imap":{...},"smtp":{...}}` |
 | `chainmail secret set <name> [--from-pass <entry>]` | Stores a secret in the vault. The name must be `accounts/<account>` for a configured password account, or `oauth_clients/<client>` for a configured OAuth2 client. Any other name, including `tokens/<account>`, fails with `INVALID_ARGUMENT` (exit 2). For an account password it then probes the account's connection limit. | `{"name":...,"set":true}`, plus `"limit":{...}` for `accounts/<account>` |
 | `chainmail auth login <account>` | Runs the OAuth2 paste-back flow, stores the refresh token, then probes the account's connection limit. | `{"account":...,"logged_in":true,"limit":{...}}` |
-| `chainmail admin status` | Shows the daemon's version, start time, dev mode and stored secret names. | `{"version":...,"started_at":...,"dev_mode":...,"secret_names":[...]}` |
+| `chainmail admin status` | Shows the daemon's version, start time, dev mode, stored secret names and the sync state of each synced folder. | `{"version":...,"started_at":...,"dev_mode":...,"secret_names":[...],"sync":[...]}` |
+| `chainmail watch [--group NAME \| --since ID] [--account NAME]... [--kind KIND[,KIND]...] [--in FOLDER] [--once] [--heartbeat]` | Streams mail events from the daemon's event log, one per line. See [Watching for mail](#watching-for-mail). | one JSON object per event on its own line, and `{"heartbeat":{...}}` lines with `--heartbeat` |
+| `chainmail watch status` | Shows each synced folder's mode, state, CONDSTORE support, last sync, last sweep and last error. Not audited. | `{"folders":[{"account":...,"folder":...,"mode":...,"state":...,"condstore":...,"last_sync_at":...,"last_sweep_at":...,"last_error":...}]}` |
+| `chainmail watch groups` | Lists watch groups with their acknowledged event, lag in events, creation time and last use. | `{"groups":[{"name":...,"acked_id":...,"lag":...,"created_at":...,"last_seen_at":...}]}` |
+| `chainmail watch groups delete <name>` | Deletes a watch group, so its next use starts at the newest event. Deleting a group that does not exist succeeds with `deleted` false. | `{"deleted":...}` |
 | `chainmail audit [--since 24h] [--account <account>] [--action <action>] [--limit N] [--before-id N]` | Lists audit rows, newest first. See [Reading the audit log](#reading-the-audit-log). | `{"entries":[...],"next_before_id":...}` |
 | `chainmail help [command]` | Prints help. `--help` on any command does the same. | help text |
 
@@ -773,12 +798,13 @@ If the daemon is down or the user cannot reach the socket, `chainmail mcp` still
 | `rename_folder` | Renames a folder and returns the new name the server uses, as untrusted. |
 | `expunge` | Deletes messages for good. Listed only while the policy allows it. |
 | `delete_folder` | Deletes a folder, and with `force` the mail in it. Listed only while the policy allows it. |
+| `read_events` | Reads mail events after a cursor or a group's acknowledged position, waiting up to 60 seconds for the first. A group read acknowledges what it returns. New events carry the message summary as untrusted. See [Watching for mail](#watching-for-mail). |
 
-Inputs take refs, addresses and folder names as plain strings. Outputs give dates in RFC 3339. A message's `flags` are the system flags by short name: `seen`, `flagged`, `answered`, `draft` and `deleted`. Every other flag, such as `$Forwarded`, is in `keywords`, as untrusted. The send and draft tools take `attachments` and `inline[].path` as absolute file paths. The batch tools take 1 to 500 refs. Every tool sets the four MCP annotations: the read and file tools are read-only, and `expunge` and `delete_folder` are destructive. `update_draft`, `send_draft` and `delete_draft` are destructive while the policy allows expunge on at least one account, since the daemon then expunges the old draft instead of moving it to Trash, and are not destructive otherwise. No other annotation depends on the policy.
+Inputs take refs, addresses and folder names as plain strings. Outputs give dates in RFC 3339. A message's `flags` are the system flags by short name: `seen`, `flagged`, `answered`, `draft` and `deleted`. Every other flag, such as `$Forwarded`, is in `keywords`, as untrusted. The send and draft tools take `attachments` and `inline[].path` as absolute file paths. The batch tools take 1 to 500 refs. Every tool sets the four MCP annotations: the read and file tools are read-only, and `expunge` and `delete_folder` are destructive. `read_events` is read-only, since it changes no mail, but not idempotent, since a read with a group moves the group. `update_draft`, `send_draft` and `delete_draft` are destructive while the policy allows expunge on at least one account, since the daemon then expunges the old draft instead of moving it to Trash, and are not destructive otherwise. No other annotation depends on the policy.
 
 `expunge` and `delete_folder` are listed only while the policy allows them on at least one account, as `list_accounts` reports. The server asks the daemon at start, and again before a `tools/list` once its last check is 60 seconds old. It runs no timer, so an idle session writes no audit rows. Each check is one `accounts.list` row. The same check sets the draft tools' `destructiveHint`. When the answer changes the list or that hint, the server sends `notifications/tools/list_changed`. While the daemon cannot be reached, the two tools are not listed and the draft tools are not marked destructive. A check cut short because the client cancelled its `tools/list` changes nothing, and the next `tools/list` checks again. The daemon still checks the policy on every call, so a stale list leads at worst to a `POLICY_DENIED` result.
 
-Not exposed: the admin calls (secrets, `auth login`, `admin status`, `audit`), `send-raw`, `accounts probe`, and uploads as a tool of their own.
+Not exposed: the admin calls (secrets, `auth login`, `admin status`, `audit`), `send-raw`, `accounts probe`, uploads as a tool of their own, and the rest of the watch service. `read_events` reads a page at a time in place of the event stream, a group read acknowledges itself in place of a separate `Ack`, and `watch status`, `watch groups` and `watch groups delete` have no tool.
 
 ### Untrusted content
 
@@ -831,6 +857,145 @@ A failed call is a tool result with `isError: true`. Its text is `REASON: messag
 Error text is deny by default. A result carries the daemon's own message and hint for clients, or text the server wrote from fixed words and the agent's own input. Any other error gets fixed text for its reason: `TIMEOUT` for a call that was cancelled or not answered in time, `FORBIDDEN` for a refusal, and otherwise `INTERNAL` with `internal error in chainmail mcp; see its stderr log`. The stderr log records only the error's kind, such as its Connect code, filesystem operation or errno, never its text, which can hold a path or a name taken from mail. The same holds for a failed policy check for `expunge` and `delete_folder`. A missing folder's message names the folder as the agent gave it, never with the server's namespace prefix. The daemon's own text never quotes a message either. A send of unknown outcome does not name its Message-ID, which `send_draft` takes from the draft, so search Sent for the subject or recipients. A mail server's refusal of recipients gives their number, not their addresses, since `reply` and `send_draft` take them from a message. A forward whose original has an attachment that cannot be sent again as it is fails with `an original attachment cannot be forwarded as is`, without the attachment's type or name. Forward it with `no_attachments` instead.
 
 Arguments that fail a tool's input schema come back as `INVALID_ARGUMENT` results. A call to an unknown tool is a JSON-RPC error. The batch tools, and `get_message`, succeed when any ref succeeds, with each failed ref's error in `outcomes` or `errors`. Only when every ref fails is the call an error result, with the first failure's reason.
+
+## Watching for mail
+
+The daemon watches each account's mail and writes what changes to an event log in `state.db`. `chainmail watch` streams that log, and the MCP tool `read_events` reads it a page at a time. A watcher that names a group resumes where it left off, so a watcher restart, a daemon restart or a deploy loses no mail.
+
+### What is watched
+
+The daemon runs one supervisor for each account with `sync.enabled` on, from start to shutdown. On the Google presets it watches All Mail, the folder with the `\All` attribute, on one connection. All Mail holds every message whatever its labels, so that one connection sees every label, and a Google account polls nothing. Other accounts watch each folder in `watch` with IDLE, each on a connection of its own, and poll the rest of `sync.folders` every `sync.poll`. A poll asks the server for the folder's status on a pooled connection and syncs only when it changed, or every time on a server without CONDSTORE, whose status cannot show a flag change. A server without IDLE gets its watched folders synced every `idle_fallback_poll` on their own connections instead. An IDLE ends after 25 minutes at most, and the folder is synced before the next one starts.
+
+The first sync of a folder records where it stands and the messages it holds, and publishes a `status` event with state `baselined`. It reports nothing for the mail already there. After that, each new message produces a `new` event within seconds on a watched folder, and within `sync.poll` on a polled one. A sync commits its events together with the folder's checkpoint, so a crash neither loses nor repeats one. When the daemon starts, every folder catches up from its checkpoint, at most 500 messages per commit, so mail that arrived while the daemon was down produces its events in order.
+
+### Events
+
+Every event has `id`, `at`, `kind`, `account` and `folder`. The rest depends on the kind:
+
+| Kind | Fields | Meaning |
+|---|---|---|
+| `new` | `ref`, `message` | A message arrived. `message` is the message's search row, as `search` prints it, with the snippet when the server gave a preview. `thread_count` is always 0. |
+| `flags` | `ref`, `flags`, `labels` | A message's flags or Gmail labels changed. Both hold the current values, not a diff. `flags` holds keywords too, as the server names them. |
+| `expunged` | `ref` | A message left the folder. |
+| `status` | `state`, `detail` | A folder's sync state changed. An empty `folder` means the whole account. See [Sync status](#sync-status). |
+| `gap` | `reason`, `next_id` | Events are missing. `trimmed` means the log no longer holds them, and `uidvalidity` means the server renumbered the folder. |
+
+`chainmail watch --output json` prints one line per event, with every field, empty ones included, as other commands do. Like other 64-bit fields, `id`, `next_id` and a message's `size` are JSON strings. These lines are what it prints for each kind:
+
+```json
+{"id":"1","at":"2026-11-02T10:00:01Z","kind":"new","account":"host","folder":"INBOX","ref":"cm1:host:INBOX:1:1","message":{"ref":"cm1:host:INBOX:1:1","account":"host","folder":"INBOX","date":"2026-11-02T10:00:00Z","internal_date":"2026-11-02T10:00:00Z","from":[{"name":{"untrusted":"Sam"},"email":{"untrusted":"sam@example.org"}}],"to":[],"subject":{"untrusted":"Hello"},"flags":[],"size":"300","has_attachment":false,"thread_id":"","labels":[],"snippet":null,"thread_count":0},"flags":[],"labels":[],"state":"","detail":"","reason":"","next_id":"0"}
+{"id":"2","at":"2026-11-02T10:00:02Z","kind":"flags","account":"host","folder":"INBOX","ref":"cm1:host:INBOX:1:1","message":null,"flags":["\\Seen"],"labels":["Work"],"state":"","detail":"","reason":"","next_id":"0"}
+{"id":"3","at":"2026-11-02T10:00:03Z","kind":"status","account":"host","folder":"INBOX","ref":"","message":null,"flags":[],"labels":[],"state":"watching","detail":"","reason":"","next_id":"0"}
+{"id":"4","at":"2026-11-02T10:00:04Z","kind":"expunged","account":"host","folder":"INBOX","ref":"cm1:host:INBOX:1:2","message":null,"flags":[],"labels":[],"state":"","detail":"","reason":"","next_id":"0"}
+{"id":"0","at":"2026-11-02T10:00:05Z","kind":"gap","account":"","folder":"","ref":"","message":null,"flags":[],"labels":[],"state":"","detail":"","reason":"trimmed","next_id":"9"}
+```
+
+Subjects, names, addresses and snippets come from the message and are untrusted, wrapped as `{"untrusted": "..."}` as in search rows. Folder names, flags and labels come from the server. On a terminal each event is one line instead: the time, the kind, the account and the folder, then what happened: a new message's subject, a changed message's ref with its flags and labels, an expunged message's ref, a status's state and detail, or a gap's reason and next ID. Every value is cleaned of terminal control characters.
+
+A `uidvalidity` gap comes with the folder's new `baselined` status, and its `next_id` is 0. The refs the folder's earlier events named are stale, so search the folder again. A `trimmed` gap is made at read time and is never stored, so its `id` is 0 and it has no account or folder. Its `next_id` is where reading goes on.
+
+### Expunges
+
+A server tells a watching client about new mail and flag changes at once, but chainmail finds expunged mail by comparing the folder's UIDs with the ones it knows. On a server with CONDSTORE that comparison, the sweep, runs on each connect, every `expunge_sweep`, and after the server reports an expunge during IDLE, as soon as 5 minutes have passed since the last sweep. So an `expunged` event can trail the change by up to 5 minutes on a watched folder whose server reports it, and by up to `expunge_sweep` otherwise, as on a polled folder. On a server without CONDSTORE every sync fetches the whole UID set, so each sync finds expunges.
+
+On Gmail, archiving takes the `\Inbox` label away, which arrives as a `flags` event without `\Inbox`. Trashing a message, or marking it as spam, takes it out of All Mail, which arrives as an `expunged` event. Mail sent from the account arrives as a `new` event with the `\Sent` label.
+
+### Reading
+
+```
+chainmail watch [--group NAME | --since ID] [--account NAME]... [--kind KIND[,KIND]...] [--in FOLDER] [--once] [--heartbeat]
+chainmail watch status
+chainmail watch groups
+chainmail watch groups delete <name>
+```
+
+Where a read starts:
+
+- `--group <name>` resumes after the group's acknowledged event. A group is created the first time it is used, at the newest event, so a new group sees only what comes after. Group names match `^[a-z0-9][a-z0-9._-]{0,63}$`.
+- `--since <id>` resumes after that event ID, or after a heartbeat's position.
+- Neither starts with the events that arrive from now on.
+
+`--group` and `--since` together are a usage error. Filters apply in the daemon. `--account`, repeatable, keeps the named accounts' events, and an unknown account fails with `NOT_FOUND`. `--kind` takes `new`, `flags`, `expunged`, `status` and `gap`, comma separated or repeated. `status` and `gap` events pass a `--kind` list that names neither of them, so a `--kind new` watcher still hears about gaps and auth problems. `--in` keeps events whose folder or Gmail labels match, ignoring case: `inbox` also matches Gmail's `\Inbox` label and `sent` matches `\Sent`. `status` and `gap` events always pass `--in`.
+
+A start older than the oldest event kept, after a trim, first gets a `trimmed` gap, then goes on from the oldest event. A start past the newest event, as when `state.db` was reset under a watcher, gets one `trimmed` gap and goes on from the newest event, and a group acknowledged past it is reset there.
+
+The daemon trims the log when it starts and every hour after. It removes events older than `watch.retention` or beyond `watch.max_events`, oldest first, whatever any group has acknowledged. A group that falls further behind than that gets a gap. A group not used for longer than `watch.retention` is removed with the events. `chainmail watch groups` lists the groups with the event each has acknowledged and how many events lie past it, and `chainmail watch groups delete <name>` removes one.
+
+### Delivery
+
+`chainmail watch --group` acknowledges an event once its line is written to stdout, in batches: once a second, or at once after 100 lines. Heartbeats move the acknowledgement too, so a group also moves past the events its filters dropped. The last batch goes out before each reconnect and when the watch exits. Delivery is at least once. A watch that crashes, or whose acknowledgement fails, delivers the events it printed since its last acknowledgement again on its next run, usually a second's worth, so a consumer should tolerate an `id` it has already seen. The acknowledgement says the line was written, not that the consumer finished with it. A consumer that must not lose an event it had read but not yet handled should record the last `id` it handled and restart from it with `--since`.
+
+`read_events` with a group acknowledges the events it returns, and the events its filters dropped, before it answers. If the acknowledgement fails, the call fails and the next read returns the same events. If the client goes away after the acknowledgement and before the answer reaches it, those events are lost: under a disconnect, a group read over MCP is at most once.
+
+Use one group per consumer. Two consumers that share a group share its position, and each skips what the other acknowledged.
+
+### Long-running watchers
+
+`chainmail watch` runs until it is stopped. When the daemon goes away, as in a deploy, or the stream ends, it reconnects by itself, waiting 1 second, then twice as long each time up to 30 seconds. It resumes from its group, or from the last event or heartbeat it saw. The daemon sends a heartbeat as soon as the stream has sent every event already in the log, then every 30 seconds while nothing happens. A stream silent for 75 seconds is reconnected. `--heartbeat` prints heartbeats, as `{"heartbeat":{"at":...,"position":...}}` lines.
+
+The watch stops with an error only when the daemon refuses the request, such as an invalid group name, an unknown account or a refused socket peer, or when it cannot write its output, as when the program reading it exits. Ctrl-C or `SIGTERM` ends it with exit 0 after its last acknowledgement.
+
+`--once` exits at the first heartbeat, once every event already in the log is printed, which suits cron:
+
+```fish
+chainmail watch --group digest --once >> ~/mail-events.jsonl
+```
+
+A script that handles new inbox mail can read the stream through a pipe. Its stdout is not a terminal, so it gets JSON lines:
+
+```fish
+chainmail watch --group triage --kind new --in inbox | ~/bin/triage
+```
+
+As a systemd user service, so that it comes back if the script fails:
+
+```ini
+[Unit]
+Description=Triage new mail
+
+[Service]
+ExecStart=/bin/sh -c 'chainmail watch --group triage --kind new --in inbox | %h/bin/triage'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+The service's user must be in the `chainmail-clients` group, as for the CLI.
+
+### Agents
+
+`read_events` takes `group`, `cursor`, `kinds`, `accounts`, `in`, `wait_seconds` and `limit`. `group` and `cursor` together are `INVALID_ARGUMENT`. `wait_seconds` is 0 to 60, default 0: when no event is ready, the read waits that long for the first one. `limit` is 1 to 200, default 50. A read with `cursor` returns the events after it, and `cursor` 0 starts at the oldest event kept. A read with neither returns only events that arrive during its wait. The result is `{"events":[...],"next_cursor":...}`. Pass `next_cursor` as `cursor` to read on. A group read does not need it.
+
+The events have the fields above, with empty fields left out. As in the other tools, `flags` holds the system flags by short name and `keywords` the rest, and the folder, labels and keywords are untrusted, as is the `message` summary. An agent waits for mail by calling the tool again and again:
+
+```
+read_events(group: "<name>", wait_seconds: 60)
+```
+
+A client that cancels the request ends the wait. A `status` event with state `auth_required` means James must act on the account, and its `detail` says what to run.
+
+### Sync status
+
+`chainmail watch status`, and the `sync` section of `chainmail admin status`, show each synced folder's mode, state and last error. `watch status` adds whether the folder has CONDSTORE and when it was last swept. Neither is audited.
+
+```fish
+chainmail watch status --output table
+```
+
+The mode is `idle` for a folder watched with IDLE and `poll` for a polled one, including a watched folder on a server without IDLE. The state is one of these, and each change of state is also published as a `status` event:
+
+| State | Meaning |
+|---|---|
+| `baselined` | The folder's first sync recorded where it stands. |
+| `watching` | The folder is watched with IDLE and its last sync worked. |
+| `polling` | The folder is polled and its last sync worked. |
+| `reconnecting` | The connection or the poll failed. The daemon tries again after 1 second, then twice as long each time up to 5 minutes, give or take a fifth. A polled folder waits at most `sync.poll`. The last error is `SERVER_UNAVAILABLE`. |
+| `auth_required` | The server rejected the account's credentials, or it has no secret. Every loop of the account stops and every folder shows this state, with the last error `AUTH_REQUIRED`. One `status` event with an empty folder stands for the whole account, and its `detail` is the command James must run, such as `run: chainmail auth login work`. Watching starts again within 15 seconds of `secret set` or `auth login` clearing the state. |
+| `error` | The folder does not exist. The last error is `FOLDER_NOT_FOUND`, and the folder is tried again every `sync.poll`. The account's other folders keep running. |
+
+When the daemon shuts down, each watcher ends its IDLE and logs out, within 5 seconds.
 
 ## NixOS deployment
 
@@ -896,6 +1061,8 @@ The daemon keeps a pool of IMAP connections per account and works on several fol
 2. Otherwise the cap less 2, between 1 and 12. The 2 left over are for your other mail clients on the same account.
 3. Before any probe, the preset's default: 6 on Google accounts and 3 on the others.
 
+Then the pool shrinks to leave room for the account's watcher connections, which the daemon dials outside the pool, one per watched folder, or one for All Mail on Google (see [Watching for mail](#watching-for-mail)). Pool and watchers together stay within the probed cap, or before any probe the preset's cap of 10 on Google accounts and 3 on the others. A `pool` set in the config shrinks too. The pool never drops below 1, even when the watchers alone fill the cap, and the watchers never shrink. The connections the probe counts as the daemon's own include the watcher connections.
+
 ```fish
 chainmail accounts probe
 chainmail accounts probe work site --output table
@@ -908,7 +1075,7 @@ The daemon also probes:
 - after `auth login` for an account and after `secret set accounts/<account>`, which print the result, such as `connections: cap 10, pool 8`. A failed probe there is a warning and does not fail the command.
 - in the background, on an account's first use, when the account has no stored result or one older than 30 days.
 
-While a probe runs, the account's other calls go on as usual. Once it ends, the pool is rebuilt at the new size: calls already running finish first, and calls that start meanwhile wait only for the switch. If a server refuses a connection for being over its limit in normal use, the daemon lowers that account's pool by one, never below 1, and records a cap of the new pool size plus 2, unless the stored cap is already lower. The refusal counts as a fresh measurement, so it also postpones the next background probe. A refusal while a probe of the account runs still lowers the pool, but records no cap, since the probe's own connections may have filled the server: the probe's result is stored and the pool is rebuilt from it.
+While a probe runs, the account's other calls go on as usual. Once it ends, the pool is rebuilt at the new size: calls already running finish first, and calls that start meanwhile wait only for the switch. If a server refuses a connection for being over its limit in normal use, the daemon lowers that account's pool by one, never below 1, and records a cap of the new pool size plus 2, or plus the account's watcher connections when it has any, unless the stored cap is already lower. The refusal counts as a fresh measurement, so it also postpones the next background probe. A refusal while a probe of the account runs still lowers the pool, but records no cap, since the probe's own connections may have filled the server: the probe's result is stored and the pool is rebuilt from it.
 
 A probe ramps up slowly and stops at the first refusal, but it does open many connections at once, which some providers watch for abuse. It runs rarely. Setting `pool` in the config fixes the pool size whatever a probe finds, though the probes still run and record the cap. A refusal in normal use still lowers the pool below the configured `pool` until a probe rebuilds the pool or the daemon restarts.
 
