@@ -672,7 +672,7 @@ func TestSupervisorParksWhileAuthRequired(t *testing.T) {
 		}
 	})
 	r.start()
-	e := r.waitFor("INBOX auth_required", supStatus("INBOX", StateAuthRequired))
+	e := r.waitFor("account auth_required", supStatus("", StateAuthRequired))
 	if e.Detail != supHint {
 		t.Errorf("detail = %q, want %q", e.Detail, supHint)
 	}
@@ -688,7 +688,7 @@ func TestSupervisorParksWhileAuthRequired(t *testing.T) {
 	required.Store(false)
 	r.clock.Advance(AuthRecheck)
 	r.waitFor("INBOX watching after auth", supStatus("INBOX", StateWatching))
-	if n := supCount(r.all(), supStatus("INBOX", StateAuthRequired)); n != 1 {
+	if n := supCount(r.all(), supStatus("", StateAuthRequired)); n != 1 {
 		t.Errorf("%d auth_required events, want 1:%s", n, supDump(r.all()))
 	}
 }
@@ -702,7 +702,7 @@ func TestSupervisorParksOnRejectedCredentials(t *testing.T) {
 	fs.FailWatch(&auth.RejectedError{Hint: supHint, Err: errors.New("LOGIN refused")})
 	r := newSupRig(t, fs, supAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
 	r.start()
-	e := r.waitFor("INBOX auth_required", supStatus("INBOX", StateAuthRequired))
+	e := r.waitFor("account auth_required", supStatus("", StateAuthRequired))
 	if e.Detail != supHint {
 		t.Errorf("detail = %q, want %q", e.Detail, supHint)
 	}
@@ -868,7 +868,7 @@ func TestSupervisorPollerParksWhileAuthRequired(t *testing.T) {
 		o.AuthRequired = func(string) (bool, string) { return required.Load(), supHint }
 	})
 	r.start()
-	e := r.waitFor("Sent auth_required", supStatus("Sent", StateAuthRequired))
+	e := r.waitFor("account auth_required", supStatus("", StateAuthRequired))
 	if e.Detail != supHint {
 		t.Errorf("detail = %q, want %q", e.Detail, supHint)
 	}
@@ -876,8 +876,207 @@ func TestSupervisorPollerParksWhileAuthRequired(t *testing.T) {
 	if n := r.acquired.Load(); n != 0 {
 		t.Errorf("Store opened %d times while parked, want 0", n)
 	}
+	if row := r.row("Sent"); row.State != StateAuthRequired || row.LastError != "AUTH_REQUIRED" || row.Mode != passModePoll {
+		t.Errorf("Sent row = mode %q state %q last_error %q, want poll, auth_required and AUTH_REQUIRED", row.Mode, row.State, row.LastError)
+	}
 	required.Store(false)
 	r.clock.Advance(AuthRecheck)
 	r.waitFor("Sent polling", supStatus("Sent", StatePolling))
 	r.clock.expectAfter(t, acct.SyncPoll)
+}
+
+// supAfter returns a scan position just past e, for events that follow it
+// in no fixed order.
+func supAfter(e Event) *int64 {
+	pos := e.ID
+	return &pos
+}
+
+// When the auth state turns required while the account's watchers and
+// poller run, every loop stops and closes its connection before the
+// account parks: one auth_required event with the hint, and an
+// auth_required row for every folder. All of them resume once it clears.
+func TestSupervisorParksEveryLoopMidSession(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	var required atomic.Bool
+	watched := []string{"INBOX", "Archive"}
+	acct := supAccount(t, "hostinger", watched, []string{"INBOX", "Archive", "Sent"})
+	r := newSupRig(t, fs, acct, func(o *SupervisorOptions) {
+		o.AuthRequired = func(string) (bool, string) { return required.Load(), supHint }
+	})
+	r.start()
+	r.waitSeen("INBOX watching", supStatus("INBOX", StateWatching))
+	r.waitSeen("Archive watching", supStatus("Archive", StateWatching))
+	r.waitSeen("Sent polling", supStatus("Sent", StatePolling))
+	r.clock.expectAfter(t, AuthRecheck)   // the running account's auth check
+	r.clock.expectAfter(t, acct.SyncPoll) // the poller waits for its next tick
+
+	required.Store(true)
+	r.clock.Advance(AuthRecheck)
+	e := r.waitFor("account auth_required", supStatus("", StateAuthRequired))
+	if e.Detail != supHint {
+		t.Errorf("detail = %q, want %q", e.Detail, supHint)
+	}
+	if n := fs.WatchConns(); n != 0 {
+		t.Errorf("WatchConns() while parked = %d, want 0", n)
+	}
+	if n := r.held.Load(); n != 0 {
+		t.Errorf("store held %d times while parked, want 0", n)
+	}
+	for _, folder := range []string{"INBOX", "Archive", "Sent"} {
+		if row := r.row(folder); row.State != StateAuthRequired || row.LastError != "AUTH_REQUIRED" {
+			t.Errorf("%s row = state %q last_error %q, want auth_required and AUTH_REQUIRED", folder, row.State, row.LastError)
+		}
+	}
+	opens, states := fs.Calls("OpenWatch"), fs.Calls("FolderState")
+	r.clock.expectAfter(t, AuthRecheck)
+	r.clock.Advance(AuthRecheck) // still required
+	r.clock.expectAfter(t, AuthRecheck)
+	if got := fs.Calls("OpenWatch"); got != opens {
+		t.Errorf("OpenWatch ran %d times while parked, want 0", got-opens)
+	}
+	if got := fs.Calls("FolderState"); got != states {
+		t.Errorf("FolderState ran %d times while parked, want 0", got-states)
+	}
+	if n := supCount(r.all(), supKind("", KindStatus)); n != 1 {
+		t.Errorf("%d account status events while parked, want 1:%s", n, supDump(r.all()))
+	}
+	for _, folder := range []string{"INBOX", "Archive", "Sent"} {
+		if n := supCount(r.all(), supStatus(folder, StateAuthRequired)); n != 0 {
+			t.Errorf("%d auth_required events for %s, want 0: the account event covers it", n, folder)
+		}
+	}
+
+	required.Store(false)
+	r.clock.Advance(AuthRecheck)
+	r.scan("INBOX watching after auth", supAfter(e), supStatus("INBOX", StateWatching))
+	r.scan("Archive watching after auth", supAfter(e), supStatus("Archive", StateWatching))
+	r.scan("Sent polling after auth", supAfter(e), supStatus("Sent", StatePolling))
+	if n := fs.WatchConns(); n != 2 {
+		t.Errorf("WatchConns() after auth = %d, want 2", n)
+	}
+	for _, folder := range []string{"INBOX", "Archive", "Sent"} {
+		if row := r.row(folder); row.LastError != "" {
+			t.Errorf("%s last_error after auth = %q, want empty", folder, row.LastError)
+		}
+	}
+}
+
+// A polled folder whose STATUS or pass fails reports reconnecting once,
+// retries with backoff capped at sync.poll, reports polling again after the
+// first success, and starts the backoff over for the next outage.
+func TestSupervisorPollerBacksOffOutages(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		method string // the fake method that fails
+	}{
+		{name: "STATUS fails", method: "FolderState"},
+		{name: "the pass fails", method: "SyncFolder"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			outage := fmt.Errorf("%w: test outage", mailstore.ErrUnavailable)
+			fs := supFake(false)
+			acct := supAccount(t, "hostinger", nil, []string{"Sent"})
+			// Short enough that the backoff reaches it: Backoff(2, 0.5) is 4s.
+			acct.SyncPoll = 3 * time.Second
+			r := newSupRig(t, fs, acct)
+			r.start()
+			r.waitFor("Sent polling", supStatus("Sent", StatePolling))
+			r.clock.expectAfter(t, acct.SyncPoll)
+
+			fs.Fail(tt.method, outage)
+			fs.Add(supMsg("Sent", "during")) // STATUS shows a change, so the pass runs
+			r.clock.Advance(acct.SyncPoll)
+			r.waitFor("Sent reconnecting", supStatus("Sent", StateReconnecting))
+			r.clock.expectAfter(t, Backoff(0, 0.5))
+			if row := r.row("Sent"); row.State != StateReconnecting || row.LastError != "SERVER_UNAVAILABLE" {
+				t.Errorf("row = state %q last_error %q, want reconnecting and SERVER_UNAVAILABLE", row.State, row.LastError)
+			}
+			r.clock.Advance(Backoff(0, 0.5))
+			r.clock.expectAfter(t, Backoff(1, 0.5))
+			r.clock.Advance(Backoff(1, 0.5))
+			r.clock.expectAfter(t, acct.SyncPoll) // Backoff(2, 0.5) is 4s, capped at the 3s poll
+
+			fs.Fail(tt.method, nil)
+			r.clock.Advance(acct.SyncPoll)
+			r.waitFor("new event for during", supNew("Sent", "during"))
+			r.waitFor("Sent polling again", supStatus("Sent", StatePolling))
+			r.clock.expectAfter(t, acct.SyncPoll)
+			if n := supCount(r.all(), supStatus("Sent", StateReconnecting)); n != 1 {
+				t.Errorf("%d reconnecting events for one outage, want 1:%s", n, supDump(r.all()))
+			}
+			if row := r.row("Sent"); row.State != StatePolling || row.LastError != "" {
+				t.Errorf("row after recovery = state %q last_error %q, want polling and no error", row.State, row.LastError)
+			}
+
+			// The success reset the backoff, so the next outage retries after 1s again.
+			fs.Fail(tt.method, outage)
+			fs.Add(supMsg("Sent", "later"))
+			r.clock.Advance(acct.SyncPoll)
+			r.waitFor("Sent reconnecting again", supStatus("Sent", StateReconnecting))
+			r.clock.expectAfter(t, Backoff(0, 0.5))
+		})
+	}
+}
+
+// A status write that fails is not published and not remembered: the
+// watcher backs off as for a database error, and the retry records the
+// status exactly once.
+func TestSupervisorRetriesFailedStatusWrites(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		failSetStatus bool // else Publish fails
+	}{
+		{name: "SetStatus fails", failSetStatus: true},
+		{name: "Publish fails"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fs := supFake(false)
+			r := newSupRig(t, fs, supAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+			errDisk := errors.New("disk full")
+			var failed atomic.Bool
+			if tt.failSetStatus {
+				next := r.sup.writeStatus
+				r.sup.writeStatus = func(ctx context.Context, account, folder, mode, state, lastError string) error {
+					if state == StateWatching && failed.CompareAndSwap(false, true) {
+						return errDisk
+					}
+					return next(ctx, account, folder, mode, state, lastError)
+				}
+			} else {
+				next := r.sup.publishEvents
+				r.sup.publishEvents = func(ctx context.Context, events ...Event) error {
+					if len(events) == 1 && events[0].State == StateWatching && failed.CompareAndSwap(false, true) {
+						return errDisk
+					}
+					return next(ctx, events...)
+				}
+			}
+			r.start()
+			r.waitFor("INBOX reconnecting", supStatus("INBOX", StateReconnecting))
+			if !failed.Load() {
+				t.Fatal("the status write never failed")
+			}
+			if n := supCount(r.all(), supStatus("INBOX", StateWatching)); n != 0 {
+				t.Fatalf("%d watching events after the failed write, want 0:%s", n, supDump(r.all()))
+			}
+			r.clock.expectAfter(t, Backoff(0, 0.5))
+			r.clock.Advance(Backoff(0, 0.5))
+			r.waitFor("INBOX watching", supStatus("INBOX", StateWatching))
+			r.waitIdle("INBOX")
+			if n := supCount(r.all(), supStatus("INBOX", StateWatching)); n != 1 {
+				t.Errorf("%d watching events, want 1:%s", n, supDump(r.all()))
+			}
+			if row := r.row("INBOX"); row.State != StateWatching || row.LastError != "" {
+				t.Errorf("row = state %q last_error %q, want watching and no error", row.State, row.LastError)
+			}
+		})
+	}
 }

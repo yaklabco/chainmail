@@ -1,8 +1,10 @@
 package watch
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"slices"
@@ -75,7 +77,9 @@ type SupervisorOptions struct {
 
 // Supervisor watches and syncs one account: one watcher loop per watched
 // folder, each on its own connection, and one poller for the synced folders
-// that are not watched. Spec section 5 describes its failure handling.
+// that are not watched. Spec section 5 describes its failure handling. Auth
+// parks the whole account: every loop stops, every known folder's row says
+// auth_required, and one account-wide status event carries the hint.
 type Supervisor struct {
 	o          SupervisorOptions
 	clock      Clock
@@ -85,9 +89,16 @@ type Supervisor struct {
 	syncPoll   time.Duration
 	sweepFloor time.Duration
 
-	// mu guards states, the last status recorded per folder.
-	mu     sync.Mutex
-	states map[string]string
+	// writeStatus and publishEvents are State.SetStatus and Log.Publish.
+	// Tests replace them to fail a status write.
+	writeStatus   func(ctx context.Context, account, folder, mode, state, lastError string) error
+	publishEvents func(ctx context.Context, events ...Event) error
+
+	// mu guards statuses: the mode and state last recorded per folder,
+	// keyed by name, "" for the account-wide status. Its folders other than
+	// "" are the ones a parking records.
+	mu       sync.Mutex
+	statuses map[string]folderStatus
 }
 
 // NewSupervisor returns a supervisor for o.Account. A nil Clock, Jitter,
@@ -96,7 +107,7 @@ type Supervisor struct {
 func NewSupervisor(o SupervisorOptions) *Supervisor {
 	s := &Supervisor{
 		o: o, clock: o.Clock, jitter: o.Jitter, logger: o.Logger,
-		settings: o.Settings, syncPoll: o.Account.SyncPoll, states: map[string]string{},
+		settings: o.Settings, syncPoll: o.Account.SyncPoll, statuses: map[string]folderStatus{},
 	}
 	if s.clock == nil {
 		s.clock = RealClock
@@ -120,6 +131,15 @@ func NewSupervisor(o SupervisorOptions) *Supervisor {
 	if s.syncPoll <= 0 {
 		s.syncPoll = fallbackSyncPoll
 	}
+	s.writeStatus, s.publishEvents = o.State.SetStatus, o.Log.Publish
+	if !o.Account.Provider.Gmail {
+		for _, f := range o.Account.Watch {
+			s.know(f, passModeIdle)
+		}
+		for _, f := range polledFolders(o.Account) {
+			s.know(f, passModePoll)
+		}
+	}
 	s.sweepFloor = o.SweepFloor
 	if s.sweepFloor <= 0 {
 		s.sweepFloor = ExpungeSweepFloor
@@ -128,25 +148,144 @@ func NewSupervisor(o SupervisorOptions) *Supervisor {
 }
 
 // Run watches and syncs until ctx ends, then closes every connection. It
-// returns at once when the account has sync disabled.
+// returns at once when the account has sync disabled, and when the store
+// cannot watch. While the account needs a human every loop is stopped and
+// the account is parked; the loops start again once the auth state clears.
 func (s *Supervisor) Run(ctx context.Context) {
 	if !s.o.Account.SyncEnabled {
 		return
 	}
-	var wg sync.WaitGroup
+	for {
+		need, hint := s.o.AuthRequired(s.o.Account.Name)
+		if !need {
+			var park bool
+			if park, hint = s.active(ctx); !park || ctx.Err() != nil {
+				return
+			}
+		}
+		if !s.park(ctx, hint) {
+			return
+		}
+	}
+}
+
+// parker lets any loop of a running account ask Run to park it. The first
+// request's hint wins, and every request stops every loop.
+type parker struct {
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	asked  bool
+	hint   string
+}
+
+// park asks Run to park the account with hint and stops every loop.
+func (p *parker) park(hint string) {
+	p.mu.Lock()
+	if !p.asked {
+		p.asked, p.hint = true, hint
+	}
+	p.mu.Unlock()
+	p.cancel()
+}
+
+// requested reports whether a loop asked to park, and with which hint.
+func (p *parker) requested() (bool, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.asked, p.hint
+}
+
+// active runs the watcher loops and the poller until ctx ends, every loop
+// has returned, or the account needs a human, asking AuthRequired every
+// AuthRecheck meanwhile. It returns once every loop has returned and closed
+// its connection, so no pass is running, and reports whether to park.
+func (s *Supervisor) active(ctx context.Context) (park bool, hint string) {
+	actx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	p := &parker{cancel: cancel}
+	var loops sync.WaitGroup
 	if s.o.Account.Provider.Gmail {
 		// One watcher on the \All folder covers every Gmail label, so a
 		// Gmail account polls nothing.
-		wg.Go(func() { s.watchLoop(ctx, "") })
+		loops.Go(func() { s.watchLoop(actx, p, "") })
 	} else {
 		for _, folder := range s.o.Account.Watch {
-			wg.Go(func() { s.watchLoop(ctx, folder) })
+			loops.Go(func() { s.watchLoop(actx, p, folder) })
 		}
 		if polled := polledFolders(s.o.Account); len(polled) > 0 {
-			wg.Go(func() { s.pollLoop(ctx, polled) })
+			loops.Go(func() { s.pollLoop(actx, p, polled) })
 		}
 	}
-	wg.Wait()
+	done := make(chan struct{})
+	var join sync.WaitGroup
+	join.Go(func() {
+		loops.Wait()
+		close(done)
+	})
+	s.checkAuth(actx, done, p)
+	join.Wait()
+	return p.requested()
+}
+
+// checkAuth asks AuthRequired every AuthRecheck until done closes or ctx
+// ends, and parks the account the first time the answer is yes.
+func (s *Supervisor) checkAuth(ctx context.Context, done <-chan struct{}, p *parker) {
+	for {
+		select {
+		case <-done:
+			return
+		case <-ctx.Done():
+			return
+		case <-s.clock.After(AuthRecheck):
+		}
+		if need, hint := s.o.AuthRequired(s.o.Account.Name); need {
+			p.park(hint)
+			return
+		}
+	}
+}
+
+// park records the account as needing a human, then asks AuthRequired
+// every AuthRecheck until it clears. It waits at least one AuthRecheck, so
+// a refusal is never retried sooner, and reports false when ctx ends.
+func (s *Supervisor) park(ctx context.Context, hint string) bool {
+	s.logger.Warn("watching is parked until the account is authenticated")
+	recorded := false
+	for {
+		// Armed before the status is recorded, so whoever sees the status
+		// finds the recheck already waiting on the clock.
+		recheck := s.clock.After(AuthRecheck)
+		if !recorded {
+			if err := s.recordParked(ctx, hint); err != nil {
+				s.logger.Warn("recording that the account is parked", "reason", failureReason(err))
+			} else {
+				recorded = true
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-recheck:
+		}
+		if need, _ := s.o.AuthRequired(s.o.Account.Name); !need {
+			// The next account-wide status is a new one.
+			s.forget("")
+			return true
+		}
+	}
+}
+
+// recordParked writes auth_required to every known folder's row, then
+// publishes one account-wide status event with the hint. Every loop has
+// returned, so no pass can overwrite a row. A failure leaves the rest for
+// the next call.
+func (s *Supervisor) recordParked(ctx context.Context, hint string) error {
+	for _, f := range s.knownFolders() {
+		if err := s.setStatus(ctx, f.name, f.mode, StateAuthRequired, api.ReasonAuthRequired); err != nil {
+			return err
+		}
+	}
+	return s.transition(ctx, "", "", StateAuthRequired, hint, api.ReasonAuthRequired)
 }
 
 // watcher is one watched folder's loop state. Only its own goroutine uses it.
@@ -163,14 +302,16 @@ type watcher struct {
 }
 
 // watchLoop keeps one folder watched until ctx ends. folder is "" on Gmail,
-// which resolves its \All folder before each connection that lacks it.
-// Auth failures park the loop, a missing folder retries every sync.poll,
-// and anything else reconnects with backoff, reset by a successful pass.
-func (s *Supervisor) watchLoop(ctx context.Context, folder string) {
+// which resolves its \All folder before each connection that lacks it. An
+// auth failure parks the whole account through p, a missing folder retries
+// every sync.poll, and anything else reconnects with backoff, reset by a
+// successful pass.
+func (s *Supervisor) watchLoop(ctx context.Context, p *parker, folder string) {
 	w := &watcher{s: s, folder: folder, mode: passModeIdle}
 	failures := 0
 	for {
-		if !s.waitAuth(ctx, w.folder, w.mode) {
+		if need, hint := s.o.AuthRequired(s.o.Account.Name); need {
+			p.park(hint)
 			return
 		}
 		healthy, err := w.session(ctx)
@@ -187,39 +328,24 @@ func (s *Supervisor) watchLoop(ctx context.Context, folder string) {
 			s.logger.Error("the account's store cannot watch folders", "folder", w.folder)
 			return
 		case authFailure(err):
-			s.logger.Warn("watching is parked until the account is authenticated", "folder", w.folder, "reason", failureReason(err))
-			s.transition(ctx, w.folder, w.mode, StateAuthRequired, s.authHint(err), api.ReasonAuthRequired)
-			wait = AuthRecheck
+			s.logger.Warn("a watch connection needs the account authenticated", "folder", w.folder, "reason", failureReason(err))
+			p.park(s.authHint(err))
+			return
 		case errors.As(err, &notFound):
 			s.logger.Warn("a watched folder does not exist", "folder", w.folder)
-			s.transition(ctx, w.folder, w.mode, StateError, ReasonFolderNotFound, ReasonFolderNotFound)
+			s.note(ctx, w.folder, w.mode, StateError, ReasonFolderNotFound, ReasonFolderNotFound)
 			if s.o.Account.Provider.Gmail {
 				w.folder = "" // resolve the \All folder again
 			}
 			wait = s.syncPoll
 		default:
 			s.logger.Warn("watch connection failed", "folder", w.folder, "reason", failureReason(err))
-			s.transition(ctx, w.folder, w.mode, StateReconnecting, "", api.ReasonServerUnavailable)
+			s.note(ctx, w.folder, w.mode, StateReconnecting, "", api.ReasonServerUnavailable)
 			wait = Backoff(failures, s.jitter())
 			failures++
 		}
 		if !s.sleep(ctx, wait) {
 			return
-		}
-	}
-}
-
-// waitAuth parks while the account needs a human: it records auth_required
-// once, then asks again every AuthRecheck. It reports false when ctx ends.
-func (s *Supervisor) waitAuth(ctx context.Context, folder, mode string) bool {
-	for {
-		need, hint := s.o.AuthRequired(s.o.Account.Name)
-		if !need {
-			return true
-		}
-		s.transition(ctx, folder, mode, StateAuthRequired, hint, api.ReasonAuthRequired)
-		if !s.sleep(ctx, AuthRecheck) {
-			return false
 		}
 	}
 }
@@ -258,59 +384,77 @@ func polledFolders(a config.ResolvedAccount) []string {
 	return out
 }
 
-// pollLoop checks folders every sync.poll until ctx ends, starting at once
-// so they catch up from their checkpoints. A folder's failure stays its
-// own, except auth, which parks every folder.
-func (s *Supervisor) pollLoop(ctx context.Context, folders []string) {
-	lastSweep := make(map[string]time.Time, len(folders))
+// polled is one polled folder's schedule. Only the poller's goroutine uses it.
+type polled struct {
+	folder string
+	// next is when the folder is due, lastSweep when its last sweep ran.
+	next      time.Time
+	lastSweep time.Time
+	// failures counts failed polls since the last success.
+	failures int
+}
+
+// pollLoop polls folders until ctx ends, each every sync.poll, starting at
+// once so they catch up from their checkpoints. A folder's failure stays
+// its own: a missing folder retries every sync.poll and an outage with
+// backoff capped at sync.poll. An auth failure parks the account through p.
+func (s *Supervisor) pollLoop(ctx context.Context, p *parker, folders []string) {
+	sched := make([]*polled, 0, len(folders))
+	for _, f := range folders {
+		sched = append(sched, &polled{folder: f})
+	}
 	for {
-		wait := s.syncPoll
 		if need, hint := s.o.AuthRequired(s.o.Account.Name); need {
-			s.parkAll(ctx, folders, hint)
-			wait = AuthRecheck
-		} else {
-			for _, f := range folders {
-				err := s.pollFolder(ctx, f, lastSweep)
-				if ctx.Err() != nil {
-					return
-				}
-				if errors.Is(err, errNoWatcher) {
-					s.logger.Error("the account's store cannot sync folders")
-					return
-				}
-				if authFailure(err) {
-					s.logger.Warn("polling is parked until the account is authenticated", "reason", failureReason(err))
-					s.parkAll(ctx, folders, s.authHint(err))
-					wait = AuthRecheck
-					break
-				}
+			p.park(hint)
+			return
+		}
+		now := s.clock.Now()
+		for _, pf := range sched {
+			if pf.next.After(now) {
+				continue
+			}
+			err := s.pollFolder(ctx, pf, now)
+			if ctx.Err() != nil {
+				return
+			}
+			if errors.Is(err, errNoWatcher) {
+				s.logger.Error("the account's store cannot sync folders")
+				return
+			}
+			if authFailure(err) {
+				s.logger.Warn("a poll needs the account authenticated", "folder", pf.folder, "reason", failureReason(err))
+				p.park(s.authHint(err))
+				return
 			}
 		}
-		if !s.sleep(ctx, wait) {
+		next := sched[0].next
+		for _, pf := range sched[1:] {
+			if pf.next.Before(next) {
+				next = pf.next
+			}
+		}
+		if !s.sleep(ctx, next.Sub(s.clock.Now())) {
 			return
 		}
 	}
 }
 
-// parkAll records every polled folder as needing a human.
-func (s *Supervisor) parkAll(ctx context.Context, folders []string, hint string) {
-	for _, f := range folders {
-		s.transition(ctx, f, passModePoll, StateAuthRequired, hint, api.ReasonAuthRequired)
-	}
-}
-
-// pollFolder polls one folder and records its status. A missing folder and
-// other failures stay with the folder; the error is returned so pollLoop
-// can stop for auth or a store that cannot sync. The first poll of a folder
-// sweeps, then one every ExpungeSweep.
-func (s *Supervisor) pollFolder(ctx context.Context, folder string, lastSweep map[string]time.Time) error {
-	sweep := !s.clock.Now().Before(lastSweep[folder].Add(s.settings.ExpungeSweep))
-	res, err := s.pollPass(ctx, folder, sweep)
+// pollFolder polls one folder due at now, records its status and schedules
+// its next poll. The first poll of a folder sweeps, then one every
+// ExpungeSweep. A failed status write counts as a failed poll. The error is
+// returned so pollLoop can stop for auth or a store that cannot sync.
+func (s *Supervisor) pollFolder(ctx context.Context, pf *polled, now time.Time) error {
+	sweep := !now.Before(pf.lastSweep.Add(s.settings.ExpungeSweep))
+	res, err := s.pollPass(ctx, pf.folder, sweep)
 	if err == nil {
 		if sweep || res.Baselined {
-			lastSweep[folder] = s.clock.Now()
+			pf.lastSweep = now
 		}
-		s.settled(ctx, folder, passModePoll, res)
+		err = s.settled(ctx, pf.folder, passModePoll, res)
+	}
+	if err == nil {
+		pf.failures = 0
+		pf.next = now.Add(s.syncPoll)
 		return nil
 	}
 	if ctx.Err() != nil || errors.Is(err, errNoWatcher) || authFailure(err) {
@@ -318,10 +462,14 @@ func (s *Supervisor) pollFolder(ctx context.Context, folder string, lastSweep ma
 	}
 	var notFound *mailstore.FolderNotFoundError
 	if errors.As(err, &notFound) {
-		s.transition(ctx, folder, passModePoll, StateError, ReasonFolderNotFound, ReasonFolderNotFound)
-	} else {
-		s.logger.Warn("polling a folder failed", "folder", folder, "reason", failureReason(err))
+		s.note(ctx, pf.folder, passModePoll, StateError, ReasonFolderNotFound, ReasonFolderNotFound)
+		pf.next = now.Add(s.syncPoll)
+		return err
 	}
+	s.logger.Warn("polling a folder failed", "folder", pf.folder, "reason", failureReason(err))
+	s.note(ctx, pf.folder, passModePoll, StateReconnecting, "", api.ReasonServerUnavailable)
+	pf.next = now.Add(min(Backoff(pf.failures, s.jitter()), s.syncPoll))
+	pf.failures++
 	return err
 }
 
@@ -363,6 +511,7 @@ func (w *watcher) session(ctx context.Context) (healthy bool, err error) {
 		if w.folder, err = w.s.resolveAll(ctx); err != nil {
 			return false, err
 		}
+		w.s.know(w.folder, passModeIdle)
 	}
 	conn, err := w.s.openWatch(ctx, w.folder)
 	if err != nil {
@@ -386,7 +535,8 @@ func (w *watcher) session(ctx context.Context) (healthy bool, err error) {
 }
 
 // pass runs one engine pass on conn and records the folder as watching or
-// polling. A sweep, or a baseline, restarts the sweep schedule.
+// polling. A sweep, or a baseline, restarts the sweep schedule. A status
+// that cannot be recorded fails the pass like a database error.
 func (w *watcher) pass(ctx context.Context, conn mailstore.WatchConn, sweep bool) error {
 	res, err := w.s.o.Engine.Pass(ctx, w.s.o.Account.Name, w.folder, conn, PassOptions{Sweep: sweep, Mode: w.mode})
 	if err != nil {
@@ -396,8 +546,7 @@ func (w *watcher) pass(ctx context.Context, conn mailstore.WatchConn, sweep bool
 		w.lastSweep = w.s.clock.Now()
 		w.expungeAt = time.Time{}
 	}
-	w.s.settled(ctx, w.folder, w.mode, res)
-	return nil
+	return w.s.settled(ctx, w.folder, w.mode, res)
 }
 
 // wait blocks until the folder needs another pass and reports whether that
@@ -527,43 +676,114 @@ func (s *Supervisor) closeConn(conn mailstore.WatchConn, folder string) {
 
 // settled records a successful pass as watching or polling, by mode. A
 // baseline published its own status with the pass, so the steady state is
-// recorded after it.
-func (s *Supervisor) settled(ctx context.Context, folder, mode string, res PassResult) {
+// recorded after it. A failed write is returned, for the caller to back off
+// as from a database error and record it again after its next pass.
+func (s *Supervisor) settled(ctx context.Context, folder, mode string, res PassResult) error {
 	if res.Baselined {
-		s.mu.Lock()
-		s.states[folder] = StateBaselined
-		s.mu.Unlock()
+		s.record(folder, mode, StateBaselined)
 	}
 	state := StateWatching
 	if mode == passModePoll {
 		state = StatePolling
 	}
-	s.transition(ctx, folder, mode, state, "", "")
+	return s.transition(ctx, folder, mode, state, "", "")
 }
 
 // transition records a folder's status, only when state differs from the
 // last one recorded for the folder: the row through State.SetStatus first,
 // so a reader that sees the event also sees the row, then a status event.
-// A Gmail status from before the \All folder is resolved has an empty
-// folder and no row.
-func (s *Supervisor) transition(ctx context.Context, folder, mode, state, detail, lastError string) {
-	s.mu.Lock()
-	same := s.states[folder] == state
-	s.states[folder] = state
-	s.mu.Unlock()
-	if same {
-		return
+// The state is remembered only once both succeed, so a failed write is
+// retried by the next transition to the same state, and a row that cannot
+// be written is never announced. An empty folder is an account-wide status,
+// such as a Gmail one from before the \All folder is resolved, with no row.
+func (s *Supervisor) transition(ctx context.Context, folder, mode, state, detail, lastError string) error {
+	if s.recorded(folder) == state {
+		return nil
 	}
 	account := s.o.Account.Name
 	if folder != "" {
-		if err := s.o.State.SetStatus(ctx, account, folder, mode, state, lastError); err != nil {
-			s.logger.Warn("recording a folder's sync status", "folder", folder, "state", state, "reason", failureReason(err))
+		if err := s.writeStatus(ctx, account, folder, mode, state, lastError); err != nil {
+			return fmt.Errorf("recording sync status: %w", err)
 		}
 	}
 	ev := Event{At: s.clock.Now(), Kind: KindStatus, Account: account, Folder: folder, State: state, Detail: detail}
-	if err := s.o.Log.Publish(ctx, ev); err != nil {
-		s.logger.Warn("publishing a sync status", "folder", folder, "state", state, "reason", failureReason(err))
+	if err := s.publishEvents(ctx, ev); err != nil {
+		return fmt.Errorf("publishing sync status: %w", err)
 	}
+	s.record(folder, mode, state)
+	return nil
+}
+
+// note is transition for a failure path, which goes on to back off
+// whatever happens: a failed write is logged and retried by the next
+// transition to the same state.
+func (s *Supervisor) note(ctx context.Context, folder, mode, state, detail, lastError string) {
+	if err := s.transition(ctx, folder, mode, state, detail, lastError); err != nil {
+		s.logger.Warn("recording a folder's sync status", "folder", folder, "reason", failureReason(err))
+	}
+}
+
+// setStatus writes a folder's row without an event, when state differs
+// from the last one recorded, and remembers it once written.
+func (s *Supervisor) setStatus(ctx context.Context, folder, mode, state, lastError string) error {
+	if s.recorded(folder) == state {
+		return nil
+	}
+	if err := s.writeStatus(ctx, s.o.Account.Name, folder, mode, state, lastError); err != nil {
+		return fmt.Errorf("recording sync status: %w", err)
+	}
+	s.record(folder, mode, state)
+	return nil
+}
+
+// folderStatus is the mode and state last recorded for a folder.
+type folderStatus struct {
+	name, mode, state string
+}
+
+// recorded is the state last recorded for folder, "" when none.
+func (s *Supervisor) recorded(folder string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.statuses[folder].state
+}
+
+// record remembers folder's mode and state.
+func (s *Supervisor) record(folder, mode, state string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statuses[folder] = folderStatus{name: folder, mode: mode, state: state}
+}
+
+// know adds folder, in mode, to the folders a parking records, unless it is
+// already known.
+func (s *Supervisor) know(folder, mode string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.statuses[folder]; !ok {
+		s.statuses[folder] = folderStatus{name: folder, mode: mode}
+	}
+}
+
+// forget drops what was recorded for folder.
+func (s *Supervisor) forget(folder string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.statuses, folder)
+}
+
+// knownFolders are the folders with a row to keep, sorted by name.
+func (s *Supervisor) knownFolders() []folderStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []folderStatus
+	for name, st := range s.statuses {
+		if name != "" {
+			out = append(out, st)
+		}
+	}
+	slices.SortFunc(out, func(a, b folderStatus) int { return cmp.Compare(a.name, b.name) })
+	return out
 }
 
 // sleep waits d on the supervisor's clock. It reports false when ctx ended first.
