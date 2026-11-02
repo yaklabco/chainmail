@@ -514,7 +514,7 @@ func newWatchStatusCmd(ctx context.Context, env Env, g *globals) *cobra.Command 
 				return err
 			}
 			if g.table() {
-				return watchStatusTable(env.Stdout, env.location(), resp.Msg)
+				return syncTable(env.Stdout, env.location(), resp.Msg.GetFolders())
 			}
 			return writeProto(env.Stdout, resp.Msg)
 		},
@@ -560,28 +560,6 @@ func newWatchGroupsCmd(ctx context.Context, env Env, g *globals) *cobra.Command 
 		},
 	})
 	return cmd
-}
-
-// orDash shows an empty cell as "-", so a table never ends a line with padding.
-func orDash(s string) string {
-	if s == "" {
-		return "-"
-	}
-	return s
-}
-
-// watchStatusTable prints one line per synced folder. Folder names come
-// from mail servers, so every value is cleaned for the terminal.
-func watchStatusTable(w io.Writer, loc *time.Location, r *chainmailv1.GetWatchStatusResponse) error {
-	tw := newTable(w)
-	_, _ = fmt.Fprintln(tw, "ACCOUNT\tFOLDER\tMODE\tSTATE\tCONDSTORE\tLAST SYNC\tLAST SWEEP\tERROR")
-	for _, f := range r.GetFolders() {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\t%s\t%s\t%s\n",
-			termText(f.GetAccount()), termText(f.GetFolder()), orDash(termText(f.GetMode())), orDash(termText(f.GetState())),
-			f.GetCondstore(), orDash(shortDate(f.GetLastSyncAt(), loc)), orDash(shortDate(f.GetLastSweepAt(), loc)),
-			orDash(termText(f.GetLastError())))
-	}
-	return tw.Flush()
 }
 
 // watchGroupsTable prints one line per group.

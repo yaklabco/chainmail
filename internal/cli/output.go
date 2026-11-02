@@ -113,22 +113,34 @@ func statusTable(w io.Writer, loc *time.Location, r *chainmailv1.GetStatusRespon
 	if err := writeString(w, "\n"); err != nil {
 		return err
 	}
-	return statusSyncTable(w, loc, r.GetSync())
+	// The sync table has its own columns, so it is a table of its own below
+	// the daemon's details.
+	return syncTable(w, loc, r.GetSync())
 }
 
-// statusSyncTable lists each synced folder's mode, state, last sync and
-// last error. It has its own columns, so it is a table of its own below the
-// daemon's details. Folder names can come from the server, so they are
-// cleaned like other server text.
-func statusSyncTable(w io.Writer, loc *time.Location, folders []*chainmailv1.FolderSyncStatus) error {
+// syncTable prints one line per synced folder, for admin status and watch
+// status alike: its mode, state, CONDSTORE, last sync, last sweep and last
+// error, with "-" for an empty cell, so a line never ends in padding.
+// Folder names come from mail servers, so every value is cleaned for the
+// terminal.
+func syncTable(w io.Writer, loc *time.Location, folders []*chainmailv1.FolderSyncStatus) error {
 	tw := newTable(w)
-	_, _ = fmt.Fprintln(tw, "ACCOUNT\tFOLDER\tMODE\tSTATE\tLAST SYNC\tERROR")
+	_, _ = fmt.Fprintln(tw, "ACCOUNT\tFOLDER\tMODE\tSTATE\tCONDSTORE\tLAST SYNC\tLAST SWEEP\tERROR")
 	for _, f := range folders {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			termText(f.GetAccount()), termText(f.GetFolder()), f.GetMode(), f.GetState(),
-			shortDate(f.GetLastSyncAt(), loc), termText(f.GetLastError()))
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\t%s\t%s\t%s\n",
+			termText(f.GetAccount()), termText(f.GetFolder()), orDash(termText(f.GetMode())), orDash(termText(f.GetState())),
+			f.GetCondstore(), orDash(shortDate(f.GetLastSyncAt(), loc)), orDash(shortDate(f.GetLastSweepAt(), loc)),
+			orDash(termText(f.GetLastError())))
 	}
 	return tw.Flush()
+}
+
+// orDash shows an empty cell as "-", so a table never ends a line with padding.
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func foldersTable(w io.Writer, r *chainmailv1.ListFoldersResponse) error {

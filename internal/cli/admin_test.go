@@ -56,15 +56,15 @@ func TestStatusTableWithoutSync(t *testing.T) {
 func TestStatusSyncTableCleansText(t *testing.T) {
 	t.Parallel()
 	var b strings.Builder
-	err := statusSyncTable(&b, time.UTC, []*chainmailv1.FolderSyncStatus{
+	err := syncTable(&b, time.UTC, []*chainmailv1.FolderSyncStatus{
 		{Account: "host", Folder: "a\tb\x1b[2J", Mode: "poll", State: "error", LastError: "FOLDER_NOT_FOUND\x07"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "ACCOUNT  FOLDER  MODE  STATE  LAST SYNC  ERROR\n" +
-		"host     a b[2J  poll  error             FOLDER_NOT_FOUND\n"
+	want := "ACCOUNT  FOLDER  MODE  STATE  CONDSTORE  LAST SYNC  LAST SWEEP  ERROR\n" +
+		"host     a b[2J  poll  error  false      -          -           FOLDER_NOT_FOUND\n"
 	if b.String() != want {
-		t.Errorf("statusSyncTable =\n%q\nwant\n%q", b.String(), want)
+		t.Errorf("syncTable =\n%q\nwant\n%q", b.String(), want)
 	}
 }

@@ -978,7 +978,7 @@ A client that cancels the request ends the wait. A `status` event with state `au
 
 ### Sync status
 
-`chainmail watch status`, and the `sync` section of `chainmail admin status`, show each synced folder's mode, state and last error. `watch status` adds whether the folder has CONDSTORE and when it was last swept. Neither is audited.
+`chainmail watch status`, and the `sync` section of `chainmail admin status`, show each synced folder's mode, state, whether it has CONDSTORE, its last sync and sweep, and its last error. Both print the same table. Neither is audited.
 
 ```fish
 chainmail watch status --output table
