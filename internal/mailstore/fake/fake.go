@@ -69,6 +69,9 @@ type Message struct {
 	// raw is the message as Append received it. When set, it is what the
 	// store streams, instead of a message built from the fields.
 	raw []byte
+	// modseq is the MODSEQ of the message's last change in its folder:
+	// arriving there, or a flag or label edit.
+	modseq uint64
 }
 
 // Store is an in-memory account.
@@ -102,6 +105,12 @@ type Store struct {
 	archiveFolder string
 	// nsPrefix and nsDelim are the namespace SetNamespace gives.
 	nsPrefix, nsDelim string
+	// Watch state and test hooks, in watch.go. modseq is each folder's
+	// HIGHESTMODSEQ, condstore whether the server advertises CONDSTORE,
+	// and watchFail the error FailWatch set for the next pass.
+	modseq    map[string]uint64
+	condstore bool
+	watchFail error
 }
 
 var _ mailstore.Store = (*Store)(nil)
@@ -117,6 +126,7 @@ func New(account string, gmail bool) *Store {
 		msgIDs: map[uint64]bool{}, threadIDs: map[uint64]bool{}, nextMsgID: 1000,
 		fail: map[string]error{}, folderFail: map[string]error{}, calls: map[string]int{},
 		everValidity: map[string]uint32{}, writeFail: map[string]error{},
+		modseq: map[string]uint64{}, condstore: true,
 	}
 	if gmail {
 		s.AddFolder("INBOX", mailstore.RoleInbox)
@@ -167,6 +177,8 @@ func (s *Store) addFolderLocked(name string, role mailstore.Role, v, next uint32
 	s.uidValidity[name] = v
 	s.everValidity[name] = v
 	s.nextUID[name] = next
+	// A new folder starts at HIGHESTMODSEQ 1.
+	s.modseq[name] = 1
 }
 
 // removeFolderLocked forgets a folder. Its messages must already be gone.
@@ -174,6 +186,7 @@ func (s *Store) removeFolderLocked(name string) {
 	s.folders = slices.DeleteFunc(s.folders, func(f mailstore.Folder) bool { return f.Name == name })
 	delete(s.uidValidity, name)
 	delete(s.nextUID, name)
+	delete(s.modseq, name)
 	delete(s.folderFail, name)
 }
 
@@ -215,6 +228,7 @@ func (s *Store) Add(m Message) ref.Ref {
 	m.uid = s.nextUID[m.Folder]
 	s.nextUID[m.Folder]++
 	s.msgs = append(s.msgs, &m)
+	s.touchLocked(&m)
 	return s.refLocked(&m)
 }
 
