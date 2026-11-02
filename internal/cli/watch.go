@@ -144,6 +144,12 @@ type watcher struct {
 	// before any. hasPos says there is one.
 	pos    int64
 	hasPos bool
+	// acked is the highest position the group has acknowledged in this
+	// run, and unacked counts the lines printed since. ackDue fires when
+	// the current batch is due, and is nil when no batch is waiting.
+	acked   int64
+	unacked int
+	ackDue  <-chan time.Time
 }
 
 func newWatcher(env Env, svc chainmailv1connect.WatchServiceClient, opts watchOptions) *watcher {
@@ -174,8 +180,10 @@ func (e stopError) Unwrap() error { return e.err }
 // A stream that fails, ends, or stays silent for watchHeartbeatTimeout is
 // reopened after a backoff, from the group or the last position seen.
 // Only a refusal the daemon would repeat, or a failure to write output,
-// ends the watch with an error.
+// ends the watch with an error. A group's pending acknowledgement goes out
+// before each reconnect and on exit.
 func (w *watcher) run(ctx context.Context) error {
+	defer w.finalAck(ctx)
 	attempt := 0
 	for {
 		got, err := w.session(ctx)
@@ -194,6 +202,7 @@ func (w *watcher) run(ctx context.Context) error {
 		if got {
 			attempt = 0
 		}
+		w.flushAck(ctx)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -294,9 +303,11 @@ func (w *watcher) session(ctx context.Context) (bool, error) {
 			return got, err
 		case <-quiet:
 			return got, errHeartbeatTimeout
+		case <-w.ackDue:
+			w.flushAck(ctx)
 		case m := <-msgs:
 			got = true
-			if err := w.handle(m); err != nil {
+			if err := w.handle(ctx, m); err != nil {
 				return got, err
 			}
 			quiet = w.env.after(watchHeartbeatTimeout)
@@ -304,8 +315,9 @@ func (w *watcher) session(ctx context.Context) (bool, error) {
 	}
 }
 
-// handle prints one stream message and moves the watch's position.
-func (w *watcher) handle(m *chainmailv1.SubscribeResponse) error {
+// handle prints one stream message, moves the watch's position, and
+// queues a group acknowledgement for it.
+func (w *watcher) handle(ctx context.Context, m *chainmailv1.SubscribeResponse) error {
 	if e := m.GetEvent(); e != nil {
 		if err := w.printEvent(e); err != nil {
 			return stopError{err}
@@ -313,6 +325,7 @@ func (w *watcher) handle(m *chainmailv1.SubscribeResponse) error {
 		if id := e.GetId(); id > 0 { // a trimmed gap has no ID
 			w.seen(id)
 		}
+		w.queueAck(ctx, true)
 		return nil
 	}
 	hb := m.GetHeartbeat()
@@ -325,6 +338,7 @@ func (w *watcher) handle(m *chainmailv1.SubscribeResponse) error {
 		}
 	}
 	w.seen(hb.GetPosition())
+	w.queueAck(ctx, false)
 	if w.opts.once {
 		return errWatchOnce
 	}
@@ -337,6 +351,51 @@ func (w *watcher) seen(pos int64) {
 		return
 	}
 	w.pos, w.hasPos = pos, true
+}
+
+// queueAck notes that a group may acknowledge the current position. line
+// says a line was printed for it: 100 lines flush at once, and otherwise
+// the first waiting line or heartbeat starts the batch's one-second timer.
+func (w *watcher) queueAck(ctx context.Context, line bool) {
+	if w.opts.group == "" || !w.hasPos || w.pos <= w.acked {
+		return
+	}
+	if line {
+		w.unacked++
+	}
+	if w.unacked >= watchAckBatch {
+		w.flushAck(ctx)
+		return
+	}
+	if w.ackDue == nil {
+		w.ackDue = w.env.after(watchAckInterval)
+	}
+}
+
+// flushAck acknowledges the current position for the group, if it is
+// higher than the last acknowledgement. A failed Ack is dropped: the next
+// batch covers it, and a reconnect resumes the group from what the daemon
+// has, so delivery stays at least once.
+func (w *watcher) flushAck(ctx context.Context) {
+	w.ackDue = nil
+	if w.opts.group == "" || !w.hasPos || w.pos <= w.acked {
+		return
+	}
+	w.unacked = 0
+	id := w.pos
+	if _, err := w.watch.Ack(ctx, connect.NewRequest(&chainmailv1.AckRequest{Group: w.opts.group, Id: id})); err != nil {
+		return
+	}
+	w.acked = id
+}
+
+// finalAck acknowledges what the watch printed since its last batch. It
+// runs as the watch exits, after a signal too, so it gets a context of its
+// own with a short deadline.
+func (w *watcher) finalAck(ctx context.Context) {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), watchFinalAckTimeout)
+	defer cancel()
+	w.flushAck(actx)
 }
 
 // printEvent writes one event: a JSON line, or one human line in a table.

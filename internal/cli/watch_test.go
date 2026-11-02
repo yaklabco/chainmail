@@ -758,3 +758,126 @@ func TestWatchReconnectsAfterHeartbeatTimeout(t *testing.T) {
 		t.Errorf("requests = %v, want a reconnect since=1", reqs)
 	}
 }
+
+// A group acknowledges every 100 lines, then a heartbeat's higher
+// position, which --once acknowledges on exit.
+func TestWatchGroupAcksInBatches(t *testing.T) {
+	t.Parallel()
+	items := make([]*chainmailv1.SubscribeResponse, 0, 251)
+	for id := int64(1); id <= 250; id++ {
+		items = append(items, eventItem(newEvent(id, "Hello")))
+	}
+	items = append(items, heartbeatItem(260))
+	f := newFakeWatch(playThen(nil, items...))
+	socket := startFakeWatch(t, f)
+	got := runCLI(t, Env{After: newFakeClock(nil).After}, "--socket", socket, "watch", "--group", "bot", "--once")
+	if got.code != 0 {
+		t.Fatalf("watch: %+v", got)
+	}
+	if n := strings.Count(got.stdout, "\n"); n != 250 {
+		t.Errorf("%d lines, want 250", n)
+	}
+	if acks := f.ackIDs(t, "bot"); !slices.Equal(acks, []int64{100, 200, 260}) {
+		t.Errorf("acks = %v, want [100 200 260]", acks)
+	}
+}
+
+// Fewer than 100 lines are acknowledged once the batch's second is up.
+func TestWatchGroupAcksEverySecond(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	f := newFakeWatch(func(ctx context.Context, send func(*chainmailv1.SubscribeResponse) error) error {
+		for id := int64(1); id <= 3; id++ {
+			if err := send(eventItem(newEvent(id, "Hello"))); err != nil {
+				return err
+			}
+		}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil
+		}
+		if err := send(heartbeatItem(3)); err != nil {
+			return err
+		}
+		<-ctx.Done()
+		return nil
+	})
+	socket := startFakeWatch(t, f)
+	clock := newFakeClock(nil)
+	res := runCLIAsync(t.Context(), Env{After: clock.After}, "--socket", socket, "watch", "--group", "bot", "--once")
+	clock.waitCount(t, watchHeartbeatTimeout, 4) // the stream's start and each of its 3 events
+	if acks := f.ackIDs(t, "bot"); len(acks) != 0 {
+		t.Fatalf("acks = %v before the second was up, want none", acks)
+	}
+	if n := clock.count(watchAckInterval); n != 1 {
+		t.Fatalf("%d acknowledgement timers, want 1 for the batch", n)
+	}
+	clock.fire(watchAckInterval)
+	f.waitAcks(t, 1)
+	close(release)
+	got := waitResult(t, res)
+	if got.code != 0 {
+		t.Fatalf("watch: %+v", got)
+	}
+	if acks := f.ackIDs(t, "bot"); !slices.Equal(acks, []int64{3}) {
+		t.Errorf("acks = %v, want [3]: the heartbeat adds nothing new", acks)
+	}
+}
+
+// A signal ends the watch with exit 0, after acknowledging what it printed.
+func TestWatchGroupFinalAckOnSignal(t *testing.T) {
+	t.Parallel()
+	f := newFakeWatch(playThen(nil, eventItem(newEvent(1, "a")), eventItem(newEvent(2, "b"))))
+	socket := startFakeWatch(t, f)
+	clock := newFakeClock(nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	res := runCLIAsync(ctx, Env{After: clock.After}, "--socket", socket, "watch", "--group", "bot")
+	clock.waitCount(t, watchHeartbeatTimeout, 3) // the stream's start and its 2 events
+	cancel()
+	got := waitResult(t, res)
+	if got.code != 0 {
+		t.Fatalf("watch: %+v, want exit 0 on a signal", got)
+	}
+	if strings.Count(got.stdout, "\n") != 2 {
+		t.Errorf("stdout = %q, want 2 lines", got.stdout)
+	}
+	if acks := f.ackIDs(t, "bot"); !slices.Equal(acks, []int64{2}) {
+		t.Errorf("acks = %v, want [2]", acks)
+	}
+}
+
+// Pending acknowledgements go out before a reconnect, so the group resumes
+// after what was printed.
+func TestWatchGroupAcksBeforeReconnect(t *testing.T) {
+	t.Parallel()
+	f := newFakeWatch(
+		playThen(unavailable(), eventItem(newEvent(1, "a")), eventItem(newEvent(2, "b"))),
+		playThen(authRequired()),
+	)
+	socket := startFakeWatch(t, f)
+	clock := newFakeClock(nil)
+	res := runCLIAsync(t.Context(), Env{After: clock.After}, "--socket", socket, "watch", "--group", "bot")
+	f.waitAcks(t, 1)
+	if acks := f.ackIDs(t, "bot"); !slices.Equal(acks, []int64{2}) {
+		t.Errorf("acks before the reconnect = %v, want [2]", acks)
+	}
+	if n := len(f.requests()); n != 1 {
+		t.Errorf("%d Subscribe calls before the backoff, want 1", n)
+	}
+	// One wait of a second is the batch timer from event 1, the other the backoff.
+	clock.waitCount(t, time.Second, 2)
+	clock.fire(time.Second)
+	got := waitResult(t, res)
+	if got.code != api.ExitAuth {
+		t.Fatalf("watch: %+v, want exit 5 from the second stream", got)
+	}
+	reqs := f.requests()
+	if len(reqs) != 2 || position(reqs[1]) != "group=bot" {
+		t.Errorf("requests = %v, want a reconnect with the group", reqs)
+	}
+	if acks := f.ackIDs(t, "bot"); !slices.Equal(acks, []int64{2}) {
+		t.Errorf("acks = %v, want [2]", acks)
+	}
+}
