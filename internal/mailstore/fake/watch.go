@@ -447,7 +447,7 @@ type watchConn struct {
 	// to the folder, a drop or Close.
 	wake chan struct{}
 	// Guarded by s.mu. pending is the wake the changes since Idle last took
-	// it add up to, less what a Sync since then settled.
+	// it add up to. Only Idle clears it.
 	pending mailstore.Wake
 	dropped bool
 	closed  bool
@@ -479,22 +479,10 @@ func (c *watchConn) takeLocked() mailstore.Wake {
 	return w
 }
 
-// settleLocked updates the pending wake after a pass that returned d for
-// req. The pass reports every arrival and flag change made before it, so a
-// pending Changed alone clears. A pending Expunged clears only when the
-// pass returned the full UID set (a rebase, a sweep, or the full-flags
-// path), from which deletions show. Otherwise the whole wake stays for the
-// next Idle, as imapstore keeps an EXPUNGE report until Idle takes it, so
-// the watcher still learns that it should sweep.
-func (c *watchConn) settleLocked(req mailstore.SyncRequest, d mailstore.Delta) {
-	if c.pending.Expunged && !d.Rebased && !d.FullFlags && !req.Sweep {
-		return
-	}
-	c.takeLocked()
-}
-
-// Sync implements mailstore.WatchConn. It settles the pending wake as
-// settleLocked says.
+// Sync implements mailstore.WatchConn. It leaves the pending wake alone, as
+// imapstore's Sync leaves what the server reported for Idle to take: a
+// change made before a pass still wakes the next Idle at once, even when the
+// pass reported it, and only that Idle consumes it.
 func (c *watchConn) Sync(ctx context.Context, req mailstore.SyncRequest) (mailstore.Delta, error) {
 	s := c.s
 	s.mu.Lock()
@@ -506,22 +494,17 @@ func (c *watchConn) Sync(ctx context.Context, req mailstore.SyncRequest) (mailst
 	if err := s.watchErrLocked(ctx, opSync); err != nil {
 		return mailstore.Delta{}, err
 	}
-	d, err := s.syncLocked(c.folder, req, c.condstore)
-	if err != nil {
-		return mailstore.Delta{}, err
-	}
-	c.settleLocked(req, d)
-	return d, nil
+	return s.syncLocked(c.folder, req, c.condstore)
 }
 
 // IdleSupported implements mailstore.WatchConn.
 func (c *watchConn) IdleSupported() bool { return c.idle }
 
-// Idle implements mailstore.WatchConn. A pending wake (see settleLocked)
-// returns at once. Otherwise Idle starts the store's After timer for
-// limit, tells IdleStarted, and waits for a change, the timer, a drop,
-// Close or ctx. An ended ctx wins over a ready wake or timer and leaves
-// the wake pending.
+// Idle implements mailstore.WatchConn. A pending wake, from any change
+// since an Idle last returned one, returns at once and is consumed.
+// Otherwise Idle starts the store's After timer for limit, tells
+// IdleStarted, and waits for a change, the timer, a drop, Close or ctx. An
+// ended ctx wins over a ready wake or timer and leaves the wake pending.
 func (c *watchConn) Idle(ctx context.Context, limit time.Duration) (mailstore.Wake, error) {
 	s := c.s
 	s.mu.Lock()

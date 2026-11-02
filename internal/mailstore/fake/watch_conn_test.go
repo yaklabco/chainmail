@@ -288,22 +288,52 @@ func TestCloseClosesWatches(t *testing.T) {
 	}
 }
 
-// TestSyncKeepsPendingExpunge checks that a pass which cannot see
-// deletions leaves a pending expunge for the next Idle, so the watcher
-// still learns it should sweep, and that a pass which returns the full
-// UID set (a sweep, a rebase, or the full-flags path) accounts for it.
-func TestSyncKeepsPendingExpunge(t *testing.T) {
+// TestSyncKeepsPendingWake checks that a pass never clears a pending wake,
+// as imapstore's Sync leaves what the server reported for Idle to take:
+// whatever the pass, the next Idle returns the wake at once, and only that
+// Idle consumes it. A pass that cannot see deletions (CONDSTORE without a
+// sweep) thus still lets the watcher learn it should sweep.
+func TestSyncKeepsPendingWake(t *testing.T) {
 	t.Parallel()
+	changed := mailstore.Wake{Changed: true}
+	expunged := mailstore.Wake{Changed: true, Expunged: true}
 	tests := []struct {
 		name  string
 		plain bool // the server has no CONDSTORE
+		act   func(s *Store, refs []ref.Ref)
 		req   mailstore.SyncRequest
-		keep  bool // the next Idle returns the expunge at once
+		want  mailstore.Wake
 	}{
-		{name: "condstore pass without a sweep", req: mailstore.SyncRequest{From: cp(1, 4, 4)}, keep: true},
-		{name: "condstore sweep", req: mailstore.SyncRequest{From: cp(1, 4, 4), Sweep: true}},
-		{name: "rebase", req: mailstore.SyncRequest{}},
-		{name: "full flags without condstore", plain: true, req: mailstore.SyncRequest{From: cp(1, 4, 0)}},
+		{
+			name: "expunge, condstore pass without a sweep",
+			act:  func(s *Store, refs []ref.Ref) { s.ExternalExpunge("INBOX", refs[1].UID) },
+			req:  mailstore.SyncRequest{From: cp(1, 4, 4)}, want: expunged,
+		},
+		{
+			name: "expunge, condstore sweep",
+			act:  func(s *Store, refs []ref.Ref) { s.ExternalExpunge("INBOX", refs[1].UID) },
+			req:  mailstore.SyncRequest{From: cp(1, 4, 4), Sweep: true}, want: expunged,
+		},
+		{
+			name: "expunge, rebase",
+			act:  func(s *Store, refs []ref.Ref) { s.ExternalExpunge("INBOX", refs[1].UID) },
+			want: expunged,
+		},
+		{
+			name: "expunge, full flags without condstore", plain: true,
+			act: func(s *Store, refs []ref.Ref) { s.ExternalExpunge("INBOX", refs[1].UID) },
+			req: mailstore.SyncRequest{From: cp(1, 4, 0)}, want: expunged,
+		},
+		{
+			name: "arrival, the pass reports it",
+			act:  func(s *Store, _ []ref.Ref) { s.Add(Message{Folder: "INBOX", Subject: "d"}) },
+			req:  mailstore.SyncRequest{From: cp(1, 4, 4)}, want: changed,
+		},
+		{
+			name: "flags, the pass reports them",
+			act:  func(s *Store, refs []ref.Ref) { s.ExternalFlags("INBOX", refs[0].UID, []string{`\Seen`}, nil) },
+			req:  mailstore.SyncRequest{From: cp(1, 4, 4)}, want: changed,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -314,24 +344,23 @@ func TestSyncKeepsPendingExpunge(t *testing.T) {
 			s.SetAfter(timers.After)
 			c := openWatch(t, s, "INBOX")
 			syncConn(t, c, mailstore.SyncRequest{})
-			s.ExternalExpunge("INBOX", refs[1].UID)
+			tt.act(s, refs)
 			syncConn(t, c, tt.req)
 			done := idleAsync(t, c, time.Minute)
-			if tt.keep {
-				if r := result(t, done); r.err != nil || r.wake != (mailstore.Wake{Changed: true, Expunged: true}) {
-					t.Errorf("Idle = %+v, %v, want the pending expunge", r.wake, r.err)
-				}
-				select {
-				case f := <-s.IdleStarted():
-					t.Errorf("Idle with a pending expunge started to wait on %s", f)
-				default:
-				}
-				return
+			if r := result(t, done); r.err != nil || r.wake != tt.want {
+				t.Errorf("Idle after the pass = %+v, %v, want the pending %+v", r.wake, r.err, tt.want)
 			}
+			select {
+			case f := <-s.IdleStarted():
+				t.Errorf("Idle with a pending wake started to wait on %s", f)
+			default:
+			}
+			// That Idle consumed the wake: the next one waits for its max.
+			done = idleAsync(t, c, time.Minute)
 			waitIdle(t, s, "INBOX")
 			timers.fire()
 			if r := result(t, done); r.err != nil || r.wake != (mailstore.Wake{}) {
-				t.Errorf("Idle = %+v, %v, want the max to pass: the pass accounted for the expunge", r.wake, r.err)
+				t.Errorf("second Idle = %+v, %v, want the max to pass", r.wake, r.err)
 			}
 		})
 	}
@@ -506,20 +535,25 @@ func TestIdle(t *testing.T) {
 		default:
 		}
 	})
-	t.Run("sync clears a pending change", func(t *testing.T) {
+	t.Run("a change pending before a sync survives it", func(t *testing.T) {
 		t.Parallel()
 		s := newHost()
-		timers := &manualAfter{}
-		s.SetAfter(timers.After)
+		s.SetAfter((&manualAfter{}).After)
 		c := openWatch(t, s, "INBOX")
 		syncConn(t, c, mailstore.SyncRequest{})
 		s.Add(Message{Folder: "INBOX", Subject: "a"})
-		syncConn(t, c, mailstore.SyncRequest{From: cp(1, 1, 1)})
-		done := idleAsync(t, c, time.Second)
-		waitIdle(t, s, "INBOX")
-		timers.fire()
-		if r := result(t, done); r.err != nil || r.wake != (mailstore.Wake{}) {
-			t.Errorf("Idle = %+v, %v, want the max to pass", r.wake, r.err)
+		if d := syncConn(t, c, mailstore.SyncRequest{From: cp(1, 1, 1)}); len(d.New) != 1 {
+			t.Fatalf("pass found %d new, want 1", len(d.New))
+		}
+		// As against imapstore, the change the pass already reported still
+		// wakes the next Idle at once, which then consumes it.
+		if r := result(t, idleAsync(t, c, time.Minute)); r.err != nil || r.wake != (mailstore.Wake{Changed: true}) {
+			t.Errorf("Idle = %+v, %v, want the pending change at once", r.wake, r.err)
+		}
+		select {
+		case f := <-s.IdleStarted():
+			t.Errorf("Idle with a pending change started to wait on %s", f)
+		default:
 		}
 	})
 	t.Run("max on the real clock", func(t *testing.T) {
