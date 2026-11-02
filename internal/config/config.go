@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 
@@ -37,6 +38,7 @@ type Config struct {
 	OAuthClients map[string]OAuthClient `toml:"oauth_clients"`
 	Accounts     map[string]Account     `toml:"accounts"`
 	Policy       Policy                 `toml:"policy"`
+	Watch        WatchConfig            `toml:"watch"`
 }
 
 // DefaultMaxRecipients is the most recipients a send may have unless
@@ -155,6 +157,12 @@ type Account struct {
 	MaxMessageSize string `toml:"max_message_size"`
 	// Policy holds the account's own send allowlist.
 	Policy AccountPolicy `toml:"policy"`
+	// Watch lists the folders watched with IDLE. Nil means the default,
+	// ["INBOX"]; an empty list watches nothing. Gmail presets must leave it
+	// unset.
+	Watch *[]string `toml:"watch"`
+	// Sync is the account's sync table.
+	Sync AccountSync `toml:"sync"`
 }
 
 // EndpointOverride replaces a preset's server address.
@@ -187,6 +195,16 @@ type ResolvedAccount struct {
 	// MaxMessageSize is the largest message to send, in bytes: max_message_size
 	// when set, else the preset's.
 	MaxMessageSize int64
+	// Watch lists the folders watched with IDLE. Nil on Gmail presets,
+	// which watch their \All folder instead.
+	Watch []string
+	// SyncFolders lists every synced folder, Watch first, then the rest of
+	// sync.folders in config order, without duplicates. Nil on Gmail presets.
+	SyncFolders []string
+	// SyncPoll is how often synced folders that are not watched are checked.
+	SyncPoll time.Duration
+	// SyncEnabled is false when sync.enabled is false.
+	SyncEnabled bool
 }
 
 // ValidationError lists every problem found in a config.
@@ -259,6 +277,8 @@ func (c *Config) Account(name string) (ResolvedAccount, error) {
 		ArchiveFolder:  a.ArchiveFolder,
 		Pool:           a.Pool,
 		MaxMessageSize: p.MaxMessageSize,
+		SyncPoll:       durationOr(a.Sync.Poll, defaultSyncPoll),
+		SyncEnabled:    a.Sync.Enabled == nil || *a.Sync.Enabled,
 	}
 	// Parse validated max_message_size. A Config that never went through
 	// Parse keeps the preset's limit.
@@ -267,6 +287,10 @@ func (c *Config) Account(name string) (ResolvedAccount, error) {
 	}
 	if a.OAuthClient != "" {
 		r.ClientID = c.OAuthClients[a.OAuthClient].ClientID
+	}
+	if !p.Gmail {
+		r.Watch = watchList(a.Watch)
+		r.SyncFolders = syncFolders(r.Watch, a.Sync.Folders)
 	}
 	return r, nil
 }
@@ -290,11 +314,13 @@ func (c *Config) applyDefaults() {
 		c.Daemon.BodyLimit = DefaultBodyLimit
 	}
 	c.Policy = c.Policy.WithDefaults()
+	c.Watch.applyDefaults()
 	for name, a := range c.Accounts {
 		if a.Username == "" {
 			a.Username = a.Address
 		}
-		if p, ok := provider.Lookup(a.Provider); ok && a.Auth == "" && len(p.AuthMethods) == 1 {
+		p, known := provider.Lookup(a.Provider)
+		if known && a.Auth == "" && len(p.AuthMethods) == 1 {
 			a.Auth = string(p.AuthMethods[0])
 		}
 		for _, o := range []*EndpointOverride{a.IMAP, a.SMTP} {
@@ -302,6 +328,7 @@ func (c *Config) applyDefaults() {
 				o.Security = provider.SecurityTLS.String()
 			}
 		}
+		a.applyWatchDefaults(p, known)
 		c.Accounts[name] = a
 	}
 }
@@ -329,6 +356,7 @@ func (c *Config) validate() error {
 		add("policy.max_recipients must be %d to %d", minMaxRecipients, maxMaxRecipients)
 	}
 	validateSendAllow("policy.send_allow", c.Policy.SendAllow, add)
+	c.Watch.validate(add)
 	for _, name := range c.AccountNames() {
 		c.validateAccount(name, add)
 	}
@@ -383,6 +411,7 @@ func (c *Config) validateAccount(name string, add func(string, ...any)) {
 			add("%s: max_message_size: %s must be between 1KiB and 1024MiB", where, a.MaxMessageSize)
 		}
 	}
+	validateAccountWatch(where, a, p, add)
 }
 
 func validateOverride(where string, o *EndpointOverride, add func(string, ...any)) {
