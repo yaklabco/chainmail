@@ -196,11 +196,9 @@ func (w *watchConn) Idle(ctx context.Context, limit time.Duration) (mailstore.Wa
 	}); err != nil {
 		return mailstore.Wake{}, w.s.watchError(err)
 	}
-	timer := time.NewTimer(limit)
-	defer timer.Stop()
 	select {
 	case <-w.signal:
-	case <-timer.C:
+	case <-w.s.after(limit):
 	case <-ctx.Done():
 	case <-w.c.client().Closed():
 	}

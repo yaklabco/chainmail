@@ -136,6 +136,10 @@ type Options struct {
 	// once. Gmail behaves so for a message another session moved into a
 	// folder: it sends the EXISTS some time after the NOOP's answer.
 	LateExists bool
+	// IdleTicks, when set, gives an idling session the ticks at which it
+	// looks again for changes other sessions made, and a function that stops
+	// them. Nil means a ticker every 10ms. Tests set it to drive IDLE.
+	IdleTicks func() (ticks <-chan time.Time, stop func())
 }
 
 // late reports whether FETCH, STORE and SEARCH leave new arrivals unseen,

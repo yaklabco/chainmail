@@ -300,3 +300,60 @@ func waitIdling(t *testing.T, w *watchConn, done <-chan error) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// TestWatchIdleLimitUsesStoreClock drives Idle's limit through the store's
+// clock: Idle asks it for the limit, and returns Wake{} only once that
+// fires, however long the limit.
+func TestWatchIdleLimitUsesStoreClock(t *testing.T) {
+	t.Parallel()
+	s, _, _ := watchFixture(t)
+	asked := make(chan time.Duration, 1)
+	fire := make(chan time.Time)
+	s.after = func(d time.Duration) <-chan time.Time {
+		asked <- d
+		return fire
+	}
+	wc, err := s.OpenWatch(t.Context(), storetest.GmailAllMail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wc.Close() })
+	type result struct {
+		wake mailstore.Wake
+		err  error
+	}
+	done := make(chan result, 1)
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+	wg.Go(func() {
+		wake, err := wc.Idle(t.Context(), time.Hour)
+		done <- result{wake, err}
+	})
+	select {
+	case d := <-asked:
+		if d != time.Hour {
+			t.Errorf("Idle asked the clock for %v, want the limit, 1h", d)
+		}
+	case res := <-done:
+		t.Fatalf("Idle(1h) returned %+v, %v before asking the clock", res.wake, res.err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Idle did not ask the store's clock for its limit within 2s")
+	}
+	select {
+	case res := <-done:
+		t.Fatalf("Idle(1h) returned %+v, %v before its limit fired", res.wake, res.err)
+	default:
+	}
+	fire <- time.Now()
+	select {
+	case res := <-done:
+		if res.err != nil || res.wake != (mailstore.Wake{}) {
+			t.Errorf("Idle after its limit fired = %+v, %v; want Wake{} and nil", res.wake, res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Idle did not return within 2s of its limit firing")
+	}
+	if _, err := wc.Sync(t.Context(), mailstore.SyncRequest{}); err != nil {
+		t.Errorf("Sync after the Idle = %v; the connection must stay usable", err)
+	}
+}

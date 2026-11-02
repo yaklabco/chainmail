@@ -778,24 +778,37 @@ func (sess *session) Poll(w *imapserver.UpdateWriter, allowExpunge bool) error {
 }
 
 // idlePoll is how often a session in IDLE looks for changes other sessions
-// made.
+// made, unless Options.IdleTicks says otherwise.
 const idlePoll = 10 * time.Millisecond
 
-// Idle tells the client of changes other sessions make to the selected
-// folder while it idles, as EXISTS and EXPUNGE, within idlePoll, by running
-// Poll as the end of a command does. Like Poll it says nothing of flag
-// changes.
-func (sess *session) Idle(w *imapserver.UpdateWriter, stop <-chan struct{}) error {
+// idleTicks returns the ticks at which an idling session looks for changes,
+// and a function that stops them.
+func (o Options) idleTicks() (<-chan time.Time, func()) {
+	if o.IdleTicks != nil {
+		return o.IdleTicks()
+	}
 	ticker := time.NewTicker(idlePoll)
-	defer ticker.Stop()
+	return ticker.C, ticker.Stop
+}
+
+// Idle tells the client of changes other sessions make to the selected
+// folder while it idles, as EXISTS and EXPUNGE: at once, then at each tick
+// of Options.IdleTicks, by running Poll as the end of a command does. Like
+// Poll it says nothing of flag changes.
+func (sess *session) Idle(w *imapserver.UpdateWriter, stop <-chan struct{}) error {
+	if err := sess.Poll(w, true); err != nil {
+		return err
+	}
+	ticks, stopTicks := sess.s.opts.idleTicks()
+	defer stopTicks()
 	for {
-		if err := sess.Poll(w, true); err != nil {
-			return err
-		}
 		select {
 		case <-stop:
 			return nil
-		case <-ticker.C:
+		case <-ticks:
+		}
+		if err := sess.Poll(w, true); err != nil {
+			return err
 		}
 	}
 }
