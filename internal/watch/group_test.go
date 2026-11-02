@@ -174,10 +174,11 @@ func TestValidGroupName(t *testing.T) {
 	}
 }
 
-// TestResetGroup checks the recovery for a group left past the tail: it
-// sets the acknowledged ID to exactly id, lowering it if need be, stamps
-// last_seen_at, keeps created_at, creates an unknown group, and refuses an
-// invalid name or a negative id.
+// TestResetGroup checks the compare-and-set recovery for a group left past
+// the tail: it moves the acknowledged ID from exactly from to to, lowering
+// it if need be, stamps last_seen_at and keeps created_at. It does not
+// apply when the group has moved since from was read, or does not exist,
+// and it refuses an invalid name or a negative to.
 func TestResetGroup(t *testing.T) {
 	t.Parallel()
 	l, conn, clock := newLog(t)
@@ -189,27 +190,34 @@ func TestResetGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.Set(t0.Add(time.Hour))
-	if err := l.ResetGroup(t.Context(), "bot", 2); err != nil {
-		t.Fatalf("ResetGroup(bot): %v", err)
+	steps := []struct {
+		name     string
+		group    string
+		from, to int64
+		applied  bool
+	}{
+		{name: "applies", group: "bot", from: 50, to: 2, applied: true},
+		{name: "moved since", group: "bot", from: 50, to: 1, applied: false},
+		{name: "unknown group", group: "nobody", from: 0, to: 1, applied: false},
 	}
-	if err := l.ResetGroup(t.Context(), "fresh", 1); err != nil {
-		t.Fatalf("ResetGroup(fresh): %v", err)
+	for _, s := range steps {
+		applied, err := l.ResetGroup(t.Context(), s.group, s.from, s.to)
+		if err != nil || applied != s.applied {
+			t.Errorf("%s: ResetGroup = %v, %v; want %v, nil", s.name, applied, err, s.applied)
+		}
 	}
 	groups, err := l.Groups(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []GroupInfo{
-		{Name: "bot", AckedID: 2, Lag: 1, CreatedAt: t0, LastSeenAt: t0.Add(time.Hour)},
-		{Name: "fresh", AckedID: 1, Lag: 2, CreatedAt: t0.Add(time.Hour), LastSeenAt: t0.Add(time.Hour)},
-	}
+	want := []GroupInfo{{Name: "bot", AckedID: 2, Lag: 1, CreatedAt: t0, LastSeenAt: t0.Add(time.Hour)}}
 	if !reflect.DeepEqual(groups, want) {
 		t.Errorf("Groups =\n%+v\nwant\n%+v", groups, want)
 	}
-	if err := l.ResetGroup(t.Context(), "Bad Name", 1); err == nil {
+	if _, err := l.ResetGroup(t.Context(), "Bad Name", 0, 1); err == nil {
 		t.Error("ResetGroup accepted an invalid name")
 	}
-	if err := l.ResetGroup(t.Context(), "bot", -1); err == nil {
+	if _, err := l.ResetGroup(t.Context(), "bot", 2, -1); err == nil {
 		t.Error("ResetGroup accepted a negative id")
 	}
 }

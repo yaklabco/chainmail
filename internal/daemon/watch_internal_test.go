@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -338,8 +339,10 @@ func TestReadEventsWaitEndsBeforeTheDeadline(t *testing.T) {
 	t.Parallel()
 	s, stateDB := newTestServer(t)
 	w := &watchService{s: s}
-	// The wait gets half of the 100ms, which leaves the audit write the rest.
-	const deadline = 100 * time.Millisecond
+	// wait_seconds 60 would overrun the 1s deadline 60 times over. The wait
+	// gets half of the second, so the call must return at least 200ms
+	// before the deadline, which leaves a loaded machine room to be late.
+	const deadline = time.Second
 	ctx, cancel := context.WithTimeout(peerContext(t.Context()), deadline)
 	defer cancel()
 	start := time.Now()
@@ -347,8 +350,8 @@ func TestReadEventsWaitEndsBeforeTheDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadEvents: %v, want an empty page", err)
 	}
-	if elapsed := time.Since(start); elapsed >= deadline {
-		t.Errorf("returned after %v, want before the %v deadline", elapsed, deadline)
+	if elapsed := time.Since(start); elapsed >= deadline-200*time.Millisecond {
+		t.Errorf("returned after %v, want well before the %v deadline", elapsed, deadline)
 	}
 	if len(resp.Msg.GetEvents()) != 0 || resp.Msg.GetNextCursor() != 0 {
 		t.Errorf("resp = %v, want nothing at cursor 0", resp.Msg)
@@ -417,13 +420,14 @@ func TestStaleGroupResetRacesAPublish(t *testing.T) {
 	}
 	seedStaleGroup(t, s, "bot", 50)
 	var once sync.Once
-	w := &watchService{s: s, afterTail: func() {
+	s.watchAfterTail = func(context.Context) {
 		once.Do(func() {
 			if err := s.watchLog.Publish(ctx, testWatchEvent("raced")); err != nil {
 				t.Error(err)
 			}
 		})
-	}}
+	}
+	w := &watchService{s: s}
 	read := func() *chainmailv1.ReadEventsResponse {
 		t.Helper()
 		resp, err := w.ReadEvents(ctx, connect.NewRequest(&chainmailv1.ReadEventsRequest{Group: "bot", Limit: 1}))
@@ -520,5 +524,182 @@ func TestReadEventsAuditFailureLeavesAStaleGroup(t *testing.T) {
 	}
 	if ev := resp.Msg.GetEvents(); len(ev) != 1 || ev[0].GetKind() != "gap" || ev[0].GetNextId() != 2 || resp.Msg.GetNextCursor() != 1 {
 		t.Errorf("read after the failure = %v, want the gap to 2 at cursor 1", resp.Msg)
+	}
+}
+
+// firstTime runs f the first time it is called and does nothing after, so
+// a hook that starts another read, which runs the hook too, does not
+// recurse. Unlike sync.Once it does not block a nested call.
+func firstTime(f func(context.Context)) func(context.Context) {
+	var fired atomic.Bool
+	return func(ctx context.Context) {
+		if fired.CompareAndSwap(false, true) {
+			f(ctx)
+		}
+	}
+}
+
+// readerB is the second reader of a stale group bot, run while the first
+// has found the group stale but not yet recovered it. Its first read gets
+// the gap and recovers the group at the tail, 3. Then events 4 and 5 are
+// published and its second read gets them, so bot is acknowledged at 5.
+// ctx is the first reader's, which carries its peer.
+// It returns every event it read.
+func readerB(ctx context.Context, t *testing.T, s *Server) []*chainmailv1.WatchEvent {
+	t.Helper()
+	w := &watchService{s: s}
+	var got []*chainmailv1.WatchEvent
+	for i, publish := range []bool{false, true} {
+		if publish {
+			if err := s.watchLog.Publish(ctx, testWatchEvent("d"), testWatchEvent("e")); err != nil {
+				t.Error(err)
+				return got
+			}
+		}
+		resp, err := w.ReadEvents(ctx, connect.NewRequest(&chainmailv1.ReadEventsRequest{Group: "bot"}))
+		if err != nil {
+			t.Errorf("reader B read %d: %v", i+1, err)
+			return got
+		}
+		got = append(got, resp.Msg.GetEvents()...)
+	}
+	return got
+}
+
+// TestStaleGroupTwoReadersReadEvents checks two ReadEvents readers of one
+// stale group. Reader A finds the group at 50 with the tail at 3. Before A
+// recovers it, reader B recovers it and is acknowledged at 5 for events 4
+// and 5 (B's first read recovers the group, then B reads 4 and 5). A's
+// recovery must then not apply: it may not lower the group to
+// the 3 its one-event page reached, and A reads on as a normal read from
+// 5, with no second gap and no replay of 4 or 5.
+func TestStaleGroupTwoReadersReadEvents(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServer(t)
+	ctx := peerContext(t.Context())
+	w := &watchService{s: s}
+	if err := s.watchLog.Publish(ctx, testWatchEvent("a"), testWatchEvent("b"), testWatchEvent("c")); err != nil {
+		t.Fatal(err)
+	}
+	seedStaleGroup(t, s, "bot", 50)
+	var bGot []*chainmailv1.WatchEvent
+	s.watchAfterTail = firstTime(func(hookCtx context.Context) { bGot = readerB(hookCtx, t, s) })
+	resp, err := w.ReadEvents(ctx, connect.NewRequest(&chainmailv1.ReadEventsRequest{Group: "bot", Limit: 1}))
+	if err != nil {
+		t.Fatalf("reader A: %v", err)
+	}
+	if len(bGot) != 3 || bGot[0].GetKind() != "gap" || bGot[1].GetId() != 4 || bGot[2].GetId() != 5 {
+		t.Fatalf("reader B = %v, want the gap then 4 and 5", bGot)
+	}
+	if len(resp.Msg.GetEvents()) != 0 || resp.Msg.GetNextCursor() != 5 {
+		t.Errorf("reader A = %v, want nothing at cursor 5: no second gap, no replay", resp.Msg)
+	}
+	groups, err := s.watchLog.Groups(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].AckedID != 5 {
+		t.Errorf("groups = %+v, want bot at 5", groups)
+	}
+}
+
+// TestStaleGroupTwoReadersSubscribe is the same race with a Subscribe
+// stream as reader A. A has already found the group stale, so it sends the
+// one gap it owes, but its recovery does not apply, so it resumes from the
+// group's 5 rather than lowering it to 3 and replaying 4 and 5.
+func TestStaleGroupTwoReadersSubscribe(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServerOptions(t, passwordConfig, Options{WatchHeartbeat: time.Hour})
+	ctx := peerContext(t.Context())
+	if err := s.watchLog.Publish(ctx, testWatchEvent("a"), testWatchEvent("b"), testWatchEvent("c")); err != nil {
+		t.Fatal(err)
+	}
+	seedStaleGroup(t, s, "bot", 50)
+	s.watchAfterTail = firstTime(func(hookCtx context.Context) { readerB(hookCtx, t, s) })
+	c := serveWatchTest(t, s)
+	sctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	stream, err := c.Watch.Subscribe(sctx, connect.NewRequest(&chainmailv1.SubscribeRequest{Group: "bot"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stream.Close() }()
+	var items []*chainmailv1.SubscribeResponse
+	for stream.Receive() {
+		items = append(items, stream.Msg())
+		if stream.Msg().GetHeartbeat() != nil {
+			break
+		}
+	}
+	if len(items) != 2 || items[0].GetEvent().GetKind() != "gap" || items[1].GetHeartbeat().GetPosition() != 5 {
+		t.Errorf("reader A got %v (%v), want the gap then a heartbeat at 5 with no replay", items, stream.Err())
+	}
+	groups, err := s.watchLog.Groups(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].AckedID != 5 {
+		t.Errorf("groups = %+v, want bot at 5", groups)
+	}
+}
+
+// TestSubscribeStaleGroupStaysStaleUntilTheGapIsSent checks that a stream
+// that ends before it delivers the trimmed gap leaves the group stale, so
+// the reconnect gets the gap. The first stream is cancelled right after
+// its start is read, and the hook waits for the daemon to see that.
+func TestSubscribeStaleGroupStaysStaleUntilTheGapIsSent(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServerOptions(t, passwordConfig, Options{WatchHeartbeat: time.Hour})
+	ctx := peerContext(t.Context())
+	if err := s.watchLog.Publish(ctx, testWatchEvent("a"), testWatchEvent("b"), testWatchEvent("c")); err != nil {
+		t.Fatal(err)
+	}
+	seedStaleGroup(t, s, "bot", 50)
+	c := serveWatchTest(t, s)
+	firstCtx, cancelFirst := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancelFirst()
+	s.watchAfterTail = firstTime(func(handlerCtx context.Context) {
+		cancelFirst()
+		<-handlerCtx.Done()
+	})
+	first, err := c.Watch.Subscribe(firstCtx, connect.NewRequest(&chainmailv1.SubscribeRequest{Group: "bot"}))
+	if err == nil {
+		for first.Receive() {
+		}
+		_ = first.Close()
+	}
+	groups, err := s.watchLog.Groups(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].AckedID != 50 {
+		t.Fatalf("after the cancelled stream groups = %+v, want bot still stale at 50", groups)
+	}
+	sctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	stream, err := c.Watch.Subscribe(sctx, connect.NewRequest(&chainmailv1.SubscribeRequest{Group: "bot"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stream.Close() }()
+	if !stream.Receive() || stream.Msg().GetEvent().GetKind() != "gap" || stream.Msg().GetEvent().GetNextId() != 4 {
+		t.Errorf("reconnect first item = %v (%v), want the gap to 4", stream.Msg(), stream.Err())
+	}
+}
+
+// TestWaitReadQuietWhenTheDeadlinePassesToo checks that a wait that ends
+// with nothing new is a quiet result even when the request's deadline has
+// passed by the time waitRead looks, as a late wakeup on a loaded machine
+// finds it. Here the deadline comes before the wait ends, so both have
+// passed when the wait returns.
+func TestWaitReadQuietWhenTheDeadlinePassesToo(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServer(t)
+	w := &watchService{s: s}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	page, err := w.waitRead(ctx, watch.Query{After: 0}, watch.Page{Next: 0}, time.Second)
+	if err != nil || len(page.Events) != 0 || page.Next != 0 {
+		t.Errorf("waitRead = %+v, %v; want an empty page at 0 and no error", page, err)
 	}
 }

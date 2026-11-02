@@ -464,29 +464,32 @@ func (l *Log) Ack(ctx context.Context, name string, id int64) error {
 	return nil
 }
 
-// ResetGroup sets the group's acknowledged ID to exactly id and stamps
-// last_seen_at, creating the group when it does not exist. It is the
-// recovery for a group left acknowledged past the tail, as a reset of the
-// state database leaves one: such a group belongs to a log that no longer
-// exists. It is not an acknowledgement, so unlike Ack it can lower the ID,
-// and it does not cap id at Tail. One statement does it, so no reader ever
-// sees the group missing or half reset.
-func (l *Log) ResetGroup(ctx context.Context, name string, id int64) error {
+// ResetGroup moves the group's acknowledged ID from exactly from to to,
+// and stamps last_seen_at, in one compare-and-set statement. It reports
+// whether it applied: it does not when the group no longer stands at from,
+// because another reader recovered or acknowledged it first, or when the
+// group does not exist. It is the recovery for a group left acknowledged
+// past the tail, as a reset of the state database leaves one: such a group
+// belongs to a log that no longer exists. It is not an acknowledgement, so
+// unlike Ack it can lower the ID, and it does not cap to at Tail.
+func (l *Log) ResetGroup(ctx context.Context, name string, from, to int64) (bool, error) {
 	if !ValidGroupName(name) {
-		return fmt.Errorf("watch: invalid group name %q", name)
+		return false, fmt.Errorf("watch: invalid group name %q", name)
 	}
-	if id < 0 {
-		return fmt.Errorf("watch: group %s reset to negative ID %d", name, id)
+	if to < 0 {
+		return false, fmt.Errorf("watch: group %s reset to negative ID %d", name, to)
 	}
-	now := formatTime(l.now())
-	_, err := l.db.ExecContext(ctx,
-		`INSERT INTO event_groups (name, acked_id, created_at, last_seen_at) VALUES (?, ?, ?, ?)
-		 ON CONFLICT (name) DO UPDATE SET acked_id = excluded.acked_id, last_seen_at = excluded.last_seen_at`,
-		name, id, now, now)
+	res, err := l.db.ExecContext(ctx,
+		"UPDATE event_groups SET acked_id = ?, last_seen_at = ? WHERE name = ? AND acked_id = ?",
+		to, formatTime(l.now()), name, from)
 	if err != nil {
-		return fmt.Errorf("watch: resetting group %s: %w", name, err)
+		return false, fmt.Errorf("watch: resetting group %s: %w", name, err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("watch: resetting group %s: %w", name, err)
+	}
+	return n > 0, nil
 }
 
 // Groups lists every group by name, with its lag in retained events.
