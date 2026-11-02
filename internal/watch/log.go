@@ -354,3 +354,31 @@ func (l *Log) Run(ctx context.Context, interval, retention time.Duration, maxEve
 		}
 	}
 }
+
+// changed returns the channel the next Notify closes.
+func (l *Log) changed() <-chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.notify
+}
+
+// Wait blocks until an event with ID above after exists or ctx ends.
+func (l *Log) Wait(ctx context.Context, after int64) error {
+	for {
+		// Take the channel before reading Tail, so a Notify that lands
+		// between the two still wakes the select below.
+		woken := l.changed()
+		tail, err := l.Tail(ctx)
+		if err != nil {
+			return err
+		}
+		if tail > after {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("watch: waiting for events: %w", ctx.Err())
+		case <-woken:
+		}
+	}
+}
