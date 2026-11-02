@@ -1203,3 +1203,74 @@ func TestSupervisorPollerBackoffStartsAfterTheFailure(t *testing.T) {
 		t.Errorf("FolderState ran %d times after the backoff, want 1", got-calls)
 	}
 }
+
+// supStuckStore is a fake store whose watch connections' Idle ignores
+// cancellation and returns only once Close is called, as a real IDLE whose
+// DONE the server never answers waits out its command timeout.
+type supStuckStore struct {
+	*fake.Store
+	idling chan struct{} // gets a token each time a stuck Idle starts
+}
+
+func (s *supStuckStore) OpenWatch(ctx context.Context, folder string) (mailstore.WatchConn, error) {
+	c, err := s.Store.OpenWatch(ctx, folder)
+	if err != nil {
+		return nil, err
+	}
+	return &supStuckConn{WatchConn: c, idling: s.idling, closed: make(chan struct{})}, nil
+}
+
+type supStuckConn struct {
+	mailstore.WatchConn
+	idling chan struct{}
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (c *supStuckConn) Idle(context.Context, time.Duration) (mailstore.Wake, error) {
+	select {
+	case c.idling <- struct{}{}:
+	default:
+	}
+	<-c.closed
+	return mailstore.Wake{}, fmt.Errorf("%w: closed during IDLE", mailstore.ErrUnavailable)
+}
+
+func (c *supStuckConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.WatchConn.Close()
+}
+
+// Cancelling Run while an Idle ignores the cancellation closes the
+// connection under it after ShutdownLogout on the supervisor's clock, so Run
+// returns within the shutdown bound instead of waiting out the IDLE.
+func TestSupervisorShutdownClosesAStuckIdle(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	stuck := &supStuckStore{Store: fs, idling: make(chan struct{}, 1)}
+	r := newSupRig(t, fs, supAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	r.store = stuck
+	r.start()
+	r.waitFor("INBOX watching", supStatus("INBOX", StateWatching))
+	select {
+	case <-stuck.idling:
+	case <-time.After(supWait):
+		t.Fatal("the watcher never started IDLE")
+	}
+	r.cancel()
+	r.clock.expectAfter(t, ShutdownLogout)
+	select {
+	case <-r.done:
+		t.Fatal("Run returned before ShutdownLogout passed, with Idle still running")
+	default:
+	}
+	r.clock.Advance(ShutdownLogout)
+	select {
+	case <-r.done:
+	case <-time.After(supWait):
+		t.Fatal("Run did not return once ShutdownLogout passed")
+	}
+	if n := fs.WatchConns(); n != 0 {
+		t.Errorf("WatchConns() after Run = %d, want 0", n)
+	}
+}

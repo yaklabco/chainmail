@@ -397,6 +397,76 @@ func TestWatchIdleLimitUsesStoreClock(t *testing.T) {
 	}
 }
 
+// TestWatchCloseWhileDoneIsUnanswered cancels an Idle whose DONE the server
+// never answers, which leaves Idle waiting out the command timeout. Close
+// during that wait shuts the connection at once, as a supervisor stopping
+// within its shutdown bound needs, and Idle returns.
+func TestWatchCloseWhileDoneIsUnanswered(t *testing.T) {
+	t.Parallel()
+	s, srv, _ := watchFixture(t)
+	running := make(chan struct{}, 1)
+	s.after = func(time.Duration) <-chan time.Time {
+		running <- struct{}{} // Idle asks for its limit once IDLE is running
+		return nil
+	}
+	wc, err := s.OpenWatch(t.Context(), storetest.GmailAllMail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wc.Close() })
+	if _, err := wc.Sync(t.Context(), mailstore.SyncRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+	wg.Go(func() {
+		_, err := wc.Idle(ctx, time.Minute)
+		done <- err
+	})
+	select {
+	case <-running:
+	case err := <-done:
+		t.Fatalf("Idle returned %v before IDLE was running", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("IDLE was not running within 2s")
+	}
+	held, release := srv.HoldReads()
+	defer release()
+	cancel() // Idle sends DONE, which the server now holds unanswered
+	select {
+	case <-held:
+	case err := <-done:
+		t.Fatalf("Idle returned %v before the server got DONE", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the server did not get DONE within 2s")
+	}
+	start := time.Now()
+	closed := make(chan error, 1)
+	wg.Go(func() { closed <- wc.Close() })
+	select {
+	case <-closed:
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("Close took %v while DONE was unanswered, want well under 1s", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return within 2s while DONE was unanswered")
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("Idle closed during DONE = nil, want an error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Idle did not return within 2s of Close")
+	}
+	if n := s.OpenConns(); n != 0 {
+		t.Errorf("OpenConns after Close = %d, want 0", n)
+	}
+}
+
 // TestWatchIdleCancelledBeforeContinuation cancels an Idle while the server
 // has yet to answer IDLE with its continuation: Idle still waits for it,
 // ends IDLE with DONE and returns the context's error, and the connection

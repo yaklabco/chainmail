@@ -594,6 +594,12 @@ func (w *watcher) wait(ctx context.Context, conn mailstore.WatchConn) (sweep boo
 // passes, or the supervisor's clock passes limit plus idleGrace, when it
 // cancels the IDLE. Idle runs in a joined goroutine; the connection is used
 // by one goroutine at a time.
+//
+// Once the IDLE is cancelled, by ctx ending or by that timer, Idle still
+// ends it with DONE, which a store bounds only by its command timeout. So a
+// cancelled Idle gets ShutdownLogout on the supervisor's clock to return,
+// after which the connection is closed under it (stop, below). That keeps a
+// shutdown within ShutdownLogout however the server behaves.
 func (w *watcher) idle(ctx context.Context, conn mailstore.WatchConn, limit time.Duration) (mailstore.Wake, error) {
 	idleCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -607,12 +613,31 @@ func (w *watcher) idle(ctx context.Context, conn mailstore.WatchConn, limit time
 		wake, err := conn.Idle(idleCtx, limit)
 		done <- result{wake: wake, err: err}
 	})
+	stop := func() result {
+		cancel()
+		select {
+		case r := <-done:
+			return r // no timer for an Idle that has returned already
+		default:
+		}
+		select {
+		case r := <-done:
+			return r
+		case <-w.s.clock.After(ShutdownLogout):
+			// WatchConn.Close is safe while Idle runs: it shuts the
+			// connection, which ends the IDLE. session closes it again,
+			// which does nothing more.
+			w.s.closeConn(conn, w.folder)
+			return <-done
+		}
+	}
 	var r result
 	select {
 	case r = <-done:
+	case <-ctx.Done():
+		r = stop()
 	case <-w.s.clock.After(limit + idleGrace):
-		cancel()
-		r = <-done
+		r = stop()
 		if ctx.Err() == nil && errors.Is(r.err, context.Canceled) {
 			r.err = nil // the supervisor's own timer ended the IDLE
 		}
