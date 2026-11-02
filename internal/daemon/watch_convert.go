@@ -16,7 +16,7 @@ func eventToProto(e watch.Event) *chainmailv1.WatchEvent {
 		Id: e.ID, At: timestamp(e.At), Kind: string(e.Kind),
 		Account: e.Account, Folder: e.Folder, Ref: e.Ref,
 		Flags: e.Flags, Labels: e.Labels,
-		State: e.State, Detail: e.Detail,
+		State: string(e.State), Detail: e.Detail,
 		Reason: e.Reason, NextId: e.NextID,
 	}
 	if m := e.Message; m != nil {
@@ -37,7 +37,7 @@ func eventToProto(e watch.Event) *chainmailv1.WatchEvent {
 // checkpoint stays in the daemon. A time never set stays unset.
 func folderStatusProto(r watch.FolderRow) *chainmailv1.FolderSyncStatus {
 	return &chainmailv1.FolderSyncStatus{
-		Account: r.Account, Folder: r.Folder, Mode: r.Mode, State: r.State, Condstore: r.CondStore,
+		Account: r.Account, Folder: r.Folder, Mode: string(r.Mode), State: string(r.State), Condstore: r.CondStore,
 		LastSyncAt: timestamp(r.LastSyncAt), LastSweepAt: timestamp(r.LastSweepAt), LastError: r.LastError,
 	}
 }

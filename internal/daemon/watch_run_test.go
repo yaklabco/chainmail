@@ -63,7 +63,7 @@ func awaitWatchEvent(t *testing.T, stream *connect.ServerStreamForClient[chainma
 // watchingStatus matches the status event of folder going to watching.
 func watchingStatus(folder string) func(*chainmailv1.WatchEvent) bool {
 	return func(ev *chainmailv1.WatchEvent) bool {
-		return ev.GetKind() == string(watch.KindStatus) && ev.GetFolder() == folder && ev.GetState() == watch.StateWatching
+		return ev.GetKind() == string(watch.KindStatus) && ev.GetFolder() == folder && ev.GetState() == string(watch.StateWatching)
 	}
 }
 
@@ -179,8 +179,8 @@ func TestGetStatusReportsSync(t *testing.T) {
 		t.Fatalf("sync = %v, want 2 rows", got)
 	}
 	want := []struct{ folder, mode, state, lastError string }{
-		{"INBOX", "idle", watch.StateWatching, ""},
-		{"Sent", "poll", watch.StateError, "FOLDER_NOT_FOUND"},
+		{"INBOX", "idle", string(watch.StateWatching), ""},
+		{"Sent", "poll", string(watch.StateError), "FOLDER_NOT_FOUND"},
 	}
 	for i, w := range want {
 		g := got[i]

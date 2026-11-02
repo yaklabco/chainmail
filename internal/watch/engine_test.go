@@ -310,7 +310,7 @@ func TestPassFailureLeavesStateUntouched(t *testing.T) {
 	tests := []struct {
 		name    string
 		result  scriptResult
-		mode    string
+		mode    Mode
 		wantErr error
 		wantMsg string
 	}{
@@ -501,7 +501,7 @@ func TestPassRerunAfterFailedCommitEmitsEachEventOnce(t *testing.T) {
 	src := &folderSource{}
 	src.add(2)
 	h.pass(t, src, PassOptions{Mode: "idle"}) // baseline: UIDs 1 and 2
-	src.add(5)                                      // UIDs 3 to 7 arrive
+	src.add(5)                                // UIDs 3 to 7 arrive
 
 	errCrash := errors.New("disk I/O error")
 	commits := 0

@@ -71,7 +71,7 @@ func watchFlags(account, folder string, uid uint32, flags ...string) watch.Event
 	return watch.Event{At: time.Now(), Kind: watch.KindFlags, Account: account, Folder: folder, Ref: watchRef(account, folder, uid), Flags: flags}
 }
 
-func watchStatus(account, folder, state string) watch.Event {
+func watchStatus(account, folder string, state watch.Status) watch.Event {
 	return watch.Event{At: time.Now(), Kind: watch.KindStatus, Account: account, Folder: folder, State: state}
 }
 

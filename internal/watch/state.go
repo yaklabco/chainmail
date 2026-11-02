@@ -13,6 +13,16 @@ import (
 	"time"
 )
 
+// Mode is how a folder is synced, as sync_folders records it. The API
+// carries it as a plain string.
+type Mode string
+
+// Sync modes. A row no pass has written yet has the empty mode.
+const (
+	ModeIdle Mode = "idle"
+	ModePoll Mode = "poll"
+)
+
 // FolderRow is one sync_folders row.
 type FolderRow struct {
 	Account       string
@@ -21,8 +31,8 @@ type FolderRow struct {
 	UIDNext       uint32
 	HighestModSeq uint64
 	CondStore     bool
-	Mode          string // "", "idle" or "poll"
-	State         string // a Status state, or ""
+	Mode          Mode   // "", ModeIdle or ModePoll
+	State         Status // a status state, or ""
 	LastSyncAt    time.Time
 	LastSweepAt   time.Time
 	LastError     string // an error reason such as FOLDER_NOT_FOUND, never server text
@@ -74,8 +84,8 @@ func (f *folderScan) row() (FolderRow, error) {
 		UIDNext:       uint32(f.uidNext),
 		HighestModSeq: uint64(f.modSeq),
 		CondStore:     f.condStore == 1,
-		Mode:          f.mode,
-		State:         f.state,
+		Mode:          Mode(f.mode),
+		State:         Status(f.state),
 		LastError:     f.lastError,
 	}
 	var err error
@@ -165,12 +175,17 @@ func (s *State) uids(ctx context.Context, account, folder string) (map[uint32]kn
 }
 
 // validMode reports whether mode is one sync_folders accepts.
-func validMode(mode string) bool {
-	return mode == "" || mode == "idle" || mode == "poll"
+func validMode(mode Mode) bool {
+	switch mode {
+	case "", ModeIdle, ModePoll:
+		return true
+	default:
+		return false
+	}
 }
 
 // SetStatus updates mode, state and last_error only, creating the row when missing.
-func (s *State) SetStatus(ctx context.Context, account, folder, mode, state, lastError string) error {
+func (s *State) SetStatus(ctx context.Context, account, folder string, mode Mode, state Status, lastError string) error {
 	if !validMode(mode) {
 		return fmt.Errorf("watch: invalid folder mode %q", mode)
 	}
@@ -178,7 +193,7 @@ func (s *State) SetStatus(ctx context.Context, account, folder, mode, state, las
 		`INSERT INTO sync_folders (account, folder, mode, state, last_error) VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT (account, folder) DO UPDATE SET
 		   mode = excluded.mode, state = excluded.state, last_error = excluded.last_error`,
-		account, folder, mode, state, lastError)
+		account, folder, string(mode), string(state), lastError)
 	if err != nil {
 		return fmt.Errorf("watch: setting status of %s/%s: %w", account, folder, err)
 	}
@@ -207,7 +222,7 @@ func PutFolder(ctx context.Context, tx *sql.Tx, r FolderRow) error {
 		   last_sync_at = excluded.last_sync_at, last_sweep_at = excluded.last_sweep_at,
 		   last_error = excluded.last_error`,
 		r.Account, r.Folder, int64(r.UIDValidity), int64(r.UIDNext), int64(r.HighestModSeq), boolInt(r.CondStore),
-		r.Mode, r.State, formatTime(r.LastSyncAt), formatTime(r.LastSweepAt), r.LastError)
+		string(r.Mode), string(r.State), formatTime(r.LastSyncAt), formatTime(r.LastSweepAt), r.LastError)
 	if err != nil {
 		return fmt.Errorf("watch: writing folder %s/%s: %w", r.Account, r.Folder, err)
 	}

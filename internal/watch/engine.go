@@ -84,8 +84,8 @@ func NewEngine(db *sql.DB, log *Log, state *State, opts EngineOptions) *Engine {
 type PassOptions struct {
 	// Sweep fetches the full UID set and emits expunged events.
 	Sweep bool
-	// Mode is recorded on the folder row: "idle" or "poll".
-	Mode string
+	// Mode is recorded on the folder row: ModeIdle or ModePoll.
+	Mode Mode
 }
 
 // PassResult reports what a Pass did.
@@ -126,7 +126,7 @@ func (e *Engine) Pass(ctx context.Context, account, folder string, src Source, o
 // step runs one batch and reports whether more new mail remains. Every
 // read happens before the transaction begins: state.db has one connection,
 // so a read inside it would wait for itself.
-func (e *Engine) step(ctx context.Context, account, folder string, src Source, sweep bool, mode string, res *PassResult) (bool, error) {
+func (e *Engine) step(ctx context.Context, account, folder string, src Source, sweep bool, mode Mode, res *PassResult) (bool, error) {
 	prev, ok, err := e.state.Folder(ctx, account, folder)
 	if err != nil {
 		return false, fmt.Errorf("reading sync checkpoint: %w", err)

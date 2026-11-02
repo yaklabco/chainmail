@@ -319,7 +319,7 @@ func supGmailMsg(subject string, labels ...string) fake.Message {
 	return m
 }
 
-func supStatus(folder, state string) func(Event) bool {
+func supStatus(folder string, state Status) func(Event) bool {
 	return func(e Event) bool { return e.Kind == KindStatus && e.Folder == folder && e.State == state }
 }
 
@@ -403,7 +403,7 @@ func TestSupervisorBaselinesThenReportsNewMail(t *testing.T) {
 	if n := supCount(r.all(), supKind("INBOX", KindNew)); n != 0 {
 		t.Fatalf("the baseline produced %d new events, want 0", n)
 	}
-	if row := r.row("INBOX"); row.Mode != passModeIdle || row.State != StateWatching || row.LastError != "" {
+	if row := r.row("INBOX"); row.Mode != ModeIdle || row.State != StateWatching || row.LastError != "" {
 		t.Errorf("row = mode %q state %q last_error %q, want idle, watching and no error", row.Mode, row.State, row.LastError)
 	}
 	if n := r.held.Load(); n != 0 {
@@ -438,7 +438,7 @@ func TestSupervisorGmailWatchesAllMailOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 1 || rows[0].Folder != supAllMail || rows[0].Mode != passModeIdle {
+	if len(rows) != 1 || rows[0].Folder != supAllMail || rows[0].Mode != ModeIdle {
 		t.Errorf("rows = %+v, want one idle row for %s", rows, supAllMail)
 	}
 	fs.Add(supGmailMsg("hello", `\Inbox`))
@@ -458,7 +458,7 @@ func TestSupervisorFallsBackToPollingWithoutIdle(t *testing.T) {
 	r.start()
 	r.waitFor("INBOX polling", supStatus("INBOX", StatePolling))
 	r.clock.expectAfter(t, 30*time.Second)
-	if row := r.row("INBOX"); row.Mode != passModePoll || row.State != StatePolling {
+	if row := r.row("INBOX"); row.Mode != ModePoll || row.State != StatePolling {
 		t.Errorf("row = mode %q state %q, want poll and polling", row.Mode, row.State)
 	}
 	if n := fs.WatchConns(); n != 1 {
@@ -807,7 +807,7 @@ func TestSupervisorPollsUnwatchedFolders(t *testing.T) {
 			if n := fs.WatchConns(); n != 0 {
 				t.Errorf("WatchConns() = %d, want 0: polled folders use the pool", n)
 			}
-			if row := r.row("Sent"); row.Mode != passModePoll {
+			if row := r.row("Sent"); row.Mode != ModePoll {
 				t.Errorf("Sent mode = %q, want poll", row.Mode)
 			}
 			fs.Add(supMsg("Sent", "report"))
@@ -877,7 +877,7 @@ func TestSupervisorPollerParksWhileAuthRequired(t *testing.T) {
 	if n := r.acquired.Load(); n != 0 {
 		t.Errorf("Store opened %d times while parked, want 0", n)
 	}
-	if row := r.row("Sent"); row.State != StateAuthRequired || row.LastError != "AUTH_REQUIRED" || row.Mode != passModePoll {
+	if row := r.row("Sent"); row.State != StateAuthRequired || row.LastError != "AUTH_REQUIRED" || row.Mode != ModePoll {
 		t.Errorf("Sent row = mode %q state %q last_error %q, want poll, auth_required and AUTH_REQUIRED", row.Mode, row.State, row.LastError)
 	}
 	required.Store(false)
@@ -1045,7 +1045,7 @@ func TestSupervisorRetriesFailedStatusWrites(t *testing.T) {
 			var failed atomic.Bool
 			if tt.failSetStatus {
 				next := r.sup.writeStatus
-				r.sup.writeStatus = func(ctx context.Context, account, folder, mode, state, lastError string) error {
+				r.sup.writeStatus = func(ctx context.Context, account, folder string, mode Mode, state Status, lastError string) error {
 					if state == StateWatching && failed.CompareAndSwap(false, true) {
 						return errDisk
 					}
@@ -1083,8 +1083,8 @@ func TestSupervisorRetriesFailedStatusWrites(t *testing.T) {
 }
 
 // supStatuses lists folder's status events as "state" strings, in order.
-func supStatuses(events []Event, folder string) []string {
-	var out []string
+func supStatuses(events []Event, folder string) []Status {
+	var out []Status
 	for _, e := range events {
 		if e.Kind == KindStatus && e.Folder == folder {
 			out = append(out, e.State)
@@ -1104,12 +1104,12 @@ func TestSupervisorRepairsPartialStatusTransition(t *testing.T) {
 		// failReconnect makes the first reconnect fail too, so the outage
 		// asks for reconnecting a second time.
 		failReconnect bool
-		want          []string
+		want          []Status
 	}{
-		{name: "the next connection works", want: []string{StateBaselined, StateWatching}},
+		{name: "the next connection works", want: []Status{StateBaselined, StateWatching}},
 		{
 			name: "the next connection fails too", failReconnect: true,
-			want: []string{StateBaselined, StateWatching, StateReconnecting, StateWatching},
+			want: []Status{StateBaselined, StateWatching, StateReconnecting, StateWatching},
 		},
 	}
 	for _, tt := range tests {

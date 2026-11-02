@@ -21,12 +21,6 @@ import (
 // a synced folder the account does not have.
 const reasonFolderNotFound = "FOLDER_NOT_FOUND"
 
-// Pass modes, as PassOptions.Mode and the sync_folders mode column record them.
-const (
-	passModeIdle = "idle"
-	passModePoll = "poll"
-)
-
 // Fallbacks for settings left zero. config.Parse always fills them; these
 // only keep a hand-built SupervisorOptions from sweeping or polling in a
 // tight loop.
@@ -91,7 +85,7 @@ type Supervisor struct {
 
 	// writeStatus and publishEvents are State.SetStatus and Log.Publish.
 	// Tests replace them to fail a status write.
-	writeStatus   func(ctx context.Context, account, folder, mode, state, lastError string) error
+	writeStatus   func(ctx context.Context, account, folder string, mode Mode, state Status, lastError string) error
 	publishEvents func(ctx context.Context, events ...Event) error
 
 	// mu guards statuses: the row last written and the status last
@@ -134,10 +128,10 @@ func NewSupervisor(o SupervisorOptions) *Supervisor {
 	s.writeStatus, s.publishEvents = o.State.SetStatus, o.Log.Publish
 	if !o.Account.Provider.Gmail {
 		for _, f := range o.Account.Watch {
-			s.know(f, passModeIdle)
+			s.know(f, ModeIdle)
 		}
 		for _, f := range polledFolders(o.Account) {
-			s.know(f, passModePoll)
+			s.know(f, ModePoll)
 		}
 	}
 	s.sweepFloor = o.SweepFloor
@@ -301,8 +295,8 @@ type watcher struct {
 	s *Supervisor
 	// folder is "" on Gmail until the \All folder is resolved.
 	folder string
-	// mode is passModeIdle, or passModePoll on a server without IDLE.
-	mode string
+	// mode is ModeIdle, or ModePoll on a server without IDLE.
+	mode Mode
 	// lastSweep is when the last sweep pass ran. expungeAt is when an
 	// EXPUNGE asked for the next one, zero when none is pending.
 	lastSweep time.Time
@@ -319,7 +313,7 @@ type watcher struct {
 // every sync.poll, and anything else reconnects with backoff, reset by a
 // successful pass.
 func (s *Supervisor) watchLoop(ctx context.Context, p *parker, folder string) {
-	w := &watcher{s: s, folder: folder, mode: passModeIdle}
+	w := &watcher{s: s, folder: folder, mode: ModeIdle}
 	failures := 0
 	for {
 		if need, hint := s.o.AuthRequired(s.o.Account.Name); need {
@@ -467,7 +461,7 @@ func (s *Supervisor) pollFolder(ctx context.Context, pf *polled) error {
 		if sweep || res.Baselined {
 			pf.lastSweep = now
 		}
-		err = s.settled(ctx, pf.folder, passModePoll, res)
+		err = s.settled(ctx, pf.folder, ModePoll, res)
 	}
 	if err == nil {
 		pf.failures = 0
@@ -479,12 +473,12 @@ func (s *Supervisor) pollFolder(ctx context.Context, pf *polled) error {
 	}
 	var notFound *mailstore.FolderNotFoundError
 	if errors.As(err, &notFound) {
-		s.note(ctx, pf.folder, passModePoll, StateError, reasonFolderNotFound, reasonFolderNotFound)
+		s.note(ctx, pf.folder, ModePoll, StateError, reasonFolderNotFound, reasonFolderNotFound)
 		pf.next = s.clock.Now().Add(s.syncPoll)
 		return err
 	}
 	s.logger.Warn("polling a folder failed", "folder", pf.folder, "reason", failureReason(err))
-	s.note(ctx, pf.folder, passModePoll, StateReconnecting, "", api.ReasonServerUnavailable)
+	s.note(ctx, pf.folder, ModePoll, StateReconnecting, "", api.ReasonServerUnavailable)
 	pf.next = s.clock.Now().Add(min(backoff(pf.failures, s.jitter()), s.syncPoll))
 	pf.failures++
 	return err
@@ -517,7 +511,7 @@ func (s *Supervisor) pollPass(ctx context.Context, folder string, sweep bool) (P
 		return PassResult{}, err
 	}
 	defer release()
-	return s.o.Engine.Pass(ctx, s.o.Account.Name, folder, storeSource{W: w, Folder: folder}, PassOptions{Sweep: sweep, Mode: passModePoll})
+	return s.o.Engine.Pass(ctx, s.o.Account.Name, folder, storeSource{W: w, Folder: folder}, PassOptions{Sweep: sweep, Mode: ModePoll})
 }
 
 // session runs one connection on the folder: open, sync, then IDLE or poll
@@ -528,16 +522,16 @@ func (w *watcher) session(ctx context.Context) (healthy bool, err error) {
 		if w.folder, err = w.s.resolveAll(ctx); err != nil {
 			return false, err
 		}
-		w.s.know(w.folder, passModeIdle)
+		w.s.know(w.folder, ModeIdle)
 	}
 	conn, err := w.s.openWatch(ctx, w.folder)
 	if err != nil {
 		return false, err
 	}
 	defer w.closeConn(ctx, conn)
-	w.mode = passModePoll
+	w.mode = ModePoll
 	if conn.IdleSupported() {
-		w.mode = passModeIdle
+		w.mode = ModeIdle
 	}
 	sweep := true // the first pass after a connect always sweeps
 	for {
@@ -809,10 +803,10 @@ func (s *Supervisor) closeConn(conn mailstore.WatchConn, folder string) {
 // and published its event, so the steady state is recorded after it. A
 // failed write is returned, for the caller to back off as from a database
 // error and record it again after its next pass.
-func (s *Supervisor) settled(ctx context.Context, folder, mode string, res PassResult) error {
+func (s *Supervisor) settled(ctx context.Context, folder string, mode Mode, res PassResult) error {
 	s.passed(folder, mode, res.Baselined)
 	state := StateWatching
-	if mode == passModePoll {
+	if mode == ModePoll {
 		state = StatePolling
 	}
 	return s.transition(ctx, folder, mode, state, "", "")
@@ -826,7 +820,7 @@ func (s *Supervisor) settled(ctx context.Context, folder, mode string, res PassR
 // a row a failed transition left different. A row that cannot be written is
 // never announced. An empty folder is an account-wide status, such as a
 // Gmail one from before the \All folder is resolved, with no row.
-func (s *Supervisor) transition(ctx context.Context, folder, mode, state, detail, lastError string) error {
+func (s *Supervisor) transition(ctx context.Context, folder string, mode Mode, state Status, detail, lastError string) error {
 	if folder != "" {
 		if err := s.setStatus(ctx, folder, mode, state, lastError); err != nil {
 			return err
@@ -846,7 +840,7 @@ func (s *Supervisor) transition(ctx context.Context, folder, mode, state, detail
 // note is transition for a failure path, which goes on to back off
 // whatever happens: a failed write is logged and completed by the next
 // transition.
-func (s *Supervisor) note(ctx context.Context, folder, mode, state, detail, lastError string) {
+func (s *Supervisor) note(ctx context.Context, folder string, mode Mode, state Status, detail, lastError string) {
 	if err := s.transition(ctx, folder, mode, state, detail, lastError); err != nil {
 		s.logger.Warn("recording a folder's sync status", "folder", folder, "reason", failureReason(err))
 	}
@@ -855,7 +849,7 @@ func (s *Supervisor) note(ctx context.Context, folder, mode, state, detail, last
 // setStatus writes a folder's row, without an event, unless the row last
 // written already holds mode, state and lastError, and remembers it once
 // written.
-func (s *Supervisor) setStatus(ctx context.Context, folder, mode, state, lastError string) error {
+func (s *Supervisor) setStatus(ctx context.Context, folder string, mode Mode, state Status, lastError string) error {
 	want := rowStatus{mode: mode, state: state, lastError: lastError}
 	if s.status(folder).row == want {
 		return nil
@@ -870,7 +864,9 @@ func (s *Supervisor) setStatus(ctx context.Context, folder, mode, state, lastErr
 // rowStatus is what the supervisor last wrote, or a pass last left, in a
 // folder's sync_folders row.
 type rowStatus struct {
-	mode, state, lastError string
+	mode      Mode
+	state     Status
+	lastError string
 }
 
 // folderStatus is what is durably recorded for a folder: its row, and the
@@ -879,7 +875,7 @@ type rowStatus struct {
 type folderStatus struct {
 	name      string
 	row       rowStatus
-	published string
+	published Status
 }
 
 // status returns what is recorded for folder.
@@ -902,7 +898,7 @@ func (s *Supervisor) update(folder string, change func(*folderStatus)) {
 // passed records what a successful pass wrote: the row's mode, and on a
 // baseline the baselined state and its event. A pass carries the row's
 // last_error over, so that stays as recorded.
-func (s *Supervisor) passed(folder, mode string, baselined bool) {
+func (s *Supervisor) passed(folder string, mode Mode, baselined bool) {
 	s.update(folder, func(st *folderStatus) {
 		st.row.mode = mode
 		if baselined {
@@ -913,7 +909,7 @@ func (s *Supervisor) passed(folder, mode string, baselined bool) {
 
 // know adds folder, in mode, to the folders a parking records, unless it is
 // already known.
-func (s *Supervisor) know(folder, mode string) {
+func (s *Supervisor) know(folder string, mode Mode) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.statuses[folder]; !ok {

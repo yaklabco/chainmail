@@ -72,7 +72,7 @@ func diffLine(e Event) string {
 	case KindGap:
 		return fmt.Sprintf("gap %s next=%d", e.Reason, e.NextID)
 	case KindStatus:
-		return "status " + e.State
+		return "status " + string(e.State)
 	case KindFlags:
 		return fmt.Sprintf("flags %s %v %v", e.Ref, e.Flags, e.Labels)
 	default:

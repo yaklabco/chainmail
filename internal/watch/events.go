@@ -24,15 +24,21 @@ const (
 	KindGap      Kind = "gap"
 )
 
+// Status is a folder's sync state, as status events and sync_folders rows
+// record it. The API and the stored JSON carry it as a plain string.
+type Status string
+
 // Status states.
 const (
-	StateBaselined    = "baselined"
-	StateCatchingUp   = "catching_up"
-	StateWatching     = "watching"
-	StatePolling      = "polling"
-	StateReconnecting = "reconnecting"
-	StateAuthRequired = "auth_required"
-	StateError        = "error"
+	StateBaselined Status = "baselined"
+	// StateCatchingUp is reserved and never published in SP6: the engine
+	// runs every catch-up batch inside one Pass.
+	StateCatchingUp   Status = "catching_up"
+	StateWatching     Status = "watching"
+	StatePolling      Status = "polling"
+	StateReconnecting Status = "reconnecting"
+	StateAuthRequired Status = "auth_required"
+	StateError        Status = "error"
 )
 
 // Gap reasons.
@@ -68,7 +74,7 @@ type Event struct {
 	Message *Message // new
 	Flags   []string // flags
 	Labels  []string // flags
-	State   string   // status
+	State   Status   // status
 	Detail  string   // status
 	Reason  string   // gap
 	NextID  int64    // gap
@@ -105,7 +111,7 @@ func encodePayload(e Event) (string, error) {
 	case KindFlags:
 		v = flagsPayload{Flags: nonNil(e.Flags), Labels: nonNil(e.Labels)}
 	case KindStatus:
-		v = statusPayload{State: e.State, Detail: e.Detail}
+		v = statusPayload{State: string(e.State), Detail: e.Detail}
 	case KindGap:
 		v = gapPayload{Reason: e.Reason, NextID: e.NextID}
 	case KindExpunged:
@@ -139,7 +145,7 @@ func decodePayload(e *Event, payload string) error {
 	case KindStatus:
 		var p statusPayload
 		if err = json.Unmarshal(data, &p); err == nil {
-			e.State, e.Detail = p.State, p.Detail
+			e.State, e.Detail = Status(p.State), p.Detail
 		}
 	case KindGap:
 		var p gapPayload
