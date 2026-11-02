@@ -59,6 +59,9 @@ var kindNames = map[string]watch.Kind{
 // watchService implements chainmailv1connect.WatchServiceHandler.
 type watchService struct {
 	s *Server
+	// afterTail, when set, runs in start between reading the tail and
+	// resetting a group left past it. Tests land an event in that window.
+	afterTail func()
 }
 
 var _ chainmailv1connect.WatchServiceHandler = (*watchService)(nil)
@@ -146,24 +149,37 @@ func watchKinds(names []string) ([]watch.Kind, string, error) {
 	return kinds, strings.Join(names, ","), nil
 }
 
-// start returns the ID a request reads after: the group's acknowledged
-// event, which creates the group at the tail when it is new, the request's
-// since or cursor, or the tail for a live read.
+// readStart is where a Subscribe or ReadEvents request reads from.
+type readStart struct {
+	// after is the ID to read after.
+	after int64
+	// gap is the trimmed gap to deliver before anything else, or nil.
+	gap *watch.Event
+	// stale says the group was acknowledged past the tail and must be
+	// reset with Log.ResetGroup, which Ack could never do, once the caller
+	// may move it.
+	stale bool
+}
+
+// start returns where a request reads from: after the group's acknowledged
+// event, which creates the group at the tail when it is new, after the
+// request's since or cursor, or after the tail for a live read.
 //
 // A client only ever learns IDs up to the tail, so a start past it means
 // the daemon's state was reset under the client. Such a start is capped at
 // the tail, and start also returns the trimmed gap that reports the loss,
 // unless the filter drops it, as Log.Read reports a start below the oldest
 // event. A group acknowledged past the tail belongs to a log that no longer
-// exists, so it is reset to the tail, which Ack could never do, and its
-// later reads resume normally with no second gap.
-func (w *watchService) start(ctx context.Context, q watchQuery) (int64, *watch.Event, error) {
+// exists, so it is marked stale. start changes nothing itself: the caller
+// resets the group, to the tail start read or past it, never to a fresh
+// tail, so an event published since is never acknowledged unread.
+func (w *watchService) start(ctx context.Context, q watchQuery) (readStart, error) {
 	var after int64
 	switch {
 	case q.group != "":
 		acked, _, err := w.s.watchLog.Group(ctx, q.group)
 		if err != nil {
-			return 0, nil, err
+			return readStart{}, err
 		}
 		after = acked
 	case q.since != nil:
@@ -172,33 +188,29 @@ func (w *watchService) start(ctx context.Context, q watchQuery) (int64, *watch.E
 	tail, err := w.s.watchLog.Tail(ctx)
 	switch {
 	case err != nil:
-		return 0, nil, err
+		return readStart{}, err
 	case q.group == "" && q.since == nil:
-		return tail, nil, nil // a live read
+		return readStart{after: tail}, nil // a live read
 	case after <= tail:
-		return after, nil, nil
+		return readStart{after: after}, nil
 	}
-	if q.group != "" {
-		if err := w.resetGroup(ctx, q.group); err != nil {
-			return 0, nil, err
-		}
+	if w.afterTail != nil {
+		w.afterTail()
 	}
-	gap := watch.Event{At: w.s.opts.Now().UTC(), Kind: watch.KindGap, Reason: watch.GapTrimmed, NextID: tail + 1}
-	if !q.filter.Match(gap) {
-		return tail, nil, nil
+	st := readStart{after: tail, stale: q.group != ""}
+	if gap := (watch.Event{At: w.s.opts.Now().UTC(), Kind: watch.KindGap, Reason: watch.GapTrimmed, NextID: tail + 1}); q.filter.Match(gap) {
+		st.gap = &gap
 	}
-	return tail, &gap, nil
+	return st, nil
 }
 
-// resetGroup recreates a group at the tail. The group is deleted first, so
-// Group creates it again at the tail. An Ack landing in between creates it
-// at most at the tail too, so the group never ends up past the tail.
-func (w *watchService) resetGroup(ctx context.Context, group string) error {
-	if _, err := w.s.watchLog.DeleteGroup(ctx, group); err != nil {
-		return err
+// advance moves a group past id once its read may count as delivered: an
+// Ack, or for a stale group the reset to exactly id.
+func (w *watchService) advance(ctx context.Context, group string, id int64, stale bool) error {
+	if stale {
+		return w.s.watchLog.ResetGroup(ctx, group, id)
 	}
-	_, _, err := w.s.watchLog.Group(ctx, group)
-	return err
+	return w.s.watchLog.Ack(ctx, group, id)
 }
 
 // watchLogErr is the error for a failed event log call. The client sees
@@ -235,16 +247,23 @@ func (w *watchService) Subscribe(ctx context.Context, req *connect.Request[chain
 	if err := w.s.record(ctx, c, entry, messageErr(parseErr)); err != nil {
 		return err
 	}
-	pos, gap, err := w.start(ctx, q)
+	st, err := w.start(ctx, q)
 	if err != nil {
 		return w.streamEnd(ctx, err)
 	}
-	if gap != nil {
-		if stream.Send(&chainmailv1.SubscribeResponse{Item: &chainmailv1.SubscribeResponse_Event{Event: eventToProto(*gap)}}) != nil {
+	if st.stale {
+		// The stream is audited already, and a stale group could never
+		// be raised by the client's Acks, so it is reset before sending.
+		if err := w.advance(ctx, q.group, st.after, true); err != nil {
+			return w.streamEnd(ctx, err)
+		}
+	}
+	if st.gap != nil {
+		if stream.Send(&chainmailv1.SubscribeResponse{Item: &chainmailv1.SubscribeResponse_Event{Event: eventToProto(*st.gap)}}) != nil {
 			return toConnectError(clientGone())
 		}
 	}
-	return w.send(ctx, q.filter, pos, stream)
+	return w.send(ctx, q.filter, st.after, stream)
 }
 
 // send streams the events after pos that match f, with heartbeats, until
@@ -301,6 +320,13 @@ func (w *watchService) streamEnd(ctx context.Context, err error) error {
 // one page, waiting up to wait_seconds for the first event, and records
 // watch.read with the number of events returned. A client cancelling the
 // call ends the wait.
+//
+// A group read acknowledges the page's Next, so events the filter dropped
+// move the group too, or resets a stale group to it, but only once the
+// audit row is written: a read that
+// could not be audited returns an error and leaves the group where it was.
+// If the acknowledgement itself fails, the call fails without its events
+// and the next read returns the same page, so delivery is at least once.
 func (w *watchService) ReadEvents(ctx context.Context, req *connect.Request[chainmailv1.ReadEventsRequest]) (*connect.Response[chainmailv1.ReadEventsResponse], error) {
 	c, err := callerOf(ctx, req.Header())
 	if err != nil {
@@ -311,13 +337,21 @@ func (w *watchService) ReadEvents(ctx context.Context, req *connect.Request[chai
 	entry.Action = "watch.read"
 	wait, limit, boundsErr := readBounds(m.GetWaitSeconds(), m.GetLimit(), w.s.watchWaitUnit)
 	readErr = cmp.Or(readErr, boundsErr)
-	var page watch.Page
+	var (
+		page  watch.Page
+		stale bool
+	)
 	if readErr == nil {
-		page, readErr = w.read(ctx, q, wait, limit)
+		page, stale, readErr = w.read(ctx, q, wait, limit)
 	}
 	entry.Targets = append(entry.Targets, tally("events", len(page.Events)))
 	if err := w.s.record(ctx, c, entry, messageErr(readErr)); err != nil {
 		return nil, err
+	}
+	if q.group != "" {
+		if err := w.ack(ctx, q.group, page.Next, stale); err != nil {
+			return nil, err
+		}
 	}
 	resp := &chainmailv1.ReadEventsResponse{Events: make([]*chainmailv1.WatchEvent, 0, len(page.Events)), NextCursor: page.Next}
 	for _, e := range page.Events {
@@ -342,17 +376,17 @@ func readBounds(waitSeconds, limit int32, unit time.Duration) (time.Duration, in
 // read runs a ReadEvents query: one page after the start and, when it is
 // empty and wait is positive, the first events that arrive within wait.
 // The wait ends before the request's deadline when that comes first, so a
-// client that set a short deadline gets what there is, not TIMEOUT. A
-// group read acknowledges the page's Next, so events the filter dropped
-// move the group too. The page is lost if the acknowledgement fails, and
-// the next read returns the same events: delivery is at least once.
-func (w *watchService) read(ctx context.Context, q watchQuery, wait time.Duration, limit int) (watch.Page, error) {
+// client that set a short deadline gets what there is, not TIMEOUT. It
+// does not move a group: ReadEvents does, once the read is audited, and
+// read reports whether the group is stale (see start).
+func (w *watchService) read(ctx context.Context, q watchQuery, wait time.Duration, limit int) (watch.Page, bool, error) {
 	ctx, cancel := withDeadline(ctx, wait+callTimeout)
 	defer cancel()
-	after, gap, err := w.start(ctx, q)
+	st, err := w.start(ctx, q)
 	if err != nil {
-		return watch.Page{}, w.s.watchLogErr(err)
+		return watch.Page{}, false, w.s.watchLogErr(err)
 	}
+	after, gap := st.after, st.gap
 	if gap != nil {
 		// The gap counts toward the limit, as one from Log.Read does.
 		limit--
@@ -361,7 +395,7 @@ func (w *watchService) read(ctx context.Context, q watchQuery, wait time.Duratio
 	page := watch.Page{Next: after}
 	if limit > 0 {
 		if page, err = w.s.watchLog.Read(ctx, query); err != nil {
-			return watch.Page{}, w.s.watchLogErr(err)
+			return watch.Page{}, false, w.s.watchLogErr(err)
 		}
 	}
 	if gap != nil {
@@ -369,15 +403,10 @@ func (w *watchService) read(ctx context.Context, q watchQuery, wait time.Duratio
 	}
 	if wait = waitBudget(ctx, wait); len(page.Events) == 0 && wait > 0 {
 		if page, err = w.waitRead(ctx, query, page, wait); err != nil {
-			return watch.Page{}, err
+			return watch.Page{}, false, err
 		}
 	}
-	if q.group != "" {
-		if err := w.s.watchLog.Ack(ctx, q.group, page.Next); err != nil {
-			return watch.Page{}, w.s.watchLogErr(err)
-		}
-	}
-	return page, nil
+	return page, st.stale, nil
 }
 
 // waitRead waits up to wait for the first events after page, reading on
@@ -505,4 +534,15 @@ func (w *watchService) DeleteGroup(ctx context.Context, req *connect.Request[cha
 		return nil, err
 	}
 	return connect.NewResponse(&chainmailv1.DeleteGroupResponse{Deleted: deleted}), nil
+}
+
+// ack moves a group past a page ReadEvents has read and audited, resetting
+// it when it was stale. A failure is the client's error, with fixed text.
+func (w *watchService) ack(ctx context.Context, group string, id int64, stale bool) error {
+	ctx, cancel := withDeadline(ctx, callTimeout)
+	defer cancel()
+	if err := w.advance(ctx, group, id, stale); err != nil {
+		return toConnectError(w.s.watchLogErr(err))
+	}
+	return nil
 }

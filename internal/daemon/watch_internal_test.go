@@ -392,3 +392,133 @@ func TestWaitBudget(t *testing.T) {
 		}
 	}
 }
+
+// seedStaleGroup creates group acknowledged at acked, past the tail.
+func seedStaleGroup(t *testing.T, s *Server, group string, acked int64) {
+	t.Helper()
+	if _, _, err := s.watchLog.Group(t.Context(), group); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.opts.StateDB.ExecContext(t.Context(), "UPDATE event_groups SET acked_id = ? WHERE name = ?", acked, group); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStaleGroupResetRacesAPublish checks that a group left past the tail
+// is reset to the very position its read starts from. An event published
+// between reading the tail and the reset must not be skipped: the group
+// may not be reset past it.
+func TestStaleGroupResetRacesAPublish(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServer(t)
+	ctx := peerContext(t.Context())
+	if err := s.watchLog.Publish(ctx, testWatchEvent("a"), testWatchEvent("b"), testWatchEvent("c")); err != nil {
+		t.Fatal(err)
+	}
+	seedStaleGroup(t, s, "bot", 50)
+	var once sync.Once
+	w := &watchService{s: s, afterTail: func() {
+		once.Do(func() {
+			if err := s.watchLog.Publish(ctx, testWatchEvent("raced")); err != nil {
+				t.Error(err)
+			}
+		})
+	}}
+	read := func() *chainmailv1.ReadEventsResponse {
+		t.Helper()
+		resp, err := w.ReadEvents(ctx, connect.NewRequest(&chainmailv1.ReadEventsRequest{Group: "bot", Limit: 1}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.Msg
+	}
+	first := read()
+	if ev := first.GetEvents(); len(ev) != 1 || ev[0].GetKind() != "gap" || ev[0].GetNextId() != 4 || first.GetNextCursor() != 3 {
+		t.Fatalf("first read = %v, want the gap to 4 at cursor 3", first)
+	}
+	second := read()
+	if ev := second.GetEvents(); len(ev) != 1 || ev[0].GetId() != 4 || ev[0].GetMessage().GetSubject().GetUntrusted() != "raced" {
+		t.Errorf("second read = %v, want event 4, published during the reset", second)
+	}
+}
+
+// TestReadEventsAuditFailureLeavesTheGroup checks that a group read whose
+// audit write fails does not move the group, so the next read returns the
+// same page. The audit insert fails through a trigger; the event log still
+// works.
+func TestReadEventsAuditFailureLeavesTheGroup(t *testing.T) {
+	t.Parallel()
+	s, stateDB := newTestServer(t)
+	ctx := peerContext(t.Context())
+	w := &watchService{s: s}
+	if _, _, err := s.watchLog.Group(ctx, "bot"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.watchLog.Publish(ctx, testWatchEvent("a"), testWatchEvent("b")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stateDB.ExecContext(ctx, "CREATE TRIGGER audit_down BEFORE INSERT ON audit BEGIN SELECT RAISE(ABORT, 'audit down'); END"); err != nil {
+		t.Fatal(err)
+	}
+	req := &chainmailv1.ReadEventsRequest{Group: "bot"}
+	_, err := w.ReadEvents(ctx, connect.NewRequest(req))
+	if connect.CodeOf(err) != connect.CodeInternal || err == nil || !strings.Contains(err.Error(), "audit write failed") {
+		t.Fatalf("err = %v, want the audit failure", err)
+	}
+	groups, err := s.watchLog.Groups(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].AckedID != 0 {
+		t.Errorf("groups = %+v, want bot still at 0", groups)
+	}
+	if _, err := stateDB.ExecContext(ctx, "DROP TRIGGER audit_down"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := w.ReadEvents(ctx, connect.NewRequest(req))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev := resp.Msg.GetEvents(); len(ev) != 2 || ev[0].GetId() != 1 || ev[1].GetId() != 2 || resp.Msg.GetNextCursor() != 2 {
+		t.Errorf("read after the failure = %v, want events 1 and 2 again", resp.Msg)
+	}
+}
+
+// TestReadEventsAuditFailureLeavesAStaleGroup checks that the reset of a
+// group left past the tail waits for the audit row too: a read that could
+// not be audited leaves the group where it was, so the next read still
+// reports the gap rather than losing it.
+func TestReadEventsAuditFailureLeavesAStaleGroup(t *testing.T) {
+	t.Parallel()
+	s, stateDB := newTestServer(t)
+	ctx := peerContext(t.Context())
+	w := &watchService{s: s}
+	if err := s.watchLog.Publish(ctx, testWatchEvent("a")); err != nil {
+		t.Fatal(err)
+	}
+	seedStaleGroup(t, s, "bot", 50)
+	if _, err := stateDB.ExecContext(ctx, "CREATE TRIGGER audit_down BEFORE INSERT ON audit BEGIN SELECT RAISE(ABORT, 'audit down'); END"); err != nil {
+		t.Fatal(err)
+	}
+	req := &chainmailv1.ReadEventsRequest{Group: "bot"}
+	if _, err := w.ReadEvents(ctx, connect.NewRequest(req)); err == nil || !strings.Contains(err.Error(), "audit write failed") {
+		t.Fatalf("err = %v, want the audit failure", err)
+	}
+	groups, err := s.watchLog.Groups(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].AckedID != 50 {
+		t.Errorf("groups = %+v, want bot still at 50", groups)
+	}
+	if _, err := stateDB.ExecContext(ctx, "DROP TRIGGER audit_down"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := w.ReadEvents(ctx, connect.NewRequest(req))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev := resp.Msg.GetEvents(); len(ev) != 1 || ev[0].GetKind() != "gap" || ev[0].GetNextId() != 2 || resp.Msg.GetNextCursor() != 1 {
+		t.Errorf("read after the failure = %v, want the gap to 2 at cursor 1", resp.Msg)
+	}
+}
