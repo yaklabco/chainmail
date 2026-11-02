@@ -62,7 +62,7 @@ type eventOut struct {
 	Flags    []string    `json:"flags,omitempty" jsonschema:"flags: the current system flags by short name: seen, flagged, answered, draft, deleted"`
 	Keywords []untrusted `json:"keywords,omitempty" jsonschema:"flags: every other current flag, as the server has it; untrusted"`
 	Labels   []untrusted `json:"labels,omitempty" jsonschema:"flags: the current Gmail labels; untrusted"`
-	State    string      `json:"state,omitempty" jsonschema:"status: baselined, catching_up, watching, polling, reconnecting, auth_required or error"`
+	State    string      `json:"state,omitempty" jsonschema:"status: baselined, watching, polling, reconnecting, auth_required or error; catching_up is reserved and not published"`
 	Detail   string      `json:"detail,omitempty" jsonschema:"status: what to do, such as the command James should run"`
 	Reason   string      `json:"reason,omitempty" jsonschema:"gap: trimmed when events were lost, uidvalidity when a folder was reset"`
 	NextID   int64       `json:"next_id,omitempty" jsonschema:"gap: the event ID reading continues from"`

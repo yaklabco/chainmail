@@ -1184,3 +1184,21 @@ func TestWatchGroupAcksAfterAResetLog(t *testing.T) {
 		t.Errorf("new events printed = %v, want [mail 100 mail 4]", s)
 	}
 }
+
+// The help says what stops a watch. An account that needs a login does
+// not: the daemon keeps the stream open and publishes an auth_required
+// status event instead.
+func TestWatchHelpOnAccountsNeedingALogin(t *testing.T) {
+	t.Parallel()
+	got := runCLI(t, Env{}, "watch", "--help")
+	if got.code != 0 {
+		t.Fatalf("watch --help: %+v", got)
+	}
+	help := strings.Join(strings.Fields(got.stdout), " ")
+	if strings.Contains(help, "refuses the request, such as a bad group name or an account that needs a login") {
+		t.Errorf("help says an account that needs a login stops the watch:\n%s", got.stdout)
+	}
+	if !strings.Contains(help, "auth_required status event") {
+		t.Errorf("help does not say an account that needs a login gets an auth_required status event:\n%s", got.stdout)
+	}
+}

@@ -38,7 +38,9 @@ inbox also matches \Inbox.
 The watch reconnects by itself when the daemon goes away, or sends nothing
 for 75 seconds, resuming from its group or from the last event or
 heartbeat it saw. It stops with an error only when the daemon refuses the
-request, such as a bad group name or an account that needs a login.
+request, such as a bad group name or an unknown account. An account that
+needs a login does not stop it: the watch goes on, and an auth_required
+status event says what to run.
 --once stops at the first heartbeat, which comes once every event already
 in the log has been printed.
 

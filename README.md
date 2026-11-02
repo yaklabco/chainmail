@@ -995,6 +995,8 @@ The mode is `idle` for a folder watched with IDLE and `poll` for a polled one, i
 | `auth_required` | The server rejected the account's credentials, or it has no secret. Every loop of the account stops and every folder shows this state, with the last error `AUTH_REQUIRED`. One `status` event with an empty folder stands for the whole account, and its `detail` is the command James must run, such as `run: chainmail auth login work`. Watching starts again within 15 seconds of `secret set` or `auth login` clearing the state. |
 | `error` | The folder does not exist. The last error is `FOLDER_NOT_FOUND`, and the folder is tried again every `sync.poll`. The account's other folders keep running. |
 
+The event schema also names a `catching_up` state. It is reserved and not published yet: a folder catches up inside one sync, which reports its events as it commits them.
+
 When the daemon shuts down, each watcher ends its IDLE and logs out, within 5 seconds.
 
 ## NixOS deployment
