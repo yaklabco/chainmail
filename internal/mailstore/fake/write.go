@@ -235,11 +235,20 @@ func isBin(role mailstore.Role) bool {
 var errBinNotInAllMail = fmt.Errorf("%w: the message is in Trash or Spam, not All Mail, and Gmail keeps one copy of a message; move it to All Mail instead", mailstore.ErrUnsupported)
 
 // relocateLocked moves m to folder under a new UID and returns its new ref.
+// m leaves its old folder as an EXPUNGE there would.
 func (s *Store) relocateLocked(m *Message, folder string) ref.Ref {
+	s.changedLocked(m.Folder, true)
+	s.placeLocked(m, folder)
+	return s.refLocked(m)
+}
+
+// placeLocked gives m the next UID in folder, as a message arriving there,
+// and a new MODSEQ.
+func (s *Store) placeLocked(m *Message, folder string) {
 	m.Folder = folder
 	m.uid = s.nextUID[folder]
 	s.nextUID[folder]++
-	return s.refLocked(m)
+	s.touchLocked(m)
 }
 
 // allMailLocked is the name of Gmail's All Mail folder.
@@ -299,6 +308,7 @@ func (s *Store) Append(ctx context.Context, folder string, flags []string, date 
 	m.uid = s.nextUID[m.Folder]
 	s.nextUID[m.Folder]++
 	s.msgs = append(s.msgs, &m)
+	s.touchLocked(&m)
 	s.appended = append(s.appended, slices.Clone(raw))
 	return s.refInLocked(&m, folder), nil
 }
@@ -372,6 +382,7 @@ func (s *Store) moveLocked(m *Message, r ref.Ref, dest mailstore.Folder) (ref.Re
 	if holdsMail(dest.Role) {
 		if !holdsMail(src.Role) && dest.Role == mailstore.RoleAll {
 			m.Labels = editSet(m.Labels, nil, []string{labelOf(src)})
+			s.touchLocked(m)
 		}
 		if m.Folder != dest.Name {
 			s.relocateLocked(m, dest.Name)
@@ -400,6 +411,7 @@ func (s *Store) moveLocked(m *Message, r ref.Ref, dest mailstore.Folder) (ref.Re
 func (s *Store) labelLocked(m *Message, r ref.Ref, src mailstore.Folder, add, remove []string) ref.Ref {
 	m.Labels = editSet(m.Labels, add, remove)
 	flagFromLabels(m, add, remove)
+	s.touchLocked(m)
 	if !holdsMail(src.Role) && slices.ContainsFunc(remove, func(l string) bool { return strings.EqualFold(l, labelOf(src)) }) {
 		return s.refLocked(m)
 	}
@@ -427,7 +439,8 @@ func (s *Store) Copy(ctx context.Context, refs []ref.Ref, folder string) []mails
 		if !s.gmail {
 			c := cloneMessage(*m)
 			s.msgs = append(s.msgs, &c)
-			return s.relocateLocked(&c, dest.Name), nil
+			s.placeLocked(&c, dest.Name)
+			return s.refLocked(&c), nil
 		}
 		switch {
 		case dest.Role == mailstore.RoleTrash || dest.Role == mailstore.RoleSpam:
@@ -495,6 +508,7 @@ func (s *Store) Expunge(ctx context.Context, refs []ref.Ref) []mailstore.RefResu
 			}
 			s.relocateLocked(m, trash)
 		}
+		s.changedLocked(m.Folder, true)
 		s.msgs = slices.DeleteFunc(s.msgs, func(o *Message) bool { return o == m })
 		return ref.Ref{}, nil
 	})
@@ -514,6 +528,7 @@ func (s *Store) StoreFlags(ctx context.Context, refs []ref.Ref, add, remove []st
 		if s.gmail {
 			starFromFlags(m, add, remove)
 		}
+		s.touchLocked(m)
 		return r, nil
 	})
 }
@@ -805,9 +820,10 @@ func (s *Store) renameLocked(from, to string) error {
 	}
 	for _, c := range moving {
 		next := renamed(c.Name)
-		v, uid := s.uidValidity[c.Name], s.nextUID[c.Name]
+		v, uid, modseq := s.uidValidity[c.Name], s.nextUID[c.Name], s.modseq[c.Name]
 		s.removeFolderLocked(c.Name)
 		s.addFolderLocked(next, c.Role, v, uid)
+		s.modseq[next] = modseq
 		for _, m := range s.msgs {
 			if m.Folder == c.Name {
 				m.Folder = next
@@ -815,6 +831,7 @@ func (s *Store) renameLocked(from, to string) error {
 			if s.gmail && hasLabel(m, c.Name) {
 				m.Labels = editSet(m.Labels, nil, []string{c.Name})
 				m.Labels = append(m.Labels, next)
+				s.touchLocked(m)
 			}
 		}
 	}
@@ -850,7 +867,10 @@ func (s *Store) DeleteFolder(ctx context.Context, name string, force bool) error
 	}
 	if s.gmail {
 		for _, m := range s.msgs {
-			m.Labels = editSet(m.Labels, nil, []string{name})
+			if hasLabel(m, name) {
+				m.Labels = editSet(m.Labels, nil, []string{name})
+				s.touchLocked(m)
+			}
 		}
 	} else {
 		s.msgs = slices.DeleteFunc(s.msgs, func(m *Message) bool { return m.Folder == name })
