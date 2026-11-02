@@ -2,10 +2,7 @@ package client
 
 import (
 	"context"
-	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -50,29 +47,12 @@ func (s stubWatch) Subscribe(_ context.Context, req *connect.Request[chainmailv1
 }
 
 // serveWatch serves h as the WatchService on a new Unix socket and returns
-// the socket path. The directory comes from os.MkdirTemp rather than
-// t.TempDir, since a socket path must fit in sun_path.
+// the socket path.
 func serveWatch(t *testing.T, h chainmailv1connect.WatchServiceHandler) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "cmc")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	socket := filepath.Join(dir, "s.sock")
-	var lc net.ListenConfig
-	ln, err := lc.Listen(t.Context(), "unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
 	mux := http.NewServeMux()
 	mux.Handle(chainmailv1connect.NewWatchServiceHandler(h))
-	protocols := new(http.Protocols)
-	protocols.SetUnencryptedHTTP2(true)
-	srv := &http.Server{Protocols: protocols, Handler: mux}
-	go func() { _ = srv.Serve(ln) }() // returns http.ErrServerClosed on Close
-	t.Cleanup(func() { _ = srv.Close() })
-	return socket
+	return serveUnix(t, &http.Server{Handler: mux})
 }
 
 // TestWatchReadEventsReachesTheDaemon checks that the Watch client calls
