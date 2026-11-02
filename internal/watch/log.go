@@ -284,3 +284,73 @@ func tailOf(ctx context.Context, q queryer) (int64, error) {
 	}
 	return tail, nil
 }
+
+// Trim deletes events older than retention, then the oldest beyond
+// maxEvents, then groups not seen for longer than retention. It returns
+// the number of events deleted.
+func (l *Log) Trim(ctx context.Context, retention time.Duration, maxEvents int) (int64, error) {
+	if retention <= 0 || maxEvents < 1 {
+		return 0, fmt.Errorf("watch: trim needs a positive retention and max events, got %s and %d", retention, maxEvents)
+	}
+	cutoff := formatTime(l.now().Add(-retention))
+	tx, err := l.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("watch: beginning trim: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // a no-op after Commit; an earlier error is the one to report
+
+	var deleted int64
+	for _, del := range []struct {
+		query string
+		args  []any
+	}{
+		{"DELETE FROM events WHERE at < ?", []any{cutoff}},
+		// The subquery is the newest ID beyond the cap, NULL when there are
+		// not that many events, and id <= NULL deletes nothing.
+		{"DELETE FROM events WHERE id <= (SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET ?)", []any{maxEvents}},
+	} {
+		res, err := tx.ExecContext(ctx, del.query, del.args...)
+		if err != nil {
+			return 0, fmt.Errorf("watch: trimming events: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("watch: trimming events: %w", err)
+		}
+		deleted += n
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM event_groups WHERE last_seen_at < ?", cutoff); err != nil {
+		return 0, fmt.Errorf("watch: pruning groups: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("watch: committing trim: %w", err)
+	}
+	return deleted, nil
+}
+
+// Run trims every interval until ctx ends. It trims once on entry too, so a
+// daemon that restarts often still trims. A failed trim is logged to Logger
+// and retried at the next tick; one cut short because ctx ended is not
+// logged. A nil Logger discards failures. A non-positive interval means
+// an hour.
+func (l *Log) Run(ctx context.Context, interval, retention time.Duration, maxEvents int) {
+	logger := l.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if _, err := l.Trim(ctx, retention, maxEvents); err != nil && ctx.Err() == nil {
+			logger.ErrorContext(ctx, "trimming the event log failed", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
