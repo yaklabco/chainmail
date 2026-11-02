@@ -919,20 +919,32 @@ func TestSettleEndsOnShutdown(t *testing.T) {
 	}
 }
 
-// settleAsync runs s.settle in a goroutine with a write that signals when
-// it starts, then blocks until its context ends and returns that context's
-// error. It returns the started signal and the channel settle's result
-// arrives on; the test joins the goroutine by receiving it.
-func settleAsync(ctx context.Context, s *Server) (started <-chan struct{}, result <-chan error) {
+// settleAsync runs s.settle on a joined worker with a write that signals
+// when it starts, then blocks until its context ends and returns that
+// context's error. It returns the started signal and the channel settle's
+// result arrives on. A cleanup releases the write, whatever the behavior
+// under test did, and waits for the worker, so it never outlives the test.
+func settleAsync(ctx context.Context, t *testing.T, s *Server) (started <-chan struct{}, result <-chan error) {
+	t.Helper()
 	start := make(chan struct{})
+	release := make(chan struct{})
 	res := make(chan error, 1)
-	go func() {
+	var wg sync.WaitGroup
+	wg.Go(func() {
 		res <- s.settle(ctx, func(wctx context.Context) error {
 			close(start)
-			<-wctx.Done()
-			return wctx.Err()
+			select {
+			case <-wctx.Done():
+				return wctx.Err()
+			case <-release:
+				return errors.New("released by the test's cleanup")
+			}
 		})
-	}()
+	})
+	t.Cleanup(func() {
+		close(release)
+		wg.Wait()
+	})
 	return start, res
 }
 
@@ -942,7 +954,7 @@ func settleResult(t *testing.T, result <-chan error) error {
 	select {
 	case err := <-result:
 		return err
-	case <-time.After(settleTimeout / 2):
+	case <-time.After(2500 * time.Millisecond): // half the 5s bound
 		t.Fatal("settle did not return after its write's context should have ended")
 		return nil
 	}
@@ -956,7 +968,7 @@ func TestSettleCancelDuringWrite(t *testing.T) {
 	s, _ := newTestServer(t)
 	ctx, cancel := context.WithCancel(peerContext(t.Context()))
 	defer cancel()
-	started, result := settleAsync(ctx, s)
+	started, result := settleAsync(ctx, t, s)
 	<-started
 	cancel()
 	if err := settleResult(t, result); !errors.Is(err, context.Canceled) {
@@ -975,7 +987,7 @@ func TestSettleShutdownDuringWrite(t *testing.T) {
 	s.shutdown = shutdown
 	late := newLateCtx(peerContext(t.Context()))
 	late.expire()
-	started, result := settleAsync(late, s)
+	started, result := settleAsync(late, t, s)
 	<-started
 	close(shutdown)
 	if err := settleResult(t, result); !errors.Is(err, context.Canceled) {
@@ -984,7 +996,7 @@ func TestSettleShutdownDuringWrite(t *testing.T) {
 }
 
 // TestSettleBound checks the bound on a settlement write: a deadline
-// settleTimeout from when it starts, in place of the request's deadline,
+// 5 seconds from when it starts, in place of the request's deadline,
 // which has already passed. Only the deadline is read, so nothing waits
 // the 5 seconds out.
 func TestSettleBound(t *testing.T) {
@@ -1003,8 +1015,9 @@ func TestSettleBound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("settle past the request's deadline = %v, want nil", err)
 	}
-	if !ok || deadline.Before(before.Add(settleTimeout)) || deadline.After(after.Add(settleTimeout)) {
-		t.Errorf("write deadline = %v, %v; want %v after the call, between %v and %v",
-			deadline, ok, settleTimeout, before.Add(settleTimeout), after.Add(settleTimeout))
+	const bound = 5 * time.Second
+	if !ok || deadline.Before(before.Add(bound)) || deadline.After(after.Add(bound)) {
+		t.Errorf("write deadline = %v, %v; want 5s after the call, between %v and %v",
+			deadline, ok, before.Add(bound), after.Add(bound))
 	}
 }
