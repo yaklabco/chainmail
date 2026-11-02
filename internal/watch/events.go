@@ -105,7 +105,7 @@ func encodePayload(e Event) (string, error) {
 	switch e.Kind {
 	case KindNew:
 		if e.Message == nil {
-			return "", fmt.Errorf("watch: new event for %s has no message", e.Ref)
+			return "", fmt.Errorf("new event for %s has no message", e.Ref)
 		}
 		v = newPayload{Message: e.Message}
 	case KindFlags:
@@ -117,11 +117,11 @@ func encodePayload(e Event) (string, error) {
 	case KindExpunged:
 		return "{}", nil
 	default:
-		return "", fmt.Errorf("watch: unknown event kind %q", e.Kind)
+		return "", fmt.Errorf("unknown event kind %q", e.Kind)
 	}
 	b, err := json.Marshal(v)
 	if err != nil {
-		return "", fmt.Errorf("watch: encoding %s payload: %w", e.Kind, err)
+		return "", fmt.Errorf("encoding %s payload: %w", e.Kind, err)
 	}
 	return string(b), nil
 }
@@ -154,10 +154,10 @@ func decodePayload(e *Event, payload string) error {
 		}
 	case KindExpunged:
 	default:
-		return fmt.Errorf("watch: event %d has unknown kind %q", e.ID, e.Kind)
+		return fmt.Errorf("event %d has unknown kind %q", e.ID, e.Kind)
 	}
 	if err != nil {
-		return fmt.Errorf("watch: decoding event %d payload: %w", e.ID, err)
+		return fmt.Errorf("decoding event %d payload: %w", e.ID, err)
 	}
 	return nil
 }

@@ -370,7 +370,7 @@ func (w *watchService) ReadEvents(ctx context.Context, req *connect.Request[chai
 			return resp, err
 		}
 	}
-	return nil, toConnectError(w.s.watchLogErr(fmt.Errorf("watch: group %s kept changing while it was recovered", q.group)))
+	return nil, toConnectError(w.s.watchLogErr(fmt.Errorf("group %s kept changing while it was recovered", q.group)))
 }
 
 // readOnce is one try of ReadEvents: the read, its audit row, then the

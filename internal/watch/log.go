@@ -107,13 +107,13 @@ func (l *Log) Append(ctx context.Context, tx *sql.Tx, events []Event) error {
 	stmt, err := tx.PrepareContext(ctx,
 		"INSERT INTO events (at, account, folder, kind, ref, payload) VALUES (?, ?, ?, ?, ?, ?)")
 	if err != nil {
-		return fmt.Errorf("watch: preparing event insert: %w", err)
+		return fmt.Errorf("preparing event insert: %w", err)
 	}
 	defer func() { _ = stmt.Close() }() // closing a prepared statement only frees it
 	for i := range events {
 		e := &events[i]
 		if e.Kind == KindGap && e.Reason == GapTrimmed {
-			return errors.New("watch: trimmed gaps are generated at read time and never stored")
+			return errors.New("trimmed gaps are generated at read time and never stored")
 		}
 		payload, err := encodePayload(*e)
 		if err != nil {
@@ -124,10 +124,10 @@ func (l *Log) Append(ctx context.Context, tx *sql.Tx, events []Event) error {
 		}
 		res, err := stmt.ExecContext(ctx, formatTime(e.At), e.Account, e.Folder, string(e.Kind), e.Ref, payload)
 		if err != nil {
-			return fmt.Errorf("watch: appending %s event: %w", e.Kind, err)
+			return fmt.Errorf("appending %s event: %w", e.Kind, err)
 		}
 		if e.ID, err = res.LastInsertId(); err != nil {
-			return fmt.Errorf("watch: appending %s event: %w", e.Kind, err)
+			return fmt.Errorf("appending %s event: %w", e.Kind, err)
 		}
 	}
 	return nil
@@ -148,14 +148,14 @@ func (l *Log) Publish(ctx context.Context, events ...Event) error {
 	}
 	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("watch: beginning publish: %w", err)
+		return fmt.Errorf("beginning publish: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }() // a no-op after Commit; an earlier error is the one to report
 	if err := l.Append(ctx, tx, events); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("watch: committing publish: %w", err)
+		return fmt.Errorf("committing publish: %w", err)
 	}
 	l.Notify()
 	return nil
@@ -177,18 +177,18 @@ func (l *Log) Read(ctx context.Context, q Query) (Page, error) {
 		limit = defaultReadLimit
 	}
 	if limit < 1 || limit > maxReadLimit {
-		return Page{}, fmt.Errorf("watch: read limit %d must be 1 to %d", q.Limit, maxReadLimit)
+		return Page{}, fmt.Errorf("read limit %d must be 1 to %d", q.Limit, maxReadLimit)
 	}
 	if q.After < 0 {
 		// A negative start would look like a read from below the oldest
 		// event and produce a trimmed gap that hides nothing.
-		return Page{}, fmt.Errorf("watch: read position %d must not be negative", q.After)
+		return Page{}, fmt.Errorf("read position %d must not be negative", q.After)
 	}
 	// One read transaction gives a consistent view, so a Trim cannot remove
 	// events between the gap check and the scan.
 	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
-		return Page{}, fmt.Errorf("watch: beginning read: %w", err)
+		return Page{}, fmt.Errorf("beginning read: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }() // read-only; nothing to keep
 
@@ -201,7 +201,7 @@ func (l *Log) Read(ctx context.Context, q Query) (Page, error) {
 	if after < tail {
 		var oldest int64
 		if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MIN(id), 0) FROM events").Scan(&oldest); err != nil {
-			return Page{}, fmt.Errorf("watch: reading the oldest event: %w", err)
+			return Page{}, fmt.Errorf("reading the oldest event: %w", err)
 		}
 		if oldest == 0 || oldest > after+1 {
 			next := oldest
@@ -256,19 +256,19 @@ func readRows(ctx context.Context, q queryer, after int64, n int) ([]eventRow, e
 		"SELECT id, at, account, folder, kind, ref, payload FROM events WHERE id > ? ORDER BY id LIMIT ?",
 		after, n)
 	if err != nil {
-		return nil, fmt.Errorf("watch: reading events: %w", err)
+		return nil, fmt.Errorf("reading events: %w", err)
 	}
 	defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
 	var out []eventRow
 	for rows.Next() {
 		var r eventRow
 		if err := rows.Scan(&r.id, &r.at, &r.account, &r.folder, &r.kind, &r.ref, &r.body); err != nil {
-			return nil, fmt.Errorf("watch: reading events: %w", err)
+			return nil, fmt.Errorf("reading events: %w", err)
 		}
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("watch: reading events: %w", err)
+		return nil, fmt.Errorf("reading events: %w", err)
 	}
 	return out, nil
 }
@@ -277,7 +277,7 @@ func readRows(ctx context.Context, q queryer, after int64, n int) ([]eventRow, e
 func (r eventRow) event() (Event, error) {
 	at, err := parseTime(r.at)
 	if err != nil {
-		return Event{}, fmt.Errorf("watch: event %d: %w", r.id, err)
+		return Event{}, fmt.Errorf("event %d: %w", r.id, err)
 	}
 	e := Event{ID: r.id, At: at, Kind: Kind(r.kind), Account: r.account, Folder: r.folder, Ref: r.ref}
 	if err := decodePayload(&e, r.body); err != nil {
@@ -296,7 +296,7 @@ func tailOf(ctx context.Context, q queryer) (int64, error) {
 	err := q.QueryRowContext(ctx,
 		"SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'events'), 0)").Scan(&tail)
 	if err != nil {
-		return 0, fmt.Errorf("watch: reading the log tail: %w", err)
+		return 0, fmt.Errorf("reading the log tail: %w", err)
 	}
 	return tail, nil
 }
@@ -426,7 +426,7 @@ func (l *Log) Wait(ctx context.Context, after int64) error {
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("watch: waiting for events: %w", ctx.Err())
+			return fmt.Errorf("waiting for events: %w", ctx.Err())
 		case <-woken:
 		}
 	}
@@ -436,11 +436,11 @@ func (l *Log) Wait(ctx context.Context, after int64) error {
 // when it does not exist, and stamps last_seen_at.
 func (l *Log) Group(ctx context.Context, name string) (acked int64, created bool, err error) {
 	if !ValidGroupName(name) {
-		return 0, false, fmt.Errorf("watch: invalid group name %q", name)
+		return 0, false, fmt.Errorf("invalid group name %q", name)
 	}
 	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, false, fmt.Errorf("watch: beginning group %s: %w", name, err)
+		return 0, false, fmt.Errorf("beginning group %s: %w", name, err)
 	}
 	defer func() { _ = tx.Rollback() }() // a no-op after Commit; an earlier error is the one to report
 
@@ -459,10 +459,10 @@ func (l *Log) Group(ctx context.Context, name string) (acked int64, created bool
 		_, err = tx.ExecContext(ctx, "UPDATE event_groups SET last_seen_at = ? WHERE name = ?", now, name)
 	}
 	if err != nil {
-		return 0, false, fmt.Errorf("watch: group %s: %w", name, err)
+		return 0, false, fmt.Errorf("group %s: %w", name, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, false, fmt.Errorf("watch: committing group %s: %w", name, err)
+		return 0, false, fmt.Errorf("committing group %s: %w", name, err)
 	}
 	return acked, created, nil
 }
@@ -487,11 +487,11 @@ func (l *Log) TouchGroup(ctx context.Context, name string) error {
 // last_seen_at.
 func (l *Log) Ack(ctx context.Context, name string, id int64) error {
 	if !ValidGroupName(name) {
-		return fmt.Errorf("watch: invalid group name %q", name)
+		return fmt.Errorf("invalid group name %q", name)
 	}
 	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("watch: beginning ack for %s: %w", name, err)
+		return fmt.Errorf("beginning ack for %s: %w", name, err)
 	}
 	defer func() { _ = tx.Rollback() }() // a no-op after Commit; an earlier error is the one to report
 
@@ -506,10 +506,10 @@ func (l *Log) Ack(ctx context.Context, name string, id int64) error {
 		 ON CONFLICT (name) DO UPDATE SET acked_id = max(acked_id, excluded.acked_id), last_seen_at = excluded.last_seen_at`,
 		name, id, now, now)
 	if err != nil {
-		return fmt.Errorf("watch: acknowledging %s: %w", name, err)
+		return fmt.Errorf("acknowledging %s: %w", name, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("watch: committing ack for %s: %w", name, err)
+		return fmt.Errorf("committing ack for %s: %w", name, err)
 	}
 	return nil
 }
@@ -524,20 +524,20 @@ func (l *Log) Ack(ctx context.Context, name string, id int64) error {
 // unlike Ack it can lower the ID, and it does not cap to at Tail.
 func (l *Log) ResetGroup(ctx context.Context, name string, from, to int64) (bool, error) {
 	if !ValidGroupName(name) {
-		return false, fmt.Errorf("watch: invalid group name %q", name)
+		return false, fmt.Errorf("invalid group name %q", name)
 	}
 	if to < 0 {
-		return false, fmt.Errorf("watch: group %s reset to negative ID %d", name, to)
+		return false, fmt.Errorf("group %s reset to negative ID %d", name, to)
 	}
 	res, err := l.db.ExecContext(ctx,
 		"UPDATE event_groups SET acked_id = ?, last_seen_at = ? WHERE name = ? AND acked_id = ?",
 		to, formatTime(l.now()), name, from)
 	if err != nil {
-		return false, fmt.Errorf("watch: resetting group %s: %w", name, err)
+		return false, fmt.Errorf("resetting group %s: %w", name, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("watch: resetting group %s: %w", name, err)
+		return false, fmt.Errorf("resetting group %s: %w", name, err)
 	}
 	return n > 0, nil
 }
@@ -549,7 +549,7 @@ func (l *Log) Groups(ctx context.Context) ([]GroupInfo, error) {
 		        (SELECT count(*) FROM events e WHERE e.id > g.acked_id)
 		 FROM event_groups g ORDER BY g.name`)
 	if err != nil {
-		return nil, fmt.Errorf("watch: listing groups: %w", err)
+		return nil, fmt.Errorf("listing groups: %w", err)
 	}
 	defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
 	type row struct {
@@ -560,20 +560,20 @@ func (l *Log) Groups(ctx context.Context) ([]GroupInfo, error) {
 	for rows.Next() {
 		var r row
 		if err := rows.Scan(&r.info.Name, &r.info.AckedID, &r.created, &r.lastSeen, &r.info.Lag); err != nil {
-			return nil, fmt.Errorf("watch: listing groups: %w", err)
+			return nil, fmt.Errorf("listing groups: %w", err)
 		}
 		raw = append(raw, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("watch: listing groups: %w", err)
+		return nil, fmt.Errorf("listing groups: %w", err)
 	}
 	out := make([]GroupInfo, 0, len(raw))
 	for _, r := range raw {
 		if r.info.CreatedAt, err = parseTime(r.created); err != nil {
-			return nil, fmt.Errorf("watch: group %s: %w", r.info.Name, err)
+			return nil, fmt.Errorf("group %s: %w", r.info.Name, err)
 		}
 		if r.info.LastSeenAt, err = parseTime(r.lastSeen); err != nil {
-			return nil, fmt.Errorf("watch: group %s: %w", r.info.Name, err)
+			return nil, fmt.Errorf("group %s: %w", r.info.Name, err)
 		}
 		out = append(out, r.info)
 	}
@@ -584,11 +584,11 @@ func (l *Log) Groups(ctx context.Context) ([]GroupInfo, error) {
 func (l *Log) DeleteGroup(ctx context.Context, name string) (bool, error) {
 	res, err := l.db.ExecContext(ctx, "DELETE FROM event_groups WHERE name = ?", name)
 	if err != nil {
-		return false, fmt.Errorf("watch: deleting group %s: %w", name, err)
+		return false, fmt.Errorf("deleting group %s: %w", name, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("watch: deleting group %s: %w", name, err)
+		return false, fmt.Errorf("deleting group %s: %w", name, err)
 	}
 	return n > 0, nil
 }
