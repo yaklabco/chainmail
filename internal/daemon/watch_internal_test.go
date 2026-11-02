@@ -177,6 +177,8 @@ func TestGroupProto(t *testing.T) {
 }
 
 // serveWatchTest serves s until the test ends and returns a client of it.
+// Build s with DisableWatch when the test reads the event log, or the
+// supervisors' status events land in it too.
 func serveWatchTest(t *testing.T, s *Server) *client.Client {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -202,7 +204,7 @@ func testWatchEvent(subject string) watch.Event {
 // could wake it before the test's deadline.
 func TestSubscribeWakesOnNotify(t *testing.T) {
 	t.Parallel()
-	s, _ := newTestServerOptions(t, passwordConfig, Options{WatchHeartbeat: time.Hour})
+	s, _ := newTestServerOptions(t, passwordConfig, Options{WatchHeartbeat: time.Hour, DisableWatch: true})
 	c := serveWatchTest(t, s)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()

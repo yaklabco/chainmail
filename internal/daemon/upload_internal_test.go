@@ -103,6 +103,8 @@ func serveUploads(t *testing.T, timers *uploadTimers) uploadDaemon {
 	s, err := New(Options{
 		Config: cfg, Vault: v, StateDB: stateDB, Listener: ln, StateDir: dir,
 		Authorizer: NewAuthorizer(uint32(os.Getuid()), -1),
+		// Uploads are the subject: no supervisor runs beside them.
+		DisableWatch: true,
 	})
 	if err != nil {
 		t.Fatal(err)
