@@ -881,3 +881,27 @@ func TestWatchGroupAcksBeforeReconnect(t *testing.T) {
 		t.Errorf("acks = %v, want [2]", acks)
 	}
 }
+
+// brokenStdout fails every write, as a closed pipe does.
+type brokenStdout struct{}
+
+func (brokenStdout) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+// A failure to write stdout ends the watch at once with exit 1, without a
+// reconnect: a second Subscribe call would exit 2 instead.
+func TestWatchStopsWhenStdoutFails(t *testing.T) {
+	t.Parallel()
+	f := newFakeWatch(playThen(nil, eventItem(newEvent(1, "a"))))
+	socket := startFakeWatch(t, f)
+	clock := newFakeClock(allButHeartbeat)
+	got := runCLI(t, Env{Stdout: brokenStdout{}, After: clock.After}, "--socket", socket, "watch")
+	if got.code != api.ExitInternal {
+		t.Fatalf("watch: %+v, want exit 1", got)
+	}
+	if n := len(f.requests()); n != 1 {
+		t.Errorf("%d Subscribe calls, want 1", n)
+	}
+	if b := clock.backoffs(); len(b) != 0 {
+		t.Errorf("backoffs = %v after a failed write, want none", b)
+	}
+}
