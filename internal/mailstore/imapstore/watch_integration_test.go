@@ -22,16 +22,6 @@ func TestWatchDovecot(t *testing.T) {
 		CondStore: true,
 		Idle:      true,
 		New: func(t *testing.T) (mailstore.Watcher, storetest.WatchRemote) {
-			if t.Name() == "TestWatchDovecot/watch/uidvalidity_change" {
-				// A session open across a doveadm UIDVALIDITY change sees the
-				// new value without a HIGHESTMODSEQ, so NewUIDValidity kicks
-				// the user's sessions, as SetUIDValidity does, the Watcher's
-				// included. WatchConn.Sync documents that a
-				// dropped connection is ErrUnavailable and the caller dials
-				// again, but this storetest case keeps one WatchConn across
-				// the change. The pooled run of the case redials and passes.
-				t.Skip("storetest defect: the watch path of the uidvalidity case cannot redial after NewUIDValidity drops the WatchConn")
-			}
 			user := doveUser(t)
 			return doveStore(t, user), doveRemote(user)
 		},
@@ -62,6 +52,9 @@ func doveRemote(user string) storetest.WatchRemote {
 				t.Fatalf("expunging %s/%d: %v", folder, uid, err)
 			}
 		},
+		// NewUIDValidity kicks the user's sessions, the Watcher's included:
+		// a session open across the change would see the folder without a
+		// HIGHESTMODSEQ. RunWatch redials the dropped watch connection.
 		NewUIDValidity: func(t *testing.T, folder string) {
 			t.Helper()
 			v, err := dove().UIDValidity(user, folder)

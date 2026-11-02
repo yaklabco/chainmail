@@ -40,6 +40,8 @@ type WatchRemote struct {
 	// Expunge removes the message with uid from folder.
 	Expunge func(t *testing.T, folder string, uid uint32)
 	// NewUIDValidity gives folder a new UIDVALIDITY and its messages new UIDs.
+	// It may drop the account's sessions, the Watcher's included, as a
+	// server-side reset can: RunWatch redials a dropped watch connection.
 	NewUIDValidity func(t *testing.T, folder string)
 	// Flags returns the flags of the message with uid in folder, read
 	// without changing them.
@@ -79,7 +81,7 @@ func RunWatch(t *testing.T, h WatchHarness) {
 	t.Helper()
 	paths := []struct {
 		name string
-		open func(t *testing.T, w mailstore.Watcher, folder string) passFunc
+		open func(t *testing.T, w mailstore.Watcher, folder string) (passFunc, func())
 	}{
 		{"watch", watchPass},
 		{"pooled", pooledPass},
@@ -89,7 +91,15 @@ func RunWatch(t *testing.T, h WatchHarness) {
 			for _, c := range passCases {
 				t.Run(c.name, func(t *testing.T) {
 					w, r := h.New(t)
-					c.run(t, h, r, p.open(t, w, h.Folder))
+					pass, renumbered := p.open(t, w, h.Folder)
+					if renumbered != nil {
+						renumber := r.NewUIDValidity
+						r.NewUIDValidity = func(t *testing.T, folder string) {
+							renumber(t, folder)
+							renumbered()
+						}
+					}
+					c.run(t, h, r, pass)
 				})
 			}
 		})
@@ -133,20 +143,37 @@ func openWatch(t *testing.T, w mailstore.Watcher, folder string) mailstore.Watch
 	return wc
 }
 
-func watchPass(t *testing.T, w mailstore.Watcher, folder string) passFunc {
+// watchPass runs passes on one watch connection, as the supervisor does,
+// and returns the hook RunWatch calls after NewUIDValidity. A renumbering
+// may drop every session of the account, as Dovecot's does, and a dropped
+// watch connection is the caller's to redial (WatchConn.Sync), so the
+// first pass after one redials once when the connection was lost. Any
+// other pass that loses it fails the case, and a server that keeps the
+// session across the renumbering keeps the same connection.
+func watchPass(t *testing.T, w mailstore.Watcher, folder string) (passFunc, func()) {
 	t.Helper()
 	wc := openWatch(t, w, folder)
-	return func(t *testing.T, req mailstore.SyncRequest) mailstore.Delta {
+	renumbered := false
+	pass := func(t *testing.T, req mailstore.SyncRequest) mailstore.Delta {
 		t.Helper()
 		d, err := wc.Sync(t.Context(), req)
+		if err != nil && renumbered && errors.Is(err, mailstore.ErrUnavailable) {
+			t.Logf("the renumbering dropped the watch connection (%v); dialing again", err)
+			wc = openWatch(t, w, folder)
+			d, err = wc.Sync(t.Context(), req)
+		}
+		renumbered = false
 		if err != nil {
 			t.Fatalf("WatchConn.Sync(%+v) = %v", req, err)
 		}
 		return d
 	}
+	return pass, func() { renumbered = true }
 }
 
-func pooledPass(_ *testing.T, w mailstore.Watcher, folder string) passFunc {
+// pooledPass runs passes on pooled connections. SyncFolder redials a
+// dropped connection itself, so it needs no hook after a renumbering.
+func pooledPass(_ *testing.T, w mailstore.Watcher, folder string) (passFunc, func()) {
 	return func(t *testing.T, req mailstore.SyncRequest) mailstore.Delta {
 		t.Helper()
 		d, err := w.SyncFolder(t.Context(), folder, req)
@@ -154,7 +181,7 @@ func pooledPass(_ *testing.T, w mailstore.Watcher, folder string) passFunc {
 			t.Fatalf("SyncFolder(%q, %+v) = %v", folder, req, err)
 		}
 		return d
-	}
+	}, nil
 }
 
 // watchMsg is a message for the watch cases, told apart by token.
@@ -232,10 +259,14 @@ func watchBaseline(t *testing.T, h WatchHarness, r WatchRemote, pass passFunc) {
 // every message with its flags, and FullFlags is set. With CONDSTORE it is
 // every message on Gmail, for its X-GM-MSGID, and nothing elsewhere, and
 // FullFlags is unset. Entries carry an X-GM-MSGID exactly on Gmail.
+// CONDSTORE is the pass's own d.State.CondStore, not the harness's: a
+// server may report a folder without mod-sequences (NOMODSEQ) after a
+// renumbering, and the pass then owes the rebase without CONDSTORE. The
+// callers check d.State against the harness first.
 func checkRebaseChanged(t *testing.T, h WatchHarness, d mailstore.Delta) {
 	t.Helper()
 	switch {
-	case !h.CondStore:
+	case !d.State.CondStore:
 		if !d.FullFlags || !slices.Equal(changedUIDs(d), d.UIDs) {
 			t.Errorf("rebase without CONDSTORE: FullFlags %v, Changed UIDs %v; want every message's flags, %v", d.FullFlags, changedUIDs(d), d.UIDs)
 		}
@@ -383,6 +414,12 @@ func watchUIDValidity(t *testing.T, h WatchHarness, r WatchRemote, pass passFunc
 	}
 	if len(d.UIDs) != 1 || len(d.New) != 0 {
 		t.Errorf("after a UIDVALIDITY change: UIDs %v, %d new; want one UID and nothing new", d.UIDs, len(d.New))
+	}
+	// A renumbered folder may have no mod-sequences yet (NOMODSEQ), so the
+	// pass may report no CONDSTORE where the harness has it, never the
+	// reverse, and a HIGHESTMODSEQ exactly when it reports CONDSTORE.
+	if st := d.State; (st.CondStore && !h.CondStore) || st.CondStore != (st.HighestModSeq != 0) {
+		t.Errorf("after a UIDVALIDITY change: State = %+v; want CONDSTORE only where the server has it (%v), with a HIGHESTMODSEQ exactly when CONDSTORE", st, h.CondStore)
 	}
 	checkRebaseChanged(t, h, d)
 }
