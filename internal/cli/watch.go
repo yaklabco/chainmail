@@ -142,11 +142,19 @@ type watcher struct {
 	env   Env
 	watch chainmailv1connect.WatchServiceClient
 	opts  watchOptions
-	// pos is where the stream stands: the last heartbeat position or trimmed
-	// gap seen, raised by each event ID since, or --since before any. hasPos
-	// says there is one.
+	// pos is where the stream stands: the last heartbeat position, trimmed
+	// gap or event ID seen (a group replay never lowers it), or --since
+	// before any. hasPos says there is one.
 	pos    int64
 	hasPos bool
+	// high is the furthest the current stream, or the last one once it has
+	// ended, has reported: an event ID, a trimmed gap's NextID - 1 or a
+	// heartbeat position. hasHigh says it has reported one. A group never
+	// acknowledges past it, so a position from before a reset the stream
+	// has not revealed yet is never sent to a daemon that would cap it to
+	// a tail holding events not yet printed.
+	high    int64
+	hasHigh bool
 	// acked is the highest position the group has acknowledged in this
 	// run, and unacked counts the lines printed since. ackDue fires when
 	// the current batch is due, and is nil when no batch is waiting.
@@ -216,9 +224,11 @@ func (w *watcher) run(ctx context.Context) error {
 }
 
 // watchFatal reports whether the daemon refused the stream in a way a
-// retry would repeat: a bad request, a refused peer or policy, an account
-// that needs a login, or an unknown account. Everything else, an
-// unreachable daemon included, is retried.
+// retry would repeat: a bad request, a refused peer or policy, an
+// AUTH_REQUIRED refusal, or an unknown account. Subscribe never refuses an
+// account for needing a login, which an auth_required status event reports
+// instead, but an auth refusal would be repeated all the same. Everything
+// else, an unreachable daemon included, is retried.
 func watchFatal(err error) bool {
 	cerr, ok := errors.AsType[*connect.Error](err)
 	if !ok {
@@ -283,6 +293,7 @@ func (w *watcher) session(ctx context.Context) (bool, error) {
 		wg.Wait()
 		_ = stream.Close() // the stream has ended or been cancelled; its outcome is returned below
 	}()
+	w.high, w.hasHigh = 0, false
 	got := false
 	quiet := w.env.after(watchHeartbeatTimeout)
 	for {
@@ -318,9 +329,11 @@ func (w *watcher) handle(ctx context.Context, m *chainmailv1.SubscribeResponse) 
 		switch {
 		case e.GetId() > 0:
 			w.seen(e.GetId())
+			w.reach(e.GetId())
 		case e.GetKind() == "gap" && e.GetReason() == "trimmed":
 			// A trimmed gap has no ID: the stream goes on from NextID.
 			w.moveTo(e.GetNextId() - 1)
+			w.reach(e.GetNextId() - 1)
 		}
 		w.queueAck(ctx, true)
 		return nil
@@ -335,6 +348,7 @@ func (w *watcher) handle(ctx context.Context, m *chainmailv1.SubscribeResponse) 
 		}
 	}
 	w.moveTo(hb.GetPosition())
+	w.reach(hb.GetPosition())
 	w.queueAck(ctx, false)
 	if w.opts.once {
 		return errWatchOnce
@@ -342,14 +356,34 @@ func (w *watcher) handle(ctx context.Context, m *chainmailv1.SubscribeResponse) 
 	return nil
 }
 
-// seen raises the position the watch resumes after to an event's ID. A
-// group stream that replays events after a failed acknowledgement sends
-// IDs at or below it, which leave it where it is.
+// seen moves the position the watch resumes after to an event's ID. A
+// stream from --since or a heartbeat position sends IDs above its start, so
+// the ID is where it stands, even below an old position from a reset log.
+// A group stream that replays events after a failed acknowledgement sends
+// IDs at or below the position, which leave it where it is.
 func (w *watcher) seen(id int64) {
-	if w.hasPos && id <= w.pos {
+	if w.opts.group != "" && w.hasPos && id <= w.pos {
 		return
 	}
 	w.pos, w.hasPos = id, true
+}
+
+// reach raises high to p, a position the current stream reported.
+func (w *watcher) reach(p int64) {
+	if !w.hasHigh || p > w.high {
+		w.high, w.hasHigh = p, true
+	}
+}
+
+// ackable is the position a group may acknowledge, the watch's position
+// but no further than the stream has reported, and whether it is above
+// what the group has acknowledged.
+func (w *watcher) ackable() (int64, bool) {
+	if w.opts.group == "" || !w.hasPos || !w.hasHigh {
+		return 0, false
+	}
+	id := min(w.pos, w.high)
+	return id, id > w.acked
 }
 
 // moveTo sets the position the watch resumes after to pos, which the stream
@@ -375,7 +409,7 @@ func (w *watcher) moveTo(pos int64) {
 // says a line was printed for it: 100 lines flush at once, and otherwise
 // the first waiting line or heartbeat starts the batch's one-second timer.
 func (w *watcher) queueAck(ctx context.Context, line bool) {
-	if w.opts.group == "" || !w.hasPos || w.pos <= w.acked {
+	if _, ok := w.ackable(); !ok {
 		return
 	}
 	if line {
@@ -390,19 +424,20 @@ func (w *watcher) queueAck(ctx context.Context, line bool) {
 	}
 }
 
-// flushAck acknowledges the current position for the group, if it is
-// higher than the last acknowledgement. A failed or abandoned Ack leaves
+// flushAck acknowledges the current position for the group, no further
+// than the stream has reported (ackable), if that is higher than the last
+// acknowledgement. A failed or abandoned Ack leaves
 // the position pending: the next batch, the next heartbeat, the flush
 // before a reconnect or the one on exit sends it again, and a reconnect
 // resumes the group from what the daemon has, so delivery stays at least
 // once.
 func (w *watcher) flushAck(ctx context.Context) {
 	w.ackDue = nil
-	if w.opts.group == "" || !w.hasPos || w.pos <= w.acked {
+	id, ok := w.ackable()
+	if !ok {
 		return
 	}
 	w.unacked = 0
-	id := w.pos
 	if err := w.ack(ctx, id); err != nil {
 		return
 	}

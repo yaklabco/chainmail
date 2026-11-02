@@ -1205,3 +1205,59 @@ func TestWatchHelpOnAccountsNeedingALogin(t *testing.T) {
 		t.Errorf("help does not say an account that needs a login gets an auth_required status event:\n%s", got.stdout)
 	}
 }
+
+// A stream that sends events before any heartbeat or gap reveals a reset
+// log still never acknowledges, or resumes from, more than it has seen in
+// that stream. A group recreated at a reset log's tail sends event 4 while
+// an earlier position of 100 is pending: the watch acknowledges 4, not
+// 100, which the daemon would cap to a tail holding events not yet
+// printed. A --since stream whose filter dropped the gap resumes after the
+// event it got.
+func TestWatchNeverAcknowledgesPastWhatTheStreamSent(t *testing.T) {
+	t.Parallel()
+	t.Run("group", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeWatch(
+			playThen(unavailable(), eventItem(newEvent(100, "mail 100"))),
+			playThen(unavailable(), eventItem(newEvent(4, "mail 4"))),
+			playThen(authRequired()),
+		)
+		var mu sync.Mutex
+		var landed []int64
+		f.ack = func(_ context.Context, n int) error {
+			f.mu.Lock()
+			id := f.acks[n].GetId()
+			f.mu.Unlock()
+			if id == 100 {
+				return connect.NewError(connect.CodeUnavailable, errors.New("daemon restarting"))
+			}
+			mu.Lock()
+			landed = append(landed, id)
+			mu.Unlock()
+			return nil
+		}
+		socket := startFakeWatch(t, f)
+		clock := newFakeClock(func(d time.Duration) bool { return d != watchHeartbeatTimeout && d != watchAckTimeout })
+		got := runCLI(t, Env{After: clock.After}, "--socket", socket, "watch", "--group", "bot")
+		if got.code != api.ExitAuth {
+			t.Fatalf("watch: %+v, want exit 5 from the third stream", got)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if !slices.Equal(landed, []int64{4}) {
+			t.Errorf("acknowledgements that landed = %v, want [4]; all acks %v", landed, f.ackIDs(t, "bot"))
+		}
+	})
+	t.Run("since with the gap filtered", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeWatch(playThen(unavailable(), eventItem(newEvent(4, "mail 4"))), playThen(authRequired()))
+		socket := startFakeWatch(t, f)
+		got := runCLI(t, Env{After: newFakeClock(allButHeartbeat).After}, "--socket", socket, "watch", "--since", "100", "--kind", "new,status")
+		if got.code != api.ExitAuth {
+			t.Fatalf("watch: %+v, want exit 5 from the second stream", got)
+		}
+		if reqs := f.requests(); len(reqs) != 2 || position(reqs[1]) != "since=4" {
+			t.Errorf("requests = %v, want a reconnect since=4", reqs)
+		}
+	})
+}
