@@ -29,6 +29,11 @@ type conn struct {
 	selected    string
 	writable    bool
 	uidValidity uint32
+	// uidNext and highestModSeq are what the last SELECT or EXAMINE
+	// reported. highestModSeq is 0 unless it asked for CONDSTORE and the
+	// folder keeps mod-sequences.
+	uidNext       uint32
+	highestModSeq uint64
 	// folderGen is the Store.folderGen this connection last opened a
 	// folder under. A rename or delete since then means the folder open
 	// here may no longer be the one its name now stands for.
@@ -184,7 +189,9 @@ func (c *conn) kill() {
 
 // forget makes the next SelectFolder open its folder again, even if that is
 // the folder open now.
-func (c *conn) forget() { c.selected, c.writable, c.uidValidity = "", false, 0 }
+func (c *conn) forget() {
+	c.selected, c.writable, c.uidValidity, c.uidNext, c.highestModSeq = "", false, 0, 0, 0
+}
 
 // holds reports whether c has folder open in a mode that will do:
 // read-write when writable, either mode otherwise.
@@ -200,23 +207,32 @@ func (c *conn) SelectFolder(ctx context.Context, folder string, writable bool) e
 	if c.holds(folder, writable) {
 		return nil
 	}
+	_, err := c.selectFolder(ctx, folder, writable, false)
+	return err
+}
+
+// selectFolder sends SELECT, or EXAMINE unless writable, with (CONDSTORE)
+// when condStore, even if folder is open already, and returns the answer.
+// It keeps what the answer reports on c.
+func (c *conn) selectFolder(ctx context.Context, folder string, writable, condStore bool) (*imap.SelectData, error) {
 	var data *imap.SelectData
 	sent := c.now()
 	err := c.do(ctx, func() error {
 		var err error
-		data, err = c.client().Select(folder, &imap.SelectOptions{ReadOnly: !writable}).Wait()
+		data, err = c.client().Select(folder, &imap.SelectOptions{ReadOnly: !writable, CondStore: condStore}).Wait()
 		return err
 	})
 	if err != nil {
 		// A failed SELECT or EXAMINE leaves no folder open.
-		c.selected, c.writable, c.uidValidity = "", false, 0
+		c.forget()
 		if missingFolder(err) {
-			return fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, folder)
+			return nil, fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, folder)
 		}
-		return err
+		return nil, err
 	}
 	c.selected, c.writable, c.uidValidity, c.synced = folder, writable, data.UIDValidity, sent
-	return nil
+	c.uidNext, c.highestModSeq = uint32(data.UIDNext), data.HighestModSeq
+	return data, nil
 }
 
 // missingFolder reports whether err is a server saying a folder does not exist.
