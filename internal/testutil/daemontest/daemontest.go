@@ -53,6 +53,12 @@ type Options struct {
 	// password, so its supervisor does not park the account as needing
 	// authentication before the test could set it.
 	Secrets map[string]string
+	// Reuse, when set, makes Start a restart of that harness's daemon: it
+	// stops it if it still runs, then serves the same state directory,
+	// vault (with its secrets), state database and socket path. The
+	// database stays open, as Stop documents, so both harnesses read the
+	// same audit rows. Secrets, when also set, are stored again.
+	Reuse *Harness
 }
 
 // Harness is a running daemon and a client connected to it.
@@ -63,6 +69,11 @@ type Harness struct {
 	Socket string
 
 	stop func() error
+
+	// dir and id are the state directory and vault identity, kept so a
+	// later Start with Reuse can open the same vault.
+	dir string
+	id  *age.X25519Identity
 }
 
 // AuditRow is one row of the audit table, as text.
@@ -82,15 +93,32 @@ func Start(t testing.TB, configTOML string, opts Options) *Harness {
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
-	// Unix socket paths are limited to 108 bytes, so avoid t.TempDir's long paths.
-	dir, err := os.MkdirTemp("", "cmd")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	id, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatal(err)
+	var (
+		dir     string
+		id      *age.X25519Identity
+		stateDB *sql.DB
+	)
+	if prev := opts.Reuse; prev != nil {
+		// A restart: the old daemon must be gone before the new one takes
+		// its socket, vault and database.
+		if err := prev.Stop(); err != nil {
+			t.Fatalf("stopping the daemon being restarted: %v", err)
+		}
+		dir, id, stateDB = prev.dir, prev.id, prev.DB
+	} else {
+		// Unix socket paths are limited to 108 bytes, so avoid t.TempDir's long paths.
+		dir, err = os.MkdirTemp("", "cmd")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		if id, err = age.GenerateX25519Identity(); err != nil {
+			t.Fatal(err)
+		}
+		if stateDB, err = db.OpenState(t.Context(), filepath.Join(dir, "state.db")); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = stateDB.Close() })
 	}
 	v, err := vault.Open(filepath.Join(dir, "vault.age"), id)
 	if err != nil {
@@ -101,11 +129,6 @@ func Start(t testing.TB, configTOML string, opts Options) *Harness {
 			t.Fatalf("secret %s: %v", name, err)
 		}
 	}
-	stateDB, err := db.OpenState(t.Context(), filepath.Join(dir, "state.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = stateDB.Close() })
 	socket := filepath.Join(dir, "d.sock")
 	ln, err := daemon.Listen(t.Context(), socket, -1)
 	if err != nil {
@@ -151,7 +174,7 @@ func Start(t testing.TB, configTOML string, opts Options) *Harness {
 			t.Errorf("daemon: %v", err)
 		}
 	})
-	return &Harness{Client: c, Vault: v, DB: stateDB, Socket: socket, stop: stop}
+	return &Harness{Client: c, Vault: v, DB: stateDB, Socket: socket, stop: stop, dir: dir, id: id}
 }
 
 // Stop shuts the daemon down as a signal would and returns what Serve
