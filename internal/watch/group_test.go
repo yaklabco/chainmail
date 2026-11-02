@@ -173,3 +173,51 @@ func TestValidGroupName(t *testing.T) {
 		}
 	}
 }
+
+// TestResetGroup checks the compare-and-set recovery for a group left past
+// the tail: it moves the acknowledged ID from exactly from to to, lowering
+// it if need be, stamps last_seen_at and keeps created_at. It does not
+// apply when the group has moved since from was read, or does not exist,
+// and it refuses an invalid name or a negative to.
+func TestResetGroup(t *testing.T) {
+	t.Parallel()
+	l, conn, clock := newLog(t)
+	publish(t, l, newEvent("a", "INBOX", 1), newEvent("a", "INBOX", 2), newEvent("a", "INBOX", 3))
+	if _, _, err := l.Group(t.Context(), "bot"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(t.Context(), "UPDATE event_groups SET acked_id = 50 WHERE name = 'bot'"); err != nil {
+		t.Fatal(err)
+	}
+	clock.Set(t0.Add(time.Hour))
+	steps := []struct {
+		name     string
+		group    string
+		from, to int64
+		applied  bool
+	}{
+		{name: "applies", group: "bot", from: 50, to: 2, applied: true},
+		{name: "moved since", group: "bot", from: 50, to: 1, applied: false},
+		{name: "unknown group", group: "nobody", from: 0, to: 1, applied: false},
+	}
+	for _, s := range steps {
+		applied, err := l.ResetGroup(t.Context(), s.group, s.from, s.to)
+		if err != nil || applied != s.applied {
+			t.Errorf("%s: ResetGroup = %v, %v; want %v, nil", s.name, applied, err, s.applied)
+		}
+	}
+	groups, err := l.Groups(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []GroupInfo{{Name: "bot", AckedID: 2, Lag: 1, CreatedAt: t0, LastSeenAt: t0.Add(time.Hour)}}
+	if !reflect.DeepEqual(groups, want) {
+		t.Errorf("Groups =\n%+v\nwant\n%+v", groups, want)
+	}
+	if _, err := l.ResetGroup(t.Context(), "Bad Name", 0, 1); err == nil {
+		t.Error("ResetGroup accepted an invalid name")
+	}
+	if _, err := l.ResetGroup(t.Context(), "bot", 2, -1); err == nil {
+		t.Error("ResetGroup accepted a negative id")
+	}
+}

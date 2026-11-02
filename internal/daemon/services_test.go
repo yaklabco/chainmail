@@ -10,10 +10,10 @@ import (
 	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
 )
 
-// TestWriteServicesAreRegistered checks that the daemon serves the compose
-// and organize services and ProbeLimits. An unregistered route answers HTTP
-// 404, which Connect reports in the error text, so any answer but that one
-// means the route exists, whether or not the handler is implemented yet.
+// TestWriteServicesAreRegistered checks that the daemon serves the compose, organize and watch services and ProbeLimits.
+// An unregistered route answers HTTP 404, which Connect reports in the
+// error text, so any answer but that one means the route exists, whether or
+// not the handler is implemented yet.
 func TestWriteServicesAreRegistered(t *testing.T) {
 	t.Parallel()
 	h := daemontest.Start(t, "", daemontest.Options{})
@@ -28,6 +28,10 @@ func TestWriteServicesAreRegistered(t *testing.T) {
 		},
 		"AccountService.ProbeLimits": func() error {
 			_, err := h.Client.Account.ProbeLimits(t.Context(), connect.NewRequest(&chainmailv1.ProbeLimitsRequest{}))
+			return err
+		},
+		"WatchService.GetWatchStatus": func() error {
+			_, err := h.Client.Watch.GetWatchStatus(t.Context(), connect.NewRequest(&chainmailv1.GetWatchStatusRequest{}))
 			return err
 		},
 	}
