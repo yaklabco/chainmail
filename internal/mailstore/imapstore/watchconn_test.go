@@ -470,6 +470,60 @@ func TestWatchCloseWhileDoneIsUnanswered(t *testing.T) {
 	}
 }
 
+// TestWatchAbortEndsAnUnansweredLogout closes a watch connection whose
+// LOGOUT the server never answers, which leaves Close waiting out its 5
+// second bound. Abort, the optional mailstore.Aborter, shuts the connection
+// at once: Close returns promptly and the connection is released.
+func TestWatchAbortEndsAnUnansweredLogout(t *testing.T) {
+	t.Parallel()
+	s, srv, _ := watchFixture(t)
+	wc, err := s.OpenWatch(t.Context(), storetest.GmailAllMail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, ok := wc.(mailstore.Aborter)
+	if !ok {
+		_ = wc.Close()
+		t.Fatal("imapstore's watch connection does not implement mailstore.Aborter")
+	}
+	if _, err := wc.Sync(t.Context(), mailstore.SyncRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	held, release := srv.HoldReads()
+	defer release()
+	closed := make(chan error, 1)
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+	wg.Go(func() { closed <- wc.Close() })
+	select {
+	case <-held:
+	case err := <-closed:
+		t.Fatalf("Close returned %v before the server got LOGOUT", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the server did not get LOGOUT within 2s")
+	}
+	start := time.Now()
+	a.Abort()
+	a.Abort() // idempotent
+	select {
+	case err := <-closed:
+		if err == nil {
+			t.Error("Close cut short by Abort = nil, want the failed LOGOUT reported")
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("Close returned %v after Abort, want well under 1s", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return within 2s of Abort")
+	}
+	if n := s.OpenConns(); n != 0 {
+		t.Errorf("OpenConns after Abort and Close = %d, want 0", n)
+	}
+	if _, err := wc.Sync(t.Context(), mailstore.SyncRequest{}); !errors.Is(err, mailstore.ErrUnavailable) {
+		t.Errorf("Sync after Abort = %v, want ErrUnavailable", err)
+	}
+}
+
 // TestWatchIdleCancelledBeforeContinuation cancels an Idle while the server
 // has yet to answer IDLE with its continuation: Idle still waits for it,
 // ends IDLE with DONE and returns the context's error, and the connection

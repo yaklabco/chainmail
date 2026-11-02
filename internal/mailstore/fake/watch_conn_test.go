@@ -427,6 +427,40 @@ func TestDropWatches(t *testing.T) {
 	}
 }
 
+// TestAbortDropsTheConnection checks the optional mailstore.Aborter: Abort
+// ends an Idle in progress and fails what follows as a dropped connection,
+// is idempotent, and Close still releases the connection after it.
+func TestAbortDropsTheConnection(t *testing.T) {
+	t.Parallel()
+	s, _ := seedWatch(t)
+	s.SetIdle(true)
+	c := openWatch(t, s, "INBOX")
+	syncConn(t, c, mailstore.SyncRequest{})
+	a, ok := c.(mailstore.Aborter)
+	if !ok {
+		t.Fatal("the fake watch connection does not implement mailstore.Aborter")
+	}
+	idle := idleAsync(t, c, time.Hour)
+	waitIdle(t, s, "INBOX")
+	a.Abort()
+	a.Abort()
+	if r := result(t, idle); !errors.Is(r.err, mailstore.ErrUnavailable) {
+		t.Errorf("Idle ended by Abort = %+v, %v; want ErrUnavailable", r.wake, r.err)
+	}
+	if _, err := c.Sync(t.Context(), mailstore.SyncRequest{}); !errors.Is(err, mailstore.ErrUnavailable) {
+		t.Errorf("Sync after Abort = %v, want ErrUnavailable", err)
+	}
+	if n := s.WatchConns(); n != 1 {
+		t.Errorf("WatchConns after Abort = %d, want 1: it counts until closed", n)
+	}
+	if err := c.Close(); err != nil {
+		t.Errorf("Close after Abort = %v", err)
+	}
+	if n := s.WatchConns(); n != 0 {
+		t.Errorf("WatchConns after Close = %d, want 0", n)
+	}
+}
+
 // TestIdleWakes checks that each change to the watched folder ends an Idle
 // with the wake a server's EXISTS, FETCH or EXPUNGE gives, and that a
 // change elsewhere does not.

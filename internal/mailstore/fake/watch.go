@@ -578,3 +578,17 @@ func (c *watchConn) Close() error {
 	c.notifyLocked()
 	return nil
 }
+
+var _ mailstore.Aborter = (*watchConn)(nil)
+
+// Abort implements mailstore.Aborter. It drops the connection as
+// DropWatches does: an Idle in progress returns, and what follows fails with
+// an error matching mailstore.ErrUnavailable. The connection counts in
+// WatchConns until Close. It is idempotent.
+func (c *watchConn) Abort() {
+	s := c.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c.dropped = true
+	c.notifyLocked()
+}

@@ -1274,3 +1274,120 @@ func TestSupervisorShutdownClosesAStuckIdle(t *testing.T) {
 		t.Errorf("WatchConns() after Run = %d, want 0", n)
 	}
 }
+
+// supStallStore is a fake store whose watch connections end a cancelled
+// Idle only when the test lets DONE complete, and whose Close stalls, as an
+// unanswered LOGOUT does, until Abort.
+type supStallStore struct {
+	*fake.Store
+	idling  chan struct{} // gets a token when an Idle starts
+	doneOK  chan struct{} // closed by the test: DONE completes
+	closing chan struct{} // gets a token when Close starts
+	conn    atomic.Pointer[supStallConn]
+}
+
+func (s *supStallStore) OpenWatch(ctx context.Context, folder string) (mailstore.WatchConn, error) {
+	c, err := s.Store.OpenWatch(ctx, folder)
+	if err != nil {
+		return nil, err
+	}
+	sc := &supStallConn{WatchConn: c, st: s, aborted: make(chan struct{})}
+	s.conn.Store(sc)
+	return sc, nil
+}
+
+type supStallConn struct {
+	mailstore.WatchConn
+	st      *supStallStore
+	once    sync.Once
+	aborted chan struct{}
+}
+
+func (c *supStallConn) Idle(ctx context.Context, _ time.Duration) (mailstore.Wake, error) {
+	select {
+	case c.st.idling <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	select {
+	case <-c.st.doneOK:
+		return mailstore.Wake{}, ctx.Err()
+	case <-c.aborted:
+		return mailstore.Wake{}, fmt.Errorf("%w: aborted during DONE", mailstore.ErrUnavailable)
+	}
+}
+
+func (c *supStallConn) Close() error {
+	select {
+	case c.st.closing <- struct{}{}:
+	default:
+	}
+	<-c.aborted
+	_ = c.WatchConn.Close()
+	return fmt.Errorf("%w: LOGOUT unanswered", mailstore.ErrUnavailable)
+}
+
+func (c *supStallConn) Abort() { c.once.Do(func() { close(c.aborted) }) }
+
+// abortedNow reports whether Abort has run.
+func (c *supStallConn) abortedNow() bool {
+	select {
+	case <-c.aborted:
+		return true
+	default:
+		return false
+	}
+}
+
+// One ShutdownLogout deadline, from the moment ctx ends, covers both DONE
+// and LOGOUT: DONE that completes 4s in leaves LOGOUT 1s, and when LOGOUT
+// stalls the connection is aborted at the deadline, not 5s after DONE.
+func TestSupervisorShutdownIsOneDeadline(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	stall := &supStallStore{Store: fs, idling: make(chan struct{}, 1), doneOK: make(chan struct{}), closing: make(chan struct{}, 1)}
+	r := newSupRig(t, fs, supAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	r.store = stall
+	r.start()
+	t.Cleanup(func() { // unblocks a stalled connection if the test fails first
+		if c := stall.conn.Load(); c != nil {
+			c.Abort()
+		}
+	})
+	r.waitFor("INBOX watching", supStatus("INBOX", StateWatching))
+	select {
+	case <-stall.idling:
+	case <-time.After(supWait):
+		t.Fatal("the watcher never started IDLE")
+	}
+	r.cancel()
+	r.clock.expectAfter(t, ShutdownLogout)
+	r.clock.Advance(4 * time.Second)
+	close(stall.doneOK) // DONE completes 4s after the cancel
+	select {
+	case <-stall.closing:
+	case <-time.After(supWait):
+		t.Fatal("the watcher never closed its connection")
+	}
+	r.clock.expectAfter(t, time.Second) // what is left of the one deadline
+	if stall.conn.Load().abortedNow() {
+		t.Fatal("aborted before the deadline")
+	}
+	select {
+	case <-r.done:
+		t.Fatal("Run returned with LOGOUT still stalled")
+	default:
+	}
+	r.clock.Advance(time.Second)
+	select {
+	case <-r.done:
+	case <-time.After(supWait):
+		t.Fatal("Run did not return at the shutdown deadline")
+	}
+	if !stall.conn.Load().abortedNow() {
+		t.Error("the stalled connection was not aborted at the deadline")
+	}
+	if n := fs.WatchConns(); n != 0 {
+		t.Errorf("WatchConns() after Run = %d, want 0", n)
+	}
+}

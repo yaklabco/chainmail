@@ -105,6 +105,8 @@ type watchConn struct {
 	// idling is set while IDLE may be running, so Close shuts the socket
 	// rather than queue LOGOUT behind an IDLE that only DONE would end.
 	idling atomic.Bool
+	// aborted is set by Abort, after which Close does not log out.
+	aborted atomic.Bool
 
 	closeOnce sync.Once
 	closeErr  error
@@ -225,11 +227,12 @@ func (w *watchConn) Idle(ctx context.Context, limit time.Duration) (mailstore.Wa
 // Store.Close calls it while the owner may still be using the connection:
 // it marks the connection dead first, so the owner's next command fails at
 // once, and shuts the socket instead of logging out when IDLE may be
-// running, so neither waits on the other.
+// running, so neither waits on the other. After Abort it only shuts the
+// socket too.
 func (w *watchConn) Close() error {
 	w.closeOnce.Do(func() {
 		w.c.dead.Store(true)
-		if w.idling.Load() {
+		if w.idling.Load() || w.aborted.Load() {
 			w.c.kill()
 		} else {
 			w.closeErr = w.c.Close()
@@ -237,4 +240,16 @@ func (w *watchConn) Close() error {
 		w.s.forgetWatch(w)
 	})
 	return w.closeErr
+}
+
+var _ mailstore.Aborter = (*watchConn)(nil)
+
+// Abort implements mailstore.Aborter. It shuts the socket without logging
+// out, so an Idle waiting for DONE's completion, or a Close waiting for
+// LOGOUT's answer, returns at once with an error. It is idempotent and safe
+// while Idle, Sync or Close run. It does not release the connection: Close
+// still does, and after Abort it does not wait on the server.
+func (w *watchConn) Abort() {
+	w.aborted.Store(true)
+	w.c.kill()
 }

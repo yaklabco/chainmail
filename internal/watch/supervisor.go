@@ -307,6 +307,10 @@ type watcher struct {
 	// EXPUNGE asked for the next one, zero when none is pending.
 	lastSweep time.Time
 	expungeAt time.Time
+	// shutdownAt is the one deadline for tearing the connection down once
+	// ctx has ended: ShutdownLogout after the watcher first saw it end,
+	// across DONE and LOGOUT both. Zero until then.
+	shutdownAt time.Time
 }
 
 // watchLoop keeps one folder watched until ctx ends. folder is "" on Gmail,
@@ -530,7 +534,7 @@ func (w *watcher) session(ctx context.Context) (healthy bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	defer w.s.closeConn(conn, w.folder)
+	defer w.closeConn(ctx, conn)
 	w.mode = passModePoll
 	if conn.IdleSupported() {
 		w.mode = passModeIdle
@@ -595,11 +599,14 @@ func (w *watcher) wait(ctx context.Context, conn mailstore.WatchConn) (sweep boo
 // cancels the IDLE. Idle runs in a joined goroutine; the connection is used
 // by one goroutine at a time.
 //
-// Once the IDLE is cancelled, by ctx ending or by that timer, Idle still
-// ends it with DONE, which a store bounds only by its command timeout. So a
-// cancelled Idle gets ShutdownLogout on the supervisor's clock to return,
-// after which the connection is closed under it (stop, below). That keeps a
-// shutdown within ShutdownLogout however the server behaves.
+// Once the IDLE is cancelled, Idle still ends it with DONE, which a store
+// bounds only by its command timeout. So a cancelled Idle has until a
+// deadline on the supervisor's clock to return, after which the connection
+// is torn down under it (abortConn). When ctx ended, that deadline is the
+// one shutdown deadline (startShutdown), which closeConn then holds LOGOUT
+// to as well. When the supervisor's own timer cancelled it, the deadline
+// is ShutdownLogout from then, and a ctx that ends meanwhile starts the
+// shutdown deadline at that moment.
 func (w *watcher) idle(ctx context.Context, conn mailstore.WatchConn, limit time.Duration) (mailstore.Wake, error) {
 	idleCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -613,37 +620,85 @@ func (w *watcher) idle(ctx context.Context, conn mailstore.WatchConn, limit time
 		wake, err := conn.Idle(idleCtx, limit)
 		done <- result{wake: wake, err: err}
 	})
-	stop := func() result {
+	// stop cancels the Idle and waits for it until expiry, then aborts the
+	// connection. ended, when not nil, is a ctx that may end meanwhile.
+	stop := func(expiry func() <-chan time.Time, ended <-chan struct{}) result {
 		cancel()
 		select {
 		case r := <-done:
 			return r // no timer for an Idle that has returned already
 		default:
 		}
-		select {
-		case r := <-done:
-			return r
-		case <-w.s.clock.After(ShutdownLogout):
-			// WatchConn.Close is safe while Idle runs: it shuts the
-			// connection, which ends the IDLE. session closes it again,
-			// which does nothing more.
-			w.s.closeConn(conn, w.folder)
-			return <-done
+		timer := expiry()
+		for {
+			select {
+			case r := <-done:
+				return r
+			case <-ended:
+				w.startShutdown() // later than timer, which stays the bound here
+				ended = nil
+			case <-timer:
+				w.s.abortConn(conn, w.folder)
+				return <-done
+			}
 		}
 	}
 	var r result
 	select {
 	case r = <-done:
 	case <-ctx.Done():
-		r = stop()
+		w.startShutdown()
+		r = stop(w.shutdownTimer, nil)
 	case <-w.s.clock.After(limit + idleGrace):
-		r = stop()
+		r = stop(func() <-chan time.Time { return w.s.clock.After(ShutdownLogout) }, ctx.Done())
 		if ctx.Err() == nil && errors.Is(r.err, context.Canceled) {
 			r.err = nil // the supervisor's own timer ended the IDLE
 		}
 	}
 	wg.Wait()
 	return r.wake, r.err
+}
+
+// startShutdown fixes the shutdown deadline at ShutdownLogout from now, the
+// first time it is called. Callers call it as soon as they see ctx end.
+func (w *watcher) startShutdown() {
+	if w.shutdownAt.IsZero() {
+		w.shutdownAt = w.s.clock.Now().Add(ShutdownLogout)
+	}
+}
+
+// shutdownTimer fires at the shutdown deadline, starting it if needed, and
+// at once when it has passed.
+func (w *watcher) shutdownTimer() <-chan time.Time {
+	w.startShutdown()
+	return w.s.clock.After(w.shutdownAt.Sub(w.s.clock.Now()))
+}
+
+// closeConn logs out of the session's connection. While ctx runs, Close
+// bounds itself as the store does. Once ctx has ended, Close runs in a
+// joined goroutine with only what is left of the shutdown deadline, and a
+// connection still logging out then is aborted (mailstore.Aborter), so DONE
+// and LOGOUT together take at most ShutdownLogout. A connection that cannot
+// abort gets the store's own bound.
+func (w *watcher) closeConn(ctx context.Context, conn mailstore.WatchConn) {
+	a, ok := conn.(mailstore.Aborter)
+	if ctx.Err() == nil || !ok {
+		w.s.closeConn(conn, w.folder)
+		return
+	}
+	closed := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		defer close(closed)
+		w.s.closeConn(conn, w.folder)
+	})
+	select {
+	case <-closed:
+	case <-w.shutdownTimer():
+		w.s.logger.Debug("aborting a watch connection still logging out at the shutdown deadline", "folder", w.folder)
+		a.Abort()
+	}
+	wg.Wait()
 }
 
 // nextSweep is when the folder's next sweep is due: ExpungeSweep after the
@@ -702,6 +757,17 @@ func (s *Supervisor) resolveAll(ctx context.Context) (string, error) {
 		}
 	}
 	return "", &mailstore.FolderNotFoundError{Name: `\All`}
+}
+
+// abortConn tears conn down under whatever is using it: Abort when it has
+// one (mailstore.Aborter), else Close, which a store makes safe while Idle
+// runs.
+func (s *Supervisor) abortConn(conn mailstore.WatchConn, folder string) {
+	if a, ok := conn.(mailstore.Aborter); ok {
+		a.Abort()
+		return
+	}
+	s.closeConn(conn, folder)
 }
 
 // closeConn logs out of a watch connection. Close bounds itself at

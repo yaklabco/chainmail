@@ -92,6 +92,17 @@ type WatchConn interface {
 	Close() error
 }
 
+// Aborter is optional on a WatchConn, found by type assertion. Abort tears
+// the connection down at once, without logging out: an Idle, Sync or Close
+// running on another goroutine returns promptly with an error, and a Close
+// afterwards still releases the connection. It is idempotent. A watch
+// supervisor calls it when its shutdown deadline passes with DONE or
+// LOGOUT still unanswered. imapstore's and the fake's watch connections
+// implement it.
+type Aborter interface {
+	Abort()
+}
+
 // Watcher is a store that can watch and sync folders. imapstore.Store and
 // fake.Store implement it.
 type Watcher interface {
