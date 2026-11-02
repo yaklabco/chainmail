@@ -29,7 +29,7 @@ type fakeCall struct {
 	Msg       proto.Message // the request; nil for UploadAttachment
 }
 
-// fakeDaemon serves the four agent-facing services on a Unix socket. Each
+// fakeDaemon serves the five agent-facing services on a Unix socket. Each
 // RPC answers with the func a test set, or CodeUnimplemented when it is nil.
 // Set the funcs before startFake. To change an answer mid-test, close over
 // state the test guards with a mutex or an atomic.
@@ -67,6 +67,13 @@ type fakeDaemon struct {
 	CreateFolder unaryFn[chainmailv1.CreateFolderRequest, chainmailv1.CreateFolderResponse]
 	RenameFolder unaryFn[chainmailv1.RenameFolderRequest, chainmailv1.RenameFolderResponse]
 	DeleteFolder unaryFn[chainmailv1.DeleteFolderRequest, chainmailv1.DeleteFolderResponse]
+
+	Subscribe      func(context.Context, *chainmailv1.SubscribeRequest, *connect.ServerStream[chainmailv1.SubscribeResponse]) error
+	ReadEvents     unaryFn[chainmailv1.ReadEventsRequest, chainmailv1.ReadEventsResponse]
+	Ack            unaryFn[chainmailv1.AckRequest, chainmailv1.AckResponse]
+	GetWatchStatus unaryFn[chainmailv1.GetWatchStatusRequest, chainmailv1.GetWatchStatusResponse]
+	ListGroups     unaryFn[chainmailv1.ListGroupsRequest, chainmailv1.ListGroupsResponse]
+	DeleteGroup    unaryFn[chainmailv1.DeleteGroupRequest, chainmailv1.DeleteGroupResponse]
 
 	mu    sync.Mutex
 	calls []fakeCall
@@ -120,6 +127,7 @@ type (
 	fakeMessageSvc  struct{ f *fakeDaemon }
 	fakeComposeSvc  struct{ f *fakeDaemon }
 	fakeOrganizeSvc struct{ f *fakeDaemon }
+	fakeWatchSvc    struct{ f *fakeDaemon }
 )
 
 func (a fakeAccountSvc) ListAccounts(ctx context.Context, req *connect.Request[chainmailv1.ListAccountsRequest]) (*connect.Response[chainmailv1.ListAccountsResponse], error) {
@@ -253,6 +261,35 @@ func (o fakeOrganizeSvc) DeleteFolder(ctx context.Context, req *connect.Request[
 	return fakeUnary(ctx, o.f, chainmailv1connect.OrganizeServiceDeleteFolderProcedure, o.f.DeleteFolder, req)
 }
 
+func (w fakeWatchSvc) Subscribe(ctx context.Context, req *connect.Request[chainmailv1.SubscribeRequest], stream *connect.ServerStream[chainmailv1.SubscribeResponse]) error {
+	const proc = chainmailv1connect.WatchServiceSubscribeProcedure
+	w.f.record(proc, req.Header().Get(api.HeaderClient), req.Msg)
+	if w.f.Subscribe == nil {
+		return notFaked(proc)
+	}
+	return w.f.Subscribe(ctx, req.Msg, stream)
+}
+
+func (w fakeWatchSvc) ReadEvents(ctx context.Context, req *connect.Request[chainmailv1.ReadEventsRequest]) (*connect.Response[chainmailv1.ReadEventsResponse], error) {
+	return fakeUnary(ctx, w.f, chainmailv1connect.WatchServiceReadEventsProcedure, w.f.ReadEvents, req)
+}
+
+func (w fakeWatchSvc) Ack(ctx context.Context, req *connect.Request[chainmailv1.AckRequest]) (*connect.Response[chainmailv1.AckResponse], error) {
+	return fakeUnary(ctx, w.f, chainmailv1connect.WatchServiceAckProcedure, w.f.Ack, req)
+}
+
+func (w fakeWatchSvc) GetWatchStatus(ctx context.Context, req *connect.Request[chainmailv1.GetWatchStatusRequest]) (*connect.Response[chainmailv1.GetWatchStatusResponse], error) {
+	return fakeUnary(ctx, w.f, chainmailv1connect.WatchServiceGetWatchStatusProcedure, w.f.GetWatchStatus, req)
+}
+
+func (w fakeWatchSvc) ListGroups(ctx context.Context, req *connect.Request[chainmailv1.ListGroupsRequest]) (*connect.Response[chainmailv1.ListGroupsResponse], error) {
+	return fakeUnary(ctx, w.f, chainmailv1connect.WatchServiceListGroupsProcedure, w.f.ListGroups, req)
+}
+
+func (w fakeWatchSvc) DeleteGroup(ctx context.Context, req *connect.Request[chainmailv1.DeleteGroupRequest]) (*connect.Response[chainmailv1.DeleteGroupResponse], error) {
+	return fakeUnary(ctx, w.f, chainmailv1connect.WatchServiceDeleteGroupProcedure, w.f.DeleteGroup, req)
+}
+
 // startFake serves f until the test ends and sets f.Socket. The socket
 // lives under a short os.MkdirTemp path: Unix socket paths stop at 108 bytes.
 func startFake(t *testing.T, f *fakeDaemon) {
@@ -272,6 +309,7 @@ func startFake(t *testing.T, f *fakeDaemon) {
 	mux.Handle(chainmailv1connect.NewMessageServiceHandler(fakeMessageSvc{f: f}))
 	mux.Handle(chainmailv1connect.NewComposeServiceHandler(fakeComposeSvc{f: f}))
 	mux.Handle(chainmailv1connect.NewOrganizeServiceHandler(fakeOrganizeSvc{f: f}))
+	mux.Handle(chainmailv1connect.NewWatchServiceHandler(fakeWatchSvc{f: f}))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
