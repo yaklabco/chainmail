@@ -233,6 +233,9 @@ func TestReadLimits(t *testing.T) {
 			t.Errorf("Read(limit %d) err = %v, want a limit error", limit, err)
 		}
 	}
+	if _, err := l.Read(t.Context(), Query{After: -1}); err == nil || !strings.Contains(err.Error(), "must not be negative") {
+		t.Errorf("Read(after -1) err = %v, want a position error", err)
+	}
 }
 
 // A filter that matches nothing examines at most maxScan rows per Read, and

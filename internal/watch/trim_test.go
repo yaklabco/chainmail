@@ -257,3 +257,29 @@ func TestRunDoesNotLogCancellation(t *testing.T) {
 	l.Logger = nil
 	l.Run(ctx, time.Hour, 0, 1000)
 }
+
+// The age trim removes only a prefix of IDs, so a reader whose start is
+// still retained never loses an event without a gap. An event older than
+// retention that sits after a retained one stays until everything before it
+// is trimmed.
+func TestTrimByAgeKeepsAPrefix(t *testing.T) {
+	t.Parallel()
+	l, _, clock := newLog(t)
+	clock.Set(t0.Add(2 * time.Hour))
+	first := newEvent("a", "INBOX", 1)
+	backdated := newEvent("a", "INBOX", 2)
+	backdated.At = t0 // supplied by the caller, or the clock stepped back
+	last := newEvent("a", "INBOX", 3)
+	publish(t, l, first, backdated, last)
+	clock.Set(t0.Add(week + time.Hour))
+	if n, err := l.Trim(t.Context(), week, 1000); err != nil || n != 0 {
+		t.Fatalf("Trim = %d, %v, want nothing deleted", n, err)
+	}
+	if got, _ := readIDs(t, l, Query{After: 1}); !slices.Equal(got, []int64{2, 3}) {
+		t.Errorf("Read(after 1) = %v, want [2 3]", got)
+	}
+	clock.Set(t0.Add(week + 3*time.Hour))
+	if n, err := l.Trim(t.Context(), week, 1000); err != nil || n != 3 {
+		t.Errorf("Trim once all are old = %d, %v, want 3", n, err)
+	}
+}
