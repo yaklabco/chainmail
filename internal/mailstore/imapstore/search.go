@@ -166,6 +166,30 @@ func (c *conn) fetch(ctx context.Context, set imap.UIDSet, opts *imap.FetchOptio
 	return bufs, err
 }
 
+// fetchEach runs one FETCH and passes each message of the answer to each as
+// it arrives. Every message gives the command a fresh timeout, so the
+// timeout bounds the silence between replies and not the whole answer: an
+// answer for every message in a large folder can take longer than the
+// timeout and still complete while the server keeps sending.
+//
+// each must not block or use c, and may see a truncated message just before
+// an error; discard what it gathered when fetchEach fails.
+func (c *conn) fetchEach(ctx context.Context, set imap.UIDSet, opts *imap.FetchOptions, each func(*imapclient.FetchMessageBuffer)) error {
+	return c.pipeline(ctx, func(progress func()) error {
+		cmd := c.client().Fetch(set, opts)
+		for msg := cmd.Next(); msg != nil; msg = cmd.Next() {
+			buf, err := msg.Collect()
+			if err != nil {
+				_ = cmd.Close() // drains the rest so the client reads on; the message's error is the one to report
+				return err
+			}
+			progress()
+			each(buf)
+		}
+		return cmd.Close()
+	})
+}
+
 func uidSet(uids []uint32) imap.UIDSet {
 	var set imap.UIDSet
 	for _, u := range uids {
