@@ -841,3 +841,73 @@ func TestGroupAckedAboveTailIsReset(t *testing.T) {
 		t.Errorf("reconnect: ids %v then position %d, want [4 5] then 5 with no gap", ids, got.heartbeat.GetPosition())
 	}
 }
+
+// idRange is from to to inclusive.
+func idRange(from, to int64) []int64 {
+	ids := make([]int64, 0, to-from+1)
+	for id := from; id <= to; id++ {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// TestSubscribeBacklogCrossesPages checks a backlog longer than one
+// 100-event read: every event arrives once, in order, before the single
+// caught-up heartbeat.
+func TestSubscribeBacklogCrossesPages(t *testing.T) {
+	t.Parallel()
+	h := startWatch(t, 0)
+	events := make([]watch.Event, 250)
+	for i := range events {
+		events[i] = watchNew("host", "INBOX", uint32(i+1), "m")
+	}
+	watchPublish(t, h, events...)
+	got := untilHeartbeat(t, subscribe(t, h, &chainmailv1.SubscribeRequest{Since: proto.Int64(0)}))
+	if ids := eventIDs(got.events); !slices.Equal(ids, idRange(1, 250)) {
+		t.Errorf("ids = %d events from %v, want 1 to 250", len(ids), ids[:min(len(ids), 3)])
+	}
+	if got.heartbeat.GetPosition() != 250 {
+		t.Errorf("position = %d, want 250", got.heartbeat.GetPosition())
+	}
+}
+
+// TestFilteredReadsCrossTheScanCap checks a filter that matches events
+// either side of the 5000 rows one log read examines. Subscribe reads on
+// past the cap before its heartbeat. A ReadEvents page with no wait stops
+// at the cap, possibly empty, with the cursor where it stopped, and a
+// waiting read reads on past it.
+func TestFilteredReadsCrossTheScanCap(t *testing.T) {
+	t.Parallel()
+	h := startWatch(t, 0)
+	events := make([]watch.Event, 5004)
+	for i := range events {
+		events[i] = watchNew("host", "INBOX", uint32(i+1), "m")
+	}
+	events[1] = watchNew("work", "INBOX", 2, "early")      // ID 2
+	events[5002] = watchNew("work", "INBOX", 5003, "late") // ID 5003
+	watchPublish(t, h, events...)
+	work := &chainmailv1.WatchFilter{Accounts: []string{"work"}}
+
+	got := untilHeartbeat(t, subscribe(t, h, &chainmailv1.SubscribeRequest{Since: proto.Int64(0), Filter: work}))
+	if ids := eventIDs(got.events); !slices.Equal(ids, []int64{2, 5003}) || got.heartbeat.GetPosition() != 5004 {
+		t.Errorf("Subscribe: ids %v then position %d, want [2 5003] then 5004", ids, got.heartbeat.GetPosition())
+	}
+
+	tests := []struct {
+		name   string
+		req    *chainmailv1.ReadEventsRequest
+		want   []int64
+		cursor int64
+	}{
+		{name: "first page stops at the cap", req: &chainmailv1.ReadEventsRequest{Cursor: proto.Int64(0), Filter: work}, want: []int64{2}, cursor: 5000},
+		{name: "empty page past the cap", req: &chainmailv1.ReadEventsRequest{Cursor: proto.Int64(2), Filter: work}, want: []int64{}, cursor: 5002},
+		{name: "from the cap", req: &chainmailv1.ReadEventsRequest{Cursor: proto.Int64(5000), Filter: work}, want: []int64{5003}, cursor: 5004},
+		{name: "waiting reads on", req: &chainmailv1.ReadEventsRequest{Cursor: proto.Int64(2), Filter: work, WaitSeconds: 5}, want: []int64{5003}, cursor: 5004},
+	}
+	for _, tt := range tests {
+		resp := readEvents(t, h, tt.req)
+		if ids := eventIDs(resp.GetEvents()); !slices.Equal(ids, tt.want) || resp.GetNextCursor() != tt.cursor {
+			t.Errorf("%s: ids %v cursor %d, want %v cursor %d", tt.name, ids, resp.GetNextCursor(), tt.want, tt.cursor)
+		}
+	}
+}
