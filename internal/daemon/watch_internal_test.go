@@ -789,7 +789,7 @@ func TestReadEventsGroupQuietPastTheDeadline(t *testing.T) {
 // gap, and only a delivered gap recovers the group.
 func TestSubscribeGapSendFailureLeavesTheGroupStale(t *testing.T) {
 	t.Parallel()
-	s, _ := newTestServerOptions(t, passwordConfig, Options{WatchHeartbeat: time.Hour})
+	s, _ := newTestServerOptions(t, passwordConfig, Options{WatchHeartbeat: time.Hour, DisableWatch: true})
 	ctx := peerContext(t.Context())
 	if err := s.watchLog.Publish(ctx, testWatchEvent("a"), testWatchEvent("b"), testWatchEvent("c")); err != nil {
 		t.Fatal(err)
