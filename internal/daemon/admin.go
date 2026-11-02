@@ -137,15 +137,26 @@ func (a *adminService) FinishAuthLogin(ctx context.Context, req *connect.Request
 	return connect.NewResponse(&chainmailv1.FinishAuthLoginResponse{}), nil
 }
 
-// GetStatus reports the daemon's version, start time, mode and secret names.
-// It is read-only and returns no secret values, so it is deliberately not
-// audited: status polling would otherwise flood the audit log.
-func (a *adminService) GetStatus(_ context.Context, _ *connect.Request[chainmailv1.GetStatusRequest]) (*connect.Response[chainmailv1.GetStatusResponse], error) {
+// GetStatus reports the daemon's version, start time, mode, secret names
+// and each synced folder's state. It is read-only and returns no secret
+// values or message content, so it is deliberately not audited: status
+// polling would otherwise flood the audit log.
+func (a *adminService) GetStatus(ctx context.Context, _ *connect.Request[chainmailv1.GetStatusRequest]) (*connect.Response[chainmailv1.GetStatusResponse], error) {
+	rows, err := a.s.watchState.Folders(ctx)
+	if err != nil {
+		a.s.opts.Logger.Error("sync state read failed", "err", err)
+		return nil, toConnectError(&fixedTextError{msg: "the sync state could not be read", err: err})
+	}
+	folders := make([]*chainmailv1.FolderSyncStatus, 0, len(rows))
+	for _, r := range rows {
+		folders = append(folders, folderStatusProto(r))
+	}
 	return connect.NewResponse(&chainmailv1.GetStatusResponse{
 		Version:     version.Version,
 		StartedAt:   timestamppb.New(a.s.started),
 		DevMode:     a.s.opts.DevMode,
 		SecretNames: a.s.opts.Vault.Names(),
+		Sync:        folders,
 	}), nil
 }
 
