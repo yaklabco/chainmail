@@ -1,13 +1,16 @@
 package cache_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -54,7 +57,28 @@ type readFixture struct {
 	stateDB *sql.DB
 	path    string
 	store   *cache.Store
+	acct    *cache.Account
 	view    *cache.View
+	logs    *readLogs
+}
+
+// readLogs collects the account's log output for the tests that check what
+// a read logs.
+type readLogs struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *readLogs) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *readLogs) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
 }
 
 func newReadFixture(t *testing.T, gmail bool) *readFixture {
@@ -86,6 +110,7 @@ func newReadFixture(t *testing.T, gmail bool) *readFixture {
 	t.Cleanup(func() { _ = cs.Close() })
 	fk := fake.New(name, gmail)
 	fk.SetNow(readClock{}.Now)
+	logs := &readLogs{}
 	a := cache.NewAccount(cache.AccountOptions{
 		Account:  acct,
 		Settings: func() config.CacheSettings { return cfg.CacheSettings(name) },
@@ -95,13 +120,14 @@ func newReadFixture(t *testing.T, gmail bool) *readFixture {
 		State:    watch.NewState(stateDB),
 		Mail:     func(context.Context) (cache.MailStore, func(), error) { return fk, func() {}, nil },
 		Clock:    readClock{},
+		Logger:   slog.New(slog.NewTextHandler(logs, nil)),
 	})
 	// Freshness also needs the builder caught up with the event log, which
 	// it never is here without running the account.
 	if err := cache.ReadTestCatchUp(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	return &readFixture{name: name, fk: fk, stateDB: stateDB, path: path, store: cs, view: a.View(fk)}
+	return &readFixture{name: name, fk: fk, stateDB: stateDB, path: path, store: cs, acct: a, view: a.View(fk), logs: logs}
 }
 
 // warm caches every folder the account's default search covers, with
@@ -659,5 +685,231 @@ func TestViewThreadRecoversAStaleSeed(t *testing.T) {
 	}
 	if !slices.Equal(sortedRefs(got), sortedRefs(want)) {
 		t.Errorf("members = %v, want %v", sortedRefs(got), sortedRefs(want))
+	}
+}
+
+// TestViewThreadMatchesTheServerRule checks that a cached thread on an
+// account other than Google has the members the server's Thread finds:
+// the messages in scope whose Message-ID is the seed's root or whose
+// References hold it as a whole entry, whatever thread ID their own root
+// gives them. aside's References start with other@x, so its own thread
+// ID is other@x's, yet it belongs to the thread rooted at p@x; near miss
+// only holds p@x inside a longer ID, so it does not.
+func TestViewThreadMatchesTheServerRule(t *testing.T) {
+	t.Parallel()
+	f := newReadFixture(t, false)
+	refs := seedReadMail(f.fk, false)
+	refs["aside"] = f.fk.Add(fake.Message{
+		Folder: "Archive", Date: readDaysAgo(8), Subject: "aside", MessageID: "a1@x",
+		References: []string{"other@x", "p@x"}, Body: "aside",
+	})
+	refs["near miss"] = f.fk.Add(fake.Message{
+		Folder: "Archive", Date: readDaysAgo(7), Subject: "near miss", MessageID: "n1@x",
+		References: []string{"xp@x"}, Body: "near",
+	})
+	f.warm(t)
+	for _, seed := range []string{"plan", "re: re: plan", "aside", "near miss", "note"} {
+		want, err := f.fk.Thread(t.Context(), refs[seed])
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, source, err := f.view.ThreadFrom(t.Context(), refs[seed])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if source != cache.SourceCache {
+			t.Errorf("seed %q: source = %q, want %q", seed, source, cache.SourceCache)
+		}
+		if !slices.Equal(sortedRefs(got), sortedRefs(want)) {
+			t.Errorf("seed %q: members = %v, want %v", seed, sortedRefs(got), sortedRefs(want))
+		}
+	}
+	plan, _, err := f.view.ThreadFrom(t.Context(), refs["plan"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(plan, refs["aside"]) || slices.Contains(plan, refs["near miss"]) {
+		t.Errorf("plan's thread = %v, want aside in and near miss out", plan)
+	}
+}
+
+// spent returns the account's download budget used today.
+func (f *readFixture) spent(t *testing.T) int64 {
+	t.Helper()
+	n, err := f.store.Budget(t.Context(), f.name, readNow.UTC().Format("2006-01-02"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestViewFetchMessagesChargesEveryDownload checks spec 4.4: a body read
+// from the server counts against the day's budget whether or not the cache
+// keeps it, here from a folder it does not track, from a folder under a
+// UIDVALIDITY it does not hold, and when storing the body fails.
+func TestViewFetchMessagesChargesEveryDownload(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, f *readFixture) ref.Ref
+	}{
+		{
+			name: "a folder the cache does not track",
+			setup: func(_ *testing.T, f *readFixture) ref.Ref {
+				return f.fk.Add(fake.Message{Folder: "Trash", Date: readDaysAgo(1), Subject: "binned", Body: "gone"})
+			},
+		},
+		{
+			name: "a folder under another UIDVALIDITY",
+			setup: func(t *testing.T, f *readFixture) ref.Ref {
+				f.fk.NewUIDValidity("Archive")
+				res, err := f.fk.Search(t.Context(), mailstore.SearchRequest{In: "Archive"})
+				if err != nil || len(res) != 1 || len(res[0].UIDs) != 1 {
+					t.Fatalf("archive after the reset: %v, %v", res, err)
+				}
+				return ref.Ref{Account: f.name, Folder: "Archive", UIDValidity: res[0].Source.UIDValidity, UID: res[0].UIDs[0]}
+			},
+		},
+		{
+			name: "a body the cache fails to store",
+			setup: func(t *testing.T, f *readFixture) ref.Ref {
+				conn, err := sql.Open("sqlite", "file:"+f.path+"?_pragma=busy_timeout(5000)")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = conn.Close() }()
+				if _, err := conn.ExecContext(t.Context(),
+					`CREATE TRIGGER refuse_bodies BEFORE INSERT ON bodies BEGIN SELECT RAISE(ABORT, 'refused'); END`); err != nil {
+					t.Fatal(err)
+				}
+				return f.fk.Add(fake.Message{Folder: "INBOX", Date: readDaysAgo(0), Subject: "late", Body: "arrived after the prefetch"})
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newReadFixture(t, false)
+			seedReadMail(f.fk, false)
+			f.warm(t)
+			r := tt.setup(t, f)
+			got, sources := f.view.FetchMessagesFrom(t.Context(), []ref.Ref{r})
+			if got[0].Err != nil || sources[0] != cache.SourceServer {
+				t.Fatalf("read: err %v, source %q, want the server's message", got[0].Err, sources[0])
+			}
+			if spent, want := f.spent(t), int64(len(got[0].Message.Raw)); spent != want {
+				t.Errorf("budget = %d, want %d", spent, want)
+			}
+		})
+	}
+}
+
+// TestViewReadLogsFailuresBeforeFallingBack checks that a failure the
+// read path survives by asking the server is logged: the cache's own
+// error with its text, and a server error by a fixed message only, never
+// the server's response text.
+func TestViewReadLogsFailuresBeforeFallingBack(t *testing.T) {
+	t.Parallel()
+	const serverText = "NO [SERVERBUG] secret server words"
+	tests := []struct {
+		name  string
+		fault func(t *testing.T, f *readFixture)
+		read  func(t *testing.T, f *readFixture, refs map[string]ref.Ref)
+		want  string
+	}{
+		{
+			name:  "freshness of a cached message",
+			fault: func(_ *testing.T, f *readFixture) { _ = f.stateDB.Close() },
+			read: func(t *testing.T, f *readFixture, refs map[string]ref.Ref) {
+				got, _ := f.view.FetchMessagesFrom(t.Context(), []ref.Ref{refs["memo"]})
+				if got[0].Err != nil {
+					t.Fatal(got[0].Err)
+				}
+			},
+			want: "checking a folder's freshness failed",
+		},
+		{
+			name:  "freshness of a thread's folders",
+			fault: func(_ *testing.T, f *readFixture) { _ = f.stateDB.Close() },
+			read: func(t *testing.T, f *readFixture, refs map[string]ref.Ref) {
+				if _, _, err := f.view.ThreadFrom(t.Context(), refs["plan"]); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "checking a thread's folders for freshness failed",
+		},
+		{
+			name: "a thread's scope",
+			fault: func(_ *testing.T, f *readFixture) {
+				f.fk.Fail("SearchFolders", errors.New(serverText))
+			},
+			read: func(t *testing.T, f *readFixture, refs map[string]ref.Ref) {
+				if _, _, err := f.view.ThreadFrom(t.Context(), refs["plan"]); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "listing the folders a thread covers failed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newReadFixture(t, false)
+			refs := seedReadMail(f.fk, false)
+			f.warm(t)
+			tt.fault(t, f)
+			tt.read(t, f, refs)
+			logs := f.logs.String()
+			if !strings.Contains(logs, tt.want) {
+				t.Errorf("logs lack %q:\n%s", tt.want, logs)
+			}
+			if strings.Contains(logs, serverText) {
+				t.Errorf("logs carry the server's text:\n%s", logs)
+			}
+		})
+	}
+}
+
+// cancelAfterFetch is the fake server, except that FetchMessages cancels
+// the caller's context once it has answered, as a client that hangs up
+// while its get is being kept does.
+type cancelAfterFetch struct {
+	*fake.Store
+	cancel context.CancelFunc
+}
+
+func (s cancelAfterFetch) FetchMessages(ctx context.Context, refs []ref.Ref) []mailstore.MessageResult {
+	out := s.Store.FetchMessages(ctx, refs)
+	s.cancel()
+	return out
+}
+
+// TestViewKeepsAReadAfterTheCallerCancels checks that a body downloaded
+// before the caller cancels is still kept, marked read and charged: the
+// bookkeeping does not run on the request's context.
+func TestViewKeepsAReadAfterTheCallerCancels(t *testing.T) {
+	t.Parallel()
+	f := newReadFixture(t, false)
+	seedReadMail(f.fk, false)
+	f.warm(t)
+	late := f.fk.Add(fake.Message{Folder: "INBOX", Date: readDaysAgo(0), Subject: "late", Body: "arrived after the prefetch"})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	view := f.acct.View(cancelAfterFetch{Store: f.fk, cancel: cancel})
+	got, _ := view.FetchMessagesFrom(ctx, []ref.Ref{late})
+	if got[0].Err != nil {
+		t.Fatal(got[0].Err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("the caller's context was not canceled")
+	}
+	if _, ok, err := f.store.Row(t.Context(), late); err != nil || !ok {
+		t.Errorf("row after a canceled read: %v, %t", err, ok)
+	}
+	if !f.lastReadAt(t, late) {
+		t.Error("a canceled read did not keep its body marked read")
+	}
+	if spent, want := f.spent(t), int64(len(got[0].Message.Raw)); spent != want {
+		t.Errorf("budget = %d, want %d", spent, want)
 	}
 }

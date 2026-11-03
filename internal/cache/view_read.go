@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"time"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/ref"
@@ -49,12 +50,13 @@ func (v *View) read(ctx context.Context, refs []ref.Ref, recovering bool) ([]mai
 	for j, i := range misses {
 		missed[j] = refs[i]
 	}
+	epoch := v.a.writeEpoch()
 	for j, res := range v.server.FetchMessages(ctx, missed) {
 		i := misses[j]
 		out[i], sources[i] = res, SourceServer
 		switch {
 		case res.Err == nil:
-			v.keepRead(ctx, res.Message)
+			v.keepRead(ctx, epoch, res.Message)
 		case recovering && errors.Is(res.Err, mailstore.ErrStaleRef):
 			moved, ok := v.recoverRef(ctx, refs[i])
 			if !ok {
@@ -139,10 +141,16 @@ func (v *View) cachedMessage(ctx context.Context, r ref.Ref) (*mailstore.Message
 	return row.Message(body), true
 }
 
-// readFresh reports whether folder is fresh, so its cached flags stand.
+// readFresh reports whether folder is fresh, so its cached flags stand. A
+// failed check is logged and reads as stale, so the server's flags are
+// fetched.
 func (v *View) readFresh(ctx context.Context, folder string) bool {
 	ok, _, _, err := v.a.Freshness(ctx, []string{folder})
-	return err == nil && ok
+	if err != nil {
+		v.logReadError("checking a folder's freshness failed", err)
+		return false
+	}
+	return ok
 }
 
 // refreshFlags replaces the flags and labels of hits, all in src, with the
@@ -180,49 +188,82 @@ func (v *View) refreshFlags(ctx context.Context, src mailstore.Source, hits []re
 	return kept, missed
 }
 
-// keepRead stores a message read from the server: its row, when the cache
-// tracks the folder under the message's UIDVALIDITY and lacks the row, and
-// its body, marked read, counted against the account's budget for the UTC
-// day, and then the file's size is checked, which wakes the evictor when
-// it is over max_size. Folders the cache does not track, such as Trash or a
-// Google label folder other than All Mail, are never stored.
-func (v *View) keepRead(ctx context.Context, msg *mailstore.Message) {
+// keepReadTimeout bounds keepRead's bookkeeping, which runs detached from
+// the caller's cancellation so a client that hangs up after the download
+// still has its body charged and kept.
+const keepReadTimeout = 5 * time.Second
+
+// keepRead does the bookkeeping of a message of the view's account read
+// from the server, fetched under the account's write epoch epoch. It first
+// counts len(Raw) against the account's budget for the UTC day, as every
+// foreground download counts whether or not the cache keeps it (spec 4.4).
+// Then storeRead keeps the row and body, marked read, and when it stored a
+// new body the file's size is checked, which wakes the evictor when it is
+// over max_size. It runs on ctx without its cancellation, bounded by
+// keepReadTimeout. A message of another account is left alone.
+func (v *View) keepRead(ctx context.Context, epoch uint64, msg *mailstore.Message) {
+	store, account := v.a.o.Store, v.a.o.Account.Name
+	if msg.Summary.Ref.Account != account {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), keepReadTimeout)
+	defer cancel()
+	day := v.a.o.Clock.Now().UTC().Format("2006-01-02")
+	if _, err := store.AddBudget(ctx, account, day, int64(len(msg.Raw))); err != nil {
+		v.logReadError("counting a read against the budget failed", err)
+	}
+	if v.a.beforeKeepWrite != nil {
+		v.a.beforeKeepWrite()
+	}
+	if !v.storeRead(ctx, epoch, msg) {
+		return
+	}
+	if err := store.noteWrite(ctx, v.a.o.MaxSize()); err != nil {
+		v.logReadError("checking the cache size failed", err)
+	}
+}
+
+// storeRead stores msg's row, when the cache tracks its folder under the
+// message's UIDVALIDITY and lacks the row, and its body, marked read. It
+// writes under wmu, as the builder and backfill do, and only when no folder
+// drop or rebuild ran since epoch and the folder's progress still admits the
+// message, so a read never writes into a newer generation of the cache.
+// Folders the cache does not track, such as Trash or a Google label folder
+// other than All Mail, are never stored. It reports whether it stored a new
+// body.
+func (v *View) storeRead(ctx context.Context, epoch uint64, msg *mailstore.Message) bool {
 	store, account := v.a.o.Store, v.a.o.Account.Name
 	r := msg.Summary.Ref
+	v.a.wmu.Lock()
+	defer v.a.wmu.Unlock()
+	if v.a.epoch != epoch {
+		return false
+	}
 	p, tracked, err := store.Progress(ctx, account, r.Folder)
 	if err != nil {
 		v.logReadError("reading cache progress failed", err)
-		return
+		return false
 	}
 	if !tracked || p.UIDValidity != r.UIDValidity {
-		return
+		return false
 	}
 	_, have, err := store.Row(ctx, r)
 	if err != nil {
 		v.logReadError("reading a cached row failed", err)
-		return
+		return false
 	}
 	if !have {
 		if err := store.PutRows(ctx, []Row{messageRow(msg)}); err != nil {
 			v.logReadError("storing a read row failed", err)
-			return
+			return false
 		}
 	}
 	stored, err := store.PutBody(ctx, r, Body{Raw: msg.Raw, TextClipped: msg.TextClipped}, true)
 	if err != nil {
 		v.logReadError("storing a read body failed", err)
-		return
+		return false
 	}
-	if !stored {
-		return
-	}
-	day := v.a.o.Clock.Now().UTC().Format("2006-01-02")
-	if _, err := store.AddBudget(ctx, account, day, int64(len(msg.Raw))); err != nil {
-		v.logReadError("counting a read against the budget failed", err)
-	}
-	if err := store.noteWrite(ctx, v.a.o.MaxSize()); err != nil {
-		v.logReadError("checking the cache size failed", err)
-	}
+	return stored
 }
 
 // messageRow is the cache row of a message read from the server. A Message
@@ -308,8 +349,10 @@ func (v *View) thread(ctx context.Context, r ref.Ref, recovering bool) ([]ref.Re
 
 // cachedThread answers Thread from the cache when it holds r's row and
 // every folder a default search covers is fresh: the cached rows of those
-// folders with r's thread ID, plus r itself, as the server's Thread scopes
-// and seeds it. A row without a thread ID is a thread of one.
+// folders in r's thread (threadRows), plus r itself, as the server's Thread
+// scopes and seeds it. A row without a thread is a thread of one. A
+// failure to list or check the folders is logged and leaves the answer to
+// the server.
 func (v *View) cachedThread(ctx context.Context, r ref.Ref) ([]ref.Ref, bool) {
 	store, account := v.a.o.Store, v.a.o.Account.Name
 	if r.Account != account {
@@ -329,16 +372,23 @@ func (v *View) cachedThread(ctx context.Context, r ref.Ref) ([]ref.Ref, bool) {
 	}
 	folders, err := scoper.SearchFolders(ctx, "")
 	if err != nil {
+		// The error may carry the server's response text, so only a
+		// fixed message is logged.
+		v.a.o.Logger.Warn("listing the folders a thread covers failed", "account", account, "reason", reasonCode(err))
 		return nil, false
 	}
 	fresh, _, _, err := v.a.Freshness(ctx, folders)
-	if err != nil || !fresh {
+	if err != nil {
+		v.logReadError("checking a thread's folders for freshness failed", err)
 		return nil, false
 	}
-	if row.ThreadID == "" {
+	if !fresh {
+		return nil, false
+	}
+	rows, ok, err := v.threadRows(ctx, row)
+	if !ok {
 		return []ref.Ref{r}, true
 	}
-	rows, err := store.ThreadRows(ctx, account, row.ThreadID)
 	if err != nil {
 		v.logReadError("reading a cached thread failed", err)
 		return nil, false
@@ -350,6 +400,29 @@ func (v *View) cachedThread(ctx context.Context, r ref.Ref) ([]ref.Ref, bool) {
 		}
 	}
 	return withThreadSeed(refs, r), true
+}
+
+// threadRows returns the cached rows of the thread row belongs to, by the
+// server's rule: on Google the rows with its X-GM-THRID (as its thread
+// ID); elsewhere the rows naming its root Message-ID (RootThreadRows), as
+// a standard server's Thread searches Message-ID, References and
+// In-Reply-To for it. The bool is false when row has no thread to look up,
+// which makes it a thread of one.
+func (v *View) threadRows(ctx context.Context, row Row) ([]Row, bool, error) {
+	store, account := v.a.o.Store, v.a.o.Account
+	if account.Provider.Gmail {
+		if row.ThreadID == "" {
+			return nil, false, nil
+		}
+		rows, err := store.ThreadRows(ctx, account.Name, row.ThreadID)
+		return rows, true, err
+	}
+	root := mailstore.RootMessageID(row.References, row.InReplyTo, row.MessageID)
+	if root == "" {
+		return nil, false, nil
+	}
+	rows, err := store.RootThreadRows(ctx, account.Name, root)
+	return rows, true, err
 }
 
 // withThreadSeed adds seed to refs unless a ref already names the same

@@ -97,6 +97,9 @@ type Account struct {
 	// afterGroup, when set, runs once the builder has opened its group and
 	// before it records baselines. Tests set it.
 	afterGroup func()
+	// beforeKeepWrite, when set, runs in the read path after a downloaded
+	// message is charged and before its write takes wmu. Tests set it.
+	beforeKeepWrite func()
 }
 
 // Work timing and accounting, from spec sections 4 and 8 and amendment 14.
@@ -289,4 +292,12 @@ func (a *Account) runPrefetch(ctx context.Context) {
 		Clock:  o.Clock,
 		Logger: o.Logger,
 	}).run(ctx)
+}
+
+// writeEpoch returns the count of folder drops so far. Work fetched now
+// is written only while it is unchanged, checked under wmu.
+func (a *Account) writeEpoch() uint64 {
+	a.wmu.Lock()
+	defer a.wmu.Unlock()
+	return a.epoch
 }
