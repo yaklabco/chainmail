@@ -228,9 +228,8 @@ func TestCacheRebuild(t *testing.T) {
 				&chainmailv1.GetCacheStatusRequest{},
 				&chainmailv1.RebuildCacheRequest{Account: "gm"},
 				&chainmailv1.RebuildCacheRequest{Account: "host"},
-				&chainmailv1.RebuildCacheRequest{Account: "old"},
 			},
-			stdout: `{"accounts":[{"account":"gm","folders":["[Gmail]/All Mail"]},{"account":"host","folders":["INBOX","Sent"]},{"account":"old","folders":[]}]}` + "\n",
+			stdout: `{"accounts":[{"account":"gm","folders":["[Gmail]/All Mail"]},{"account":"host","folders":["INBOX","Sent"]}],"skipped":["old"]}` + "\n",
 		},
 		{
 			name: "every account, as a table", output: "table", args: nil,
@@ -238,9 +237,8 @@ func TestCacheRebuild(t *testing.T) {
 				&chainmailv1.GetCacheStatusRequest{},
 				&chainmailv1.RebuildCacheRequest{Account: "gm"},
 				&chainmailv1.RebuildCacheRequest{Account: "host"},
-				&chainmailv1.RebuildCacheRequest{Account: "old"},
 			},
-			stdout: "rebuilt gm: [Gmail]/All Mail\nrebuilt host: INBOX, Sent\nrebuilt old: no cached folders\n",
+			stdout: "rebuilt gm: [Gmail]/All Mail\nrebuilt host: INBOX, Sent\nskipped old: cache disabled\n",
 		},
 	}
 	for _, tt := range tests {
@@ -250,13 +248,7 @@ func TestCacheRebuild(t *testing.T) {
 				status: func(*chainmailv1.GetCacheStatusRequest) (*chainmailv1.GetCacheStatusResponse, error) {
 					return cacheStatusFixture(), nil
 				},
-				rebuild: func(req *chainmailv1.RebuildCacheRequest) (*chainmailv1.RebuildCacheResponse, error) {
-					folders := map[string][]string{"gm": {"[Gmail]/All Mail"}, "host": {"INBOX", "Sent"}}[req.GetAccount()]
-					if req.GetFolder() != "" {
-						folders = []string{req.GetFolder()}
-					}
-					return &chainmailv1.RebuildCacheResponse{Folders: folders}, nil
-				},
+				rebuild: rebuildLikeDaemon(cacheStatusFixture(), map[string][]string{"gm": {"[Gmail]/All Mail"}, "host": {"INBOX", "Sent"}}),
 			}
 			socket := startFakeCache(t, f)
 			got := runCLI(t, Env{}, append([]string{"--socket", socket, "--output", tt.output, "cache", "rebuild"}, tt.args...)...)
@@ -271,6 +263,92 @@ func TestCacheRebuild(t *testing.T) {
 			}
 		})
 	}
+}
+
+// rebuildLikeDaemon answers RebuildCache as the daemon does: an account
+// whose cache status is not enabled has no cache worker and is refused
+// with INVALID_ARGUMENT, a folder rebuild drops that folder, and an
+// account rebuild drops the folders folders lists for it.
+func rebuildLikeDaemon(status *chainmailv1.GetCacheStatusResponse, folders map[string][]string) func(*chainmailv1.RebuildCacheRequest) (*chainmailv1.RebuildCacheResponse, error) {
+	return func(req *chainmailv1.RebuildCacheRequest) (*chainmailv1.RebuildCacheResponse, error) {
+		for _, a := range status.GetAccounts() {
+			if a.GetAccount() == req.GetAccount() && !a.GetEnabled() {
+				return nil, api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, "run: chainmail cache status", fmt.Errorf("the cache is off for account %s", req.GetAccount()))
+			}
+		}
+		if req.GetFolder() != "" {
+			return &chainmailv1.RebuildCacheResponse{Folders: []string{req.GetFolder()}}, nil
+		}
+		return &chainmailv1.RebuildCacheResponse{Folders: folders[req.GetAccount()]}, nil
+	}
+}
+
+// Rebuilding every account skips the accounts whose cache is disabled, even
+// when one sorts first, and says which it skipped. Naming a disabled account
+// still asks the daemon, so its refusal reaches the user.
+func TestCacheRebuildSkipsDisabledAccounts(t *testing.T) {
+	t.Parallel()
+	status := &chainmailv1.GetCacheStatusResponse{Accounts: []*chainmailv1.AccountCacheStatus{
+		{Account: "aaa", State: "disabled"},
+		{Account: "host", Enabled: true, State: "ready"},
+		{Account: "new", Enabled: true, State: "backfilling"},
+		{Account: "zzz", State: "disabled"},
+	}}
+	tests := []struct {
+		name   string
+		output string
+		stdout string
+	}{
+		{
+			name: "json", output: "json",
+			stdout: `{"accounts":[{"account":"host","folders":["INBOX"]},{"account":"new","folders":[]}],"skipped":["aaa","zzz"]}` + "\n",
+		},
+		{
+			name: "table", output: "table",
+			stdout: "rebuilt host: INBOX\nrebuilt new: no cached folders\nskipped aaa: cache disabled\nskipped zzz: cache disabled\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeCache{
+				status: func(*chainmailv1.GetCacheStatusRequest) (*chainmailv1.GetCacheStatusResponse, error) {
+					return status, nil
+				},
+				rebuild: rebuildLikeDaemon(status, map[string][]string{"host": {"INBOX"}}),
+			}
+			socket := startFakeCache(t, f)
+			got := runCLI(t, Env{}, "--socket", socket, "--output", tt.output, "cache", "rebuild")
+			if got.code != 0 {
+				t.Fatalf("cache rebuild: %+v", got)
+			}
+			if got.stdout != tt.stdout {
+				t.Errorf("stdout = %q, want %q", got.stdout, tt.stdout)
+			}
+			want := []proto.Message{
+				&chainmailv1.GetCacheStatusRequest{},
+				&chainmailv1.RebuildCacheRequest{Account: "host"},
+				&chainmailv1.RebuildCacheRequest{Account: "new"},
+			}
+			if reqs := f.requests(); !slices.EqualFunc(reqs, want, proto.Equal) {
+				t.Errorf("requests = %v, want %v", reqs, want)
+			}
+		})
+	}
+
+	t.Run("named", func(t *testing.T) {
+		t.Parallel()
+		f := &fakeCache{rebuild: rebuildLikeDaemon(status, nil)}
+		socket := startFakeCache(t, f)
+		got := runCLI(t, Env{}, "--socket", socket, "cache", "rebuild", "--account", "aaa")
+		if got.code != api.ExitUsage || errorReason(t, got.stderr) != api.ReasonInvalidArgument || got.stdout != "" {
+			t.Errorf("cache rebuild --account aaa: %+v, want exit %d %s and no stdout", got, api.ExitUsage, api.ReasonInvalidArgument)
+		}
+		want := []proto.Message{&chainmailv1.RebuildCacheRequest{Account: "aaa"}}
+		if reqs := f.requests(); !slices.EqualFunc(reqs, want, proto.Equal) {
+			t.Errorf("requests = %v, want %v", reqs, want)
+		}
+	})
 }
 
 func TestCacheEvict(t *testing.T) {

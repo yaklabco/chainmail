@@ -57,9 +57,11 @@ type rebuiltAccount struct {
 	Folders []string `json:"folders"`
 }
 
-// rebuildOutput is cache rebuild's JSON output.
+// rebuildOutput is cache rebuild's JSON output. Skipped names the accounts
+// a rebuild of every account passed over because their cache is disabled.
 type rebuildOutput struct {
 	Accounts []rebuiltAccount `json:"accounts"`
+	Skipped  []string         `json:"skipped,omitempty"`
 }
 
 func newCacheRebuildCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
@@ -70,7 +72,8 @@ func newCacheRebuildCmd(ctx context.Context, env Env, g *globals) *cobra.Command
 		Long: `Drop the cached headers and bodies of every account, of the account
 --account names, or of one of its folders, and backfill them again from the
 mail server. Searches use the server for what is being rebuilt until the
-backfill is done. Running it again is safe.`,
+backfill is done. Without --account, accounts whose cache is disabled are
+skipped. Running it again is safe.`,
 		Args: exactArgs(0),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if folder != "" && account == "" {
@@ -79,6 +82,7 @@ backfill is done. Running it again is safe.`,
 			c := g.client(env)
 			defer c.Close()
 			accounts := []string{account}
+			var skipped []string
 			if account == "" {
 				resp, err := c.Cache.GetCacheStatus(ctx, connect.NewRequest(&chainmailv1.GetCacheStatusRequest{}))
 				if err != nil {
@@ -86,10 +90,16 @@ backfill is done. Running it again is safe.`,
 				}
 				accounts = accounts[:0]
 				for _, a := range resp.Msg.GetAccounts() {
+					// The daemon refuses to rebuild an account with no
+					// cache, so trying one would stop the loop.
+					if !a.GetEnabled() {
+						skipped = append(skipped, a.GetAccount())
+						continue
+					}
 					accounts = append(accounts, a.GetAccount())
 				}
 			}
-			out := rebuildOutput{Accounts: make([]rebuiltAccount, 0, len(accounts))}
+			out := rebuildOutput{Accounts: make([]rebuiltAccount, 0, len(accounts)), Skipped: skipped}
 			for _, a := range accounts {
 				resp, err := c.Cache.RebuildCache(ctx, connect.NewRequest(&chainmailv1.RebuildCacheRequest{Account: a, Folder: folder}))
 				if err != nil {
@@ -132,7 +142,8 @@ func newCacheEvictCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	}
 }
 
-// rebuildText prints one line per rebuilt account with the folders it dropped.
+// rebuildText prints one line per rebuilt account with the folders it
+// dropped, then one line per account skipped because its cache is disabled.
 func rebuildText(w io.Writer, out rebuildOutput) error {
 	var b strings.Builder
 	for _, a := range out.Accounts {
@@ -145,6 +156,9 @@ func rebuildText(w io.Writer, out rebuildOutput) error {
 			names[i] = termText(f)
 		}
 		fmt.Fprintf(&b, "rebuilt %s: %s\n", termText(a.Account), strings.Join(names, ", "))
+	}
+	for _, a := range out.Skipped {
+		fmt.Fprintf(&b, "skipped %s: cache disabled\n", termText(a))
 	}
 	return writeString(w, b.String())
 }
