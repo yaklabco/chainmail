@@ -67,7 +67,9 @@ var usageErrorCases = []struct {
 	{name: "missing argument", args: []string{"accounts", "test"}},
 	{name: "daemon argument", args: []string{"daemon", "extra"}},
 	{name: "completion command", args: []string{"completion", "nope"}},
-	{name: "completion for a shell", args: []string{"completion", "bash"}},
+	{name: "completion without a shell", args: []string{"completion"}},
+	{name: "completion for two shells", args: []string{"completion", "bash", "zsh"}},
+	{name: "man with an argument", args: []string{"man", "extra"}},
 	{name: "help for an unknown topic", args: []string{"help", "nope"}},
 	{name: "help for an unknown subcommand", args: []string{"help", "accounts", "nope"}},
 }

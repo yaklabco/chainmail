@@ -79,8 +79,9 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 	root := newGroup("chainmail", "Email for AI agents, behind a policy daemon")
 	root.SilenceUsage = true
 	root.SilenceErrors = true
-	// cobra's completion command prints help and exits 0 for anything it does
-	// not know, outside the exit contract. Its help command is replaced below.
+	// cobra's own completion command prints help and exits 0 for a shell
+	// it does not know, outside the exit contract. newCompletionCmd
+	// replaces it. Its help command is replaced below for the same reason.
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.SetHelpCommand(newHelpCmd())
 	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
@@ -117,6 +118,8 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 		newDraftCmd(ctx, env, g),
 		newMCPCmd(ctx, env, g),
 		newWatchCmd(ctx, env, g),
+		newCompletionCmd(),
+		newManCmd(),
 	)
 	root.AddCommand(newOrganizeCmds(ctx, env, g)...)
 	root.AddGroup(commandGroups...)

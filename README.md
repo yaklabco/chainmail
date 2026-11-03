@@ -358,6 +358,7 @@ Every command accepts `--socket <path>` and `--output json|table`. Without `--ou
 | `chainmail watch groups delete <name>` | Deletes a watch group, so its next use starts at the newest event. Deleting a group that does not exist succeeds with `deleted` false. | `{"deleted":...}` |
 | `chainmail audit [--since 24h] [--account <account>] [--action <action>] [--limit N] [--before-id N]` | Lists audit rows, newest first. See [Reading the audit log](#reading-the-audit-log). | `{"entries":[...],"next_before_id":...}` |
 | `chainmail help [command]` | Prints help. `--help` on any command does the same. | help text |
+| `chainmail completion <bash\|zsh\|fish\|powershell>` | Prints a shell completion script. See [Shell completion](#shell-completion). | the script |
 
 Each check in `accounts test` has `ok`, `reason` (`AUTH_REJECTED`, `SERVER_UNAVAILABLE` or `TIMEOUT` when it failed), `error`, `capabilities` (IMAP only) and `latency_ms`. When a check fails, the command still prints the full result on stdout, then reports the failure on stderr and exits with its code: 5 if any server rejected the credentials, otherwise the code of the first failed check. If the account is missing a secret or already needs a human, no check runs. The command prints nothing on stdout and fails with `AUTH_REQUIRED` (exit 5).
 
@@ -371,6 +372,18 @@ Two settings apply to every client command: `socket`, the daemon socket, and `ou
     output = "table"
 
 A missing file is fine. A file that does not parse, holds another key, or sets `output` to anything but `json` or `table`, is a usage error (exit 2) naming the file. The daemon's own config file is separate, and no environment variable can change it.
+
+## Shell completion
+
+`chainmail completion <shell>` prints a completion script for bash, zsh, fish or PowerShell. Every command, subcommand, argument and flag completes, with a description where one helps:
+
+    source <(chainmail completion bash)                                       # bash
+    chainmail completion zsh > "${fpath[1]}/_chainmail"                        # zsh
+    chainmail completion fish > ~/.config/fish/completions/chainmail.fish      # fish
+
+Accounts, folders, Gmail labels, message refs, attachment parts, watch groups, secret names and audit actions come from the daemon, through the same socket, policy and audit as any other command. Message refs list the 20 newest messages in the inbox (or Drafts, for `draft send`, `update` and `delete`), each with its date, sender and subject; type the start of a ref, such as `cm1:work:`, to narrow them to one account. Each lookup gives up after 1.5 seconds, and a daemon that is down or refuses you gets no candidates rather than an error. Set `BASH_COMP_DEBUG_FILE` to a path to log why a lookup offered nothing.
+
+The nix package installs the scripts for bash, zsh and fish, and a man page.
 
 ## Reading mail
 
@@ -1117,6 +1130,6 @@ Reasons and exit codes are a contract with agents and never change. They come fr
 | 8 | `SEND_OUTCOME_UNKNOWN` | A send may or may not have gone out. Check Sent before sending again (see [After a send](#after-a-send)). |
 | 9 | `TOTP_INVALID`, `TOTP_LOCKED` | Approval code refused. Reserved for a later sub-project: nothing returns it yet. |
 
-Usage errors always exit 2 with `USAGE`. That covers a missing or extra argument, an unknown flag, a bad `--output` value, a group command such as `chainmail accounts` run on its own, an unknown subcommand, and `chainmail help <unknown>`. Shell completion is disabled, so `chainmail completion` is an unknown command too.
+Usage errors always exit 2 with `USAGE`. That covers a missing or extra argument, an unknown flag, a bad `--output` value, a group command such as `chainmail accounts` run on its own, an unknown subcommand, and `chainmail help <unknown>`. `chainmail completion` without a shell, or with one it does not know, is a usage error too.
 
 Interrupting a prompt with Ctrl-C, such as the `secret set` prompt or the `auth login` paste, exits 1 with `INTERNAL` and a message containing `interrupted`.
