@@ -425,26 +425,132 @@ func TestProbeCacheWrites(t *testing.T) {
 	}
 }
 
-// Housekeeping runs every cacheInterval until its context ends.
-func TestCacheHousekeepingRuns(t *testing.T) {
-	t.Parallel()
-	s, _ := newCacheServer(t, cacheConfig)
-	var probes atomic.Int32
+// housekeepWait is one After call on a housekeepClock: how long it waits
+// and the channel the test fires it on.
+type housekeepWait struct {
+	d    time.Duration
+	fire chan time.Time
+}
+
+// housekeepClock is a watch.Clock whose timers fire only when the test
+// fires them. It sends every After call on waits.
+type housekeepClock struct {
+	now   time.Time
+	waits chan housekeepWait
+}
+
+func (c *housekeepClock) Now() time.Time { return c.now }
+
+func (c *housekeepClock) After(d time.Duration) <-chan time.Time {
+	w := housekeepWait{d: d, fire: make(chan time.Time, 1)}
+	c.waits <- w
+	return w.fire
+}
+
+// startHousekeeping runs the housekeeping of s on a housekeepClock until
+// the test ends, counting the probes. It returns the clock and the count.
+func startHousekeeping(t *testing.T, s *Server) (*housekeepClock, *atomic.Int32) {
+	t.Helper()
+	probes := new(atomic.Int32)
 	s.cacheProbe = func(context.Context) error {
 		probes.Add(1)
 		return nil
 	}
-	s.cacheInterval = 5 * time.Millisecond
+	clk := &housekeepClock{now: s.opts.Now(), waits: make(chan housekeepWait, 4)}
+	s.cacheClock = clk
 	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup
 	wg.Go(func() { s.runCacheHousekeeping(ctx) })
-	deadline := time.Now().Add(5 * time.Second)
-	for probes.Load() < 2 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+	return clk, probes
+}
+
+// nextWait returns the housekeeping's next wait on clk. The bound only
+// catches a loop that never waits on the clock; a working one asks at once.
+func nextWait(t *testing.T, clk *housekeepClock) housekeepWait {
+	t.Helper()
+	select {
+	case w := <-clk.waits:
+		return w
+	case <-time.After(5 * time.Second):
+		t.Fatal("the housekeeping never waited on the cache clock")
+		return housekeepWait{}
 	}
-	cancel()
-	wg.Wait()
-	if n := probes.Load(); n < 2 {
-		t.Errorf("probes = %d, want at least 2", n)
+}
+
+// Housekeeping waits an hour on the cache clock between runs, and each
+// timer it fires runs one probe, until its context ends.
+func TestCacheHousekeepingRuns(t *testing.T) {
+	t.Parallel()
+	s, _ := newCacheServer(t, cacheConfig)
+	clk, probes := startHousekeeping(t, s)
+	w := nextWait(t, clk)
+	before := probes.Load()
+	for range 2 {
+		if w.d != cacheHousekeepInterval {
+			t.Errorf("housekeeping waits %v, want %v", w.d, cacheHousekeepInterval)
+		}
+		w.fire <- clk.now
+		// The next wait comes after the fired run's probe.
+		w = nextWait(t, clk)
+	}
+	if n := probes.Load() - before; n != 2 {
+		t.Errorf("probes after 2 timers = %d, want 2", n)
+	}
+}
+
+// newCacheServerOptions is newCacheServer with opts.
+func newCacheServerOptions(t *testing.T, configTOML string, opts Options) (*Server, *sql.DB) {
+	t.Helper()
+	opts.CacheDir = t.TempDir()
+	s, stateDB := newTestServerOptions(t, configTOML, opts)
+	s.openCache(t.Context())
+	t.Cleanup(s.closeCache)
+	if s.cache == nil {
+		t.Fatalf("cache.db did not open: %v", s.cacheErr)
+	}
+	return s, stateDB
+}
+
+// The cache keeps the daemon's time, not the wall clock: a worker's budget
+// day and the evictor's window and retention follow Options.Now, as the
+// store's own stamps do.
+func TestCacheUsesDaemonTime(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2041, 3, 14, 12, 0, 0, 0, time.UTC)
+	s, _ := newCacheServerOptions(t, cacheConfig, Options{Now: func() time.Time { return at }})
+	ctx := peerContext(t.Context())
+	acct, err := s.opts.Config.Account("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.cache.AddBudget(ctx, "host", at.Format(cacheBudgetDay), 1234); err != nil {
+		t.Fatal(err)
+	}
+	s.cacheAccounts = map[string]*cache.Account{"host": cache.NewAccount(s.cacheAccountOptions(acct))}
+	if got := s.cacheStatus(ctx, acct, false).GetBudgetUsedBytes(); got != 1234 {
+		t.Errorf("budget used = %d, want 1234 spent on the daemon's day %s", got, at.Format(cacheBudgetDay))
+	}
+
+	// Yesterday by the wall clock is inside the 90 day window, but years
+	// before the daemon's day, so the evictor must take the body.
+	recent := time.Now().AddDate(0, 0, -1)
+	row := cache.Row{Account: "host", Folder: "INBOX", UIDValidity: 1, UID: 1, InternalDate: recent, Date: recent, Size: 30, Subject: "recent"}
+	if err := s.cache.PutRows(ctx, []cache.Row{row}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.cache.PutBody(ctx, row.Ref(), cache.Body{Raw: []byte("Subject: recent\r\n\r\ntext\r\n")}, false); err != nil || !ok {
+		t.Fatalf("PutBody = %v, %v", ok, err)
+	}
+	resp, err := (&cacheService{s: s}).EvictCache(ctx, connect.NewRequest(&chainmailv1.EvictCacheRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := resp.Msg.GetBodiesEvicted(); n != 1 {
+		t.Errorf("bodies evicted = %d, want 1: the body is outside the daemon's window", n)
 	}
 }

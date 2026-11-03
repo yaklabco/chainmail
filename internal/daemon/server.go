@@ -177,9 +177,10 @@ type Server struct {
 	cacheProbeAccount string
 	// cacheProbe tries one write to cache.db. Internal tests replace it.
 	cacheProbe func(context.Context) error
-	// cacheInterval is how often the cache housekeeping runs. Internal
-	// tests shorten it.
-	cacheInterval time.Duration
+	// cacheClock is the time of the cache workers, the evictor and the
+	// housekeeping: Options.Now, the time cache.db stamps rows with, and
+	// time.After. Internal tests replace it before the cache opens.
+	cacheClock watch.Clock
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -215,9 +216,9 @@ func New(opts Options) (*Server, error) {
 		watchState:    watch.NewState(opts.StateDB),
 		watchWaitUnit: time.Second,
 		trimInterval:  eventTrimInterval,
-		cacheInterval: cacheHousekeepInterval,
 	}
 	s.cacheProbe = s.probeCache
+	s.cacheClock = daemonClock{now: opts.Now}
 	s.lim = newLimitState(opts.StateDB, opts.Now)
 	s.newStore = func(acct config.ResolvedAccount, p storeParams) mailstore.Store {
 		return imapstore.New(acct, s.auth, imapstore.Options{

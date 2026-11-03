@@ -55,6 +55,7 @@ func (s *Server) openCache(ctx context.Context) {
 		Window:    func(account string) time.Duration { return cfg.CacheSettings(account).PrefetchBodies },
 		Retention: func(account string) time.Duration { return cfg.CacheSettings(account).ReadRetention },
 		MaxSize:   cfg.CacheMaxSize,
+		Clock:     s.cacheClock,
 		Logger:    s.opts.Logger,
 		OnError:   s.noteCacheErr,
 	})
@@ -262,6 +263,7 @@ func (s *Server) cacheAccountOptions(acct config.ResolvedAccount) cache.AccountO
 			}
 			return ms, release, nil
 		},
+		Clock:  s.cacheClock,
 		Logger: s.opts.Logger,
 	}
 }
@@ -396,19 +398,18 @@ func (s *Server) probeCache(ctx context.Context) error {
 	if s.cache == nil {
 		return nil
 	}
-	_, err := s.cache.AddBudget(ctx, s.cacheProbeAccount, s.opts.Now().UTC().Format(cacheBudgetDay), 0)
+	_, err := s.cache.AddBudget(ctx, s.cacheProbeAccount, s.cacheClock.Now().UTC().Format(cacheBudgetDay), 0)
 	return err
 }
 
-// runCacheHousekeeping runs cacheHousekeep every cacheInterval until ctx ends.
+// runCacheHousekeeping runs cacheHousekeep every cacheHousekeepInterval
+// on the cache clock until ctx ends.
 func (s *Server) runCacheHousekeeping(ctx context.Context) {
-	tick := time.NewTicker(s.cacheInterval)
-	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
+		case <-s.cacheClock.After(cacheHousekeepInterval):
 			s.cacheHousekeep(ctx)
 		}
 	}
@@ -435,7 +436,7 @@ func (s *Server) cacheHousekeep(ctx context.Context) {
 	if s.cacheDown.Load() || s.cache == nil {
 		return
 	}
-	if err := s.cache.PruneRecovery(ctx, s.opts.Now().Add(-s.maxReadRetention())); err != nil && ctx.Err() == nil {
+	if err := s.cache.PruneRecovery(ctx, s.cacheClock.Now().Add(-s.maxReadRetention())); err != nil && ctx.Err() == nil {
 		s.noteCacheErr(err)
 		s.opts.Logger.Warn("pruning cache ref recovery", "err", err)
 	}
@@ -451,3 +452,14 @@ func (s *Server) maxReadRetention() time.Duration {
 	}
 	return longest
 }
+
+// daemonClock is the cache's watch.Clock: Now is Options.Now, so budget
+// days, the eviction window and read retention agree with the times
+// cache.db stamps, and After is time.After.
+type daemonClock struct {
+	now func() time.Time
+}
+
+func (c daemonClock) Now() time.Time { return c.now() }
+
+func (daemonClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
