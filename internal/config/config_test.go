@@ -315,15 +315,31 @@ func TestBodyLimit(t *testing.T) {
 
 func TestParseByteSize(t *testing.T) {
 	t.Parallel()
-	tests := map[string]int64{"65536": 65536, "512B": 512, "64KiB": 64 << 10, "2MiB": 2 << 20}
+	tests := map[string]int64{
+		"65536": 65536, "512B": 512, "64KiB": 64 << 10, "2MiB": 2 << 20,
+		"1GiB": 1 << 30, "2GiB": 2 << 30, "1TiB": 1 << 40, "999999999999": 999999999999,
+		// The largest of each unit that still fits in an int64.
+		"8589934591GiB": 8589934591 << 30, "8388607TiB": 8388607 << 40,
+	}
 	for in, want := range tests {
 		if got, err := ParseByteSize(in); err != nil || got != want {
 			t.Errorf("ParseByteSize(%q) = %d, %v; want %d", in, got, err, want)
 		}
 	}
-	for _, bad := range []string{"", "KiB", "1 KiB", "1kib", "1GiB", "9999999999999999999"} {
-		if _, err := ParseByteSize(bad); err == nil {
+	for _, bad := range []string{"", "KiB", "1 KiB", "1kib", "1gib", "1GB", "1PiB", "9999999999999999999"} {
+		_, err := ParseByteSize(bad)
+		if err == nil {
 			t.Errorf("ParseByteSize(%q) succeeded", bad)
+			continue
+		}
+		if want := "want a number of bytes, optionally followed by B, KiB, MiB, GiB or TiB"; !strings.Contains(err.Error(), want) {
+			t.Errorf("ParseByteSize(%q) error = %q, want it to contain %q", bad, err, want)
+		}
+	}
+	for _, big := range []string{"8589934592GiB", "8388608TiB", "999999999999TiB"} {
+		_, err := ParseByteSize(big)
+		if err == nil || !strings.Contains(err.Error(), "too large") {
+			t.Errorf("ParseByteSize(%q) error = %v, want one saying too large", big, err)
 		}
 	}
 }
