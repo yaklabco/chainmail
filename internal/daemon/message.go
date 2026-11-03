@@ -30,7 +30,8 @@ const (
 	maxResponseBytes = 16 << 20
 	// chunkBytes is the size of one streamed data message.
 	chunkBytes = 64 << 10
-	// sourceServer says the mail servers answered. The local index will say "cache".
+	// sourceServer says the mail servers answered. cache.SourceCache and
+	// cache.SourceMixed are the other answers a response can report.
 	sourceServer = "server"
 )
 

@@ -235,12 +235,12 @@ func TestSearchPartialAndUnsupportedOperators(t *testing.T) {
 	if len(resp.GetRows()) != 1 || len(resp.GetPartial()) != 1 {
 		t.Fatalf("rows %d, partial %v", len(resp.GetRows()), resp.GetPartial())
 	}
-	if p := resp.GetPartial()[0]; p.GetAccount() != "host" || p.GetFolder() != "" || p.GetReason() != api.ReasonInvalidArgument {
+	if p := resp.GetPartial()[0]; p.GetAccount() != "host" || p.GetFolder() != "" || p.GetReason() != api.ReasonInvalidArgument || !strings.Contains(p.GetHint(), "chainmail cache status") {
 		t.Errorf("partial = %v", p)
 	}
 	for _, req := range []*chainmailv1.SearchRequest{{QueryString: "has:attachment", Accounts: []string{"host"}}, {QueryString: "has:attachment account:host"}} {
-		if _, err := m.search(t, req); reasonOf(err) != api.ReasonInvalidArgument {
-			t.Errorf("%v on host only = %v, want INVALID_ARGUMENT", req, err)
+		if _, err := m.search(t, req); reasonOf(err) != api.ReasonInvalidArgument || !strings.Contains(api.Detail(err).GetHint(), "chainmail cache status") {
+			t.Errorf("%v on host only = %v, want INVALID_ARGUMENT pointing at cache status", req, err)
 		}
 	}
 	m.host.Add(fake.Message{Folder: "Sent", Subject: "fine"})
@@ -278,7 +278,7 @@ func TestSearchCountOnly(t *testing.T) {
 	if resp.GetCount() != 3 || len(resp.GetRows()) != 0 || resp.GetNextCursor() != "" || len(resp.GetAccountCounts()) != 2 {
 		t.Errorf("count response = %v", resp)
 	}
-	if row := lastMailAudit(t, m); row.Targets != `["accounts=2","matches=3"]` {
+	if row := lastMailAudit(t, m); row.Targets != `["accounts=2","matches=3","source=server"]` {
 		t.Errorf("audit targets = %s", row.Targets)
 	}
 }
@@ -331,7 +331,7 @@ func TestSearchSnippetsAndUntrustedRows(t *testing.T) {
 			}
 		}
 	}
-	if row := lastMailAudit(t, m); row.Action != "search" || row.Targets != `["accounts=2","rows=1"]` {
+	if row := lastMailAudit(t, m); row.Action != "search" || row.Targets != `["accounts=2","rows=1","source=server"]` {
 		t.Errorf("audit = %+v", row)
 	}
 }

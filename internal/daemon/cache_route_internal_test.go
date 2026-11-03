@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/cache"
@@ -420,5 +422,268 @@ func TestSearchSourceIsValidated(t *testing.T) {
 		if apiReason(err) != api.ReasonInvalidArgument || !strings.Contains(hint, "auto") || !strings.Contains(hint, "cache or server") {
 			t.Errorf("source %q: %v (hint %q), want INVALID_ARGUMENT naming the values", source, err, hint)
 		}
+	}
+}
+
+// sameRows reports whether two pages hold the same rows, in order.
+func sameRows(a, b []*chainmailv1.MessageRow) bool {
+	return slices.EqualFunc(a, b, func(x, y *chainmailv1.MessageRow) bool { return proto.Equal(x, y) })
+}
+
+func rowSubjects(rows []*chainmailv1.MessageRow) []string {
+	var out []string
+	for _, r := range rows {
+		out = append(out, r.GetSubject().GetUntrusted())
+	}
+	return out
+}
+
+// bothWays runs req as given and forced to the server.
+func (f *routeFixture) bothWays(t *testing.T, req *chainmailv1.SearchRequest) (fromCache, fromServer *chainmailv1.SearchResponse) {
+	t.Helper()
+	s := proto.Clone(req).(*chainmailv1.SearchRequest)
+	s.Source = cache.SourceServer
+	return f.search(t, req), f.search(t, s)
+}
+
+// storeCalls is how often the fakes ran the calls a cached page avoids.
+func (f *routeFixture) storeCalls() int {
+	n := 0
+	for _, fk := range f.fakes {
+		n += fk.Calls("Search") + fk.Calls("FetchSummaries") + fk.Calls("FetchMessages")
+	}
+	return n
+}
+
+// TestSearchFromCacheMatchesServer checks that a warm, fresh cache answers
+// header queries, text inside the window, count_only, threads and snippets
+// with exactly the server's rows, counts and cursor, without asking the
+// server, and says so per account.
+func TestSearchFromCacheMatchesServer(t *testing.T) {
+	t.Parallel()
+	f := newRouteFixture(t)
+	seedRouteMail(f)
+	f.warm(t, "host")
+	f.warm(t, "gmail")
+	f.install(t, "host", "gmail")
+	reqs := []*chainmailv1.SearchRequest{
+		{QueryString: "from:acme"},
+		{QueryString: "invoice newer_than:30d"},
+		{Limit: 2},
+		{QueryString: "newer_than:60d", CountOnly: true},
+		{Threads: true},
+		{Snippets: true},
+		{QueryString: "in:inbox"},
+		{QueryString: "-subject:invoice older_than:2d", Limit: 3},
+	}
+	for _, req := range reqs {
+		before := f.storeCalls()
+		c := f.search(t, req)
+		if n := f.storeCalls() - before; n != 0 {
+			t.Errorf("%v: the cached page made %d server calls", req, n)
+		}
+		_, s := f.bothWays(t, req)
+		if c.GetSource() != cache.SourceCache || s.GetSource() != cache.SourceServer {
+			t.Errorf("%v: sources %q and %q, want cache and server", req, c.GetSource(), s.GetSource())
+		}
+		if !sameRows(c.GetRows(), s.GetRows()) {
+			t.Errorf("%v: cache rows %v, server rows %v", req, rowSubjects(c.GetRows()), rowSubjects(s.GetRows()))
+		}
+		if c.GetCount() != s.GetCount() || c.GetNextCursor() != s.GetNextCursor() {
+			t.Errorf("%v: cache count %d cursor %q, server count %d cursor %q", req, c.GetCount(), c.GetNextCursor(), s.GetCount(), s.GetNextCursor())
+		}
+		if len(c.GetAccountCounts()) != len(s.GetAccountCounts()) {
+			t.Fatalf("%v: account counts %v vs %v", req, c.GetAccountCounts(), s.GetAccountCounts())
+		}
+		for i, ac := range c.GetAccountCounts() {
+			sc := s.GetAccountCounts()[i]
+			if ac.GetAccount() != sc.GetAccount() || ac.GetCount() != sc.GetCount() {
+				t.Errorf("%v: count %v, server %v", req, ac, sc)
+			}
+			if ac.GetSource() != cache.SourceCache || !ac.GetComplete() || ac.GetIncompleteReason() != "" || !ac.GetSyncedAt().AsTime().Equal(routeNow) {
+				t.Errorf("%v: cache account count %v, want complete from the cache, synced %v", req, ac, routeNow)
+			}
+			if sc.GetSource() != cache.SourceServer || !sc.GetComplete() || sc.GetSyncedAt() != nil {
+				t.Errorf("%v: server account count %v, want complete from the server", req, sc)
+			}
+		}
+	}
+}
+
+// TestSearchCursorCrossesSources checks spec 6.2: a cursor from a cache page
+// continues on the server, and the reverse, with the rows an all-server run
+// gives, none missed or repeated.
+func TestSearchCursorCrossesSources(t *testing.T) {
+	t.Parallel()
+	f := newRouteFixture(t)
+	seedRouteMail(f)
+	f.warm(t, "host")
+	f.warm(t, "gmail")
+	f.install(t, "host", "gmail")
+	page1Cache, page1Server := f.bothWays(t, &chainmailv1.SearchRequest{Limit: 2})
+	if page1Cache.GetNextCursor() == "" || page1Cache.GetNextCursor() != page1Server.GetNextCursor() {
+		t.Fatalf("page 1 cursors: cache %q, server %q", page1Cache.GetNextCursor(), page1Server.GetNextCursor())
+	}
+	want := f.search(t, &chainmailv1.SearchRequest{Limit: 2, Cursor: page1Server.GetNextCursor(), Source: cache.SourceServer})
+	onServer := f.search(t, &chainmailv1.SearchRequest{Limit: 2, Cursor: page1Cache.GetNextCursor(), Source: cache.SourceServer})
+	fromCache := f.search(t, &chainmailv1.SearchRequest{Limit: 2, Cursor: page1Server.GetNextCursor()})
+	if !sameRows(onServer.GetRows(), want.GetRows()) || !sameRows(fromCache.GetRows(), want.GetRows()) {
+		t.Errorf("page 2: cache cursor on the server %v, server cursor from the cache %v, want %v",
+			rowSubjects(onServer.GetRows()), rowSubjects(fromCache.GetRows()), rowSubjects(want.GetRows()))
+	}
+	if fromCache.GetSource() != cache.SourceCache {
+		t.Errorf("page 2 from the cache: source %q", fromCache.GetSource())
+	}
+	pageAll := func(sources ...string) []string {
+		var got []string
+		req := &chainmailv1.SearchRequest{Limit: 2}
+		for i := 0; i < 20; i++ {
+			req.Source = sources[i%len(sources)]
+			resp := f.search(t, req)
+			got = append(got, rowSubjects(resp.GetRows())...)
+			if resp.GetNextCursor() == "" {
+				return got
+			}
+			req.Cursor = resp.GetNextCursor()
+		}
+		t.Fatal("still paging after 20 pages")
+		return nil
+	}
+	all := pageAll(cache.SourceServer)
+	if got := pageAll("", cache.SourceServer); !slices.Equal(got, all) {
+		t.Errorf("alternating cache and server = %v, want %v", got, all)
+	}
+	if got := pageAll(cache.SourceServer, ""); !slices.Equal(got, all) {
+		t.Errorf("alternating server and cache = %v, want %v", got, all)
+	}
+}
+
+// TestSearchMixesSourcesPerAccount checks that accounts are routed on
+// their own and the response says mixed when both sources answered.
+func TestSearchMixesSourcesPerAccount(t *testing.T) {
+	t.Parallel()
+	f := newRouteFixture(t)
+	seedRouteMail(f)
+	f.warm(t, "host")
+	f.install(t, "host")
+	resp, entry, err := f.m.search(t.Context(), &chainmailv1.SearchRequest{QueryString: "invoice newer_than:30d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetSource() != cache.SourceMixed {
+		t.Errorf("source = %q, want mixed", resp.GetSource())
+	}
+	sources := map[string]string{}
+	for _, c := range resp.GetAccountCounts() {
+		sources[c.GetAccount()] = c.GetSource()
+	}
+	if sources["host"] != cache.SourceCache || sources["gmail"] != cache.SourceServer {
+		t.Errorf("account sources = %v, want host from the cache and gmail from the server", sources)
+	}
+	// host's invoices 42 and 41 from the cache, gmail's invoice 40 from the server.
+	if want := []string{"accounts=2", "rows=3", "source=mixed"}; !slices.Equal(entry.Targets, want) {
+		t.Errorf("audit targets = %v, want %v", entry.Targets, want)
+	}
+}
+
+// TestSearchForcedCacheIsIncomplete checks spec 6.4: a forced cache answers
+// what it holds, flags the account incomplete with its reason, and an
+// account without a cache returns no rows and cache_disabled, not an error.
+func TestSearchForcedCacheIsIncomplete(t *testing.T) {
+	t.Parallel()
+	f := newRouteFixture(t)
+	seedRouteMail(f)
+	f.warm(t, "host")
+	f.install(t, "host")
+	resp, entry, err := f.m.search(t.Context(), &chainmailv1.SearchRequest{QueryString: "invoice", Source: cache.SourceCache})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rowSubjects(resp.GetRows()); !slices.Equal(got, []string{"invoice 42", "invoice 41"}) {
+		t.Errorf("rows = %v, want host's invoices from cached bodies", got)
+	}
+	if len(resp.GetPartial()) != 0 || resp.GetSource() != cache.SourceCache {
+		t.Errorf("partial %v, source %q", resp.GetPartial(), resp.GetSource())
+	}
+	byAccount := map[string]*chainmailv1.AccountCount{}
+	for _, c := range resp.GetAccountCounts() {
+		byAccount[c.GetAccount()] = c
+	}
+	if c := byAccount["host"]; c.GetComplete() || c.GetIncompleteReason() != "text_outside_window" || c.GetCount() != 2 {
+		t.Errorf("host = %v, want 2, incomplete: text_outside_window", c)
+	}
+	if c := byAccount["gmail"]; c == nil || c.GetComplete() || c.GetIncompleteReason() != "cache_disabled" || c.GetCount() != 0 || c.GetSource() != cache.SourceCache {
+		t.Errorf("gmail = %v, want 0 from the cache, incomplete: cache_disabled", c)
+	}
+	if entry.Targets[len(entry.Targets)-1] != "source=cache" {
+		t.Errorf("audit targets = %v", entry.Targets)
+	}
+}
+
+// TestSearchForcedCacheCarriesFoldersItDoesNotHold checks that a forced
+// cache page continuing a server cursor carries the cursor sources of
+// folders the cache does not hold, so a later server page still returns
+// their rows.
+func TestSearchForcedCacheCarriesFoldersItDoesNotHold(t *testing.T) {
+	t.Parallel()
+	f := newRouteFixture(t)
+	seedRouteMail(f)
+	f.warm(t, "host")
+	f.install(t, "host")
+	host := []string{"host"}
+	all := []string{}
+	req := &chainmailv1.SearchRequest{Accounts: host, Limit: 1, Source: cache.SourceServer}
+	for {
+		resp := f.search(t, req)
+		all = append(all, rowSubjects(resp.GetRows())...)
+		if resp.GetNextCursor() == "" {
+			break
+		}
+		req.Cursor = resp.GetNextCursor()
+	}
+	page1 := f.search(t, &chainmailv1.SearchRequest{Accounts: host, Limit: 1, Source: cache.SourceServer})
+	if err := f.store.DropFolder(t.Context(), "host", "Archive", false); err != nil {
+		t.Fatal(err)
+	}
+	got := rowSubjects(page1.GetRows())
+	req = &chainmailv1.SearchRequest{Accounts: host, Limit: 1, Cursor: page1.GetNextCursor(), Source: cache.SourceCache}
+	resp := f.search(t, req)
+	got = append(got, rowSubjects(resp.GetRows())...)
+	if !slices.ContainsFunc(cursorSources(t, resp.GetNextCursor()), func(s ref.CursorSource) bool { return s.Folder == "Archive" }) {
+		t.Fatalf("forced cache cursor %+v lost Archive", cursorSources(t, resp.GetNextCursor()))
+	}
+	req = &chainmailv1.SearchRequest{Accounts: host, Limit: 1, Cursor: resp.GetNextCursor(), Source: cache.SourceServer}
+	for req.Cursor != "" {
+		resp := f.search(t, req)
+		got = append(got, rowSubjects(resp.GetRows())...)
+		req.Cursor = resp.GetNextCursor()
+	}
+	slices.Sort(got)
+	slices.Sort(all)
+	if !slices.Equal(got, all) {
+		t.Errorf("rows across the pages = %v, want %v", got, all)
+	}
+}
+
+// TestSearchCacheOnlyOperatorsOnStandardAccounts checks spec 6.6: has: and
+// filename: on an account other than Google come from its cache when it
+// can answer, and are refused with a hint naming cache status when not.
+func TestSearchCacheOnlyOperatorsOnStandardAccounts(t *testing.T) {
+	t.Parallel()
+	f := newRouteFixture(t)
+	seedRouteMail(f)
+	f.warm(t, "host")
+	f.install(t, "host")
+	for _, q := range []string{"has:attachment", "filename:pdf"} {
+		resp := f.search(t, &chainmailv1.SearchRequest{QueryString: q, Accounts: []string{"host"}})
+		if got := rowSubjects(resp.GetRows()); !slices.Equal(got, []string{"invoice 41"}) || resp.GetSource() != cache.SourceCache {
+			t.Errorf("%s from the cache = %v, source %q", q, got, resp.GetSource())
+		}
+	}
+	f.install(t)
+	_, _, err := f.m.search(t.Context(), &chainmailv1.SearchRequest{QueryString: "has:attachment", Accounts: []string{"host"}})
+	hint := api.Detail(toConnectError(err)).GetHint()
+	if apiReason(err) != api.ReasonInvalidArgument || !strings.Contains(hint, "chainmail cache status") {
+		t.Errorf("without a cache: %v (hint %q), want INVALID_ARGUMENT pointing at cache status", err, hint)
 	}
 }
