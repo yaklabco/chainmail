@@ -16,6 +16,10 @@ var (
 	// database (SQLITE_CORRUPT, SQLITE_NOTADB). Closing the Store and
 	// opening the file again recreates it.
 	ErrCorrupt = errors.New("cache.db is corrupt")
+	// ErrRead marks a View read of cache.db that failed while serving a
+	// search, as opposed to the server the View also asks. The daemon
+	// answers an automatic search from the server instead.
+	ErrRead = errors.New("reading the cache failed")
 )
 
 // codeErr returns the sentinel for a SQLite result code, primary or
@@ -44,4 +48,10 @@ func classify(err error) error {
 		return err
 	}
 	return fmt.Errorf("%w: %w", sentinel, err)
+}
+
+// readErr marks err, a Store failure on the View's search path, as
+// ErrRead, keeping its classification.
+func readErr(err error) error {
+	return fmt.Errorf("%w: %w", ErrRead, err)
 }

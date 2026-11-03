@@ -270,10 +270,12 @@ func (a *Account) track(ctx context.Context) error {
 }
 
 // fail records a failed step's reason code and logs it, at warn once the
-// step has failed repeatedly or when the cache's disk is full.
+// step has failed repeatedly or when the cache's disk is full, and hands
+// err to OnError.
 func (a *Account) fail(ctx context.Context, msg string, err error, repeated bool) {
 	reason := reasonCode(err)
 	a.setError(reason)
+	a.noteErr(err)
 	if repeated || errors.Is(err, ErrDiskFull) {
 		a.logger.WarnContext(ctx, msg, "reason", reason)
 		return

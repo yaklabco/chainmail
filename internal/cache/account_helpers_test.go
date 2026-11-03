@@ -234,6 +234,8 @@ type acctRig struct {
 	settings config.CacheSettings
 	// maxSize is the size cap MaxSize reports, 2 GiB unless a test lowers it.
 	maxSize atomic.Int64
+	// onError is the OnError of the Accounts newAccount makes; set it, then renew.
+	onError func(error)
 
 	a      *Account
 	cancel context.CancelFunc
@@ -265,7 +267,7 @@ func newAcctRig(t *testing.T, fs *fake.Store, acct config.ResolvedAccount) *acct
 func (r *acctRig) newAccount() *Account {
 	return NewAccount(AccountOptions{
 		Account: r.acct, Settings: r.cacheSettings, MaxSize: r.maxSize.Load,
-		Store: r.store, Log: r.log, State: r.state, Mail: r.openMail, Clock: r.clock,
+		Store: r.store, Log: r.log, State: r.state, Mail: r.openMail, Clock: r.clock, OnError: r.onError,
 	})
 }
 

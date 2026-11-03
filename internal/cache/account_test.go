@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,5 +135,49 @@ func TestAccountRunDisabledReturnsAtOnce(t *testing.T) {
 	}
 	if slices.ContainsFunc(groups, func(g watch.GroupInfo) bool { return g.Name == watch.CacheGroup("acme") }) {
 		t.Error("a disabled account opened its group")
+	}
+}
+
+// TestAccountReportsWorkerErrors checks that a worker's failed write
+// reaches AccountOptions.OnError, so the daemon turns the cache off when
+// the disk is full (spec section 8) without waiting for its hourly probe.
+func TestAccountReportsWorkerErrors(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	for i := range 50 {
+		m := acctMsg("INBOX", fmt.Sprintf("m%d", i))
+		m.Subject = strings.Repeat("long subject ", 200)
+		fs.Add(m)
+	}
+	r.pass("INBOX")
+	got := make(chan error, 64)
+	r.onError = func(err error) {
+		select {
+		case got <- err:
+		default:
+		}
+	}
+	r.renew()
+	var pages int64
+	if err := r.store.db.QueryRowContext(t.Context(), "PRAGMA page_count").Scan(&pages); err != nil {
+		t.Fatal(err)
+	}
+	// max_page_count stands in for a full disk: the backfill's headers need
+	// pages the file may not grow by. The Store has one connection.
+	if _, err := r.store.db.ExecContext(t.Context(), "PRAGMA max_page_count = "+strconv.FormatInt(pages, 10)); err != nil {
+		t.Fatal(err)
+	}
+	r.start()
+	deadline := time.After(acctWait)
+	for {
+		select {
+		case err := <-got:
+			if errors.Is(err, ErrDiskFull) {
+				return
+			}
+		case <-deadline:
+			t.Fatal("no worker reported ErrDiskFull to OnError")
+		}
 	}
 }

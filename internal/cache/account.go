@@ -50,6 +50,11 @@ type AccountOptions struct {
 	// Logger receives progress and failures as fixed reason codes, never
 	// message content or server text. Nil discards.
 	Logger *slog.Logger
+	// OnError, when set, receives the error of every failed worker step and
+	// every cache.db failure the prefetcher and the read path log, as
+	// EvictorOptions.OnError does, so the daemon can turn the cache off on
+	// a full disk at once. Nil drops them after logging.
+	OnError func(err error)
 }
 
 // Account keeps one mail account's part of the cache. Its builder applies
@@ -278,6 +283,13 @@ func reasonCode(err error) string {
 	}
 }
 
+// noteErr hands err to OnError, when set.
+func (a *Account) noteErr(err error) {
+	if err != nil && a.o.OnError != nil {
+		a.o.OnError(err)
+	}
+}
+
 func (a *Account) setError(reason string) {
 	a.errMu.Lock()
 	defer a.errMu.Unlock()
@@ -315,6 +327,7 @@ func (a *Account) runPrefetch(ctx context.Context) {
 		Throttle: &a.throttled,
 		Clock:    o.Clock,
 		Logger:   o.Logger,
+		OnError:  o.OnError,
 	}).run(ctx)
 }
 

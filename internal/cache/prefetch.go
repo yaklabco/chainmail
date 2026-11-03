@@ -70,6 +70,8 @@ type prefetchOptions struct {
 	// Logger nil discards. It carries the account attribute: Account passes
 	// its own logger, so the prefetcher does not add it again.
 	Logger *slog.Logger
+	// OnError, when set, receives every failure warn logs.
+	OnError func(err error)
 }
 
 // prefetcher fetches the bodies of cached headers inside the account's
@@ -409,12 +411,15 @@ func (p *prefetcher) fail(ctx context.Context, r ref.Ref, reason string) error {
 	return nil
 }
 
-// warn logs a failure, unless ctx has ended.
+// warn logs a failure and hands it to OnError, unless ctx has ended.
 func (p *prefetcher) warn(ctx context.Context, msg string, err error) {
 	if ctx.Err() != nil {
 		return
 	}
 	p.o.Logger.Warn(msg, "err", err)
+	if p.o.OnError != nil {
+		p.o.OnError(err)
+	}
 }
 
 // bodyFailure maps a per-message fetch error to the fixed code to record,

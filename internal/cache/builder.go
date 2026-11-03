@@ -342,6 +342,7 @@ func (a *Account) windowStart() time.Time {
 func (a *Account) noteWrite(ctx context.Context) {
 	if err := a.o.Store.noteWrite(ctx, a.o.MaxSize()); err != nil && ctx.Err() == nil {
 		a.logger.WarnContext(ctx, "checking the cache size", "reason", reasonCode(err))
+		a.noteErr(err)
 	}
 }
 

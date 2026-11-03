@@ -328,10 +328,11 @@ func messageRow(msg *mailstore.Message) Row {
 }
 
 // logReadError logs a cache failure on the read path, which then falls back
-// to the server or skips the write. Cache errors are SQLite's and carry no
-// message content.
+// to the server or skips the write, and hands it to OnError. Cache errors
+// are SQLite's and carry no message content.
 func (v *View) logReadError(msg string, err error) {
 	v.a.o.Logger.Warn(msg, "account", v.a.o.Account.Name, "err", err)
+	v.a.noteErr(err)
 }
 
 // recoverRef finds where the message r named lives now, on an account
