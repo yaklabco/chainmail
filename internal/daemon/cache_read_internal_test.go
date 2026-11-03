@@ -33,9 +33,6 @@ address = "me@example.com"
 provider = "gmail"
 address = "me@gmail.example"
 auth = "password"
-
-[cache]
-prefetch_bodies = "0d"
 `
 
 // getNow is the clock of the read-through tests: the daemon's, the fakes'
@@ -52,7 +49,7 @@ func (getClock) Now() time.Time { return getNow }
 func (getClock) After(time.Duration) <-chan time.Time { return nil }
 
 // getFixture is a daemon that is never served, a cache store, and a
-// running cache.Account per account over it, built by hand. install hands
+// settled cache.Account per account over it, built by hand. install hands
 // accounts' caches to the daemon, as startWatch does.
 type getFixture struct {
 	s        *Server
@@ -96,39 +93,38 @@ func newGetFixture(t *testing.T) *getFixture {
 			Logger:   s.opts.Logger,
 		})
 	}
-	f.run(t)
+	f.settleRead(t)
 	return f
 }
 
-// getFreshWait bounds the wait for the fixture's cache accounts to open
-// their groups, and getFreshPoll spaces the checks. Nothing else is
+// settleReadWait bounds the wait for the fixture's cache accounts to open
+// their groups, and settleReadPoll spaces the checks. Nothing else is
 // running, so only a broken account reaches the bound.
 const (
-	getFreshWait = 10 * time.Second
-	getFreshPoll = 5 * time.Millisecond
+	settleReadWait = 10 * time.Second
+	settleReadPoll = 5 * time.Millisecond
 )
 
-// run starts every account's cache workers until the test ends, as
-// startCacheAccounts does, and waits until each account reads as fresh.
-// The builder opens its group and records baselines before any mail or
-// sync row exists, so it tracks nothing and drops nothing, and with no
-// events in the log it never looks again. The prefetch window is 0d, so
-// the prefetcher fetches nothing, and with nothing tracked the backfill
-// idles. So the tests' server call counts see only their own reads.
-// The workers stop with the test's context, which ends before the
-// cleanups run, and the cleanup waits for them before the stores close.
-func (f *getFixture) run(t *testing.T) {
+// settleRead runs every account's cache workers, as startCacheAccounts
+// does, until each account reads as fresh, then stops them and waits for
+// them to return. Freshness reports stale until the builder has opened its
+// group, which only a running account does. The builder opens it before
+// any mail or sync row exists, so it tracks nothing, and with no worker
+// left running nothing undoes the rows and progress the tests write, and
+// the tests' server call counts see only their own reads.
+func (f *getFixture) settleRead(t *testing.T) {
 	t.Helper()
-	ctx := t.Context()
+	ctx, cancel := context.WithCancel(t.Context())
 	var wg sync.WaitGroup
-	t.Cleanup(wg.Wait)
+	defer wg.Wait()
+	defer cancel()
 	for _, a := range f.accounts {
 		wg.Go(func() { a.Run(ctx) })
 	}
-	deadline := time.Now().Add(getFreshWait)
+	deadline := time.Now().Add(settleReadWait)
 	for name, a := range f.accounts {
 		for {
-			ok, reason, _, err := a.Freshness(t.Context(), nil)
+			ok, reason, _, err := a.Freshness(ctx, nil)
 			if err != nil {
 				t.Fatalf("freshness of %s: %v", name, err)
 			}
@@ -136,9 +132,9 @@ func (f *getFixture) run(t *testing.T) {
 				break
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("the cache of %s is not fresh after %v: %s", name, getFreshWait, reason)
+				t.Fatalf("the cache of %s is not fresh after %v: %s", name, settleReadWait, reason)
 			}
-			time.Sleep(getFreshPoll)
+			time.Sleep(settleReadPoll)
 		}
 	}
 }
