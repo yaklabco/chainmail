@@ -411,17 +411,72 @@ func TestCacheDiskFull(t *testing.T) {
 	}
 }
 
+// budgetRow reads the budget row of account and day from cache.db over a
+// connection of its own, since Store.Budget says 0 for a missing row too.
+func budgetRow(t *testing.T, s *Server, account, day string) (int64, bool) {
+	t.Helper()
+	conn, err := sql.Open("sqlite", "file:"+filepath.Join(s.opts.CacheDir, cacheFile)+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }() // read-only
+	var bytes int64
+	err = conn.QueryRowContext(t.Context(), "SELECT bytes FROM budget WHERE account = ? AND day = ?", account, day).Scan(&bytes)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes, true
+}
+
 // The default probe writes to cache.db: it touches the first cache
 // account's budget row for today and adds nothing.
 func TestProbeCacheWrites(t *testing.T) {
 	t.Parallel()
 	s, _ := newCacheServer(t, cacheConfig)
+	day := s.opts.Now().UTC().Format(cacheBudgetDay)
+	if _, ok := budgetRow(t, s, "host", day); ok {
+		t.Fatal("host has a budget row before the probe")
+	}
 	if err := s.probeCache(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	used, err := s.cache.Budget(t.Context(), "host", s.opts.Now().UTC().Format(cacheBudgetDay))
 	if err != nil || used != 0 {
 		t.Errorf("host budget after the probe = %d, %v; want 0", used, err)
+	}
+	if bytes, ok := budgetRow(t, s, "host", day); !ok || bytes != 0 {
+		t.Errorf("host budget row after the probe = %d, present %v; want a row of 0", bytes, ok)
+	}
+}
+
+// The probe keeps what the account spent today.
+func TestProbeCacheKeepsTheBudget(t *testing.T) {
+	t.Parallel()
+	s, _ := newCacheServer(t, cacheConfig)
+	day := s.opts.Now().UTC().Format(cacheBudgetDay)
+	if _, err := s.cache.AddBudget(t.Context(), "host", day, 4096); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.probeCache(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if bytes, ok := budgetRow(t, s, "host", day); !ok || bytes != 4096 {
+		t.Errorf("host budget row after the probe = %d, present %v; want 4096", bytes, ok)
+	}
+}
+
+// A write the probe cannot make is its error: here cache.db is closed.
+func TestProbeCacheWriteFails(t *testing.T) {
+	t.Parallel()
+	s, _ := newCacheServer(t, cacheConfig)
+	if err := s.cache.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.probeCache(t.Context()); err == nil {
+		t.Error("probe of a closed cache.db = nil, want its write error")
 	}
 }
 
