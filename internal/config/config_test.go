@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pelletier/go-toml/v2"
-
 	"github.com/jamesainslie/chainmail/internal/provider"
 )
 
@@ -245,9 +243,8 @@ func TestParseRejectsUnknownFields(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			_, err := Parse([]byte(tt.config))
-			var strict *toml.StrictMissingError
-			if !errors.As(err, &strict) {
-				t.Errorf("err = %v, want *toml.StrictMissingError", err)
+			if !errors.Is(err, ErrUnknownKey) {
+				t.Errorf("err = %v, want ErrUnknownKey", err)
 			}
 		})
 	}
@@ -580,9 +577,8 @@ func TestPolicyRejectsUnknownKeys(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			_, err := Parse([]byte(config))
-			var strict *toml.StrictMissingError
-			if !errors.As(err, &strict) {
-				t.Errorf("err = %v, want *toml.StrictMissingError", err)
+			if !errors.Is(err, ErrUnknownKey) {
+				t.Errorf("err = %v, want ErrUnknownKey", err)
 			}
 		})
 	}
@@ -935,10 +931,170 @@ func TestWatchRejectsUnknownKeys(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			_, err := Parse([]byte(config))
-			var strict *toml.StrictMissingError
-			if !errors.As(err, &strict) {
-				t.Errorf("err = %v, want *toml.StrictMissingError", err)
+			if !errors.Is(err, ErrUnknownKey) {
+				t.Errorf("err = %v, want ErrUnknownKey", err)
 			}
 		})
+	}
+}
+
+func TestParseNamesTheUnknownKey(t *testing.T) {
+	t.Parallel()
+	_, err := Parse([]byte("[accounts.x]\nprovider = \"hostinger\"\naddress = \"a@b.c\"\nprovder = \"x\""))
+	// mapstructure writes the path as accounts[x].provder; only the key's
+	// own name is pinned here.
+	if !errors.Is(err, ErrUnknownKey) || !strings.Contains(err.Error(), "provder") {
+		t.Errorf("err = %v, want ErrUnknownKey naming provder", err)
+	}
+}
+
+func TestParseRefusesKeysViperWouldFold(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, config, want string
+	}{
+		{name: "upper table", config: "[accounts.Work]\nprovider = \"hostinger\"\naddress = \"a@b.c\"", want: `accounts.Work: name must be`},
+		{name: "upper key", config: "[accounts.work]\nProvider = \"hostinger\"\naddress = \"a@b.c\"", want: `"accounts.work.Provider"`},
+		{name: "dotted key", config: "[accounts.\"a.b\"]\nprovider = \"hostinger\"\naddress = \"a@b.c\"", want: `accounts.a.b: name must be`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(tt.config))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("err = %v, want one naming %s", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseRefusesWrongTypes(t *testing.T) {
+	t.Parallel()
+	base := "[accounts.host]\nprovider = \"hostinger\"\naddress = \"me@example.com\"\n"
+	for name, extra := range map[string]string{
+		"float for int":   "pool = 1.5",
+		"string for int":  `pool = "3"`,
+		"int for string":  "display_name = 3",
+		"string for list": `watch = "INBOX"`,
+		"bool for string": "signature = true",
+		"string for bool": "[accounts.host.sync]\nenabled = \"yes\"",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Parse([]byte(base + extra)); err == nil {
+				t.Errorf("Parse accepted %q", extra)
+			}
+		})
+	}
+}
+
+func TestParseKeepsAnEmptyWatchList(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse([]byte("[accounts.host]\nprovider = \"hostinger\"\naddress = \"me@example.com\"\nwatch = []\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := cfg.Account("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Watch == nil || len(a.Watch) != 0 {
+		t.Errorf("Watch = %#v, want an empty, non-nil list", a.Watch)
+	}
+}
+
+// Not parallel: it sets the process environment.
+func TestParseIgnoresTheEnvironment(t *testing.T) {
+	t.Setenv("CHAINMAIL_POLICY_ALLOW_EXPUNGE", "true")
+	t.Setenv("POLICY_ALLOW_EXPUNGE", "true")
+	t.Setenv("CHAINMAIL_DAEMON_SOCKET", "/evil.sock")
+	cfg, err := Parse([]byte("[accounts.host]\nprovider = \"hostinger\"\naddress = \"me@example.com\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Policy.AllowExpunge || cfg.Daemon.Socket == "/evil.sock" {
+		t.Errorf("environment reached the config: %+v %+v", cfg.Policy, cfg.Daemon)
+	}
+}
+
+// Viper drops empty tables, so an empty override must be put back for
+// validation to refuse it, as the go-toml decoder did.
+func TestParseRefusesEmptyEndpointOverride(t *testing.T) {
+	t.Parallel()
+	for _, table := range []string{"imap", "smtp"} {
+		t.Run(table, func(t *testing.T) {
+			t.Parallel()
+			config := "[accounts.host]\nprovider = \"hostinger\"\naddress = \"me@example.com\"\n" + table + " = {}\n"
+			_, err := Parse([]byte(config))
+			var ve *ValidationError
+			if !errors.As(err, &ve) || !strings.Contains(err.Error(), "accounts.host."+table+": host is required") {
+				t.Errorf("err = %v, want a validation error that %s needs a host", err, table)
+			}
+		})
+	}
+}
+
+// An empty account or OAuth client table names something to validate;
+// viper drops it, so it must come back to be refused.
+func TestParseRefusesEmptyNamedTables(t *testing.T) {
+	t.Parallel()
+	for name, config := range map[string]string{
+		"account":      "[accounts.host]\n",
+		"oauth client": "[accounts.host]\nprovider = \"hostinger\"\naddress = \"me@example.com\"\n\n[oauth_clients.g]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(config))
+			var ve *ValidationError
+			if !errors.As(err, &ve) {
+				t.Errorf("err = %v, want a validation error", err)
+			}
+		})
+	}
+}
+
+// Inputs viper alone accepted but the old strict decoder refused. The
+// go-toml gate in Parse must keep refusing them.
+func TestParseGateRefusesWhatViperWouldAccept(t *testing.T) {
+	t.Parallel()
+	base := "[accounts.host]\nprovider = \"hostinger\"\naddress = \"me@example.com\"\n"
+	tests := []struct {
+		name, config string
+		unknown      bool
+	}{
+		{name: "empty unknown table", config: base + "[policy.typo]\n", unknown: true},
+		{name: "empty unknown inline table", config: base + "typo = {}\n", unknown: true},
+		{name: "table for an int", config: base + "[policy]\nmax_recipients = {}\n"},
+		{name: "table for a list", config: base + "watch = {}\n"},
+		{name: "table for a bool", config: base + "[accounts.host.sync]\nenabled = {}\n"},
+		{name: "datetime for policy", config: "policy = 1979-05-27T07:32:00Z\n" + base},
+		{name: "datetime for daemon", config: "daemon = 1979-05-27T07:32:00Z\n" + base},
+		{name: "datetime for an account", config: "[accounts]\nhost = 1979-05-27T07:32:00Z\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(tt.config))
+			if err == nil {
+				t.Fatalf("Parse accepted:\n%s", tt.config)
+			}
+			if tt.unknown && !errors.Is(err, ErrUnknownKey) {
+				t.Errorf("err = %v, want ErrUnknownKey", err)
+			}
+		})
+	}
+}
+
+// A bad account name is reported once, as validation reports it, not
+// behind a second copy of the key.
+func TestParseNamesABadAccountNameOnce(t *testing.T) {
+	t.Parallel()
+	_, err := Parse([]byte("[accounts.Work]\nprovider = \"hostinger\"\naddress = \"a@b.c\"\n"))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err = %v, want a validation error", err)
+	}
+	if n := strings.Count(err.Error(), "accounts.Work"); n != 1 {
+		t.Errorf("err = %q names accounts.Work %d times, want once", err, n)
 	}
 }

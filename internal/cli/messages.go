@@ -52,13 +52,7 @@ and says why; --source server skips the cache.
 The shell removes quotes, so quote the whole query when it holds a phrase
 or a quoted value, as in the second example below. Put -- before the query
 when a term starts with -, so it is not read as a flag:
-  chainmail search -- invoice -from:acme
-
-Examples:
-  chainmail search invoice from:acme newer_than:30d
-  chainmail search 'subject:"q3 report" OR has:attachment' --account gmail
-  chainmail search is:unread in:inbox --count
-  chainmail search from:acme --source server`
+  chainmail search -- invoice -from:acme`
 
 func newFoldersCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	var accounts []string

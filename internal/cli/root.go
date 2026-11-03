@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/fang"
 	"github.com/spf13/cobra"
 
 	"github.com/jamesainslie/chainmail/internal/api"
@@ -14,7 +15,9 @@ import (
 	"github.com/jamesainslie/chainmail/internal/config"
 )
 
-// Execute runs chainmail with args and returns the process exit code.
+// Execute runs chainmail with args and returns the process exit code. On a
+// terminal, help and errors are styled by fang; otherwise errors are one
+// line of JSON on stderr. The exit code is the same either way.
 func Execute(ctx context.Context, args []string, env Env) int {
 	root := newRoot(ctx, env)
 	// cobra reads os.Args when args is nil, which would parse the host's command line.
@@ -22,35 +25,92 @@ func Execute(ctx context.Context, args []string, env Env) int {
 		args = []string{}
 	}
 	root.SetArgs(args)
+	if env.StderrTerminal {
+		// fang has already shown the error through styledError.
+		if err := fang.Execute(ctx, root, fangOptions()...); err != nil {
+			return classify(err).code
+		}
+		return api.ExitOK
+	}
 	if err := root.ExecuteContext(ctx); err != nil {
 		return reportError(env.Stderr, err)
 	}
 	return api.ExitOK
 }
 
-// globals holds the flags every command shares.
+// globals holds the flags every command shares, and what they resolve to.
 type globals struct {
+	// socketFlag is --socket as given, empty when it was not. The daemon
+	// reads only this, so a client's settings never move its socket.
+	socketFlag string
+	// outputFlag is --output as given. resolve reads it through the flag
+	// and sets output, so nothing reads this field.
+	outputFlag string
+	// socket and output are resolved by resolve.
 	socket string
 	output string
+	// outputChosen says output came from --output, CHAINMAIL_OUTPUT or
+	// cli.toml rather than the terminal default.
+	outputChosen bool
 }
 
-func (g *globals) socketPath(env Env) string {
-	if g.socket != "" {
-		return g.socket
+// socketPath is the daemon socket clients dial.
+func (g *globals) socketPath() string {
+	if g.socket == "" {
+		return config.DefaultSocket
 	}
-	if s := env.Getenv("CHAINMAIL_SOCKET"); s != "" {
-		return s
-	}
-	return config.DefaultSocket
+	return g.socket
+}
+
+// jsonChosen says json output was chosen, by --output, CHAINMAIL_OUTPUT
+// or cli.toml, rather than being the default for a non-terminal.
+func (g *globals) jsonChosen() bool {
+	return g.outputChosen && g.output == "json"
+}
+
+// addGlobalFlags registers the flags every command shares.
+func addGlobalFlags(root *cobra.Command, g *globals) {
+	root.PersistentFlags().StringVar(&g.socketFlag, socketBinding.flag, "", "daemon socket (default $CHAINMAIL_SOCKET, then cli.toml, then "+config.DefaultSocket+")")
+	root.PersistentFlags().StringVar(&g.outputFlag, outputBinding.flag, "", "output format: json or table (default $CHAINMAIL_OUTPUT, then cli.toml, then table on a terminal, json otherwise)")
 }
 
 // client connects to the daemon. Callers Close it, so idle connections do
 // not hold up a daemon shutting down.
-func (g *globals) client(env Env) *client.Client {
-	return client.New(g.socketPath(env), "cli")
+func (g *globals) client(Env) *client.Client {
+	return client.New(g.socketPath(), "cli")
 }
 
 func (g *globals) table() bool { return g.output == "table" }
+
+// skipSettingsAnnotation marks a command that uses neither client setting,
+// so a bad cli.toml or CHAINMAIL_OUTPUT must not stop it.
+const skipSettingsAnnotation = "chainmail.skipSettings"
+
+// skipsSettings says cmd does not resolve the client settings before it
+// runs. Completion requests resolve them inside each completion function,
+// against the command being completed, and must not fail on a bad
+// cli.toml. cobra makes those request commands itself, so they are
+// matched by path rather than marked.
+func skipsSettings(cmd *cobra.Command) bool {
+	if cmd.Annotations[skipSettingsAnnotation] != "" {
+		return true
+	}
+	root := cmd.Root().Name()
+	switch cmd.CommandPath() {
+	case root + " " + cobra.ShellCompRequestCmd, root + " " + cobra.ShellCompNoDescRequestCmd:
+		return true
+	}
+	return false
+}
+
+// skipSettings marks cmd with skipSettingsAnnotation and returns it.
+func skipSettings(cmd *cobra.Command) *cobra.Command {
+	if cmd.Annotations == nil {
+		cmd.Annotations = map[string]string{}
+	}
+	cmd.Annotations[skipSettingsAnnotation] = "true"
+	return cmd
+}
 
 // newRoot builds the command tree. Commands use ctx, the context given to
 // Execute, rather than cmd.Context(). The two are the same context, but only
@@ -61,33 +121,26 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 	root := newGroup("chainmail", "Email for AI agents, behind a policy daemon")
 	root.SilenceUsage = true
 	root.SilenceErrors = true
-	// cobra's completion command prints help and exits 0 for anything it does
-	// not know, outside the exit contract. Its help command is replaced below.
+	// cobra's own completion command prints help and exits 0 for a shell
+	// it does not know, outside the exit contract. newCompletionCmd
+	// replaces it. Its help command is replaced below for the same reason.
 	root.CompletionOptions.DisableDefaultCmd = true
-	root.SetHelpCommand(newHelpCmd())
+	root.SetHelpCommand(skipSettings(newHelpCmd()))
 	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
-		// Changed tells an unset flag from an explicit --output "", which is a mistake.
-		switch {
-		case !cmd.Flags().Changed("output"):
-			g.output = "json"
-			if env.StdoutTerminal {
-				g.output = "table"
-			}
-		case g.output == "json", g.output == "table":
-		default:
-			return usageError{err: fmt.Errorf("--output must be json or table, got %q", g.output), hint: "run: chainmail --help"}
+		if skipsSettings(cmd) {
+			return nil
 		}
-		return nil
+		return g.resolve(env, cmd)
 	}
 	root.SetIn(env.Stdin)
 	root.SetOut(env.Stdout)
 	root.SetErr(env.Stderr)
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error { return usageError{err: err, hint: helpHint(cmd)} })
-	root.PersistentFlags().StringVar(&g.socket, "socket", "", "daemon socket (default $CHAINMAIL_SOCKET, then "+config.DefaultSocket+")")
-	root.PersistentFlags().StringVar(&g.output, "output", "", "output format: json or table (default: table on a terminal, json otherwise)")
+	addGlobalFlags(root, g)
 	root.AddCommand(
 		newVersionCmd(env, g),
-		newDaemonCmd(ctx, env, g),
+		// The daemon reads --socket only as a flag and has no output.
+		skipSettings(newDaemonCmd(ctx, env, g)),
 		newAccountsCmd(ctx, env, g),
 		newSecretCmd(ctx, env, g),
 		newAuthCmd(ctx, env, g),
@@ -106,10 +159,58 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 		newMCPCmd(ctx, env, g),
 		newWatchCmd(ctx, env, g),
 		newCacheCmd(ctx, env, g),
+		skipSettings(newCompletionCmd()),
+		skipSettings(newManCmd()),
 	)
 	root.AddCommand(newOrganizeCmds(ctx, env, g)...)
+	root.AddGroup(commandGroups...)
+	for _, c := range root.Commands() {
+		c.GroupID = groupOf[c.Name()]
+	}
+	root.SetHelpCommandGroupID("admin")
+	applyHelp(root)
+	cp := &completer{env: env, g: g}
+	if err := applyCompletions(root, cp.specs()); err != nil {
+		// Every name in specs is a flag defined in this package, so this is
+		// a programming error the completion tests catch first.
+		panic(err)
+	}
 	return root
 }
+
+// commandGroups orders the top-level commands in help.
+var commandGroups = []*cobra.Group{
+	{ID: "read", Title: "Read"},
+	{ID: "compose", Title: "Compose"},
+	{ID: "organize", Title: "Organize"},
+	{ID: "watch", Title: "Watch"},
+	{ID: "accounts", Title: "Accounts and auth"},
+	{ID: "admin", Title: "Admin"},
+}
+
+// groupOf names each top-level command's group. A test fails for a
+// visible top-level command missing from it.
+var groupOf = map[string]string{
+	"search": "read", "get": "read", "thread": "read", "attachment": "read", "folders": "read",
+	"send": "compose", "send-raw": "compose", "reply": "compose", "forward": "compose", "draft": "compose",
+	"move": "organize", "copy": "organize", "archive": "organize", "trash": "organize", "expunge": "organize",
+	"read": "organize", "unread": "organize", "flag": "organize", "unflag": "organize", "flags": "organize",
+	"label": "organize", "folder": "organize",
+	"watch":    "watch",
+	"accounts": "accounts", "auth": "accounts", "secret": "accounts",
+	"admin": "admin", "audit": "admin", "daemon": "admin", "mcp": "admin", "version": "admin", "completion": "admin",
+}
+
+// walk calls fn for cmd and every command below it, parents first.
+func walk(cmd *cobra.Command, fn func(*cobra.Command)) {
+	fn(cmd)
+	for _, c := range cmd.Commands() {
+		walk(c, fn)
+	}
+}
+
+// groupAnnotation marks a command that only holds subcommands.
+const groupAnnotation = "chainmail.group"
 
 // newGroup returns a command that only holds subcommands. It runs only when
 // no subcommand matched. Setting Args stops cobra reporting unknown commands
@@ -118,9 +219,10 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 // usage errors.
 func newGroup(use, short string) *cobra.Command {
 	return &cobra.Command{
-		Use:   use,
-		Short: short,
-		Args:  cobra.ArbitraryArgs,
+		Use:         use,
+		Short:       short,
+		Annotations: map[string]string{groupAnnotation: "true"},
+		Args:        cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return usageError{err: errors.New("no command given"), hint: helpHint(cmd)}
