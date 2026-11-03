@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"maps"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -109,20 +112,29 @@ type evictVictim struct {
 	inWindow bool
 }
 
-// Evict applies body retention to every account's bodies, in the order of
-// spec section 5: bodies outside the account's window whose last_read_at
-// is null or older than its retention go first. Each removed body's FTS row
-// is rewritten with its header terms alone, so headers stay searchable.
-// Free pages go back to the file system at the end. A failure returns
-// what was removed before it.
+// Evict applies body retention and the size cap to every account's bodies,
+// in the order of spec section 5:
+//
+//  1. Bodies outside the account's window whose last_read_at is null or
+//     older than its retention.
+//  2. While the file is over MaxSize: bodies outside the window, oldest
+//     last_read_at first with never read first, then window bodies, oldest
+//     internal_date first, until the file is at or under 90% of MaxSize.
+//
+// Each removed body's FTS row is rewritten with its header terms alone, so
+// headers stay searchable, and free pages go back to the file system after
+// each batch, since the cap counts page_count * page_size. A MaxSize of zero
+// or less means no cap. A failure returns what was removed before it.
 func (s *Store) Evict(ctx context.Context, p EvictPolicy) (EvictResult, error) {
 	var res EvictResult
 	accounts, err := s.bodyAccounts(ctx)
 	if err != nil {
 		return res, err
 	}
+	starts := make(map[string]int64, len(accounts))
 	for _, a := range accounts {
 		windowStart := p.Now.Add(-p.Window(a)).Unix()
+		starts[a] = windowStart
 		readCut := p.Now.Add(-p.Retention(a)).Unix()
 		for {
 			victims, err := s.retentionVictims(ctx, a, windowStart, readCut)
@@ -139,9 +151,32 @@ func (s *Store) Evict(ctx context.Context, p EvictPolicy) (EvictResult, error) {
 			}
 		}
 	}
-	if _, err := s.vacuum(ctx); err != nil {
+	size, err := s.vacuum(ctx)
+	if err != nil {
 		return res, err
 	}
+	if p.MaxSize > 0 && size > p.MaxSize {
+		target := p.MaxSize * evictTargetPercent / 100
+		for size > target {
+			victims, err := s.capVictims(ctx, starts, size-target)
+			if err != nil {
+				return res, err
+			}
+			if len(victims) == 0 {
+				break
+			}
+			n, freed, err := s.dropBodies(ctx, victims)
+			res.add(n, freed)
+			if err != nil {
+				return res, err
+			}
+			if size, err = s.vacuum(ctx); err != nil {
+				return res, err
+			}
+		}
+		res.OverCap = size > p.MaxSize
+	}
+	s.evict.over.Store(res.OverCap)
 	return res, nil
 }
 
@@ -291,4 +326,38 @@ func (s *Store) vacuum(ctx context.Context) (int64, error) {
 		return 0, s.fail("returning free pages", err)
 	}
 	return s.SizeBytes(ctx)
+}
+
+// capVictims returns the next bodies in cap order whose sizes add up to
+// need, at most evictChunk of them. starts holds each account's window
+// start in Unix seconds; bodies of accounts not in it are left alone.
+func (s *Store) capVictims(ctx context.Context, starts map[string]int64, need int64) ([]evictVictim, error) {
+	const op = "finding bodies over the cap"
+	if len(starts) == 0 {
+		return nil, nil
+	}
+	accounts := slices.Sorted(maps.Keys(starts))
+	values := make([]string, len(accounts))
+	args := make([]any, 0, 2*len(accounts)+1)
+	for i, a := range accounts {
+		values[i] = "(?, ?)"
+		args = append(args, a, starts[a])
+	}
+	args = append(args, evictChunk)
+	rows, err := s.db.QueryContext(ctx,
+		`WITH w(account, win_start) AS (VALUES `+strings.Join(values, ", ")+`)
+		 SELECT b.msg, b.size_bytes, m.account, m.folder, m.internal_date >= w.win_start
+		 FROM bodies b JOIN messages m ON m.id = b.msg JOIN w ON w.account = m.account
+		 ORDER BY m.internal_date >= w.win_start,
+		          CASE WHEN m.internal_date >= w.win_start THEN m.internal_date ELSE coalesce(b.last_read_at, -1) END,
+		          m.internal_date, b.msg
+		 LIMIT ?`, args...)
+	if err != nil {
+		return nil, s.fail(op, err)
+	}
+	victims, err := scanVictims(rows, need)
+	if err != nil {
+		return nil, s.fail(op, err)
+	}
+	return victims, nil
 }

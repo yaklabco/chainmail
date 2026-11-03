@@ -1,11 +1,13 @@
 package cache
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/ref"
 )
 
 // noteWrite wakes the evictor only when the file is over the cap, and two
@@ -158,5 +160,188 @@ func TestEvictRetention(t *testing.T) {
 	}
 	if again != (EvictResult{}) {
 		t.Errorf("second sweep = %+v, want nothing", again)
+	}
+}
+
+// seedCapOrder stores eight bodies of about 64 KiB for acme INBOX, returned
+// in the order the size cap removes them: outside the 30 day window, read 6
+// days ago (uid 1), read 5 days ago (uid 2, arrived before uid 1), read
+// yesterday (uid 3, arrived first of all); then window bodies oldest
+// arrival first (uids 4 to 8). The folder's progress has window_done set.
+// Every body outside the window has been read, since step 1 always takes a
+// never read one; TestCapVictimsNeverReadFirst covers that order.
+func seedCapOrder(t *testing.T, st *Store, clk *prefetchClock) ([]ref.Ref, [][]byte) {
+	t.Helper()
+	now := t10Start
+	seeds := []evictSeed{
+		{account: "acme", uid: 1, arrived: now.Add(-200 * oneDay), readAt: now.Add(-6 * oneDay)},
+		{account: "acme", uid: 2, arrived: now.Add(-300 * oneDay), readAt: now.Add(-5 * oneDay)},
+		{account: "acme", uid: 3, arrived: now.Add(-400 * oneDay), readAt: now.Add(-oneDay)},
+		{account: "acme", uid: 4, arrived: now.Add(-25 * oneDay)},
+		{account: "acme", uid: 5, arrived: now.Add(-20 * oneDay)},
+		{account: "acme", uid: 6, arrived: now.Add(-15 * oneDay)},
+		{account: "acme", uid: 7, arrived: now.Add(-10 * oneDay)},
+		{account: "acme", uid: 8, arrived: now.Add(-5 * oneDay)},
+	}
+	raws := make([][]byte, len(seeds))
+	for i := range seeds {
+		seeds[i].raw = evictPaddedRaw(fmt.Sprintf("padword%d", i+1))
+		raws[i] = seeds[i].raw
+	}
+	refs := seedEvict(t, st, clk, seeds...)
+	if err := st.PutProgress(t.Context(), Progress{
+		Account: "acme", Folder: "INBOX", UIDValidity: 7, BaselineUIDNext: 9, BackfillLowUID: 1, BackfillDone: true, WindowDone: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return refs, raws
+}
+
+// capPolicy keeps every body under step 1 (30 day window, ten year
+// retention), so only the cap removes anything.
+func capPolicy(maxSize int64) EvictPolicy {
+	return EvictPolicy{Now: t10Start, Window: constDur(30 * oneDay), Retention: constDur(3650 * oneDay), MaxSize: maxSize}
+}
+
+// Over the cap, bodies go in spec order until the file is at or under 90%
+// of max_size: outside the window oldest read first with never read first,
+// then window bodies oldest arrival first. Losing a window body clears the
+// folder's window_done and sets the prefetch hold.
+func TestEvictCapOrder(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// free is how many bodies' worth of bytes the cap must free.
+		free             float64
+		minGone, maxGone int
+		windowCleared    bool
+	}{
+		{name: "outside the window first, oldest read first", free: 1.5, minGone: 2, maxGone: 3},
+		{name: "then window bodies, oldest arrival first", free: 4.5, minGone: 5, maxGone: 6, windowCleared: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clk := newPrefetchClock(t10Start)
+			st := openEvictStore(t, clk.Now)
+			ctx := t.Context()
+			order, raws := seedCapOrder(t, st, clk)
+			size, err := st.SizeBytes(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := float64(len(raws[0]))
+			maxSize := int64((float64(size) - tt.free*body) / 0.9)
+			res, err := st.Evict(ctx, capPolicy(maxSize))
+			if err != nil {
+				t.Fatal(err)
+			}
+			gone := 0
+			var freed int64
+			for i, r := range order {
+				if hasBody(t, st, r) {
+					continue
+				}
+				if gone != i {
+					t.Fatalf("uid %d was evicted while an earlier body in cap order was kept", r.UID)
+				}
+				gone++
+				freed += int64(len(raws[i]))
+			}
+			if gone < tt.minGone || gone > tt.maxGone {
+				t.Errorf("evicted %d bodies, want %d to %d", gone, tt.minGone, tt.maxGone)
+			}
+			if res.Bodies != uint64(gone) || res.FreedBytes != freed || res.OverCap {
+				t.Errorf("Evict = %+v, want %d bodies, %d bytes, not over the cap", res, gone, freed)
+			}
+			after, err := st.SizeBytes(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if limit := maxSize * evictTargetPercent / 100; after > limit {
+				t.Errorf("size after = %d, want at most %d (90%% of %d)", after, limit, maxSize)
+			}
+			p, _, err := st.Progress(ctx, "acme", "INBOX")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.WindowDone == tt.windowCleared {
+				t.Errorf("window_done = %v, want %v", p.WindowDone, !tt.windowCleared)
+			}
+			if got := st.evict.hold.Load(); got != tt.windowCleared {
+				t.Errorf("prefetch hold = %v, want %v", got, tt.windowCleared)
+			}
+			if st.OverCap() {
+				t.Error("OverCap set though bodies were left")
+			}
+		})
+	}
+}
+
+// When headers alone exceed the cap every body goes and the sweep reports
+// OverCap, and a later sweep under a larger cap clears it.
+func TestEvictOverCap(t *testing.T) {
+	t.Parallel()
+	clk := newPrefetchClock(t10Start)
+	st := openEvictStore(t, clk.Now)
+	ctx := t.Context()
+	order, _ := seedCapOrder(t, st, clk)
+	res, err := st.Evict(ctx, capPolicy(8192))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Bodies != uint64(len(order)) || !res.OverCap || !st.OverCap() {
+		t.Errorf("Evict = %+v, OverCap() = %v, want every body gone and over the cap", res, st.OverCap())
+	}
+	src := mailstore.Source{Folder: "INBOX", UIDValidity: 7}
+	if uids, _, err := st.SearchUIDs(ctx, "acme", src, Where{FTS: "keepword"}, 0, false); err != nil || len(uids) != len(order) {
+		t.Errorf("header term after evicting every body = %v, %v, want every row", uids, err)
+	}
+	res, err = st.Evict(ctx, capPolicy(1<<40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OverCap || st.OverCap() {
+		t.Errorf("Evict under a large cap = %+v, OverCap() = %v, want not over the cap", res, st.OverCap())
+	}
+	if slices.ContainsFunc(order, func(r ref.Ref) bool { return hasBody(t, st, r) }) {
+		t.Error("bodies came back")
+	}
+}
+
+// Under the cap a never read body outside the window goes before any read
+// one. Step 1 always takes such a body first, so this calls capVictims
+// directly.
+func TestCapVictimsNeverReadFirst(t *testing.T) {
+	t.Parallel()
+	clk := newPrefetchClock(t10Start)
+	st := openEvictStore(t, clk.Now)
+	now := t10Start
+	refs := seedEvict(t, st, clk,
+		evictSeed{account: "acme", uid: 1, arrived: now.Add(-300 * oneDay), readAt: now.Add(-9 * oneDay), raw: evictTextRaw("readold")},
+		evictSeed{account: "acme", uid: 2, arrived: now.Add(-100 * oneDay), raw: evictTextRaw("neverread")},
+		evictSeed{account: "acme", uid: 3, arrived: now.Add(-oneDay), raw: evictTextRaw("inwindow")},
+	)
+	starts := map[string]int64{"acme": now.Add(-30 * oneDay).Unix()}
+	victims, err := st.capVictims(t.Context(), starts, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make(map[int64]uint32, len(refs))
+	for _, r := range refs {
+		var id int64
+		if err := st.db.QueryRowContext(t.Context(), "SELECT id FROM messages WHERE account = ? AND uid = ?", r.Account, r.UID).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids[id] = r.UID
+	}
+	var got []uint32
+	var inWindow []bool
+	for _, v := range victims {
+		got = append(got, ids[v.msg])
+		inWindow = append(inWindow, v.inWindow)
+	}
+	if !slices.Equal(got, []uint32{2, 1, 3}) || !slices.Equal(inWindow, []bool{false, false, true}) {
+		t.Errorf("cap order = %v (in window %v), want [2 1 3] ([false false true])", got, inWindow)
 	}
 }
