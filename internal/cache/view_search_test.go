@@ -1,0 +1,421 @@
+package cache_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jamesainslie/chainmail/internal/cache"
+	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/db"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
+	"github.com/jamesainslie/chainmail/internal/query"
+	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/jamesainslie/chainmail/internal/watch"
+)
+
+// searchNow is the clock of the search view tests, a whole second so cached
+// Unix-second dates compare equal to the fake's.
+var searchNow = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+
+func searchDaysAgo(n int) time.Time { return searchNow.AddDate(0, 0, -n) }
+
+// searchClock is a watch.Clock stopped at searchNow.
+type searchClock struct{}
+
+func (searchClock) Now() time.Time { return searchNow }
+
+func (searchClock) After(time.Duration) <-chan time.Time { return nil }
+
+const searchConfig = `
+[accounts.host]
+provider = "hostinger"
+address = "me@example.com"
+
+[accounts.gmail]
+provider = "gmail"
+address = "me@gmail.example"
+auth = "password"
+`
+
+// searchServer wraps a fake store and records the UIDs of every
+// FetchSummaries call, to show which rows the view asked the server for.
+type searchServer struct {
+	*fake.Store
+	mu    sync.Mutex
+	asked [][]uint32
+}
+
+func (s *searchServer) FetchSummaries(ctx context.Context, src mailstore.Source, uids []uint32, opts mailstore.SummaryOptions) ([]mailstore.Summary, error) {
+	s.mu.Lock()
+	s.asked = append(s.asked, slices.Clone(uids))
+	s.mu.Unlock()
+	return s.Store.FetchSummaries(ctx, src, uids, opts)
+}
+
+func (s *searchServer) summaryCalls() [][]uint32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.asked)
+}
+
+// searchFixture is one account's cache, built by hand as a finished
+// backfill and prefetch leave it, and its view over a fake server.
+type searchFixture struct {
+	name   string
+	server *searchServer
+	store  *cache.Store
+	view   *cache.View
+}
+
+func newSearchFixture(t *testing.T, gmail bool) *searchFixture {
+	t.Helper()
+	ctx := t.Context()
+	name := "host"
+	if gmail {
+		name = "gmail"
+	}
+	cfg, err := config.Parse([]byte(searchConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct, err := cfg.Account(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	stateDB, err := db.OpenState(ctx, filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stateDB.Close() })
+	cs, err := cache.Open(ctx, filepath.Join(dir, "cache.db"), cache.OpenOptions{Now: searchClock{}.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	fk := fake.New(name, gmail)
+	fk.SetNow(searchClock{}.Now)
+	server := &searchServer{Store: fk}
+	a := cache.NewAccount(cache.AccountOptions{
+		Account:  acct,
+		Settings: func() config.CacheSettings { return cfg.CacheSettings(name) },
+		MaxSize:  cfg.CacheMaxSize,
+		Store:    cs,
+		Log:      watch.NewLog(stateDB, searchClock{}.Now, nil),
+		State:    watch.NewState(stateDB),
+		Mail:     func(context.Context) (cache.MailStore, func(), error) { return fk, func() {}, nil },
+		Clock:    searchClock{},
+	})
+	return &searchFixture{name: name, server: server, store: cs, view: a.View(server)}
+}
+
+// warm caches every folder the account's default search covers, with
+// bodies, as a finished backfill and prefetch leave them.
+func (f *searchFixture) warm(t *testing.T) {
+	t.Helper()
+	results, err := f.server.Search(t.Context(), mailstore.SearchRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range results {
+		f.cacheFolder(t, r.Source, r.UIDs, true)
+	}
+}
+
+// cacheFolder caches the headers of uids in src, and their bodies when
+// bodies is set, then records the folder's backfill and window as done.
+func (f *searchFixture) cacheFolder(t *testing.T, src mailstore.Source, uids []uint32, bodies bool) {
+	t.Helper()
+	ctx := t.Context()
+	headers, err := f.server.FetchHeaders(ctx, src, uids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := make([]cache.Row, len(headers))
+	refs := make([]ref.Ref, len(headers))
+	for i, h := range headers {
+		rows[i], refs[i] = cache.RowFromHeader(h), h.Summary.Ref
+	}
+	if err := f.store.PutRows(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if bodies && len(refs) > 0 {
+		for _, res := range f.server.FetchMessages(ctx, refs) {
+			if res.Err != nil {
+				t.Fatal(res.Err)
+			}
+			body := cache.Body{Raw: res.Message.Raw, TextClipped: res.Message.TextClipped}
+			if _, err := f.store.PutBody(ctx, res.Message.Summary.Ref, body, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	next := uint32(1)
+	if len(uids) > 0 {
+		next = slices.Max(uids) + 1
+	}
+	if err := f.store.PutProgress(ctx, cache.Progress{
+		Account: f.name, Folder: src.Folder, UIDValidity: src.UIDValidity, BaselineUIDNext: next,
+		BackfillLowUID: 1, BackfillDone: true, WindowDone: true, LastAppliedAt: searchNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func searchAddr(name, email string) []mailstore.Address {
+	return []mailstore.Address{{Name: name, Email: email}}
+}
+
+// seedSearchMail adds the messages the search view tests query, oldest
+// first so UIDs rise with arrival, and returns their refs by subject. On
+// Gmail they all live in All Mail, with labels; elsewhere in INBOX, Archive
+// and Sent.
+func seedSearchMail(s *fake.Store, gmail bool) map[string]ref.Ref {
+	inbox, archive, sent := "INBOX", "Archive", "Sent"
+	var inboxLabel, sentLabel, work []string
+	if gmail {
+		inbox, archive, sent = "[Gmail]/All Mail", "[Gmail]/All Mail", "[Gmail]/All Mail"
+		inboxLabel, sentLabel, work = []string{`\Inbox`}, []string{`\Sent`}, []string{"work"}
+	}
+	acme := searchAddr("Acme Billing", "billing@acme.example")
+	alex := searchAddr("Alex Doe", "alex@example.com")
+	refs := map[string]ref.Ref{}
+	add := func(m fake.Message) { refs[m.Subject] = s.Add(m) }
+	add(fake.Message{Folder: archive, Date: searchDaysAgo(30), Subject: "old plan", Body: "notes about the plan", From: alex, Flags: []string{`\Seen`}})
+	add(fake.Message{
+		Folder: inbox, Date: searchDaysAgo(20), Subject: "invoice 41", Body: "the invoice is attached",
+		From: acme, To: searchAddr("Bob", "bob@example.com"), Labels: slices.Concat(inboxLabel, work), Flags: []string{"todo"},
+		Attachments: []fake.Attachment{{Part: "2", Filename: "invoice-41.pdf", ContentType: "application/pdf", Data: []byte("%PDF-1.7")}},
+	})
+	add(fake.Message{
+		Folder: inbox, Date: searchDaysAgo(10), Subject: "lunch", Body: strings.Repeat("long text ", 300),
+		Cc: searchAddr("Carol", "carol@example.com"), Labels: inboxLabel, Flags: []string{`\Seen`, `\Flagged`},
+	})
+	add(fake.Message{Folder: sent, Date: searchDaysAgo(5), Subject: "re: old plan", Body: "agreed on the plan", From: searchAddr("Me", "me@example.com"), Labels: sentLabel, Flags: []string{`\Seen`}})
+	add(fake.Message{Folder: inbox, Date: searchDaysAgo(3), Subject: "invoice 42", Body: "please pay the invoice", From: acme, Labels: inboxLabel})
+	return refs
+}
+
+// searchRequest parses q and splits off in:, as the daemon's plan does.
+func searchRequest(t *testing.T, q string, countOnly bool) mailstore.SearchRequest {
+	t.Helper()
+	n, err := query.Parse(q)
+	if err != nil {
+		t.Fatalf("parse %q: %v", q, err)
+	}
+	scope, rest := query.Split(n)
+	return mailstore.SearchRequest{Query: rest, In: scope.In, CountOnly: countOnly}
+}
+
+// diffResults says how got differs from want, source by source, or returns
+// "" when they match.
+func diffResults(got, want []mailstore.SourceResult) string {
+	if len(got) != len(want) {
+		return fmt.Sprintf("%d sources %v, want %d %v", len(got), sourceFolders(got), len(want), sourceFolders(want))
+	}
+	for i := range want {
+		g, w := got[i], want[i]
+		switch {
+		case g.Source != w.Source:
+			return fmt.Sprintf("source %d = %+v, want %+v", i, g.Source, w.Source)
+		case (g.Err == nil) != (w.Err == nil):
+			return fmt.Sprintf("%s: err %v, want %v", w.Source.Folder, g.Err, w.Err)
+		case !slices.Equal(g.UIDs, w.UIDs):
+			return fmt.Sprintf("%s: UIDs %v, want %v", w.Source.Folder, g.UIDs, w.UIDs)
+		case g.Count != w.Count:
+			return fmt.Sprintf("%s: count %d, want %d", w.Source.Folder, g.Count, w.Count)
+		}
+	}
+	return ""
+}
+
+func sourceFolders(results []mailstore.SourceResult) []string {
+	var out []string
+	for _, r := range results {
+		out = append(out, r.Source.Folder)
+	}
+	return out
+}
+
+// matchedRefs returns the refs of every UID in results, on an account
+// without Gmail message IDs.
+func matchedRefs(account string, results []mailstore.SourceResult) []ref.Ref {
+	var out []ref.Ref
+	for _, r := range results {
+		for _, uid := range r.UIDs {
+			out = append(out, ref.Ref{Account: account, Folder: r.Source.Folder, UIDValidity: r.Source.UIDValidity, UID: uid})
+		}
+	}
+	return out
+}
+
+// TestViewSearchMatchesServer checks that the view finds what the fake
+// server finds for header operators, dates, sizes, in: and whole-word text,
+// folder by folder, with and without count_only.
+func TestViewSearchMatchesServer(t *testing.T) {
+	t.Parallel()
+	common := []string{
+		"", "from:acme", "-from:acme", "subject:invoice", "to:bob", "cc:carol",
+		"is:unread", "is:read", "is:starred", "newer_than:7d", "older_than:7d",
+		"after:2026-10-20", "before:2026-10-20", "larger:2K", "smaller:2K",
+		"from:acme OR subject:plan", "invoice", `"the plan"`, "in:inbox",
+	}
+	for _, gmail := range []bool{false, true} {
+		queries := slices.Clone(common)
+		if gmail {
+			queries = append(queries, "has:attachment", "filename:pdf", "label:work", "in:archive", "in:sent")
+		} else {
+			queries = append(queries, "in:Archive", "in:sent")
+		}
+		t.Run(fmt.Sprintf("gmail=%t", gmail), func(t *testing.T) {
+			t.Parallel()
+			f := newSearchFixture(t, gmail)
+			seedSearchMail(f.server.Store, gmail)
+			f.warm(t)
+			for _, q := range queries {
+				for _, countOnly := range []bool{false, true} {
+					req := searchRequest(t, q, countOnly)
+					want, err := f.server.Search(t.Context(), req)
+					if err != nil {
+						t.Fatalf("server %q: %v", q, err)
+					}
+					got, err := f.view.Search(t.Context(), req)
+					if err != nil {
+						t.Fatalf("view %q: %v", q, err)
+					}
+					if d := diffResults(got, want); d != "" {
+						t.Errorf("%q count_only=%t: %s", q, countOnly, d)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestViewSearchAnswersCacheOnlyOperators checks has:, filename: and label:
+// on an account other than Google, which the server refuses: label: is an
+// IMAP keyword, and a system flag is never a label, so it matches nothing.
+func TestViewSearchAnswersCacheOnlyOperators(t *testing.T) {
+	t.Parallel()
+	f := newSearchFixture(t, false)
+	refs := seedSearchMail(f.server.Store, false)
+	f.warm(t)
+	tests := []struct {
+		query string
+		want  []ref.Ref
+	}{
+		{query: "has:attachment", want: []ref.Ref{refs["invoice 41"]}},
+		{query: "filename:pdf", want: []ref.Ref{refs["invoice 41"]}},
+		{query: "filename:41", want: []ref.Ref{refs["invoice 41"]}},
+		{query: "label:todo", want: []ref.Ref{refs["invoice 41"]}},
+		{query: `label:\Seen`, want: nil},
+	}
+	for _, tt := range tests {
+		got, err := f.view.Search(t.Context(), searchRequest(t, tt.query, false))
+		if err != nil {
+			t.Fatalf("%q: %v", tt.query, err)
+		}
+		if refs := matchedRefs("host", got); !slices.Equal(refs, tt.want) {
+			t.Errorf("%q matched %v, want %v", tt.query, refs, tt.want)
+		}
+	}
+}
+
+// TestViewSearchBounds checks a search with Bounds, as the server's Search
+// takes them: exactly those folders, each below its bound, a changed
+// UIDVALIDITY failing only that folder, and a folder the cache does not hold
+// failing as not found.
+func TestViewSearchBounds(t *testing.T) {
+	t.Parallel()
+	f := newSearchFixture(t, false)
+	refs := seedSearchMail(f.server.Store, false)
+	f.warm(t)
+	below := refs["invoice 42"].UID
+	req := mailstore.SearchRequest{Bounds: map[string]mailstore.Bound{
+		"INBOX": {UIDValidity: 1, Below: below},
+		"Sent":  {UIDValidity: 9},
+	}}
+	want, err := f.server.Search(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.view.Search(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := diffResults(got, want); d != "" {
+		t.Errorf("bounded search: %s", d)
+	}
+	if len(got) != 2 || got[0].Source.Folder != "INBOX" || !errors.Is(got[1].Err, mailstore.ErrStaleRef) {
+		t.Errorf("bounded results = %+v, want INBOX then a stale Sent", got)
+	}
+	if err := f.store.DropFolder(t.Context(), "host", "Archive", false); err != nil {
+		t.Fatal(err)
+	}
+	got, err = f.view.Search(t.Context(), mailstore.SearchRequest{Bounds: map[string]mailstore.Bound{"Archive": {UIDValidity: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !errors.Is(got[0].Err, mailstore.ErrNotFound) {
+		t.Errorf("bounded search of a folder the cache lacks = %+v, want ErrNotFound", got)
+	}
+}
+
+// TestViewSearchLeavesOutFoldersTheCacheDoesNotHold checks that a folder
+// in the search's scope that the cache has no progress for contributes no
+// result, which only a forced cache search ever sees.
+func TestViewSearchLeavesOutFoldersTheCacheDoesNotHold(t *testing.T) {
+	t.Parallel()
+	f := newSearchFixture(t, false)
+	seedSearchMail(f.server.Store, false)
+	f.warm(t)
+	if err := f.store.DropFolder(t.Context(), "host", "Archive", false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.view.Search(t.Context(), mailstore.SearchRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if folders := sourceFolders(got); slices.Contains(folders, "Archive") || !slices.Contains(folders, "INBOX") {
+		t.Errorf("folders = %v, want every default folder but Archive", folders)
+	}
+}
+
+// TestViewSearchServerOnlyMatchesNothing checks that a query the cache can
+// never answer completely returns its held folders with no matches, never
+// a partial list that could pass for the answer.
+func TestViewSearchServerOnlyMatchesNothing(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		gmail bool
+		query string
+	}{
+		{gmail: true, query: "in:anywhere"},
+		{gmail: false, query: "invoice OR lunch"},
+	}
+	for _, tt := range tests {
+		f := newSearchFixture(t, tt.gmail)
+		seedSearchMail(f.server.Store, tt.gmail)
+		f.warm(t)
+		got, err := f.view.Search(t.Context(), searchRequest(t, tt.query, false))
+		if err != nil {
+			t.Fatalf("%q: %v", tt.query, err)
+		}
+		if len(got) == 0 {
+			t.Fatalf("%q: no sources, want the held folders", tt.query)
+		}
+		for _, r := range got {
+			if len(r.UIDs) != 0 || r.Count != 0 || r.Err != nil {
+				t.Errorf("%q: %s = %v (count %d, err %v), want no matches", tt.query, r.Source.Folder, r.UIDs, r.Count, r.Err)
+			}
+		}
+	}
+}
