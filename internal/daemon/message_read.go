@@ -342,17 +342,23 @@ func (m *messageService) thread(ctx context.Context, req *chainmailv1.GetThreadR
 	if err != nil {
 		return nil, err
 	}
-	st := m.store(acct)
-	refs, err := st.Thread(ctx, seed)
+	rd := m.reader(acct)
+	refs, membership, err := rd.ThreadFrom(ctx, seed)
 	if err != nil {
 		return nil, err
 	}
-	var msgs []*mailstore.Message
+	// member is a message of the thread and where it was read from.
+	type member struct {
+		msg    *mailstore.Message
+		source string
+	}
+	var members []member
 	var unreadable []string
 	var lost error
-	for i, res := range st.FetchMessages(ctx, refs) {
+	results, sources := rd.FetchMessagesFrom(ctx, refs)
+	for i, res := range results {
 		if res.Err == nil {
-			msgs = append(msgs, res.Message)
+			members = append(members, member{msg: res.Message, source: sources[i]})
 			continue
 		}
 		err := messageErr(res.Err)
@@ -370,33 +376,41 @@ func (m *messageService) thread(ctx context.Context, req *chainmailv1.GetThreadR
 			unreadable = append(unreadable, refs[i].String())
 		}
 	}
-	if len(msgs) == 0 && len(unreadable) == 0 && lost != nil {
+	if len(members) == 0 && len(unreadable) == 0 && lost != nil {
 		return nil, lost
 	}
-	slices.SortStableFunc(msgs, func(a, b *mailstore.Message) int {
-		if c := a.Summary.Date.Compare(b.Summary.Date); c != 0 {
+	slices.SortStableFunc(members, func(a, b member) int {
+		if c := a.msg.Summary.Date.Compare(b.msg.Summary.Date); c != 0 {
 			return c
 		}
-		return a.Summary.InternalDate.Compare(b.Summary.InternalDate)
+		return a.msg.Summary.InternalDate.Compare(b.msg.Summary.InternalDate)
 	})
 	resp := &chainmailv1.GetThreadResponse{Source: sourceServer, FetchedAt: timestamppb.New(m.s.opts.Now())}
-	rendered := make([]*chainmailv1.Message, 0, len(msgs))
-	for _, msg := range msgs {
-		if sameMessage(msg.Summary.Ref, seed) || resp.ThreadId == "" {
-			resp.ThreadId = msg.Summary.ThreadID
+	rendered := make([]*chainmailv1.Message, 0, len(members))
+	for _, mb := range members {
+		if sameMessage(mb.msg.Summary.Ref, seed) || resp.ThreadId == "" {
+			resp.ThreadId = mb.msg.Summary.ThreadID
 		}
-		pm, err := m.renderMessage(msg, req.GetFull())
+		pm, err := m.renderMessage(mb.msg, req.GetFull())
 		if err != nil {
-			unreadable = append(unreadable, msg.Summary.Ref.String())
+			unreadable = append(unreadable, mb.msg.Summary.Ref.String())
 			continue
 		}
+		pm.Source = mb.source
 		rendered = append(rendered, pm)
 	}
 	capThread(resp, rendered, unreadable)
+	// The thread's source covers its membership and every message it returns.
+	answered := []string{membership}
+	for _, pm := range resp.Messages {
+		answered = append(answered, pm.GetSource())
+	}
+	resp.Source = cache.CombineSource(answered...)
 	entry.Targets = append(entry.Targets, tally("messages", len(resp.Messages)))
 	if resp.Truncated {
 		entry.Targets = append(entry.Targets, tally("omitted", len(resp.OmittedRefs)))
 	}
+	entry.Targets = append(entry.Targets, "source="+resp.GetSource())
 	return resp, nil
 }
 

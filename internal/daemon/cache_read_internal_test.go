@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	"github.com/jamesainslie/chainmail/internal/audit"
 	"github.com/jamesainslie/chainmail/internal/cache"
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
@@ -408,5 +409,84 @@ func TestGetRecoversAStaleRefByMessageID(t *testing.T) {
 	it := resp.GetItems()[0]
 	if it.GetRef() != old.String() || it.GetMessage().GetRef() != found[0].String() || it.GetMessage().GetSubject().GetUntrusted() != "with pdf" {
 		t.Errorf("item = ref %q, message ref %q, error %v; want %q recovered to %q", it.GetRef(), it.GetMessage().GetRef(), it.GetError(), old, found[0])
+	}
+}
+
+// withoutSources returns copies of msgs with their source cleared.
+func withoutSources(msgs []*chainmailv1.Message) []*chainmailv1.Message {
+	out := make([]*chainmailv1.Message, len(msgs))
+	for i, msg := range msgs {
+		c := proto.Clone(msg).(*chainmailv1.Message)
+		c.Source = ""
+		out[i] = c
+	}
+	return out
+}
+
+// TestGetThreadFromCacheMatchesServer checks spec 7.2: with every folder
+// fresh, a thread's membership and messages come from the cache, with no
+// server call, in the server path's order and rendering.
+func TestGetThreadFromCacheMatchesServer(t *testing.T) {
+	t.Parallel()
+	f := newGetFixture(t)
+	refs := seedGetMail(f)
+	f.warm(t, "host")
+	host := f.fakes["host"]
+	req := &chainmailv1.GetThreadRequest{Ref: refs["re: plan"].String()}
+	f.install("host")
+	threads, fetches := host.Calls("Thread"), host.Calls("FetchMessages")
+	var entry audit.Entry
+	cached, err := f.m.thread(t.Context(), req, &entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, m := host.Calls("Thread")-threads, host.Calls("FetchMessages")-fetches; n != 0 || m != 0 {
+		t.Errorf("the cached thread made %d Thread and %d FetchMessages calls", n, m)
+	}
+	f.install()
+	var serverEntry audit.Entry
+	server, err := f.m.thread(t.Context(), req, &serverEntry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, want := withoutSources(cached.GetMessages()), withoutSources(server.GetMessages())
+	if len(got) != 3 || !slices.EqualFunc(got, want, func(a, b *chainmailv1.Message) bool { return proto.Equal(a, b) }) {
+		t.Errorf("cached thread differs from the server's:\ncache  %v\nserver %v", got, want)
+	}
+	if cached.GetThreadId() != server.GetThreadId() || cached.GetSource() != cache.SourceCache || server.GetSource() != cache.SourceServer {
+		t.Errorf("thread id %q vs %q, sources %q and %q", cached.GetThreadId(), server.GetThreadId(), cached.GetSource(), server.GetSource())
+	}
+	if want := []string{refs["re: plan"].String(), "messages=3", "source=cache"}; !slices.Equal(entry.Targets, want) {
+		t.Errorf("audit targets = %v, want %v", entry.Targets, want)
+	}
+}
+
+// TestGetThreadMixesSourcesWhenTheScopeIsStale checks that a stale folder
+// in the default scope sends membership to the server while the members,
+// in fresh folders, still come from the cache, so the thread reports mixed.
+func TestGetThreadMixesSourcesWhenTheScopeIsStale(t *testing.T) {
+	t.Parallel()
+	f := newGetFixture(t)
+	refs := seedGetMail(f)
+	f.warm(t, "host")
+	f.install("host")
+	f.ageSync(t, "host", "Archive")
+	host := f.fakes["host"]
+	threads := host.Calls("Thread")
+	var entry audit.Entry
+	resp, err := f.m.thread(t.Context(), &chainmailv1.GetThreadRequest{Ref: refs["plan"].String()}, &entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host.Calls("Thread")-threads != 1 {
+		t.Errorf("membership did not come from the server")
+	}
+	for _, msg := range resp.GetMessages() {
+		if msg.GetSource() != cache.SourceCache {
+			t.Errorf("%s source = %q, want cache", msg.GetSubject().GetUntrusted(), msg.GetSource())
+		}
+	}
+	if resp.GetSource() != cache.SourceMixed {
+		t.Errorf("source = %q, want mixed", resp.GetSource())
 	}
 }

@@ -294,7 +294,7 @@ func TestGetThreadOldestFirst(t *testing.T) {
 	if resp.Msg.GetMessages()[1].GetBody().GetUntrusted() != "Thanks." {
 		t.Errorf("thread bodies are not trimmed: %q", resp.Msg.GetMessages()[1].GetBody().GetUntrusted())
 	}
-	if row := lastMailAudit(t, m); row.Action != "thread" || row.Account != "host" || row.Targets != fmt.Sprintf(`[%q,"messages=3"]`, reply.String()) {
+	if row := lastMailAudit(t, m); row.Action != "thread" || row.Account != "host" || row.Targets != fmt.Sprintf(`[%q,"messages=3","source=server"]`, reply.String()) {
 		t.Errorf("audit = %+v", row)
 	}
 }
@@ -338,7 +338,7 @@ func TestGetThreadResponseCap(t *testing.T) {
 	if resp.Msg.GetThreadId() != mailstore.ThreadKey("p0@x") {
 		t.Errorf("thread id = %q", resp.Msg.GetThreadId())
 	}
-	if row := lastMailAudit(t, m); row.Targets != fmt.Sprintf(`[%q,"messages=2","omitted=1"]`, refs[2]) {
+	if row := lastMailAudit(t, m); row.Targets != fmt.Sprintf(`[%q,"messages=2","omitted=1","source=server"]`, refs[2]) {
 		t.Errorf("audit = %+v", row)
 	}
 }
@@ -584,7 +584,7 @@ func TestGetThreadLeavesOutUnreadableMembers(t *testing.T) {
 			t.Errorf("seed %s: thread id = %q", seed, resp.GetThreadId())
 		}
 	}
-	if row := lastMailAudit(t, m.fakeMail); row.Result != "ok" || row.Targets != fmt.Sprintf(`[%q,"messages=1","omitted=2"]`, rendered) {
+	if row := lastMailAudit(t, m.fakeMail); row.Result != "ok" || row.Targets != fmt.Sprintf(`[%q,"messages=1","omitted=2","source=server"]`, rendered) {
 		t.Errorf("audit = %+v", row)
 	}
 }
