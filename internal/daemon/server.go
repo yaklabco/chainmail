@@ -164,6 +164,9 @@ type Server struct {
 	// cache enabled, by account. startWatch fills it before any handler
 	// runs, and it never changes after.
 	cacheAccounts map[string]*cache.Account
+	// cacheEvictor applies body retention and the size cap to the whole
+	// cache file. Nil without a cache.
+	cacheEvictor *cache.Evictor
 }
 
 // New wires up a Server. Call Serve to run it.

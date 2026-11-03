@@ -4,9 +4,11 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -45,6 +47,14 @@ func (s *Server) openCache(ctx context.Context) {
 		return
 	}
 	s.cache = st
+	cfg := s.opts.Config
+	s.cacheEvictor = cache.NewEvictor(cache.EvictorOptions{
+		Store:     st,
+		Window:    func(account string) time.Duration { return cfg.CacheSettings(account).PrefetchBodies },
+		Retention: func(account string) time.Duration { return cfg.CacheSettings(account).ReadRetention },
+		MaxSize:   cfg.CacheMaxSize,
+		Logger:    s.opts.Logger,
+	})
 }
 
 // cacheOpenFailed records why cache.db did not open.
@@ -77,9 +87,6 @@ func (s *Server) firstCacheAccount() (string, bool) {
 
 // cacheService implements chainmailv1connect.CacheServiceHandler.
 type cacheService struct {
-	// UnimplementedCacheServiceHandler answers RebuildCache and EvictCache
-	// until their cycles replace it.
-	chainmailv1connect.UnimplementedCacheServiceHandler
 	s *Server
 }
 
@@ -317,4 +324,37 @@ func (s *Server) rebuildCache(ctx context.Context, account, folder string) ([]st
 	}
 	s.opts.Logger.Info("cache rebuild", "account", acct.Name, "folders", len(folders))
 	return folders, nil
+}
+
+// errCacheNotOpen refuses an eviction when cache.db is not open.
+var errCacheNotOpen = &argError{
+	msg:  "the cache is not running",
+	hint: "the cache is disabled in the config, or cache.db did not open; the daemon log says which",
+}
+
+// EvictCache implements chainmailv1connect.CacheServiceHandler. It runs a
+// body eviction sweep now and records cache.evict with the bodies it
+// removed and the bytes they held.
+func (c *cacheService) EvictCache(ctx context.Context, req *connect.Request[chainmailv1.EvictCacheRequest]) (*connect.Response[chainmailv1.EvictCacheResponse], error) {
+	caller, err := callerOf(ctx, req.Header())
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := withDeadline(ctx, callTimeout)
+	defer cancel()
+	var res cache.EvictResult
+	evictErr := error(errCacheNotOpen)
+	if c.s.cacheEvictor != nil {
+		// Sweep logs its own failures.
+		if res, evictErr = c.s.cacheEvictor.Sweep(ctx); evictErr != nil {
+			evictErr = &fixedTextError{msg: "the cache failed", err: evictErr}
+		}
+	}
+	entry := audit.Entry{Action: "cache.evict", Targets: []string{
+		fmt.Sprintf("bodies=%d", res.Bodies), fmt.Sprintf("freed=%d", res.FreedBytes),
+	}}
+	if err := c.s.record(ctx, caller, entry, evictErr); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&chainmailv1.EvictCacheResponse{BodiesEvicted: res.Bodies, FreedBytes: res.FreedBytes}), nil
 }

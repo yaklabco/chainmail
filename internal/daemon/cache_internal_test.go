@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -310,5 +311,61 @@ func TestCacheAccountMail(t *testing.T) {
 			}
 			release()
 		})
+	}
+}
+
+// lastCacheAudit returns the newest audit row as action, targets, result
+// and reason.
+func lastCacheAudit(t *testing.T, stateDB *sql.DB) [4]string {
+	t.Helper()
+	var r [4]string
+	err := stateDB.QueryRowContext(t.Context(), "SELECT action, targets, result, reason FROM audit ORDER BY id DESC LIMIT 1").
+		Scan(&r[0], &r[1], &r[2], &r[3])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// EvictCache runs a sweep now and reports what it removed: a body that
+// arrived a year ago and was never read is outside the 90 day window and
+// past the 30 day retention. The call is audited as cache.evict.
+func TestEvictCache(t *testing.T) {
+	t.Parallel()
+	s, stateDB := newCacheServer(t, cacheConfig)
+	ctx := peerContext(t.Context())
+	old := time.Now().AddDate(-1, 0, 0)
+	row := cache.Row{Account: "host", Folder: "INBOX", UIDValidity: 1, UID: 1, InternalDate: old, Date: old, Size: 30, Subject: "old"}
+	if err := s.cache.PutRows(ctx, []cache.Row{row}); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte("Subject: old\r\n\r\nold text\r\n")
+	if ok, err := s.cache.PutBody(ctx, row.Ref(), cache.Body{Raw: raw}, false); err != nil || !ok {
+		t.Fatalf("PutBody = %v, %v", ok, err)
+	}
+	resp, err := (&cacheService{s: s}).EvictCache(ctx, connect.NewRequest(&chainmailv1.EvictCacheRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Msg.GetBodiesEvicted() != 1 || resp.Msg.GetFreedBytes() != int64(len(raw)) {
+		t.Errorf("EvictCache = %v, want 1 body of %d bytes", resp.Msg, len(raw))
+	}
+	want := [4]string{"cache.evict", `["bodies=1","freed=` + strconv.Itoa(len(raw)) + `"]`, "ok", ""}
+	if got := lastCacheAudit(t, stateDB); got != want {
+		t.Errorf("audit row = %v, want %v", got, want)
+	}
+}
+
+// Without an open cache EvictCache is refused, and the refusal is audited.
+func TestEvictCacheWithoutACache(t *testing.T) {
+	t.Parallel()
+	s, stateDB := newTestServerOptions(t, cacheConfig, Options{})
+	_, err := (&cacheService{s: s}).EvictCache(peerContext(t.Context()), connect.NewRequest(&chainmailv1.EvictCacheRequest{}))
+	if got := api.Detail(err).GetReason(); got != api.ReasonInvalidArgument {
+		t.Errorf("reason = %q, want INVALID_ARGUMENT (%v)", got, err)
+	}
+	want := [4]string{"cache.evict", `["bodies=0","freed=0"]`, "error", api.ReasonInvalidArgument}
+	if got := lastCacheAudit(t, stateDB); got != want {
+		t.Errorf("audit row = %v, want %v", got, want)
 	}
 }

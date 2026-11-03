@@ -222,3 +222,21 @@ func TestRebuildCache(t *testing.T) {
 		t.Errorf("audit rows =\n%+v\nwant\n%+v", got, want)
 	}
 }
+
+// EvictCache over the API sweeps a running daemon's cache. Recent mail is
+// inside the window, so nothing goes.
+func TestEvictCacheRuns(t *testing.T) {
+	t.Parallel()
+	h, _ := startTwoMessages(t)
+	resp, err := h.Client.Cache.EvictCache(t.Context(), connect.NewRequest(&chainmailv1.EvictCacheRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Msg.GetBodiesEvicted() != 0 || resp.Msg.GetFreedBytes() != 0 {
+		t.Errorf("EvictCache = %v, want nothing evicted", resp.Msg)
+	}
+	want := []daemontest.AuditRow{{Client: "test", Action: "cache.evict", Targets: `["bodies=0","freed=0"]`, Result: "ok"}}
+	if got := cacheAudit(t, h); !slices.Equal(got, want) {
+		t.Errorf("audit rows = %+v, want %+v", got, want)
+	}
+}
