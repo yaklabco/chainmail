@@ -1,8 +1,10 @@
 package cache
 
 import (
+	"context"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -343,5 +345,85 @@ func TestCapVictimsNeverReadFirst(t *testing.T) {
 	}
 	if !slices.Equal(got, []uint32{2, 1, 3}) || !slices.Equal(inWindow, []bool{false, false, true}) {
 		t.Errorf("cap order = %v (in window %v), want [2 1 3] ([false false true])", got, inWindow)
+	}
+}
+
+// newOldBodyEvictor seeds one body that arrived 400 days ago and was never
+// read, which any sweep under a 90 day window removes, and returns an
+// Evictor over the store with clk.
+func newOldBodyEvictor(t *testing.T, clk *prefetchClock, onError func(error)) (*Evictor, *Store, ref.Ref) {
+	t.Helper()
+	st := openEvictStore(t, clk.Now)
+	refs := seedEvict(t, st, clk, evictSeed{account: "acme", uid: 1, arrived: t10Start.Add(-400 * oneDay), raw: evictTextRaw("oldword")})
+	e := NewEvictor(EvictorOptions{
+		Store: st, Window: constDur(90 * oneDay), Retention: constDur(30 * oneDay),
+		MaxSize: func() int64 { return 1 << 40 }, Clock: clk, OnError: onError,
+	})
+	return e, st, refs[0]
+}
+
+// runEvictor runs e until the test ends.
+func runEvictor(t *testing.T, e *Evictor) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	wg.Go(func() { e.Run(ctx) })
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+}
+
+// A write that leaves the file over the cap wakes the evictor at once,
+// without waiting for the hour.
+func TestEvictorSweepsWhenKicked(t *testing.T) {
+	t.Parallel()
+	clk := newPrefetchClock(t10Start)
+	e, st, old := newOldBodyEvictor(t, clk, nil)
+	runEvictor(t, e)
+	if err := st.noteWrite(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	pollUntil(t, "the kicked sweep", func() bool { return !hasBody(t, st, old) })
+}
+
+// Without a kick the evictor sweeps once an hour has passed.
+func TestEvictorSweepsHourly(t *testing.T) {
+	t.Parallel()
+	clk := newPrefetchClock(t10Start)
+	e, st, old := newOldBodyEvictor(t, clk, nil)
+	runEvictor(t, e)
+	pollUntil(t, "the evictor to wait on its hourly timer", func() bool { return clk.waiting() > 0 })
+	if !hasBody(t, st, old) {
+		t.Fatal("the evictor swept before the hour")
+	}
+	clk.Advance(time.Hour)
+	pollUntil(t, "the hourly sweep", func() bool { return !hasBody(t, st, old) })
+}
+
+// Sweep returns the result and passes a failure to OnError.
+func TestEvictorSweep(t *testing.T) {
+	t.Parallel()
+	clk := newPrefetchClock(t10Start)
+	var reported []error
+	e, st, _ := newOldBodyEvictor(t, clk, func(err error) { reported = append(reported, err) })
+	res, err := e.Sweep(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Bodies != 1 || res.FreedBytes != int64(len(evictTextRaw("oldword"))) {
+		t.Errorf("Sweep = %+v, want 1 body of the seeded size", res)
+	}
+	if len(reported) != 0 {
+		t.Errorf("OnError called for a good sweep: %v", reported)
+	}
+	if _, err := st.db.ExecContext(t.Context(), "DROP TABLE bodies"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Sweep(t.Context()); err == nil {
+		t.Fatal("Sweep without a bodies table succeeded")
+	}
+	if len(reported) != 1 {
+		t.Errorf("OnError calls = %d, want 1", len(reported))
 	}
 }

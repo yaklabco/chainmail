@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/watch"
 )
 
 // evictState is the size cap state the prefetchers, the read path and the
@@ -77,6 +79,8 @@ const (
 	// refetchPercent is the share of max_size the file must be under before
 	// the prefetchers refill what the cap took (spec section 5).
 	refetchPercent = 80
+	// evictInterval is how often the evictor sweeps without a kick.
+	evictInterval = time.Hour
 )
 
 // EvictPolicy is one sweep's settings. Window and Retention are per
@@ -360,4 +364,84 @@ func (s *Store) capVictims(ctx context.Context, starts map[string]int64, need in
 		return nil, s.fail(op, err)
 	}
 	return victims, nil
+}
+
+// EvictorOptions configures the daemon-wide Evictor.
+type EvictorOptions struct {
+	Store *Store
+	// Window and Retention return an account's PrefetchBodies and
+	// ReadRetention, read at every sweep.
+	Window    func(account string) time.Duration
+	Retention func(account string) time.Duration
+	// MaxSize returns [cache] max_size in bytes, read at every sweep.
+	MaxSize func() int64
+	// Clock nil means the system clock.
+	Clock watch.Clock
+	// Logger nil discards.
+	Logger *slog.Logger
+	// OnError, when set, receives each failed sweep's error, unless the
+	// sweep's context ended. The daemon watches it for a full disk.
+	OnError func(err error)
+}
+
+// Evictor runs body eviction for the whole cache file: the cap is
+// file-wide, so one Evictor serves every account.
+type Evictor struct {
+	o  EvictorOptions
+	mu sync.Mutex // one sweep at a time
+}
+
+// NewEvictor returns an Evictor. Run starts its loop; Sweep runs one sweep.
+func NewEvictor(o EvictorOptions) *Evictor {
+	if o.Clock == nil {
+		o.Clock = sysClock{}
+	}
+	if o.Logger == nil {
+		o.Logger = slog.New(slog.DiscardHandler)
+	}
+	return &Evictor{o: o}
+}
+
+// Run sweeps every evictInterval and whenever a write leaves the file over
+// max_size, until ctx ends.
+func (e *Evictor) Run(ctx context.Context) {
+	kick := e.o.Store.evict.kickChan()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-kick:
+		case <-e.o.Clock.After(evictInterval):
+		}
+		if _, err := e.Sweep(ctx); err != nil && ctx.Err() != nil {
+			return
+		}
+	}
+}
+
+// Sweep runs one eviction sweep now with the current settings. It logs what
+// it removed, warns when headers alone exceed max_size, and reports a
+// failure to OnError.
+func (e *Evictor) Sweep(ctx context.Context) (EvictResult, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	res, err := e.o.Store.Evict(ctx, EvictPolicy{
+		Now: e.o.Clock.Now(), Window: e.o.Window, Retention: e.o.Retention, MaxSize: e.o.MaxSize(),
+	})
+	if err != nil {
+		if ctx.Err() == nil {
+			e.o.Logger.Warn("cache eviction failed", "err", err)
+			if e.o.OnError != nil {
+				e.o.OnError(err)
+			}
+		}
+		return res, err
+	}
+	if res.Bodies > 0 {
+		e.o.Logger.Info("cache bodies evicted", "bodies", res.Bodies, "freed_bytes", res.FreedBytes)
+	}
+	if res.OverCap {
+		e.o.Logger.Warn("cache.db is over max_size with message headers alone; raise [cache] max_size")
+	}
+	return res, nil
 }
