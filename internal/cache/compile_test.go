@@ -84,7 +84,7 @@ func compileFixture() []compileRow {
 	r4.HasAttachment = true
 	r4.Attachments = []mailstore.Attachment{{Part: "2", Filename: "Report Q3.XLSX", ContentType: "application/vnd.ms-excel", Size: 4000}}
 
-	// Exactly ageStart(newer_than:9999d) from compileNow.
+	// Exactly query.AgeStart(newer_than:9999d) from compileNow.
 	r5 := std(5, at(1999, 6, 14, 0, 0, 0), "old news: yo/yo", 100)
 	r5.From = []mailstore.Address{{Name: "Gina", Email: "gina@example.com"}}
 
@@ -115,7 +115,11 @@ func openCompileStore(tb testing.TB) *cache.Store {
 	if err != nil {
 		tb.Fatalf("Open: %v", err)
 	}
-	tb.Cleanup(func() { _ = s.Close() }) // a close error at test end changes nothing
+	tb.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			tb.Errorf("Close: %v", err)
+		}
+	})
 	fixture := compileFixture()
 	rows := make([]cache.Row, 0, len(fixture))
 	for _, r := range fixture {
@@ -191,13 +195,16 @@ type compileCase struct {
 func runCompileCases(t *testing.T, s *cache.Store, gmail bool, tests []compileCase) {
 	t.Helper()
 	for _, tt := range tests {
-		got, p := compileSearch(t, s, gmail, tt.query)
-		if !slices.Equal(got, tt.want) {
-			t.Errorf("%q = %v, want %v\nwhere %+v", tt.query, got, tt.want, p.Where)
-		}
-		if p.ServerOnly {
-			t.Errorf("%q: ServerOnly (%q), want the cache to answer it", tt.query, p.Reason)
-		}
+		// The cases share s, so they run one at a time.
+		t.Run(tt.query, func(t *testing.T) {
+			got, p := compileSearch(t, s, gmail, tt.query)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("%q = %v, want %v\nwhere %+v", tt.query, got, tt.want, p.Where)
+			}
+			if p.ServerOnly {
+				t.Errorf("%q: ServerOnly (%q), want the cache to answer it", tt.query, p.Reason)
+			}
+		})
 	}
 }
 
@@ -440,7 +447,7 @@ func TestCompileDatesAndSizes(t *testing.T) {
 	})
 }
 
-// TestCompileAgeStart copies imapstore's TestAgeStart through Plan.Since:
+// TestCompileAgeStart runs query.TestAgeStart's cases through Plan.Since:
 // the day is taken in now's own zone and returned at midnight UTC, the
 // longest ages do not overflow, and months and years clamp to the last day
 // of a shorter target month. It compiles for Google, which refuses no early
@@ -512,21 +519,24 @@ func TestCompileRefuses(t *testing.T) {
 		{"a OR -older_than:100y", "1970-01-01"},
 	}
 	for _, tt := range tests {
-		n, err := query.Parse(tt.query)
-		if err != nil {
-			t.Fatalf("Parse(%q): %v", tt.query, err)
-		}
-		_, err = cache.Compile(n, "", false, compileNow)
-		if !errors.Is(err, mailstore.ErrUnsupportedQuery) {
-			t.Errorf("Compile(%q) = %v, want ErrUnsupportedQuery", tt.query, err)
-			continue
-		}
-		if !strings.Contains(err.Error(), tt.detail) {
-			t.Errorf("Compile(%q) = %q, want it to mention %q", tt.query, err, tt.detail)
-		}
-		if _, err := cache.Compile(n, "", true, compileNow); err != nil {
-			t.Errorf("Compile(%q) on Google = %v, want no error", tt.query, err)
-		}
+		t.Run(tt.query, func(t *testing.T) {
+			t.Parallel()
+			n, err := query.Parse(tt.query)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tt.query, err)
+			}
+			_, err = cache.Compile(n, "", false, compileNow)
+			if !errors.Is(err, mailstore.ErrUnsupportedQuery) {
+				t.Errorf("Compile(%q) = %v, want ErrUnsupportedQuery", tt.query, err)
+				return
+			}
+			if !strings.Contains(err.Error(), tt.detail) {
+				t.Errorf("Compile(%q) = %q, want it to mention %q", tt.query, err, tt.detail)
+			}
+			if _, err := cache.Compile(n, "", true, compileNow); err != nil {
+				t.Errorf("Compile(%q) on Google = %v, want no error", tt.query, err)
+			}
+		})
 	}
 }
 
@@ -544,11 +554,14 @@ func TestCompileBadValues(t *testing.T) {
 		query.Term(query.FieldSmaller, "5G"),
 		query.Or(query.Term(query.FieldText, "a"), query.Not(query.Term(query.FieldNewerThan, "x"))),
 	} {
-		for _, gmail := range []bool{false, true} {
-			if _, err := cache.Compile(n, "", gmail, compileNow); !errors.Is(err, mailstore.ErrUnsupportedQuery) {
-				t.Errorf("Compile(%s, gmail %v) = %v, want ErrUnsupportedQuery", n, gmail, err)
+		t.Run(n.String(), func(t *testing.T) {
+			t.Parallel()
+			for _, gmail := range []bool{false, true} {
+				if _, err := cache.Compile(n, "", gmail, compileNow); !errors.Is(err, mailstore.ErrUnsupportedQuery) {
+					t.Errorf("Compile(%s, gmail %v) = %v, want ErrUnsupportedQuery", n, gmail, err)
+				}
 			}
-		}
+		})
 	}
 	tests := []struct {
 		name   string
@@ -565,12 +578,15 @@ func TestCompileBadValues(t *testing.T) {
 		{"unknown kind", &query.Node{Op: 99}, "malformed"},
 	}
 	for _, tt := range tests {
-		for _, gmail := range []bool{false, true} {
-			_, err := cache.Compile(tt.n, "", gmail, compileNow)
-			if err == nil || !strings.Contains(err.Error(), tt.detail) {
-				t.Errorf("%s (gmail %v): err = %v, want one mentioning %q", tt.name, gmail, err, tt.detail)
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			for _, gmail := range []bool{false, true} {
+				_, err := cache.Compile(tt.n, "", gmail, compileNow)
+				if err == nil || !strings.Contains(err.Error(), tt.detail) {
+					t.Errorf("%s (gmail %v): err = %v, want one mentioning %q", tt.name, gmail, err, tt.detail)
+				}
 			}
-		}
+		})
 	}
 }
 
@@ -659,27 +675,30 @@ func TestCompileFTSExpression(t *testing.T) {
 		{name: "not under or", query: "a (b OR -c)", fts: `"a"`, sqlHas: "NOT (" + ftsSubquery + ")"},
 	}
 	for _, tt := range tests {
-		n := tt.tree
-		if n == nil {
-			var err error
-			if n, err = query.Parse(tt.query); err != nil {
-				t.Fatalf("%s: Parse: %v", tt.name, err)
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			n := tt.tree
+			if n == nil {
+				var err error
+				if n, err = query.Parse(tt.query); err != nil {
+					t.Fatalf("%s: Parse: %v", tt.name, err)
+				}
 			}
-		}
-		p, err := cache.Compile(n, "", false, compileNow)
-		if err != nil {
-			t.Errorf("%s: Compile: %v", tt.name, err)
-			continue
-		}
-		if p.Where.FTS != tt.fts {
-			t.Errorf("%s: FTS = %q, want %q", tt.name, p.Where.FTS, tt.fts)
-		}
-		if tt.sqlHas == "" && p.Where.SQL != "" || !strings.Contains(p.Where.SQL, tt.sqlHas) {
-			t.Errorf("%s: SQL = %q, want it to contain %q", tt.name, p.Where.SQL, tt.sqlHas)
-		}
-		if got, want := strings.Count(p.Where.SQL, "?"), len(p.Where.Args); got != want {
-			t.Errorf("%s: %d placeholders, %d args", tt.name, got, want)
-		}
+			p, err := cache.Compile(n, "", false, compileNow)
+			if err != nil {
+				t.Errorf("%s: Compile: %v", tt.name, err)
+				return
+			}
+			if p.Where.FTS != tt.fts {
+				t.Errorf("%s: FTS = %q, want %q", tt.name, p.Where.FTS, tt.fts)
+			}
+			if tt.sqlHas == "" && p.Where.SQL != "" || !strings.Contains(p.Where.SQL, tt.sqlHas) {
+				t.Errorf("%s: SQL = %q, want it to contain %q", tt.name, p.Where.SQL, tt.sqlHas)
+			}
+			if got, want := strings.Count(p.Where.SQL, "?"), len(p.Where.Args); got != want {
+				t.Errorf("%s: %d placeholders, %d args", tt.name, got, want)
+			}
+		})
 	}
 }
 
@@ -735,24 +754,27 @@ func TestCompileClassifier(t *testing.T) {
 		{name: "unknown field", tree: query.Term("color", "red"), serverOnly: true},
 	}
 	for _, tt := range tests {
-		n, in := tt.tree, ""
-		if n == nil {
-			parsed, err := query.Parse(tt.query)
-			if err != nil {
-				t.Fatalf("%s: Parse: %v", tt.name, err)
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			n, in := tt.tree, ""
+			if n == nil {
+				parsed, err := query.Parse(tt.query)
+				if err != nil {
+					t.Fatalf("%s: Parse: %v", tt.name, err)
+				}
+				var scope query.Scope
+				scope, n = query.Split(parsed)
+				in = scope.In
 			}
-			var scope query.Scope
-			scope, n = query.Split(parsed)
-			in = scope.In
-		}
-		p, err := cache.Compile(n, in, tt.gmail, compileNow)
-		if err != nil {
-			t.Errorf("%s: Compile: %v", tt.name, err)
-			continue
-		}
-		if p.NeedsBodies != tt.needsBodies || !p.Since.Equal(tt.since) || p.ServerOnly != tt.serverOnly || p.Reason != tt.reason {
-			t.Errorf("%s: NeedsBodies %v, Since %v, ServerOnly %v, Reason %q; want %v, %v, %v, %q", tt.name,
-				p.NeedsBodies, p.Since, p.ServerOnly, p.Reason, tt.needsBodies, tt.since, tt.serverOnly, tt.reason)
-		}
+			p, err := cache.Compile(n, in, tt.gmail, compileNow)
+			if err != nil {
+				t.Errorf("%s: Compile: %v", tt.name, err)
+				return
+			}
+			if p.NeedsBodies != tt.needsBodies || !p.Since.Equal(tt.since) || p.ServerOnly != tt.serverOnly || p.Reason != tt.reason {
+				t.Errorf("%s: NeedsBodies %v, Since %v, ServerOnly %v, Reason %q; want %v, %v, %v, %q", tt.name,
+					p.NeedsBodies, p.Since, p.ServerOnly, p.Reason, tt.needsBodies, tt.since, tt.serverOnly, tt.reason)
+			}
+		})
 	}
 }
