@@ -69,7 +69,7 @@ func TestGetBatchWithPerItemErrors(t *testing.T) {
 		t.Errorf("source %q, fetched at %v", resp.GetSource(), resp.GetFetchedAt().AsTime())
 	}
 	row := lastMailAudit(t, m)
-	wantTargets := fmt.Sprintf(`[%q,%q,%q,"(invalid)",%q,"messages=2","errors=3"]`, a.String(), b.String(), stale.String(), other.String())
+	wantTargets := fmt.Sprintf(`[%q,%q,%q,"(invalid)",%q,"messages=2","errors=3","source=server"]`, a.String(), b.String(), stale.String(), other.String())
 	if row.Action != "get" || row.Account != "" || row.Targets != wantTargets || row.Result != "ok" {
 		t.Errorf("audit = %+v, want targets %s", row, wantTargets)
 	}
@@ -88,7 +88,7 @@ func TestGetRepeatedRef(t *testing.T) {
 			t.Errorf("item %d = %v", i, it)
 		}
 	}
-	if row := lastMailAudit(t, m); row.Account != "host" || row.Targets != fmt.Sprintf(`[%q,%q,"messages=2","errors=0"]`, r.String(), r.String()) {
+	if row := lastMailAudit(t, m); row.Account != "host" || row.Targets != fmt.Sprintf(`[%q,%q,"messages=2","errors=0","source=server"]`, r.String(), r.String()) {
 		t.Errorf("audit = %+v", row)
 	}
 }
@@ -166,7 +166,7 @@ func TestGetResponseCap(t *testing.T) {
 			t.Errorf("item %d ref = %q", i+2, it.GetRef())
 		}
 	}
-	if row := lastMailAudit(t, m); !strings.HasSuffix(row.Targets, `"messages=2","errors=2"]`) || row.Result != "ok" {
+	if row := lastMailAudit(t, m); !strings.HasSuffix(row.Targets, `"messages=2","errors=2","source=server"]`) || row.Result != "ok" {
 		t.Errorf("audit = %+v", row)
 	}
 }

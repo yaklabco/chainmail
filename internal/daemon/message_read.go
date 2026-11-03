@@ -19,6 +19,7 @@ import (
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/audit"
+	"github.com/jamesainslie/chainmail/internal/cache"
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/ref"
@@ -237,29 +238,35 @@ func (m *messageService) get(ctx context.Context, req *chainmailv1.GetRequest) (
 			for j, i := range idx {
 				rs[j] = parsed[i]
 			}
-			for j, res := range m.store(accts[name]).FetchMessages(ctx, rs) {
-				m.fill(resp.Items[idx[j]], res, req.GetFull())
+			results, sources := m.reader(accts[name]).FetchMessagesFrom(ctx, rs)
+			for j, res := range results {
+				m.fill(resp.Items[idx[j]], res, req.GetFull(), sources[j])
 			}
 		})
 	}
 	wg.Wait()
 	capItems(resp)
 	messages := 0
+	var answered []string
 	for _, it := range resp.Items {
-		if it.GetMessage() != nil {
+		if msg := it.GetMessage(); msg != nil {
 			messages++
+			answered = append(answered, msg.GetSource())
 		}
 	}
+	resp.Source = cache.CombineSource(answered...)
 	if len(byAccount) == 1 {
 		for name := range byAccount {
 			entry.Account = name
 		}
 	}
-	entry.Targets = append(entry.Targets, tally("messages", messages), tally("errors", len(refs)-messages))
+	entry.Targets = append(entry.Targets, tally("messages", messages), tally("errors", len(refs)-messages), "source="+resp.GetSource())
 	return resp, entry, nil
 }
 
-func (m *messageService) fill(item *chainmailv1.GetItem, res mailstore.MessageResult, full bool) {
+// fill sets item to res rendered, or to its error. source says where res
+// came from, and the message carries it.
+func (m *messageService) fill(item *chainmailv1.GetItem, res mailstore.MessageResult, full bool, source string) {
 	if res.Err != nil {
 		item.Result = &chainmailv1.GetItem_Error{Error: itemError(res.Err)}
 		return
@@ -269,6 +276,7 @@ func (m *messageService) fill(item *chainmailv1.GetItem, res mailstore.MessageRe
 		item.Result = &chainmailv1.GetItem_Error{Error: itemError(err)}
 		return
 	}
+	msg.Source = source
 	item.Result = &chainmailv1.GetItem_Message{Message: msg}
 }
 

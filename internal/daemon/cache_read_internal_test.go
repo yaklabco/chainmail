@@ -1,0 +1,416 @@
+package daemon
+
+import (
+	"context"
+	"database/sql"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"google.golang.org/protobuf/proto"
+
+	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	"github.com/jamesainslie/chainmail/internal/cache"
+	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
+	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/jamesainslie/chainmail/internal/watch"
+)
+
+const getConfig = `
+[daemon]
+body_limit = "1KiB"
+
+[accounts.host]
+provider = "hostinger"
+address = "me@example.com"
+
+[accounts.gmail]
+provider = "gmail"
+address = "me@gmail.example"
+auth = "password"
+
+[cache]
+prefetch_bodies = "0d"
+`
+
+// getNow is the clock of the read-through tests: the daemon's, the fakes'
+// and the caches'.
+var getNow = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+
+func getDaysAgo(n int) time.Time { return getNow.AddDate(0, 0, -n) }
+
+// getClock is a watch.Clock stopped at getNow.
+type getClock struct{}
+
+func (getClock) Now() time.Time { return getNow }
+
+func (getClock) After(time.Duration) <-chan time.Time { return nil }
+
+// getFixture is a daemon that is never served, a cache store, and a
+// running cache.Account per account over it, built by hand. install hands
+// accounts' caches to the daemon, as startWatch does.
+type getFixture struct {
+	s        *Server
+	m        *messageService
+	stateDB  *sql.DB
+	store    *cache.Store
+	fakes    map[string]*fake.Store
+	accounts map[string]*cache.Account
+}
+
+func newGetFixture(t *testing.T) *getFixture {
+	t.Helper()
+	fakes := map[string]*fake.Store{"host": fake.New("host", false), "gmail": fake.New("gmail", true)}
+	for _, fk := range fakes {
+		fk.SetNow(getClock{}.Now)
+	}
+	s, stateDB := newTestServerOptions(t, getConfig, Options{
+		NewStore: func(a config.ResolvedAccount) mailstore.Store { return fakes[a.Name] },
+		Now:      getClock{}.Now,
+	})
+	cs, err := cache.Open(t.Context(), filepath.Join(t.TempDir(), "cache.db"), cache.OpenOptions{Now: getClock{}.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	f := &getFixture{s: s, m: &messageService{s: s}, stateDB: stateDB, store: cs, fakes: fakes, accounts: map[string]*cache.Account{}}
+	for name, fk := range fakes {
+		acct, err := s.opts.Config.Account(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.accounts[name] = cache.NewAccount(cache.AccountOptions{
+			Account:  acct,
+			Settings: func() config.CacheSettings { return s.opts.Config.CacheSettings(name) },
+			MaxSize:  s.opts.Config.CacheMaxSize,
+			Store:    cs,
+			Log:      s.watchLog,
+			State:    s.watchState,
+			Mail:     func(context.Context) (cache.MailStore, func(), error) { return fk, func() {}, nil },
+			Clock:    getClock{},
+			Logger:   s.opts.Logger,
+		})
+	}
+	f.run(t)
+	return f
+}
+
+// getFreshWait bounds the wait for the fixture's cache accounts to open
+// their groups, and getFreshPoll spaces the checks. Nothing else is
+// running, so only a broken account reaches the bound.
+const (
+	getFreshWait = 10 * time.Second
+	getFreshPoll = 5 * time.Millisecond
+)
+
+// run starts every account's cache workers until the test ends, as
+// startCacheAccounts does, and waits until each account reads as fresh.
+// The builder opens its group and records baselines before any mail or
+// sync row exists, so it tracks nothing and drops nothing, and with no
+// events in the log it never looks again. The prefetch window is 0d, so
+// the prefetcher fetches nothing, and with nothing tracked the backfill
+// idles. So the tests' server call counts see only their own reads.
+// The workers stop with the test's context, which ends before the
+// cleanups run, and the cleanup waits for them before the stores close.
+func (f *getFixture) run(t *testing.T) {
+	t.Helper()
+	ctx := t.Context()
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+	for _, a := range f.accounts {
+		wg.Go(func() { a.Run(ctx) })
+	}
+	deadline := time.Now().Add(getFreshWait)
+	for name, a := range f.accounts {
+		for {
+			ok, reason, _, err := a.Freshness(t.Context(), nil)
+			if err != nil {
+				t.Fatalf("freshness of %s: %v", name, err)
+			}
+			if ok {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the cache of %s is not fresh after %v: %s", name, getFreshWait, reason)
+			}
+			time.Sleep(getFreshPoll)
+		}
+	}
+}
+
+// install makes exactly the named accounts' caches the daemon's.
+func (f *getFixture) install(names ...string) {
+	f.s.cacheAccounts = map[string]*cache.Account{}
+	for _, n := range names {
+		f.s.cacheAccounts[n] = f.accounts[n]
+	}
+}
+
+// warm caches every folder account's default search covers, with bodies.
+func (f *getFixture) warm(t *testing.T, account string) {
+	t.Helper()
+	results, err := f.fakes[account].Search(t.Context(), mailstore.SearchRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range results {
+		f.cacheFolder(t, account, r.Source, r.UIDs, true)
+	}
+}
+
+// cacheFolder caches uids of src, with bodies when bodies is set, marks the
+// folder's backfill and window done, and records it in sync_folders as
+// synced now: watching for INBOX and Gmail's All Mail, polling otherwise.
+func (f *getFixture) cacheFolder(t *testing.T, account string, src mailstore.Source, uids []uint32, bodies bool) {
+	t.Helper()
+	ctx := t.Context()
+	fk := f.fakes[account]
+	headers, err := fk.FetchHeaders(ctx, src, uids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := make([]cache.Row, len(headers))
+	refs := make([]ref.Ref, len(headers))
+	for i, h := range headers {
+		rows[i], refs[i] = cache.RowFromHeader(h), h.Summary.Ref
+	}
+	if err := f.store.PutRows(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if bodies && len(refs) > 0 {
+		for _, res := range fk.FetchMessages(ctx, refs) {
+			if res.Err != nil {
+				t.Fatal(res.Err)
+			}
+			if _, err := f.store.PutBody(ctx, res.Message.Summary.Ref, cache.Body{Raw: res.Message.Raw, TextClipped: res.Message.TextClipped}, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	next := uint32(1)
+	if len(uids) > 0 {
+		next = slices.Max(uids) + 1
+	}
+	if err := f.store.PutProgress(ctx, cache.Progress{
+		Account: account, Folder: src.Folder, UIDValidity: src.UIDValidity, BaselineUIDNext: next,
+		BackfillLowUID: 1, BackfillDone: true, WindowDone: true, LastAppliedAt: getNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mode, state := watch.ModePoll, watch.StatePolling
+	if src.Folder == "INBOX" || account == "gmail" {
+		mode, state = watch.ModeIdle, watch.StateWatching
+	}
+	tx, err := f.stateDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := watch.PutFolder(ctx, tx, watch.FolderRow{
+		Account: account, Folder: src.Folder, UIDValidity: src.UIDValidity, UIDNext: next,
+		Mode: mode, State: state, LastSyncAt: getNow,
+	}); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ageSync makes a polled folder stale: its last pass an hour old.
+func (f *getFixture) ageSync(t *testing.T, account, folder string) {
+	t.Helper()
+	row, ok, err := f.s.watchState.Folder(t.Context(), account, folder)
+	if err != nil || !ok {
+		t.Fatalf("sync row %s/%s: %v, %t", account, folder, err, ok)
+	}
+	row.LastSyncAt = getNow.Add(-time.Hour)
+	tx, err := f.stateDB.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := watch.PutFolder(t.Context(), tx, row); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const getQuotedReply = "Thanks.\n\nOn Mon, 26 Oct 2026 at 09:00, Alex Doe <alex@example.com> wrote:\n> are we on?"
+
+// seedGetMail adds the read-through tests' mail and returns refs by
+// subject: on host a thread rooted at p@x across INBOX and Sent, a quoted
+// reply, a body past the 1 KiB limit and a message with an attachment; on
+// gmail one message in All Mail.
+func seedGetMail(f *getFixture) map[string]ref.Ref {
+	host, gmail := f.fakes["host"], f.fakes["gmail"]
+	refs := map[string]ref.Ref{}
+	add := func(s *fake.Store, m fake.Message) { refs[m.Subject] = s.Add(m) }
+	add(host, fake.Message{Folder: "INBOX", Date: getDaysAgo(30), Subject: "plan", MessageID: "p@x", Body: "plan?"})
+	add(host, fake.Message{Folder: "Sent", Date: getDaysAgo(20), Subject: "re: plan", MessageID: "p1@x", References: []string{"p@x"}, Body: getQuotedReply, Flags: []string{`\Seen`}})
+	add(host, fake.Message{Folder: "INBOX", Date: getDaysAgo(10), Subject: "re: re: plan", MessageID: "p2@x", References: []string{"p@x", "p1@x"}, Body: "ok"})
+	add(host, fake.Message{Folder: "Archive", Date: getDaysAgo(5), Subject: "long", MessageID: "l@x", Body: strings.Repeat("x", 3000)})
+	add(host, fake.Message{
+		Folder: "INBOX", Date: getDaysAgo(2), Subject: "with pdf", MessageID: "a@x", Body: "see attached",
+		Attachments: []fake.Attachment{{Part: "2", Filename: "a.pdf", ContentType: "application/pdf", Data: []byte("%PDF-1.7")}},
+	})
+	add(gmail, fake.Message{Folder: "[Gmail]/All Mail", Date: getDaysAgo(3), Subject: "gmail note", MessageID: "g@x", Body: "from gmail", Labels: []string{`\Inbox`}})
+	return refs
+}
+
+func getRefs(refs map[string]ref.Ref, subjects ...string) []string {
+	out := make([]string, len(subjects))
+	for i, s := range subjects {
+		out[i] = refs[s].String()
+	}
+	return out
+}
+
+// withoutSource returns a copy of items with each message's source cleared,
+// to compare a cached answer with the server's.
+func withoutSource(items []*chainmailv1.GetItem) []*chainmailv1.GetItem {
+	out := make([]*chainmailv1.GetItem, len(items))
+	for i, it := range items {
+		c := proto.Clone(it).(*chainmailv1.GetItem)
+		if msg := c.GetMessage(); msg != nil {
+			msg.Source = ""
+		}
+		out[i] = c
+	}
+	return out
+}
+
+// TestGetFromCacheMatchesServer checks spec 7.2 and done-when 2: a get of
+// cached messages in fresh folders makes no server call and returns, with
+// and without full, exactly what the server path returns: body, body_limit
+// truncation, quote trimming, headers and attachments.
+func TestGetFromCacheMatchesServer(t *testing.T) {
+	t.Parallel()
+	f := newGetFixture(t)
+	refs := seedGetMail(f)
+	f.warm(t, "host")
+	list := getRefs(refs, "plan", "re: plan", "long", "with pdf", "re: plan")
+	host := f.fakes["host"]
+	for _, full := range []bool{false, true} {
+		f.install("host")
+		fetches, summaries := host.Calls("FetchMessages"), host.Calls("FetchSummaries")
+		cached, entry, err := f.m.get(t.Context(), &chainmailv1.GetRequest{Refs: list, Full: full})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n, m := host.Calls("FetchMessages")-fetches, host.Calls("FetchSummaries")-summaries; n != 0 || m != 0 {
+			t.Errorf("full=%t: the cached get made %d FetchMessages and %d FetchSummaries calls", full, n, m)
+		}
+		f.install()
+		server, _, err := f.m.get(t.Context(), &chainmailv1.GetRequest{Refs: list, Full: full})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, want := withoutSource(cached.GetItems()), withoutSource(server.GetItems())
+		for i := range want {
+			if !proto.Equal(got[i], want[i]) {
+				t.Errorf("full=%t item %d:\ncache  %v\nserver %v", full, i, got[i], want[i])
+			}
+			if s := cached.GetItems()[i].GetMessage().GetSource(); s != cache.SourceCache {
+				t.Errorf("full=%t item %d source = %q, want cache", full, i, s)
+			}
+			if s := server.GetItems()[i].GetMessage().GetSource(); s != cache.SourceServer {
+				t.Errorf("full=%t item %d server source = %q", full, i, s)
+			}
+		}
+		if cached.GetSource() != cache.SourceCache || server.GetSource() != cache.SourceServer {
+			t.Errorf("full=%t: sources %q and %q", full, cached.GetSource(), server.GetSource())
+		}
+		if last := entry.Targets[len(entry.Targets)-1]; last != "source=cache" {
+			t.Errorf("full=%t audit targets = %v", full, entry.Targets)
+		}
+	}
+}
+
+// TestGetMixesSources checks that messages of an account without a cache
+// come from the server in the same call, so the call reports mixed.
+func TestGetMixesSources(t *testing.T) {
+	t.Parallel()
+	f := newGetFixture(t)
+	refs := seedGetMail(f)
+	f.warm(t, "host")
+	f.install("host")
+	resp, entry, err := f.m.get(t.Context(), &chainmailv1.GetRequest{Refs: getRefs(refs, "plan", "gmail note")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, b := resp.GetItems()[0].GetMessage().GetSource(), resp.GetItems()[1].GetMessage().GetSource(); a != cache.SourceCache || b != cache.SourceServer {
+		t.Errorf("sources = %q, %q, want cache then server", a, b)
+	}
+	if resp.GetSource() != cache.SourceMixed {
+		t.Errorf("source = %q, want mixed", resp.GetSource())
+	}
+	if want := []string{refs["plan"].String(), refs["gmail note"].String(), "messages=2", "errors=0", "source=mixed"}; !slices.Equal(entry.Targets, want) {
+		t.Errorf("audit targets = %v, want %v", entry.Targets, want)
+	}
+}
+
+// TestGetMissIsCachedForTheNextGet checks that a message the cache lacks
+// comes from the server once and from the cache after.
+func TestGetMissIsCachedForTheNextGet(t *testing.T) {
+	t.Parallel()
+	f := newGetFixture(t)
+	seedGetMail(f)
+	f.warm(t, "host")
+	f.install("host")
+	host := f.fakes["host"]
+	late := host.Add(fake.Message{Folder: "INBOX", Date: getDaysAgo(0), Subject: "late", Body: "arrived after the prefetch"})
+	for i, want := range []string{cache.SourceServer, cache.SourceCache} {
+		fetches := host.Calls("FetchMessages")
+		resp, _, err := f.m.get(t.Context(), &chainmailv1.GetRequest{Refs: []string{late.String()}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := resp.GetItems()[0].GetMessage().GetSource(); got != want {
+			t.Errorf("get %d source = %q, want %q", i+1, got, want)
+		}
+		if n := host.Calls("FetchMessages") - fetches; (n == 1) != (want == cache.SourceServer) {
+			t.Errorf("get %d made %d FetchMessages calls", i+1, n)
+		}
+	}
+}
+
+// TestGetRecoversAStaleRefByMessageID checks spec 7.3 through get: the
+// item keeps the ref asked for, and its message carries the new ref.
+func TestGetRecoversAStaleRefByMessageID(t *testing.T) {
+	t.Parallel()
+	f := newGetFixture(t)
+	refs := seedGetMail(f)
+	f.warm(t, "host")
+	f.install("host")
+	host := f.fakes["host"]
+	old := refs["with pdf"]
+	host.NewUIDValidity("INBOX")
+	if err := f.store.DropFolder(t.Context(), "host", "INBOX", true); err != nil {
+		t.Fatal(err)
+	}
+	res, err := host.Search(t.Context(), mailstore.SearchRequest{In: "INBOX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.cacheFolder(t, "host", res[0].Source, res[0].UIDs, false)
+	found, err := host.FindByMessageID(t.Context(), "INBOX", "a@x")
+	if err != nil || len(found) != 1 {
+		t.Fatalf("server lookup: %v, %v", found, err)
+	}
+	resp, _, err := f.m.get(t.Context(), &chainmailv1.GetRequest{Refs: []string{old.String()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	it := resp.GetItems()[0]
+	if it.GetRef() != old.String() || it.GetMessage().GetRef() != found[0].String() || it.GetMessage().GetSubject().GetUntrusted() != "with pdf" {
+		t.Errorf("item = ref %q, message ref %q, error %v; want %q recovered to %q", it.GetRef(), it.GetMessage().GetRef(), it.GetError(), old, found[0])
+	}
+}
