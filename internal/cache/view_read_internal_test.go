@@ -1,9 +1,14 @@
 package cache
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jamesainslie/chainmail/internal/db"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
@@ -92,10 +97,29 @@ func TestViewReadThroughKicksTheEvictor(t *testing.T) {
 // its sync_folders row, so the account can rebuild the folder, and the
 // account over it.
 type keepRig struct {
-	a  *Account
-	st *Store
-	fk *fake.Store
-	r  ref.Ref
+	a    *Account
+	st   *Store
+	fk   *fake.Store
+	r    ref.Ref
+	logs *keepLogs
+}
+
+// keepLogs collects a keepRig account's log output.
+type keepLogs struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *keepLogs) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *keepLogs) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
 }
 
 func newKeepRig(t *testing.T) *keepRig {
@@ -110,6 +134,7 @@ func newKeepRig(t *testing.T) *keepRig {
 	t.Cleanup(func() { _ = conn.Close() })
 	fk := fake.New("acme", false)
 	fk.SetNow(clk.Now)
+	logs := &keepLogs{}
 	r := fk.Add(fake.Message{Folder: "INBOX", Date: t10Start.Add(-oneDay), Subject: "m", MessageID: "m@x", Body: "text of m"})
 	fs, err := fk.FolderState(ctx, "INBOX")
 	if err != nil {
@@ -144,8 +169,9 @@ func newKeepRig(t *testing.T) *keepRig {
 		State:    watch.NewState(conn),
 		Mail:     func(context.Context) (MailStore, func(), error) { return fk, func() {}, nil },
 		Clock:    clk,
+		Logger:   slog.New(slog.NewTextHandler(logs, nil)),
 	})
-	return &keepRig{a: a, st: st, fk: fk, r: r}
+	return &keepRig{a: a, st: st, fk: fk, r: r, logs: logs}
 }
 
 // TestViewKeepReadDiscardsWorkOverADrop checks that a read the server
@@ -233,5 +259,87 @@ func TestViewKeepReadIgnoresAnotherAccount(t *testing.T) {
 		if spent, err := k.st.Budget(ctx, account, day); err != nil || spent != 0 {
 			t.Errorf("budget of %s = %d, %v, want 0", account, spent, err)
 		}
+	}
+}
+
+// lockGuard bounds a wait on a read that must not block on the write lock.
+// It elapses only when a test fails.
+const lockGuard = 10 * time.Second
+
+// signalServer is the fake server, except that FetchMessages reports on
+// fetched once it has answered.
+type signalServer struct {
+	*fake.Store
+	fetched chan<- struct{}
+}
+
+func (s signalServer) FetchMessages(ctx context.Context, refs []ref.Ref) []mailstore.MessageResult {
+	out := s.Store.FetchMessages(ctx, refs)
+	s.fetched <- struct{}{}
+	return out
+}
+
+// TestViewReadDoesNotWaitForTheWriteLockToDownload checks that a canceled
+// read reaches the server while another writer holds the account's write
+// lock: reading the epoch before the download takes no lock.
+func TestViewReadDoesNotWaitForTheWriteLockToDownload(t *testing.T) {
+	t.Parallel()
+	k := newKeepRig(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	k.a.lock()
+	fetched := make(chan struct{}, 1)
+	done := make(chan mailstore.MessageResult, 1)
+	go func() {
+		got, _ := k.a.View(signalServer{Store: k.fk, fetched: fetched}).FetchMessagesFrom(ctx, []ref.Ref{k.r})
+		done <- got[0]
+	}()
+	select {
+	case <-fetched:
+		k.a.unlock()
+	case <-time.After(lockGuard):
+		k.a.unlock()
+		<-done
+		t.Fatal("a canceled read waited for the write lock before downloading")
+	}
+	if got := <-done; got.Err != nil {
+		t.Fatal(got.Err)
+	}
+}
+
+// TestViewKeepReadGivesUpWaitingForTheWriteLock checks that the write after
+// a download stops waiting for a held write lock when its bounded context
+// ends: the read returns the server's message, stores nothing, logs why,
+// and leaves the lock with its holder.
+func TestViewKeepReadGivesUpWaitingForTheWriteLock(t *testing.T) {
+	t.Parallel()
+	k := newKeepRig(t)
+	k.a.keepTimeout = 20 * time.Millisecond
+	k.a.lock()
+	done := make(chan mailstore.MessageResult, 1)
+	go func() {
+		got, _ := k.a.View(k.fk).FetchMessagesFrom(t.Context(), []ref.Ref{k.r})
+		done <- got[0]
+	}()
+	var got mailstore.MessageResult
+	select {
+	case got = <-done:
+	case <-time.After(lockGuard):
+		k.a.unlock()
+		<-done
+		t.Fatal("the write after a download kept waiting for the held write lock")
+	}
+	if len(k.a.wmu) != 1 {
+		t.Error("the held write lock was released")
+	}
+	k.a.unlock()
+	if got.Err != nil {
+		t.Fatal(got.Err)
+	}
+	if _, ok, err := k.st.Row(t.Context(), k.r); err != nil || ok {
+		t.Errorf("row stored without the write lock: %v, %t", err, ok)
+	}
+	if logs := k.logs.String(); !strings.Contains(logs, "waiting to store a read failed") {
+		t.Errorf("logs lack the give-up:\n%s", logs)
 	}
 }

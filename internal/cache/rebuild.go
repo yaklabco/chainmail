@@ -40,9 +40,9 @@ func (a *Account) recoverGroup(ctx context.Context, acked int64) (int64, error) 
 		return acked, nil
 	}
 	a.logger.WarnContext(ctx, "cache group is past the event log's tail; rebuilding the account's cache")
-	a.wmu.Lock()
+	a.lock()
 	_, err = a.rebuildLocked(ctx, "")
-	a.wmu.Unlock()
+	a.unlock()
 	if err != nil {
 		return 0, err
 	}
@@ -66,7 +66,7 @@ func (a *Account) resetFolderLocked(ctx context.Context, folder string, keepReco
 	if err := a.o.Store.DropFolder(ctx, a.name, folder, keepRecovery); err != nil {
 		return err
 	}
-	a.epoch++
+	a.epoch.Add(1)
 	row, ok, err := a.o.State.Folder(ctx, a.name, folder)
 	if err != nil {
 		return err
@@ -103,7 +103,7 @@ func (a *Account) rebuildLocked(ctx context.Context, folder string) ([]string, e
 	if err := a.o.Store.DropAccount(ctx, a.name); err != nil {
 		return nil, err
 	}
-	a.epoch++
+	a.epoch.Add(1)
 	folders := make([]string, 0, len(rows))
 	for _, r := range rows {
 		p := Progress{Account: a.name, Folder: r.Folder, UIDValidity: r.UIDValidity, BaselineUIDNext: r.UIDNext}
@@ -122,7 +122,7 @@ func (a *Account) rebuildLocked(ctx context.Context, folder string) ([]string, e
 // A folder the cache does not track is a *mailstore.FolderNotFoundError,
 // which matches mailstore.ErrNotFound.
 func (a *Account) Rebuild(ctx context.Context, folder string) ([]string, error) {
-	a.wmu.Lock()
-	defer a.wmu.Unlock()
+	a.lock()
+	defer a.unlock()
 	return a.rebuildLocked(ctx, folder)
 }

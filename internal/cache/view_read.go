@@ -206,7 +206,7 @@ func (v *View) keepRead(ctx context.Context, epoch uint64, msg *mailstore.Messag
 	if msg.Summary.Ref.Account != account {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), keepReadTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), v.a.keepTimeout)
 	defer cancel()
 	day := v.a.o.Clock.Now().UTC().Format("2006-01-02")
 	if _, err := store.AddBudget(ctx, account, day, int64(len(msg.Raw))); err != nil {
@@ -227,16 +227,21 @@ func (v *View) keepRead(ctx context.Context, epoch uint64, msg *mailstore.Messag
 // message's UIDVALIDITY and lacks the row, and its body, marked read. It
 // writes under wmu, as the builder and backfill do, and only when no folder
 // drop or rebuild ran since epoch and the folder's progress still admits the
-// message, so a read never writes into a newer generation of the cache.
+// message, so a read never writes into a newer generation of the cache. When
+// ctx ends before wmu is free it logs that and stores nothing; keepRead has
+// already charged the download.
 // Folders the cache does not track, such as Trash or a Google label folder
 // other than All Mail, are never stored. It reports whether it stored a new
 // body.
 func (v *View) storeRead(ctx context.Context, epoch uint64, msg *mailstore.Message) bool {
 	store, account := v.a.o.Store, v.a.o.Account.Name
 	r := msg.Summary.Ref
-	v.a.wmu.Lock()
-	defer v.a.wmu.Unlock()
-	if v.a.epoch != epoch {
+	if err := v.a.lockContext(ctx); err != nil {
+		v.logReadError("waiting to store a read failed", err)
+		return false
+	}
+	defer v.a.unlock()
+	if v.a.epoch.Load() != epoch {
 		return false
 	}
 	p, tracked, err := store.Progress(ctx, account, r.Folder)

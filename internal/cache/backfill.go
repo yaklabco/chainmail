@@ -87,13 +87,13 @@ func (a *Account) idle(ctx context.Context) bool {
 // nil, is on another folder or UIDVALIDITY, predates a drop, or no longer
 // matches the folder's progress because the builder recorded a new walk.
 func (a *Account) backfillStep(ctx context.Context, w *walk) (*walk, bool, error) {
-	a.wmu.Lock()
-	epoch := a.epoch
+	a.lock()
+	epoch := a.epoch.Load()
 	p, ok, err := a.nextBackfill(ctx)
 	if err == nil && ok {
 		a.inflight = &inflightBatch{folder: p.Folder, uidValidity: p.UIDValidity, changed: map[uint32]bool{}}
 	}
-	a.wmu.Unlock()
+	a.unlock()
 	if err != nil || !ok {
 		return nil, false, err
 	}
@@ -153,9 +153,9 @@ func (a *Account) fetchBatch(ctx context.Context, w *walk) ([]uint32, []Row, err
 // expunge the builder applied during the fetch is not written: it returns
 // w unchanged, so the next step fetches the batch again.
 func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows []Row) (*walk, bool, error) {
-	a.wmu.Lock()
-	defer a.wmu.Unlock()
-	if a.epoch != w.epoch {
+	a.lock()
+	defer a.unlock()
+	if a.epoch.Load() != w.epoch {
 		return nil, true, nil
 	}
 	p, ok, err := a.o.Store.Progress(ctx, a.name, w.folder)
@@ -286,7 +286,7 @@ func (b *inflightBatch) hit(uids []uint32) bool {
 
 // endInflight forgets the backfill's in-flight batch once its step ends.
 func (a *Account) endInflight() {
-	a.wmu.Lock()
-	defer a.wmu.Unlock()
+	a.lock()
+	defer a.unlock()
 	a.inflight = nil
 }

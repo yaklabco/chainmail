@@ -233,8 +233,8 @@ func TestCommitSegmentDiscardsAfterReset(t *testing.T) {
 	if err := r.a.track(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	epoch := r.a.epoch
-	r.a.epoch++ // a drop ran while the segment was fetched
+	epoch := r.a.epoch.Load()
+	r.a.epoch.Add(1) // a drop ran while the segment was fetched
 	late := ref.Ref{Account: "acme", Folder: "INBOX", UIDValidity: 1, UID: 1}
 	row := Row{Account: "acme", Folder: "INBOX", UIDValidity: 1, UID: 1, Subject: "late", MessageID: "late@example.com", InternalDate: acctStart, Date: acctStart}
 	done, err := r.a.commitSegment(t.Context(), epoch, segmentPlan{touched: map[string]bool{"INBOX": true}}, []Row{row})

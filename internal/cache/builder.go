@@ -194,10 +194,10 @@ func (a *Account) apply(ctx context.Context, seg []watch.Event) error {
 		return nil
 	}
 	for {
-		a.wmu.Lock()
-		epoch := a.epoch
+		a.lock()
+		epoch := a.epoch.Load()
 		progress, err := a.progressMap(ctx)
-		a.wmu.Unlock()
+		a.unlock()
 		if err != nil {
 			return err
 		}
@@ -265,9 +265,9 @@ func (a *Account) fetchNew(ctx context.Context, fetch map[string][]uint32, progr
 // in-flight batch, so a header fetched before it is fetched again instead
 // of written.
 func (a *Account) commitSegment(ctx context.Context, epoch uint64, plan segmentPlan, rows []Row) (bool, error) {
-	a.wmu.Lock()
-	defer a.wmu.Unlock()
-	if a.epoch != epoch {
+	a.lock()
+	defer a.unlock()
+	if a.epoch.Load() != epoch {
 		return false, nil
 	}
 	if len(rows) > 0 {

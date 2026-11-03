@@ -65,11 +65,16 @@ type Account struct {
 	clock  watch.Clock
 	logger *slog.Logger
 
-	// wmu serializes the account's cache writes. epoch counts the folder
-	// drops made under it: work fetched under an older epoch is discarded
-	// instead of written over a drop.
-	wmu   sync.Mutex
-	epoch uint64
+	// wmu serializes the account's cache writes: a one-slot semaphore,
+	// taken by lock or lockContext and given back by unlock, so the read
+	// path can stop waiting for it when its context ends. epoch counts the
+	// folder drops made under it: work fetched under an older epoch is
+	// discarded instead of written over a drop.
+	wmu   chan struct{}
+	epoch atomic.Uint64
+	// keepTimeout bounds the read path's bookkeeping after a download,
+	// keepReadTimeout unless a test shortens it.
+	keepTimeout time.Duration
 	// inflight is the backfill batch being fetched with wmu released, or
 	// nil. The builder notes in it every flags or expunged change it
 	// applies to the batch's folder, and commitBatch fetches the batch
@@ -137,6 +142,9 @@ func NewAccount(o AccountOptions) *Account {
 		logger:       o.Logger,
 		wake:         make(chan struct{}, 1),
 		prefetchWake: make(chan struct{}, 1),
+		wmu:          make(chan struct{}, 1),
+
+		keepTimeout: keepReadTimeout,
 	}
 	if a.clock == nil {
 		a.clock = systemClock{}
@@ -294,10 +302,27 @@ func (a *Account) runPrefetch(ctx context.Context) {
 	}).run(ctx)
 }
 
-// writeEpoch returns the count of folder drops so far. Work fetched now
-// is written only while it is unchanged, checked under wmu.
-func (a *Account) writeEpoch() uint64 {
-	a.wmu.Lock()
-	defer a.wmu.Unlock()
-	return a.epoch
+// writeEpoch returns the count of folder drops so far, without waiting for
+// wmu. Work fetched now is written only while it is unchanged, which the
+// writer checks again under wmu, where every drop increments it.
+func (a *Account) writeEpoch() uint64 { return a.epoch.Load() }
+
+// lock takes wmu, waiting as long as it takes.
+func (a *Account) lock() { a.wmu <- struct{}{} }
+
+// lockContext takes wmu, or gives up with ctx's error when ctx ends
+// first, leaving wmu with its holder.
+func (a *Account) lockContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case a.wmu <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
+
+// unlock gives wmu back. The caller holds it.
+func (a *Account) unlock() { <-a.wmu }
