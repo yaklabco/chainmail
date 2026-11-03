@@ -26,9 +26,15 @@ type Plan struct {
 // child, or an unknown node kind.
 var errMalformedQuery = errors.New("malformed query tree")
 
-// planFolderNotSynced is the reason of a plan that searches a folder the
-// cache never holds. It is an incomplete_reason value of the search API.
-const planFolderNotSynced = "folder_not_synced"
+// Reasons Compile gives a server-only plan. They are incomplete_reason
+// values of the search API.
+const (
+	// planTextOutsideWindow: a text term can match messages of any age,
+	// whose bodies the cache may not hold.
+	planTextOutsideWindow = "text_outside_window"
+	// planFolderNotSynced: the search covers a folder the cache never holds.
+	planFolderNotSynced = "folder_not_synced"
+)
 
 // queryMinDate and queryMaxSize are the limits imapstore's compileStandard
 // enforces off Google: IMAP keeps internal dates as Unix times, and RFC
@@ -89,12 +95,15 @@ func Compile(n *query.Node, in string, gmail bool, now time.Time) (Plan, error) 
 		fts = expr
 	}
 	p := Plan{
-		Where: Where{SQL: strings.Join(conds, " AND "), Args: args, FTS: fts},
-		Since: lowerBound(n, now),
+		Where:       Where{SQL: strings.Join(conds, " AND "), Args: args, FTS: fts},
+		NeedsBodies: hasText(n),
+		Since:       lowerBound(n, now),
 	}
 	switch {
 	case notSynced:
 		p.ServerOnly, p.Reason = true, planFolderNotSynced
+	case uncoveredText(n, false, now):
+		p.ServerOnly, p.Reason = true, planTextOutsideWindow
 	case c.unsupported:
 		p.ServerOnly = true
 	}
@@ -499,6 +508,45 @@ func termBound(n *query.Node, now time.Time) (time.Time, bool) {
 	default:
 		return time.Time{}, false
 	}
+}
+
+// hasText reports whether n holds a text term.
+func hasText(n *query.Node) bool {
+	for _, t := range n.Terms() {
+		if t.Field == query.FieldText {
+			return true
+		}
+	}
+	return false
+}
+
+// uncoveredText reports whether some text term in n has no lower date bound
+// on its path from the root: no AND above it, the root included, holds a
+// newer_than or after term directly. Such a term can match messages of any
+// age. A bound covers its AND's text whatever OR or NOT lies between them,
+// since outside the bound the AND is false whatever the text says. bounded
+// says an AND above n already holds a bound.
+func uncoveredText(n *query.Node, bounded bool, now time.Time) bool {
+	if n == nil {
+		return false
+	}
+	switch n.Op {
+	case query.OpTerm:
+		return n.Field == query.FieldText && !bounded
+	case query.OpAnd:
+		for _, ch := range n.Children {
+			if _, ok := termBound(ch, now); ok {
+				bounded = true
+				break
+			}
+		}
+	}
+	for _, ch := range n.Children {
+		if uncoveredText(ch, bounded, now) {
+			return true
+		}
+	}
+	return false
 }
 
 // queryAgeStart is imapstore's ageStart: the day an age such as 7d reaches

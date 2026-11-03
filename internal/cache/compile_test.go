@@ -622,3 +622,77 @@ func TestCompileFTSExpression(t *testing.T) {
 		}
 	}
 }
+
+// TestCompileClassifier checks what the router reads from a plan: whether
+// it needs bodies, its top-level lower date bound, and whether the cache
+// can never answer it completely, and why.
+func TestCompileClassifier(t *testing.T) {
+	t.Parallel()
+	day := func(m time.Month, d int) time.Time { return time.Date(2026, m, d, 0, 0, 0, 0, time.UTC) }
+	const (
+		text   = "text_outside_window"
+		folder = "folder_not_synced"
+	)
+	tests := []struct {
+		name        string
+		query       string      // parsed and split, unless tree is set
+		tree        *query.Node // compiled as is, with no in:
+		gmail       bool
+		needsBodies bool
+		since       time.Time
+		serverOnly  bool
+		reason      string
+	}{
+		{name: "nothing", query: ""},
+		{name: "header terms", query: "from:acme is:unread larger:1M"},
+		{name: "a bound alone", query: "newer_than:7d", since: day(10, 22)},
+		{name: "text with an age bound", query: "newer_than:7d invoice", needsBodies: true, since: day(10, 22)},
+		{name: "phrase with a date bound", query: `after:2026-10-01 "q3 report"`, needsBodies: true, since: day(10, 1)},
+		{name: "the later of two bounds", query: "newer_than:7d after:2026-10-25 invoice", needsBodies: true, since: day(10, 25)},
+		{name: "text without a bound", query: "invoice", needsBodies: true, serverOnly: true, reason: text},
+		{name: "text under OR", query: "invoice OR from:acme", needsBodies: true, serverOnly: true, reason: text},
+		{name: "text under NOT", query: "-invoice", needsBodies: true, serverOnly: true, reason: text},
+		{name: "only an upper bound", query: "older_than:7d invoice", needsBodies: true, serverOnly: true, reason: text},
+		{name: "a negated bound is no bound", query: "-newer_than:7d invoice", needsBodies: true, serverOnly: true, reason: text},
+		{name: "OR inside a bounded AND", query: "newer_than:7d (invoice OR from:acme)", needsBodies: true, since: day(10, 22)},
+		{name: "NOT inside a bounded AND", query: "newer_than:7d -invoice", needsBodies: true, since: day(10, 22)},
+		// The branch bounds its own text, but the top level has none, so
+		// the router finds no Since inside the window.
+		{name: "text bounded in its OR branch", query: "(newer_than:7d invoice) OR from:acme", needsBodies: true},
+		{name: "bounded text under NOT", query: "-(newer_than:7d invoice)", needsBodies: true},
+		{name: "a bound under OR is no top-level bound", query: "newer_than:7d OR from:acme"},
+		{name: "system flag as a label", query: `label:\Seen`, serverOnly: true},
+		{name: "system flag as a Google label", query: `label:\Seen`, gmail: true},
+		{name: "has, filename and label off Google", query: "has:attachment filename:pdf label:x"},
+		{name: "Google trash", query: "in:trash from:acme", gmail: true, serverOnly: true, reason: folder},
+		{name: "trash off Google", query: "in:trash from:acme"},
+		{name: "folder reason first", query: "in:anywhere invoice", gmail: true, needsBodies: true, serverOnly: true, reason: folder},
+		{name: "Google archive with bounded text", query: "in:archive newer_than:7d invoice", gmail: true, needsBodies: true, since: day(10, 22)},
+		{name: "text reason before an unsupported term", query: `invoice label:\Seen`, needsBodies: true, serverOnly: true, reason: text},
+		{name: "important off Google", tree: query.Term(query.FieldIs, "important"), serverOnly: true},
+		{name: "important on Google", tree: query.Term(query.FieldIs, "important"), gmail: true},
+		{name: "has other than attachment", tree: query.Term(query.FieldHas, "pdf"), serverOnly: true},
+		{name: "unknown field", tree: query.Term("color", "red"), serverOnly: true},
+	}
+	for _, tt := range tests {
+		n, in := tt.tree, ""
+		if n == nil {
+			parsed, err := query.Parse(tt.query)
+			if err != nil {
+				t.Fatalf("%s: Parse: %v", tt.name, err)
+			}
+			var scope query.Scope
+			scope, n = query.Split(parsed)
+			in = scope.In
+		}
+		p, err := cache.Compile(n, in, tt.gmail, compileNow)
+		if err != nil {
+			t.Errorf("%s: Compile: %v", tt.name, err)
+			continue
+		}
+		if p.NeedsBodies != tt.needsBodies || !p.Since.Equal(tt.since) || p.ServerOnly != tt.serverOnly || p.Reason != tt.reason {
+			t.Errorf("%s: NeedsBodies %v, Since %v, ServerOnly %v, Reason %q; want %v, %v, %v, %q", tt.name,
+				p.NeedsBodies, p.Since, p.ServerOnly, p.Reason, tt.needsBodies, tt.since, tt.serverOnly, tt.reason)
+		}
+	}
+}
