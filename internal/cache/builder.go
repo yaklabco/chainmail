@@ -96,6 +96,11 @@ func (a *Account) build(ctx context.Context, pos int64) (int64, error) {
 		return pos, err
 	}
 	a.applied.Store(next)
+	// A folder skipped in error comes back with a status event; wake the
+	// backfill so it looks again.
+	if slices.ContainsFunc(seg, func(e watch.Event) bool { return e.Kind == watch.KindStatus }) {
+		a.poke()
+	}
 	return next, nil
 }
 
@@ -203,7 +208,9 @@ func (a *Account) apply(ctx context.Context, seg []watch.Event) error {
 // folder, once no folder of the account is paused. A folder whose
 // UIDVALIDITY changed since its events is skipped: its gap follows. A
 // message the fetch no longer finds is left out: its expunged event
-// follows.
+// follows. A folder whose sync state is error is skipped alone
+// (integration note 12): its new messages are not fetched, and its
+// events are acknowledged like those of an untracked folder.
 func (a *Account) fetchNew(ctx context.Context, fetch map[string][]uint32, progress map[string]Progress) ([]Row, error) {
 	if len(fetch) == 0 {
 		return nil, nil
@@ -211,8 +218,17 @@ func (a *Account) fetchNew(ctx context.Context, fetch map[string][]uint32, progr
 	if err := a.waitReady(ctx, false); err != nil {
 		return nil, err
 	}
+	synced, err := a.syncRows(ctx)
+	if err != nil {
+		return nil, err
+	}
+	errored := erroredFolders(synced)
 	var rows []Row
 	for _, folder := range slices.Sorted(maps.Keys(fetch)) {
+		if errored[folder] {
+			a.logger.InfoContext(ctx, "cache builder skipped new mail of a folder in error", "folder", folder)
+			continue
+		}
 		src := mailstore.Source{Folder: folder, UIDValidity: progress[folder].UIDValidity}
 		got, err := a.fetchHeaders(ctx, src, fetch[folder])
 		if errors.Is(err, mailstore.ErrStaleRef) {

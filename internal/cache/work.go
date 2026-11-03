@@ -46,6 +46,19 @@ func pausedState(s watch.Status) bool {
 	}
 }
 
+// erroredFolders returns the folders of rows whose sync state is error.
+// The workers skip each alone, leaving the account's other folders
+// working (master plan integration note 12).
+func erroredFolders(rows []watch.FolderRow) map[string]bool {
+	out := map[string]bool{}
+	for _, r := range rows {
+		if r.State == watch.StateError {
+			out[r.Folder] = true
+		}
+	}
+	return out
+}
+
 // paused reports whether any of the account's folders is in a sync state
 // that pauses cache work.
 func (a *Account) paused(ctx context.Context) (bool, error) {

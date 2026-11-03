@@ -145,7 +145,9 @@ func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows
 
 // nextBackfill returns the progress of the first tracked folder whose
 // backfill is not done: the account's watched folders in config order,
-// then the rest in name order. The caller holds wmu.
+// then the rest in name order. A folder whose sync state is error is
+// skipped alone (integration note 12): the status event of its recovery
+// wakes the backfill again. The caller holds wmu.
 func (a *Account) nextBackfill(ctx context.Context) (Progress, bool, error) {
 	rows, err := a.syncRows(ctx)
 	if err != nil {
@@ -169,8 +171,9 @@ func (a *Account) nextBackfill(ctx context.Context) (Progress, bool, error) {
 			order = append(order, r.Folder)
 		}
 	}
+	errored := erroredFolders(rows)
 	for _, f := range order {
-		if p, ok := progress[f]; ok && !p.BackfillDone {
+		if p, ok := progress[f]; ok && !p.BackfillDone && !errored[f] {
 			return p, true, nil
 		}
 	}

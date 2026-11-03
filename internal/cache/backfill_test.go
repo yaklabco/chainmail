@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
 	"github.com/jamesainslie/chainmail/internal/ref"
 	"github.com/jamesainslie/chainmail/internal/watch"
@@ -289,5 +290,78 @@ func TestCommitBatchDiscardsAfterReset(t *testing.T) {
 	}
 	if p := r.progress("INBOX"); p.BackfillLowUID != 0 || p.BackfillDone {
 		t.Errorf("progress = %+v, want it untouched", p)
+	}
+}
+
+// A folder in error, as one deleted on the server leaves it, is skipped
+// alone: backfill and the builder keep working on the account's other
+// folders (integration note 12). Its events are acknowledged without a
+// fetch, and its backfill is left undone.
+func TestWorkersSkipAFolderInError(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	fs.AddFolder("Accounts", mailstore.RoleNone)
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", nil, []string{"Accounts", "INBOX"}))
+	fs.Add(acctMsg("Accounts", "ledger"))
+	fs.Add(acctMsg("INBOX", "one"))
+	r.pass("Accounts")
+	r.pass("INBOX")
+	gone := r.syncRow("Accounts")
+	if err := fs.DeleteFolder(t.Context(), "Accounts", true); err != nil {
+		t.Fatal(err)
+	}
+	r.setState("Accounts", watch.StateError)
+	r.start()
+	r.waitApplied()
+
+	// An event of the folder from before it went, whose fetch now fails.
+	late := ref.Ref{Account: "acme", Folder: "Accounts", UIDValidity: gone.UIDValidity, UID: gone.UIDNext}
+	r.publish(watch.Event{Kind: watch.KindNew, Account: "acme", Folder: "Accounts", Ref: late.String(), Message: &watch.Message{Subject: "late"}})
+	two := r.add("INBOX", "two")[0]
+	r.waitApplied()
+	r.waitBackfilled("INBOX")
+	if _, ok := r.row(two); !ok {
+		t.Error("new INBOX mail was not cached while another folder is in error")
+	}
+	if n := r.count("INBOX", 1); n != 2 {
+		t.Errorf("%d INBOX rows, want 2", n)
+	}
+	if _, ok := r.row(late); ok {
+		t.Error("cached a row of the folder in error")
+	}
+	if p := r.progress("Accounts"); p.BackfillDone {
+		t.Errorf("Accounts progress = %+v, want its backfill left undone", p)
+	}
+	if got := r.a.lastError(); got != "" {
+		t.Errorf("lastError = %q, want none: a folder in error is not a cache failure", got)
+	}
+}
+
+// A folder skipped in error is backfilled once it leaves error: the status
+// event its recovery publishes wakes the idle backfill.
+func TestBackfillResumesAFolderLeavingError(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	order := &acctOrderMail{Store: fs}
+	fs.AddFolder("Accounts", mailstore.RoleNone)
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", nil, []string{"Accounts", "INBOX"}))
+	r.mail = order
+	fs.Add(acctMsg("Accounts", "ledger"))
+	fs.Add(acctMsg("INBOX", "one"))
+	r.pass("Accounts")
+	r.pass("INBOX")
+	r.setState("Accounts", watch.StateError)
+	r.start()
+	r.waitBackfilled("INBOX")
+	r.waitApplied()
+	if got := order.folders(); slices.Contains(got, "Accounts") {
+		t.Fatalf("fetched %q, want nothing of the folder in error", got)
+	}
+
+	r.setState("Accounts", watch.StatePolling)
+	r.publish(watch.Event{Kind: watch.KindStatus, Account: "acme", Folder: "Accounts", State: watch.StatePolling})
+	r.waitBackfilled("Accounts")
+	if n := r.count("Accounts", 1); n != 1 {
+		t.Errorf("%d Accounts rows, want 1", n)
 	}
 }
