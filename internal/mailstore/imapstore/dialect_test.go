@@ -184,46 +184,6 @@ func TestCompileStandardRefuses(t *testing.T) {
 	}
 }
 
-func TestAgeStart(t *testing.T) {
-	t.Parallel()
-	// The largest ages the parser accepts do not overflow, and the day is
-	// taken in now's own zone.
-	now := time.Date(2026, 10, 29, 23, 30, 0, 0, time.FixedZone("EST", -5*3600))
-	tests := map[string]time.Time{
-		"1d":    time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC),
-		"9999d": time.Date(1999, 6, 14, 0, 0, 0, 0, time.UTC),
-		"9999w": time.Date(1835, 3, 12, 0, 0, 0, 0, time.UTC),
-		"9999m": time.Date(1193, 7, 29, 0, 0, 0, 0, time.UTC),
-		"9999y": time.Date(-7973, 10, 29, 0, 0, 0, 0, time.UTC),
-	}
-	for v, want := range tests {
-		if got := ageStart(now, v); !got.Equal(want) {
-			t.Errorf("ageStart(%s) = %v, want %v", v, got, want)
-		}
-	}
-
-	// Months and years land on the last day of a shorter target month
-	// rather than spilling into the next one.
-	ends := []struct {
-		now  time.Time
-		age  string
-		want time.Time
-	}{
-		{time.Date(2026, 3, 31, 9, 0, 0, 0, time.UTC), "1m", time.Date(2026, 2, 28, 0, 0, 0, 0, time.UTC)},
-		{time.Date(2026, 3, 31, 9, 0, 0, 0, time.UTC), "13m", time.Date(2025, 2, 28, 0, 0, 0, 0, time.UTC)},
-		{time.Date(2026, 5, 31, 9, 0, 0, 0, time.UTC), "1M", time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC)},
-		{time.Date(2028, 3, 31, 9, 0, 0, 0, time.UTC), "1m", time.Date(2028, 2, 29, 0, 0, 0, 0, time.UTC)},
-		{time.Date(2028, 2, 29, 9, 0, 0, 0, time.UTC), "1y", time.Date(2027, 2, 28, 0, 0, 0, 0, time.UTC)},
-		{time.Date(2028, 2, 29, 9, 0, 0, 0, time.UTC), "4y", time.Date(2024, 2, 29, 0, 0, 0, 0, time.UTC)},
-		{time.Date(2026, 1, 31, 9, 0, 0, 0, time.UTC), "1m", time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC)},
-	}
-	for _, tt := range ends {
-		if got := ageStart(tt.now, tt.age); !got.Equal(tt.want) {
-			t.Errorf("ageStart(%s, %s) = %v, want %v", tt.now.Format(time.DateOnly), tt.age, got, tt.want)
-		}
-	}
-}
-
 // TestCompileStandardBadValues covers trees that skipped validation: every
 // error is ErrUnsupportedQuery, never an internal error.
 func TestCompileStandardBadValues(t *testing.T) {

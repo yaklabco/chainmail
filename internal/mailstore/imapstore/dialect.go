@@ -252,7 +252,7 @@ func standardTerm(n *query.Node, now time.Time) (*imap.SearchCriteria, error) {
 		if _, _, err := query.ParseAge(n.Value); err != nil {
 			return nil, badValue(n, err)
 		}
-		d := ageStart(now, n.Value)
+		d := query.AgeStart(now, n.Value)
 		if err := checkDate(n, d); err != nil {
 			return nil, err
 		}
@@ -313,39 +313,6 @@ func checkDate(n *query.Node, d time.Time) error {
 	}
 	return fmt.Errorf("%w: %s:%s reaches back before %s, the earliest date IMAP SEARCH compares here; use a later date or a shorter age",
 		mailstore.ErrUnsupportedQuery, n.Field, n.Value, minDate.Format(time.DateOnly))
-}
-
-// ageStart is the day an age such as 7d reaches back to. IMAP compares dates
-// without times, so newer_than:1d means since the start of yesterday. A month
-// or year back from a day the target month lacks is that month's last day:
-// newer_than:1m on 31 March is since 28 February. The longest age the parser
-// allows, 9999y, still fits a time.Time.
-func ageStart(now time.Time, v string) time.Time {
-	n, unit, _ := query.ParseAge(v) // the tree was validated
-	y, m, d := now.Date()
-	day := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
-	switch unit {
-	case 'w':
-		return day.AddDate(0, 0, -7*n)
-	case 'm':
-		return addMonths(day, -n)
-	case 'y':
-		return addMonths(day, -12*n)
-	default:
-		return day.AddDate(0, 0, -n)
-	}
-}
-
-// addMonths moves t by months, keeping its time of day. Where time.AddDate
-// would spill past the end of a shorter target month, as 31 March less a
-// month gives 3 March, addMonths stops at that month's last day.
-func addMonths(t time.Time, months int) time.Time {
-	y, m, d := t.Date()
-	first := time.Date(y, m+time.Month(months), 1, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
-	if last := first.AddDate(0, 1, -1).Day(); d > last {
-		d = last
-	}
-	return first.AddDate(0, 0, d-1)
 }
 
 // intersect adds src to dst as AND. imap.SearchCriteria.And clears dst's

@@ -455,7 +455,7 @@ func (c *compiler) day(n *query.Node) (time.Time, error) {
 		if _, _, err := query.ParseAge(n.Value); err != nil {
 			return time.Time{}, badQueryValue(n, err)
 		}
-		d = queryAgeStart(c.now, n.Value)
+		d = query.AgeStart(c.now, n.Value)
 	default:
 		var err error
 		if d, err = query.ParseDate(n.Value); err != nil {
@@ -533,7 +533,7 @@ func termBound(n *query.Node, now time.Time) (time.Time, bool) {
 		if _, _, err := query.ParseAge(n.Value); err != nil {
 			return time.Time{}, false
 		}
-		return queryAgeStart(now, n.Value), true
+		return query.AgeStart(now, n.Value), true
 	case query.FieldAfter:
 		d, err := query.ParseDate(n.Value)
 		return d, err == nil
@@ -579,40 +579,4 @@ func uncoveredText(n *query.Node, bounded bool, now time.Time) bool {
 		}
 	}
 	return false
-}
-
-// queryAgeStart is imapstore's ageStart: the day an age such as 7d reaches
-// back to. IMAP compares dates without times, so newer_than:1d means since
-// the start of yesterday. The day is taken in now's own zone and returned
-// at midnight UTC. A month or year back from a day the target month lacks
-// is that month's last day: newer_than:1m on 31 March is since 28
-// February. The longest age the parser allows, 9999y, still fits a
-// time.Time.
-func queryAgeStart(now time.Time, v string) time.Time {
-	n, unit, _ := query.ParseAge(v) // callers parsed v first
-	y, m, d := now.Date()
-	day := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
-	switch unit {
-	case 'w':
-		return day.AddDate(0, 0, -7*n)
-	case 'm':
-		return queryAddMonths(day, -n)
-	case 'y':
-		return queryAddMonths(day, -12*n)
-	default:
-		return day.AddDate(0, 0, -n)
-	}
-}
-
-// queryAddMonths is imapstore's addMonths: it moves t by months, keeping
-// its time of day, and where time.AddDate would spill past the end of a
-// shorter target month, as 31 March less a month gives 3 March, it stops at
-// that month's last day.
-func queryAddMonths(t time.Time, months int) time.Time {
-	y, m, d := t.Date()
-	first := time.Date(y, m+time.Month(months), 1, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
-	if last := first.AddDate(0, 1, -1).Day(); d > last {
-		d = last
-	}
-	return first.AddDate(0, 0, d-1)
 }
