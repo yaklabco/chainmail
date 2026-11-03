@@ -1,0 +1,12 @@
+version   1.2.3
+started   Mon, 02 Nov 2026 08:00 UTC
+dev mode  false
+secrets   accounts/host
+
+ACCOUNT  FOLDER  MODE  STATE     CONDSTORE  LAST SYNC         LAST SWEEP  ERROR
+host     INBOX   idle  watching  true       2026-11-02 08:59  -           -
+
+ACCOUNT  CACHE  STATE        BUDGET TODAY          ERROR
+gm       on     backfilling  1.5 MiB of 1.0 GiB    -
+host     on     ready        512.0 KiB of 1.0 GiB  -
+old      off    disabled     0 B of 1.0 GiB        -

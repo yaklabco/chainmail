@@ -107,15 +107,23 @@ func statusTable(w io.Writer, loc *time.Location, r *chainmailv1.GetStatusRespon
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	if len(r.GetSync()) == 0 {
+	// The sync and cache tables have their own columns, so each is a table
+	// of its own below the daemon's details.
+	if len(r.GetSync()) > 0 {
+		if err := writeString(w, "\n"); err != nil {
+			return err
+		}
+		if err := syncTable(w, loc, r.GetSync()); err != nil {
+			return err
+		}
+	}
+	if len(r.GetCache()) == 0 {
 		return nil
 	}
 	if err := writeString(w, "\n"); err != nil {
 		return err
 	}
-	// The sync table has its own columns, so it is a table of its own below
-	// the daemon's details.
-	return syncTable(w, loc, r.GetSync())
+	return cacheAccountsTable(w, r.GetCache())
 }
 
 // syncTable prints one line per synced folder, for admin status and watch

@@ -13,7 +13,7 @@ func newAdminCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	cmd := newGroup("admin", "Daemon administration")
 	cmd.AddCommand(&cobra.Command{
 		Use:   "status",
-		Short: "Show the daemon's version, uptime, stored secret names and sync state",
+		Short: "Show the daemon's version, uptime, stored secret names, sync state and cache state",
 		Args:  exactArgs(0),
 		RunE: func(_ *cobra.Command, _ []string) error {
 			c := g.client(env)
