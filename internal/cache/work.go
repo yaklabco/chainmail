@@ -34,6 +34,14 @@ func (a *Account) poke() {
 	}
 }
 
+// pokePrefetch wakes an idle prefetcher without blocking.
+func (a *Account) pokePrefetch() {
+	select {
+	case a.prefetchWake <- struct{}{}:
+	default:
+	}
+}
+
 // pausedState reports whether a folder in sync state s pauses the
 // account's cache work. A folder in error does not: the backfill and the
 // builder skip that folder alone (master plan integration note 12), and a

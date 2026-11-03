@@ -146,7 +146,8 @@ func (a *Account) fetchBatch(ctx context.Context, w *walk) ([]uint32, []Row, err
 
 // commitBatch stores a fetched batch, which fetchHeaders has already
 // counted against the budget, and records the walk's new low UID, marking
-// the folder done when the walk has no UIDs left. A batch fetched before a
+// the folder done when the walk has no UIDs left, which wakes the
+// prefetcher for its window. A batch fetched before a
 // drop, or before the builder recorded a new walk of the folder, is
 // discarded with its walk. A batch with a UID whose flags or
 // expunge the builder applied during the fetch is not written: it returns
@@ -184,6 +185,7 @@ func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows
 	w.uids, w.low = rest, p.BackfillLowUID
 	if p.BackfillDone {
 		a.logger.InfoContext(ctx, "cache backfill done", "folder", w.folder)
+		a.pokePrefetch()
 	}
 	return w, true, nil
 }

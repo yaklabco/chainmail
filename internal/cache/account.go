@@ -90,6 +90,9 @@ type Account struct {
 
 	// wake tells an idle backfill that a folder was tracked or reset.
 	wake chan struct{}
+	// prefetchWake tells an idle prefetcher that a folder's backfill
+	// finished, so its window bodies are ready to fetch.
+	prefetchWake chan struct{}
 
 	// afterGroup, when set, runs once the builder has opened its group and
 	// before it records baselines. Tests set it.
@@ -124,12 +127,13 @@ func (systemClock) After(d time.Duration) <-chan time.Time { return time.After(d
 // NewAccount returns the cache of o.Account. Run starts its workers.
 func NewAccount(o AccountOptions) *Account {
 	a := &Account{
-		o:      o,
-		name:   o.Account.Name,
-		group:  watch.CacheGroup(o.Account.Name),
-		clock:  o.Clock,
-		logger: o.Logger,
-		wake:   make(chan struct{}, 1),
+		o:            o,
+		name:         o.Account.Name,
+		group:        watch.CacheGroup(o.Account.Name),
+		clock:        o.Clock,
+		logger:       o.Logger,
+		wake:         make(chan struct{}, 1),
+		prefetchWake: make(chan struct{}, 1),
 	}
 	if a.clock == nil {
 		a.clock = systemClock{}
@@ -281,6 +285,7 @@ func (a *Account) runPrefetch(ctx context.Context) {
 			}
 			return ms, release, nil
 		},
+		Wake:   a.prefetchWake,
 		Clock:  o.Clock,
 		Logger: o.Logger,
 	}).run(ctx)

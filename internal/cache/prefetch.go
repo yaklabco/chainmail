@@ -53,6 +53,11 @@ type prefetchOptions struct {
 	State *watch.State
 	// Mail returns the account's store for one batch.
 	Mail func(ctx context.Context) (mailstore.Store, func(), error)
+	// Wake, when set, ends the wait after a step early: a value on it means
+	// a folder may have newly become eligible, so the next step runs at
+	// once. A step that still has nothing to do returns the same wait
+	// again. Nil waits on Clock alone.
+	Wake <-chan struct{}
 	// Clock nil means the system clock.
 	Clock watch.Clock
 	// Logger nil discards. It carries the account attribute: Account passes
@@ -76,7 +81,8 @@ func newPrefetcher(o prefetchOptions) *prefetcher {
 	return &prefetcher{o: o}
 }
 
-// run steps until ctx ends, waiting what each step returns.
+// run steps until ctx ends, waiting what each step returns, or less when
+// Wake fires first.
 func (p *prefetcher) run(ctx context.Context) {
 	for {
 		wait := p.step(ctx)
@@ -84,6 +90,7 @@ func (p *prefetcher) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-p.o.Clock.After(wait):
+		case <-p.o.Wake:
 		}
 	}
 }
