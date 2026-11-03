@@ -130,7 +130,7 @@ func (p *partReader) fill() error {
 	sec := &imap.FetchItemBodySection{Part: p.path, Peek: true, Partial: &imap.SectionPartial{Offset: p.offset, Size: p.s.chunk}}
 	bufs, err := p.c.fetch(p.ctx, imap.UIDSetNum(imap.UID(p.uid)), &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{sec}})
 	if err != nil {
-		return err
+		return asDownload(err)
 	}
 	var data []byte
 	if len(bufs) > 0 {

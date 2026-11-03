@@ -598,18 +598,41 @@ func (s *Store) readIn(ctx context.Context, c *conn, folder string, read func() 
 // allowance.
 const gmailThrottleText = "exceeded command or bandwidth limits"
 
+// downloadError marks the error of a message download, a FETCH of headers
+// or bodies, so isThrottled can tell a download limit from a storage quota
+// or an implementation limit on another command. Its text is err's.
+type downloadError struct{ err error }
+
+func (e *downloadError) Error() string { return e.err.Error() }
+
+func (e *downloadError) Unwrap() error { return e.err }
+
+// asDownload marks err, from a message download, as downloadError when it
+// holds a server reply. Any other error, nil included, is returned as is.
+func asDownload(err error) error {
+	var e *imap.Error
+	if !errors.As(err, &e) {
+		return err
+	}
+	return &downloadError{err: err}
+}
+
 // isThrottled reports whether err holds a server reply refusing for a quota
-// or bandwidth limit: code OVERQUOTA or LIMIT, or Gmail's bandwidth text.
-// The reply may be a NO, a BAD or a BYE.
+// or bandwidth limit: Gmail's bandwidth text on any command, or code
+// OVERQUOTA or LIMIT on a message download (asDownload). On other commands
+// those codes are a storage quota (APPEND, COPY, MOVE) or an implementation
+// limit (too many results), which a pause until the next day would not
+// lift. The reply may be a NO, a BAD or a BYE.
 func isThrottled(err error) bool {
 	var e *imap.Error
 	if !errors.As(err, &e) {
 		return false
 	}
-	if e.Code == imap.ResponseCodeOverQuota || e.Code == imap.ResponseCodeLimit {
+	if strings.Contains(strings.ToLower(e.Text), gmailThrottleText) {
 		return true
 	}
-	return strings.Contains(strings.ToLower(e.Text), gmailThrottleText)
+	var d *downloadError
+	return (e.Code == imap.ResponseCodeOverQuota || e.Code == imap.ResponseCodeLimit) && errors.As(err, &d)
 }
 
 // throttled returns mailstore.ErrThrottled for the account when err is a

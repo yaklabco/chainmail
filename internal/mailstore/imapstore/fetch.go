@@ -177,7 +177,7 @@ func (s *Store) fetchGroup(ctx context.Context, c *conn, folder string, refs []r
 		if missing := missingUIDs(want, got); len(missing) > 0 {
 			bufs, err := c.fetch(ctx, uidSet(missing), s.summaryItems(false, true))
 			if err != nil {
-				return false, err
+				return false, asDownload(err)
 			}
 			for _, b := range bufs {
 				got[uint32(b.UID)] = b
@@ -229,7 +229,7 @@ func (s *Store) fetchGroup(ctx context.Context, c *conn, folder string, refs []r
 			var parts *imapclient.FetchMessageBuffer
 			if p.fetched {
 				var refusal *imap.Error
-				switch err := errs[i]; {
+				switch err := asDownload(errs[i]); {
 				case s.throttled(err) != nil:
 					// A quota or bandwidth limit is about the account,
 					// not this message.
