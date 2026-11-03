@@ -33,11 +33,8 @@ from the ref, the recipients, the body and files, and --all. To send
 again on purpose, pass a new --idempotency-key.
 
 --draft saves the reply to Drafts instead of sending it. --dry-run writes
-it as MIME to stdout, as send --dry-run does.
-
-Examples:
-  chainmail reply cm1:work:INBOX:7:42 --body "Thanks, that works."
-  chainmail reply cm1:work:INBOX:7:42 --all --body-file answer.md --attach notes.pdf`
+it as MIME to stdout, as send --dry-run does. Policy holds apply as for
+send.`
 
 const forwardHelp = `Forward a message to new recipients, with the original's attachments
 unless --no-attachments.
@@ -52,11 +49,8 @@ from the ref, the recipients, the body and files, and --no-attachments. To send
 again on purpose, pass a new --idempotency-key.
 
 --draft saves the forward to Drafts instead of sending it. --dry-run
-writes it as MIME to stdout, as send --dry-run does.
-
-Examples:
-  chainmail forward cm1:work:INBOX:7:42 --to ann@example.com --body "FYI"
-  chainmail forward cm1:work:INBOX:7:42 --to ann@example.com --no-attachments`
+writes it as MIME to stdout, as send --dry-run does. Policy holds apply
+as for send.`
 
 // answerFlags are the flags reply and forward share.
 type answerFlags struct {

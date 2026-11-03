@@ -41,6 +41,9 @@ const (
 
 const sendHelp = `Send a new message from one account.
 
+A send to recipients the policy does not allow is held: saved to Drafts,
+not sent, and the command exits 4.
+
 The body is Markdown, sent as a text part and an HTML part, unless --text
 sends it as plain text. --body - reads it from stdin. --html-file sends an
 HTML file as the body, with --body as its text part when given.
@@ -55,12 +58,7 @@ account, recipients, subject, body and files. To send identical content
 again on purpose, pass a new --idempotency-key.
 
 --dry-run writes the message as MIME to stdout instead of sending it. It
-refuses a terminal unless --output json, which prints it as a JSON string.
-
-Examples:
-  chainmail send --account work --to ann@example.com --subject "Q3" --body "See *attached*." --attach q3.pdf
-  echo "Done." | chainmail send --account work --to ann@example.com --subject "Status" --body - --text
-  chainmail send --account work --to ann@example.com --subject "Q3" --body-file q3.md --dry-run > q3.eml`
+refuses a terminal unless --output json, which prints it as a JSON string.`
 
 func newSendCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	var (
