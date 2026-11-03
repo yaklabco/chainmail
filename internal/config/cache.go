@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"time"
@@ -186,4 +187,92 @@ func cacheSizeOr(def string, values ...string) int64 {
 	}
 	n, _ := ParseByteSize(def) // every default is a valid size
 	return n
+}
+
+// Bounds of the cache keys.
+const (
+	maxCacheWindow   = 3650 * 24 * time.Hour
+	minCacheMaxSize  = 64 << 20
+	maxCacheMaxSize  = 1 << 40
+	minCacheDaily    = 16 << 20
+	maxCacheDaily    = 100 << 30
+	minCacheBatch    = 10
+	maxCacheBatch    = 1000
+	maxCachePause    = 60 * time.Second
+	minCacheFreshLag = time.Second
+	maxCacheFreshLag = 10 * time.Minute
+)
+
+// validate reports each [cache] key that does not parse or lies out of
+// range. Parse has filled every unset key but dir with its default.
+func (cc CacheConfig) validate(add func(string, ...any)) {
+	cc.validateShared("cache", add)
+	validateCacheSize("cache.max_size", cc.MaxSize, minCacheMaxSize, maxCacheMaxSize, "64MiB and 1TiB", add)
+	if cc.Dir != "" && !filepath.IsAbs(cc.Dir) {
+		add("cache.dir: %s must be an absolute path", cc.Dir)
+	}
+}
+
+// validateAccountCache reports problems in an account's cache table. where
+// is "accounts.<name>". max_size and dir bound or place the one shared
+// file, so an account table may not set them.
+func validateAccountCache(where string, cc *CacheConfig, add func(string, ...any)) {
+	if cc == nil {
+		return
+	}
+	cc.validateShared(where+".cache", add)
+	if cc.MaxSize != "" {
+		add("%s.cache: max_size is global; set it in [cache]", where)
+	}
+	if cc.Dir != "" {
+		add("%s.cache: dir is global; set it in [cache]", where)
+	}
+}
+
+// validateShared reports problems in the keys [cache] and account cache
+// tables share, skipping unset ones. where is "cache" or
+// "accounts.<name>.cache".
+func (cc CacheConfig) validateShared(where string, add func(string, ...any)) {
+	validateCacheDuration(where+".prefetch_bodies", cc.PrefetchBodies, 0, maxCacheWindow, "0d and 3650d", add)
+	validateCacheDuration(where+".read_retention", cc.ReadRetention, 0, maxCacheWindow, "0d and 3650d", add)
+	validateCacheSize(where+".daily_download", cc.DailyDownload, minCacheDaily, maxCacheDaily, "16MiB and 100GiB", add)
+	if cc.BackfillBatch != 0 && (cc.BackfillBatch < minCacheBatch || cc.BackfillBatch > maxCacheBatch) {
+		add("%s.backfill_batch: %d must be between %d and %d", where, cc.BackfillBatch, minCacheBatch, maxCacheBatch)
+	}
+	validateCacheDuration(where+".backfill_pause", cc.BackfillPause, 0, maxCachePause, "0s and 60s", add)
+	validateCacheDuration(where+".fresh_lag", cc.FreshLag, minCacheFreshLag, maxCacheFreshLag, "1s and 10m", add)
+}
+
+// validateCacheDuration reports the cache duration value at key when it is
+// set and does not parse or lies outside lo to hi. span is the range as
+// problems write it, such as "0d and 3650d".
+func validateCacheDuration(key, value string, lo, hi time.Duration, span string, add func(string, ...any)) {
+	if value == "" {
+		return
+	}
+	d, err := ParseCacheDuration(value)
+	if err != nil {
+		add("%s: %v", key, err)
+		return
+	}
+	if d < lo || d > hi {
+		add("%s: %s must be between %s", key, value, span)
+	}
+}
+
+// validateCacheSize reports the size value at key when it is set and does
+// not parse or lies outside lo to hi bytes. span is the range as problems
+// write it, such as "64MiB and 1TiB".
+func validateCacheSize(key, value string, lo, hi int64, span string, add func(string, ...any)) {
+	if value == "" {
+		return
+	}
+	n, err := ParseByteSize(value)
+	if err != nil {
+		add("%s: %v", key, err)
+		return
+	}
+	if n < lo || n > hi {
+		add("%s: %s must be between %s", key, value, span)
+	}
 }

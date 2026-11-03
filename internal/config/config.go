@@ -373,6 +373,7 @@ func (c *Config) validate() error {
 	}
 	validateSendAllow("policy.send_allow", c.Policy.SendAllow, add)
 	c.Watch.validate(add)
+	c.Cache.validate(add)
 	for _, name := range c.AccountNames() {
 		c.validateAccount(name, add)
 	}
@@ -389,6 +390,7 @@ func (c *Config) validateAccount(name string, add func(string, ...any)) {
 		add("%s: name must be lowercase letters, digits and hyphens", where)
 	}
 	validateSendAllow(where+".policy.send_allow", a.Policy.SendAllow, add)
+	validateAccountCache(where, a.Cache, add)
 	p, ok := provider.Lookup(a.Provider)
 	if !ok {
 		add("%s: unknown provider %q (known: %s)", where, a.Provider, strings.Join(provider.Names(), ", "))

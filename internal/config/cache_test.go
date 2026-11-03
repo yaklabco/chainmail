@@ -2,6 +2,8 @@ package config
 
 import (
 	"errors"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,5 +189,141 @@ func TestCacheRejectsUnknownKeys(t *testing.T) {
 				t.Errorf("err = %v, want *toml.StrictMissingError", err)
 			}
 		})
+	}
+}
+
+// cacheBound is one value of one key, and whether Parse accepts it.
+type cacheBound struct {
+	key, value string
+	ok         bool
+}
+
+// cacheSharedBounds are the values just inside and just outside each range
+// of the keys [cache] and account cache tables share.
+var cacheSharedBounds = []cacheBound{
+	{"prefetch_bodies", `"0d"`, true},
+	{"prefetch_bodies", `"3650d"`, true},
+	{"prefetch_bodies", `"87600h"`, true},
+	{"prefetch_bodies", `"3651d"`, false},
+	{"prefetch_bodies", `"87600h1s"`, false},
+	{"prefetch_bodies", `"-1s"`, false},
+	{"read_retention", `"0d"`, true},
+	{"read_retention", `"3650d"`, true},
+	{"read_retention", `"3651d"`, false},
+	{"read_retention", `"-1s"`, false},
+	{"daily_download", `"16MiB"`, true},
+	{"daily_download", `"100GiB"`, true},
+	{"daily_download", `"16383KiB"`, false},
+	{"daily_download", `"102401MiB"`, false},
+	{"backfill_batch", "10", true},
+	{"backfill_batch", "1000", true},
+	{"backfill_batch", "9", false},
+	{"backfill_batch", "1001", false},
+	{"backfill_batch", "-5", false},
+	{"backfill_pause", `"0s"`, true},
+	{"backfill_pause", `"60s"`, true},
+	{"backfill_pause", `"1m"`, true},
+	{"backfill_pause", `"60001ms"`, false},
+	{"backfill_pause", `"-1ms"`, false},
+	{"fresh_lag", `"1s"`, true},
+	{"fresh_lag", `"10m"`, true},
+	{"fresh_lag", `"999ms"`, false},
+	{"fresh_lag", `"10m1s"`, false},
+}
+
+// cacheGlobalBounds are the bounds of the keys only [cache] has.
+var cacheGlobalBounds = []cacheBound{
+	{"max_size", `"64MiB"`, true},
+	{"max_size", `"1TiB"`, true},
+	{"max_size", `"65535KiB"`, false},
+	{"max_size", `"1025GiB"`, false},
+	{"dir", `"/var/cache/chainmail"`, true},
+	{"dir", `"cache"`, false},
+}
+
+func TestCacheBounds(t *testing.T) {
+	t.Parallel()
+	for _, b := range slices.Concat(cacheSharedBounds, cacheGlobalBounds) {
+		checkCacheBound(t, "[cache]\n"+b.key+" = "+b.value+"\n", "cache."+b.key, b.ok)
+	}
+	for _, b := range cacheSharedBounds {
+		checkCacheBound(t, watchAccount+"[accounts.host.cache]\n"+b.key+" = "+b.value+"\n", "accounts.host.cache."+b.key, b.ok)
+	}
+}
+
+// checkCacheBound parses config and checks that it is valid when ok, else
+// that it has a problem naming key.
+func checkCacheBound(t *testing.T, config, key string, ok bool) {
+	t.Helper()
+	_, err := Parse([]byte(config))
+	if ok {
+		if err != nil {
+			t.Errorf("%q: err = %v, want valid", config, err)
+		}
+		return
+	}
+	var ve *ValidationError
+	if !errors.As(err, &ve) || !slices.ContainsFunc(ve.Problems, func(p string) bool { return strings.HasPrefix(p, key+": ") }) {
+		t.Errorf("%q: err = %v, want a problem starting %q", config, err, key+": ")
+	}
+}
+
+func TestCacheInvalid(t *testing.T) {
+	t.Parallel()
+	const durationHint = "want a number of days such as 90d, or a Go duration such as 30s, 5m or 168h"
+	const sizeHint = "want a number of bytes, optionally followed by B, KiB, MiB, GiB or TiB"
+	const account = watchAccount + "[accounts.host.cache]\n"
+	tests := []struct {
+		name    string
+		config  string
+		problem string
+	}{
+		{name: "prefetch too long", config: "[cache]\nprefetch_bodies = \"4000d\"\n", problem: "cache.prefetch_bodies: 4000d must be between 0d and 3650d"},
+		{name: "retention negative", config: "[cache]\nread_retention = \"-1h\"\n", problem: "cache.read_retention: -1h must be between 0d and 3650d"},
+		{name: "prefetch not a duration", config: "[cache]\nprefetch_bodies = \"3 months\"\n", problem: `cache.prefetch_bodies: duration "3 months": ` + durationHint},
+		{name: "max_size too small", config: "[cache]\nmax_size = \"32MiB\"\n", problem: "cache.max_size: 32MiB must be between 64MiB and 1TiB"},
+		{name: "max_size too large", config: "[cache]\nmax_size = \"2TiB\"\n", problem: "cache.max_size: 2TiB must be between 64MiB and 1TiB"},
+		{name: "max_size not a size", config: "[cache]\nmax_size = \"2GB\"\n", problem: `cache.max_size: size "2GB": ` + sizeHint},
+		{name: "daily_download too small", config: "[cache]\ndaily_download = \"1MiB\"\n", problem: "cache.daily_download: 1MiB must be between 16MiB and 100GiB"},
+		{name: "daily_download too large", config: "[cache]\ndaily_download = \"101GiB\"\n", problem: "cache.daily_download: 101GiB must be between 16MiB and 100GiB"},
+		{name: "backfill_batch too small", config: "[cache]\nbackfill_batch = 5\n", problem: "cache.backfill_batch: 5 must be between 10 and 1000"},
+		{name: "backfill_pause too long", config: "[cache]\nbackfill_pause = \"2m\"\n", problem: "cache.backfill_pause: 2m must be between 0s and 60s"},
+		{name: "fresh_lag too short", config: "[cache]\nfresh_lag = \"500ms\"\n", problem: "cache.fresh_lag: 500ms must be between 1s and 10m"},
+		{name: "fresh_lag not a duration", config: "[cache]\nfresh_lag = \"soon\"\n", problem: `cache.fresh_lag: duration "soon": ` + durationHint},
+		{name: "relative dir", config: "[cache]\ndir = \"var/cache\"\n", problem: "cache.dir: var/cache must be an absolute path"},
+		{name: "account backfill_batch", config: account + "backfill_batch = 5\n", problem: "accounts.host.cache.backfill_batch: 5 must be between 10 and 1000"},
+		{name: "account prefetch", config: account + "prefetch_bodies = \"4000d\"\n", problem: "accounts.host.cache.prefetch_bodies: 4000d must be between 0d and 3650d"},
+		{name: "account daily_download", config: account + "daily_download = \"lots\"\n", problem: `accounts.host.cache.daily_download: size "lots": ` + sizeHint},
+		{name: "account max_size", config: account + "max_size = \"4GiB\"\n", problem: "accounts.host.cache: max_size is global; set it in [cache]"},
+		{name: "account dir", config: account + "dir = \"/srv/cache\"\n", problem: "accounts.host.cache: dir is global; set it in [cache]"},
+		{name: "gmail account", config: gmailAccount + "[accounts.g.cache]\nfresh_lag = \"11m\"\n", problem: "accounts.g.cache.fresh_lag: 11m must be between 1s and 10m"},
+		{name: "unknown provider still checks its cache", config: "[accounts.a]\nprovider = \"aol\"\naddress = \"a@b.c\"\n[accounts.a.cache]\ndir = \"/x\"\n", problem: "accounts.a.cache: dir is global; set it in [cache]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(tt.config))
+			var ve *ValidationError
+			if !errors.As(err, &ve) || !slices.Contains(ve.Problems, tt.problem) {
+				t.Errorf("err = %v, want a problem %q", err, tt.problem)
+			}
+		})
+	}
+}
+
+// An account cache table that sets max_size and dir reports both, once each.
+func TestCacheAccountGlobalKeysReportedOnce(t *testing.T) {
+	t.Parallel()
+	_, err := Parse([]byte(watchAccount + "[accounts.host.cache]\nmax_size = \"4GiB\"\ndir = \"/srv/cache\"\n"))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err = %v, want *ValidationError", err)
+	}
+	want := []string{
+		"accounts.host.cache: max_size is global; set it in [cache]",
+		"accounts.host.cache: dir is global; set it in [cache]",
+	}
+	if !slices.Equal(ve.Problems, want) {
+		t.Errorf("problems = %q, want %q", ve.Problems, want)
 	}
 }
