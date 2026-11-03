@@ -187,11 +187,21 @@ func TestStoreForegroundStillWaitsForAConnection(t *testing.T) {
 	t.Parallel()
 	s, _, _ := backgroundStore(t, 1, nil, nil)
 	_, release := holdConn(t, s)
+	// The waiting call runs under a context this test cancels, and the
+	// cleanup, registered after the store's and holdConn's so that it runs
+	// before them, joins it before they close anything it uses, on every
+	// path out of the test.
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
 	done := make(chan error, 1)
-	go func() {
-		_, err := s.ListFolders(t.Context())
+	wg.Go(func() {
+		_, err := s.ListFolders(ctx)
 		done <- err
-	}()
+	})
 	eventually(t, func() bool { return waiters(s.pool) == 1 })
 	release()
 	select {

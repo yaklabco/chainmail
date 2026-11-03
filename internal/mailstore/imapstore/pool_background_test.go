@@ -84,6 +84,46 @@ func TestPoolTryGet(t *testing.T) {
 	}
 }
 
+// waitForConn starts a foreground get on p, a goroutine bounded by a
+// context this test cancels, and returns the channel its connection comes
+// back on. The cleanup cancels and joins it on every path out of the test,
+// so it never outlives the test's fixtures.
+func waitForConn(t *testing.T, p *pool[*fakeConn]) <-chan *fakeConn {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+	got := make(chan *fakeConn, 1)
+	wg.Go(func() {
+		c, err := p.get(ctx, "", false)
+		// The cleanup cancelling ctx is the only expected failure.
+		if err != nil && ctx.Err() == nil {
+			t.Error(err)
+		}
+		got <- c
+	})
+	return got
+}
+
+// receiveConn returns the connection the waiter from waitForConn got, and
+// fails the test if it gets none within five seconds.
+func receiveConn(t *testing.T, got <-chan *fakeConn) *fakeConn {
+	t.Helper()
+	select {
+	case c := <-got:
+		if c == nil {
+			t.Fatal("the waiting foreground call got no connection")
+		}
+		return c
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiting foreground call never got a connection")
+		return nil
+	}
+}
+
 // A foreground call blocked in get counts as waiting until a connection
 // comes back to it, and stops counting when it gives up. While it waits,
 // background work gets nothing.
@@ -95,22 +135,13 @@ func TestPoolForegroundWaitIsCountedAndWoken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := make(chan *fakeConn, 1)
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		c, err := p.get(t.Context(), "", false)
-		if err != nil {
-			t.Error(err)
-		}
-		got <- c
-	})
+	got := waitForConn(t, p)
 	eventually(t, func() bool { return waiters(p) == 1 })
 	if _, err := p.tryGet(t.Context(), "", false); !errors.Is(err, mailstore.ErrBusy) {
 		t.Errorf("tryGet while a foreground call waits = %v, want ErrBusy", err)
 	}
 	p.put(held)
-	wg.Wait()
-	if c := <-got; c != held {
+	if c := receiveConn(t, got); c != held {
 		t.Errorf("waiter got conn %d, want the returned conn %d", c.id, held.id)
 	}
 	if n := waiters(p); n != 0 {
@@ -123,6 +154,43 @@ func TestPoolForegroundWaitIsCountedAndWoken(t *testing.T) {
 	}
 	if n := waiters(p); n != 0 {
 		t.Errorf("waiters after a get gave up = %d, want 0", n)
+	}
+	if n := d.count(); n != 1 {
+		t.Errorf("dials = %d, want 1", n)
+	}
+}
+
+// A connection put back while a foreground call waits goes to that call,
+// not to background work that asks for it straight after the put. Whether
+// or not the woken waiter has taken the lock yet, tryGet must find the
+// connection out of its reach: the waiter still counts as waiting, or it
+// already holds the pool's only connection. Once the waiter puts it back,
+// background work gets it.
+func TestPoolReturnedConnGoesToTheWaiterBeforeBackground(t *testing.T) {
+	t.Parallel()
+	d := &fakeDialer{}
+	p := newTestPool(1, d, &testClock{t: time.Unix(0, 0)}, time.Hour)
+	held, err := p.get(t.Context(), "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := waitForConn(t, p)
+	eventually(t, func() bool { return waiters(p) == 1 })
+	p.put(held)
+	if c, err := p.tryGet(t.Context(), "", false); !errors.Is(err, mailstore.ErrBusy) {
+		t.Fatalf("tryGet straight after the put = %v, %v; want ErrBusy, the connection is the waiter's", c, err)
+	}
+	c := receiveConn(t, got)
+	if c != held {
+		t.Errorf("waiter got conn %d, want the returned conn %d", c.id, held.id)
+	}
+	p.put(c)
+	bg, err := p.tryGet(t.Context(), "", false)
+	if err != nil {
+		t.Fatalf("tryGet once the waiter put the connection back = %v", err)
+	}
+	if bg != held {
+		t.Errorf("background got conn %d, want the reused conn %d", bg.id, held.id)
 	}
 	if n := d.count(); n != 1 {
 		t.Errorf("dials = %d, want 1", n)
