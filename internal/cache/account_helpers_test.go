@@ -232,6 +232,8 @@ type acctRig struct {
 
 	mu       sync.Mutex
 	settings config.CacheSettings
+	// maxSize is the size cap MaxSize reports, 2 GiB unless a test lowers it.
+	maxSize atomic.Int64
 
 	a      *Account
 	cancel context.CancelFunc
@@ -247,6 +249,7 @@ func newAcctRig(t *testing.T, fs *fake.Store, acct config.ResolvedAccount) *acct
 	t.Cleanup(func() { _ = conn.Close() }) // a close error at test end changes nothing
 	clock := newAcctClock()
 	r := &acctRig{t: t, fs: fs, mail: fs, clock: clock, stateDB: conn, acct: acct, settings: acctSettings()}
+	r.maxSize.Store(2 << 30)
 	r.log = watch.NewLog(conn, clock.Now, nil)
 	r.state = watch.NewState(conn)
 	r.engine = watch.NewEngine(conn, r.log, r.state, watch.EngineOptions{Now: clock.Now})
@@ -261,7 +264,7 @@ func newAcctRig(t *testing.T, fs *fake.Store, acct config.ResolvedAccount) *acct
 
 func (r *acctRig) newAccount() *Account {
 	return NewAccount(AccountOptions{
-		Account: r.acct, Settings: r.cacheSettings, MaxSize: func() int64 { return 2 << 30 },
+		Account: r.acct, Settings: r.cacheSettings, MaxSize: r.maxSize.Load,
 		Store: r.store, Log: r.log, State: r.state, Mail: r.openMail, Clock: r.clock,
 	})
 }
@@ -565,4 +568,44 @@ func (m *acctStallMail) FetchHeaders(ctx context.Context, src mailstore.Source, 
 		return nil, ctx.Err()
 	}
 	return hs, err
+}
+
+// acctBodyStall is a MailStore whose body fetches signal entered, then
+// wait for release before they answer, so a test can see the prefetcher
+// start a fetch and hold it there. Header fetches pass straight through.
+type acctBodyStall struct {
+	*fake.Store
+	entered chan struct{} // receives once per body fetch, when it starts
+	release chan struct{} // closed by the test to let fetches answer
+}
+
+var _ MailStore = (*acctBodyStall)(nil)
+
+func newAcctBodyStall(fs *fake.Store) *acctBodyStall {
+	return &acctBodyStall{Store: fs, entered: make(chan struct{}, 16), release: make(chan struct{})}
+}
+
+func (m *acctBodyStall) FetchMessages(ctx context.Context, refs []ref.Ref) []mailstore.MessageResult {
+	select {
+	case m.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-m.release:
+	case <-ctx.Done():
+		out := make([]mailstore.MessageResult, len(refs))
+		for i := range out {
+			out[i].Err = ctx.Err()
+		}
+		return out
+	}
+	return m.Store.FetchMessages(ctx, refs)
+}
+
+// setPolling marks folder polling, as the poller does after a pass.
+func (r *acctRig) setPolling(folder string) {
+	r.t.Helper()
+	if err := r.state.SetStatus(r.t.Context(), r.acct.Name, folder, watch.ModePoll, watch.StatePolling, ""); err != nil {
+		r.t.Fatalf("SetStatus(%s, polling): %v", folder, err)
+	}
 }

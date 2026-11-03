@@ -85,8 +85,11 @@ type Account struct {
 	// applied is the builder's acknowledged event ID, -1 until the builder
 	// has opened its group.
 	applied atomic.Int64
-	// overCap is set by the evictor while headers alone exceed MaxSize.
-	overCap atomic.Bool
+	// started is when NewAccount ran, on the account's clock. A folder is
+	// fresh only once a pass of this run has synced it: a sync row from a
+	// previous run says nothing of the mail that arrived while the daemon
+	// was down.
+	started time.Time
 
 	// errMu guards lastErr, the reason code of the latest failed step. The
 	// worker that failed clears it once it succeeds again.
@@ -157,6 +160,7 @@ func NewAccount(o AccountOptions) *Account {
 	// carry the same defaults.
 	a.o.Clock, a.o.Logger = a.clock, a.logger
 	a.applied.Store(-1)
+	a.started = a.clock.Now()
 	return a
 }
 

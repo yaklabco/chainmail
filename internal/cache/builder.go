@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"time"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/ref"
@@ -263,7 +264,10 @@ func (a *Account) fetchNew(ctx context.Context, fetch map[string][]uint32, progr
 // Every write is idempotent, so a failure part way is safe to retry. A
 // closing gap is applied last. Each change is noted in the backfill's
 // in-flight batch, so a header fetched before it is fetched again instead
-// of written.
+// of written. A new row inside the prefetch window without a body clears
+// its folder's window_done in the same transaction (spec 4.1) and wakes
+// the prefetcher, so a text search never answers complete without that
+// body. Stored rows wake the evictor when the file is over max_size.
 func (a *Account) commitSegment(ctx context.Context, epoch uint64, plan segmentPlan, rows []Row) (bool, error) {
 	a.lock()
 	defer a.unlock()
@@ -271,9 +275,14 @@ func (a *Account) commitSegment(ctx context.Context, epoch uint64, plan segmentP
 		return false, nil
 	}
 	if len(rows) > 0 {
-		if err := a.o.Store.PutRows(ctx, rows); err != nil {
+		uncovered, err := a.o.Store.PutNewRows(ctx, rows, a.windowStart())
+		if err != nil {
 			return false, err
 		}
+		if uncovered {
+			a.pokePrefetch()
+		}
+		a.noteWrite(ctx)
 	}
 	for _, c := range plan.changes {
 		a.inflight.note(c.ref)
@@ -301,24 +310,38 @@ func (a *Account) commitSegment(ctx context.Context, epoch uint64, plan segmentP
 	return true, nil
 }
 
-// stampApplied sets LastAppliedAt to now on each folder's progress. The
+// stampApplied sets LastAppliedAt to now on each folder's progress, and
+// nothing else, so it never undoes a window_done clear the evictor or the
+// prefetcher makes without wmu. A folder without progress is skipped. The
 // caller holds wmu.
 func (a *Account) stampApplied(ctx context.Context, folders map[string]bool) error {
 	now := a.clock.Now()
 	for _, folder := range slices.Sorted(maps.Keys(folders)) {
-		p, ok, err := a.o.Store.Progress(ctx, a.name, folder)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			continue
-		}
-		p.LastAppliedAt = now
-		if err := a.o.Store.PutProgress(ctx, p); err != nil {
+		if err := a.o.Store.SetLastApplied(ctx, a.name, folder, now); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// windowStart is where the account's prefetch window starts now, or the
+// zero time when it has none (bodies only on read).
+func (a *Account) windowStart() time.Time {
+	window := a.settings().PrefetchBodies
+	if window <= 0 {
+		return time.Time{}
+	}
+	return a.clock.Now().Add(-window)
+}
+
+// noteWrite wakes the evictor when the file is over max_size after a write
+// that stored headers, as the body writers do (spec section 5). Headers are
+// never evicted: the sweep removes bodies only. A failed size check is
+// logged as a reason code and fails nothing.
+func (a *Account) noteWrite(ctx context.Context) {
+	if err := a.o.Store.noteWrite(ctx, a.o.MaxSize()); err != nil && ctx.Err() == nil {
+		a.logger.WarnContext(ctx, "checking the cache size", "reason", reasonCode(err))
+	}
 }
 
 // recordRewalks records, for each folder whose new mail fetchNew skipped
@@ -340,8 +363,7 @@ func (a *Account) recordRewalks(ctx context.Context, rewalk map[string]skipped) 
 			continue
 		}
 		p.BaselineUIDNext = max(p.BaselineUIDNext, s.high+1)
-		p.BackfillLowUID, p.BackfillDone = 0, false
-		if err := a.o.Store.PutProgress(ctx, p); err != nil {
+		if err := a.o.Store.RestartBackfill(ctx, a.name, folder, p.BaselineUIDNext); err != nil {
 			return err
 		}
 		a.logger.InfoContext(ctx, "cache backfill walks a folder again for new mail skipped in error",

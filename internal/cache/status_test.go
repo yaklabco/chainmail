@@ -22,8 +22,8 @@ func acctReadyFolder(r *acctRig, folder string, window bool) {
 }
 
 // The account state follows C5's states, the most pressing first:
-// disabled, error, paused, over_cap, budget_exhausted, backfilling,
-// prefetching, ready.
+// disabled, error, paused, budget_exhausted, backfilling, prefetching,
+// ready. The daemon applies the file-wide over_cap itself.
 func TestStatusStates(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -55,16 +55,24 @@ func TestStatusStates(t *testing.T) {
 				r.t.Fatal(err)
 			}
 		}, want: StatePaused},
-		{name: "over the cap", setup: func(r *acctRig) {
-			acctReadyFolder(r, "INBOX", true)
-			r.a.overCap.Store(true)
-		}, want: StateOverCap},
 		{name: "budget spent", setup: func(r *acctRig) {
 			acctReadyFolder(r, "INBOX", true)
 			if _, err := r.store.AddBudget(r.t.Context(), "acme", "2026-11-02", 1<<30); err != nil {
 				r.t.Fatal(err)
 			}
 		}, want: StateBudgetExhausted},
+		{name: "less than one header of budget left", setup: func(r *acctRig) {
+			acctReadyFolder(r, "INBOX", true)
+			if _, err := r.store.AddBudget(r.t.Context(), "acme", "2026-11-02", 1<<30-(headerBudgetBytes-1)); err != nil {
+				r.t.Fatal(err)
+			}
+		}, want: StateBudgetExhausted},
+		{name: "one header of budget left", setup: func(r *acctRig) {
+			acctReadyFolder(r, "INBOX", true)
+			if _, err := r.store.AddBudget(r.t.Context(), "acme", "2026-11-02", 1<<30-headerBudgetBytes); err != nil {
+				r.t.Fatal(err)
+			}
+		}, want: StateReady},
 		{name: "backfilling", setup: func(r *acctRig) {
 			r.putFolder(watch.FolderRow{Account: "acme", Folder: "INBOX", UIDValidity: 7, UIDNext: 10, Mode: watch.ModeIdle, State: watch.StateWatching})
 		}, want: StateBackfilling},

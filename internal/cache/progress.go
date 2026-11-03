@@ -98,3 +98,44 @@ func (s *Store) PutProgress(ctx context.Context, p Progress) error {
 	}
 	return nil
 }
+
+// SetLastApplied sets the folder's last_applied_at and changes nothing else
+// in its progress row, so it never undoes a window_done clear an eviction
+// or the prefetcher made meanwhile. A folder with no progress row is left
+// without one.
+func (s *Store) SetLastApplied(ctx context.Context, account, folder string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE folders SET last_applied_at = ? WHERE account = ? AND folder = ?`,
+		nullUnix(at), account, folder)
+	if err != nil {
+		return s.fail("writing the applied time", err)
+	}
+	return nil
+}
+
+// SetBackfill sets the folder's backfill_low_uid and backfill_done and
+// changes nothing else in its progress row, so it never undoes a
+// window_done clear an eviction or the prefetcher made meanwhile. A folder
+// with no progress row is left without one.
+func (s *Store) SetBackfill(ctx context.Context, account, folder string, low uint32, done bool) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE folders SET backfill_low_uid = ?, backfill_done = ? WHERE account = ? AND folder = ?`,
+		int64(low), boolInt(done), account, folder)
+	if err != nil {
+		return s.fail("writing backfill progress", err)
+	}
+	return nil
+}
+
+// RestartBackfill records a new backfill walk of the folder from below
+// baseline: it sets baseline_uidnext, clears backfill_low_uid and
+// backfill_done, and changes nothing else in its progress row, so it never
+// undoes a window_done clear an eviction or the prefetcher made meanwhile.
+// A folder with no progress row is left without one.
+func (s *Store) RestartBackfill(ctx context.Context, account, folder string, baseline uint32) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE folders SET baseline_uidnext = ?, backfill_low_uid = 0, backfill_done = 0 WHERE account = ? AND folder = ?`,
+		int64(baseline), account, folder)
+	if err != nil {
+		return s.fail("restarting the backfill", err)
+	}
+	return nil
+}

@@ -22,7 +22,8 @@ const (
 //
 // A folder is fresh when it has a sync_folders row with a UIDVALIDITY
 // (else folder_not_synced), is watching at any age or polling with a pass
-// within twice sync.poll (else stale), and has finished its backfill under
+// within twice sync.poll, and has been synced by a pass since this Account
+// was created (else stale), and has finished its backfill under
 // that UIDVALIDITY (else backfilling), checked in that order and in folder
 // order. The account is then stale while the builder has an event of the
 // account older than fresh_lag, or a trimmed gap, still to apply, or has
@@ -73,13 +74,19 @@ func (a *Account) Freshness(ctx context.Context, folders []string) (ok bool, rea
 
 // syncFresh reports whether SP6 keeps the folder current: watching at any
 // age, or polling with a successful pass within twice sync.poll
-// (amendment 8).
+// (amendment 8), and in either state synced by a pass of this run. The
+// state survives a restart, but the mail that arrived while the daemon was
+// down reaches the log only through this run's first pass, which stamps
+// last_sync_at.
 func (a *Account) syncFresh(r watch.FolderRow, now time.Time) bool {
+	if r.LastSyncAt.IsZero() || r.LastSyncAt.Before(a.started) {
+		return false
+	}
 	switch r.State {
 	case watch.StateWatching:
 		return true
 	case watch.StatePolling:
-		return !r.LastSyncAt.IsZero() && now.Sub(r.LastSyncAt) <= 2*a.o.Account.SyncPoll
+		return now.Sub(r.LastSyncAt) <= 2*a.o.Account.SyncPoll
 	default:
 		return false
 	}

@@ -98,6 +98,14 @@ func (a *Account) waitReady(ctx context.Context) error {
 	}
 }
 
+// headerAllowance is how many headers the day's remaining download budget
+// holds when used of limit bytes are spent, never negative. Background work
+// proceeds only while it is at least one: the backfill's admission and
+// Status's budget_exhausted both use it.
+func headerAllowance(used, limit int64) int64 {
+	return max(0, (limit-used)/headerBudgetBytes)
+}
+
 // waitAllowance blocks as waitReady does, and also while the day's
 // remaining download budget holds less than one header, until 00:00 UTC.
 // It returns how many headers the remaining budget holds, at least one,
@@ -113,7 +121,7 @@ func (a *Account) waitAllowance(ctx context.Context) (int, error) {
 			return 0, err
 		}
 		limit := a.settings().DailyDownload
-		if n := (limit - used) / headerBudgetBytes; n >= 1 {
+		if n := headerAllowance(used, limit); n >= 1 {
 			return int(min(n, math.MaxInt32)), nil
 		}
 		if !logged {

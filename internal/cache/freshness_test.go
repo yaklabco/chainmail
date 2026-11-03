@@ -12,8 +12,10 @@ import (
 // Freshness is spec 6.1 check 1 with amendment 8: every folder synced (a
 // sync row with a UIDVALIDITY), watching at any age or polling within twice
 // sync.poll, backfill done under the row's UIDVALIDITY, and no event of the
-// account older than fresh_lag left unapplied. The reason is the first
-// failure in folder order; syncedAt is the oldest last sync.
+// account older than fresh_lag left unapplied. A sync row last synced
+// before the Account started is from a previous run, so it is stale. The
+// reason is the first failure in folder order; syncedAt is the oldest last
+// sync.
 func TestFreshness(t *testing.T) {
 	t.Parallel()
 	now := acctStart
@@ -47,12 +49,14 @@ func TestFreshness(t *testing.T) {
 		return watch.Event{At: at, Kind: watch.KindNew, Account: account, Folder: "INBOX", Ref: "cm1:lag", Message: &watch.Message{Subject: "lag"}}
 	}
 	day := 24 * time.Hour
+	ranFrom := now.Add(-31 * day) // when the Account started, unless ranFor says otherwise
 	tests := []struct {
 		name       string
 		rows       []watch.FolderRow
 		progress   []Progress
 		lag        []watch.Event // published after the builder's position
 		notStarted bool          // the builder has not opened its group
+		ranFor     time.Duration // how long the Account has run, when not since ranFrom
 		folders    []string
 		wantOK     bool
 		wantReason string
@@ -128,12 +132,30 @@ func TestFreshness(t *testing.T) {
 			name: "builder not started", rows: []watch.FolderRow{watching("INBOX", now)}, progress: []Progress{done("INBOX")},
 			notStarted: true, folders: []string{"INBOX"}, wantReason: ReasonStale, wantSynced: now,
 		},
+		{
+			name: "watching, last synced before this run", rows: []watch.FolderRow{watching("INBOX", ranFrom.Add(-time.Second))}, progress: []Progress{done("INBOX")},
+			folders: []string{"INBOX"}, wantReason: ReasonStale, wantSynced: ranFrom.Add(-time.Second),
+		},
+		{
+			name: "polling within twice the poll, last synced before this run", rows: []watch.FolderRow{polling("Archive", now.Add(-6*time.Minute))}, progress: []Progress{done("Archive")},
+			ranFor: 5 * time.Minute, folders: []string{"Archive"}, wantReason: ReasonStale, wantSynced: now.Add(-6 * time.Minute),
+		},
+		{
+			name: "watching, never synced", rows: []watch.FolderRow{watching("INBOX", time.Time{})}, progress: []Progress{done("INBOX")},
+			folders: []string{"INBOX"}, wantReason: ReasonStale,
+		},
 		{name: "no folders", wantOK: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			r := newAcctRig(t, fake.New("acme", false), acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX", "Archive"}))
+			// The Account has run since ranFrom, or for ranFor when set, so
+			// a row synced since then is from this run.
+			r.a.started = ranFrom
+			if tt.ranFor > 0 {
+				r.a.started = now.Add(-tt.ranFor)
+			}
 			for _, row := range tt.rows {
 				r.putFolder(row)
 			}
@@ -262,5 +284,66 @@ func TestFreshnessFindsALagBehindOtherAccounts(t *testing.T) {
 	}
 	if ok || reason != ReasonStale {
 		t.Errorf("Freshness = %v, %q; want false, %q with an old event past one scan", ok, reason, ReasonStale)
+	}
+}
+
+// A folder's sync row survives a daemon restart, but the mail that arrived
+// while the daemon was down reaches the cache only through this run's
+// passes. So a watching or polling folder is fresh only once a pass of this
+// run has stamped its last_sync_at: the row a previous run left, however
+// recent its state, is stale until then.
+func TestFreshnessNeedsASyncInThisRun(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		state watch.Status
+		poll  bool
+	}{
+		{name: "watching", state: watch.StateWatching},
+		{name: "polling", state: watch.StatePolling, poll: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fs := fake.New("acme", false)
+			r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+			fs.Add(acctMsg("INBOX", "one"))
+			r.pass("INBOX") // the previous run's last pass, at acctStart
+			row := r.syncRow("INBOX")
+			p := Progress{Account: "acme", Folder: "INBOX", UIDValidity: row.UIDValidity, BaselineUIDNext: row.UIDNext, BackfillLowUID: 1, BackfillDone: true}
+			if err := r.store.PutProgress(t.Context(), p); err != nil {
+				t.Fatal(err)
+			}
+			if tt.poll {
+				r.setPolling("INBOX")
+			}
+			fresh := func() (bool, string) {
+				t.Helper()
+				r.a.applied.Store(r.tail())
+				ok, reason, _, err := r.a.Freshness(t.Context(), []string{"INBOX"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return ok, reason
+			}
+			if ok, reason := fresh(); !ok {
+				t.Fatalf("Freshness before the restart = %v, %q; want fresh", ok, reason)
+			}
+
+			// The daemon restarts a minute later, with the row still saying
+			// watching or polling from the previous run.
+			r.clock.Advance(time.Minute)
+			r.renew()
+			if ok, reason := fresh(); ok || reason != ReasonStale {
+				t.Errorf("Freshness after a restart, before a pass = %v, %q; want stale", ok, reason)
+			}
+			r.pass("INBOX")
+			if tt.poll {
+				r.setPolling("INBOX")
+			}
+			if ok, reason := fresh(); !ok {
+				t.Errorf("Freshness after this run's first pass = %v, %q; want fresh", ok, reason)
+			}
+		})
 	}
 }

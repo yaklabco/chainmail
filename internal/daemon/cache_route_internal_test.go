@@ -331,9 +331,6 @@ func TestSearcherRoutes(t *testing.T) {
 		spoil   func(*testing.T, *routeFixture)
 		want    string
 		route   routeInfo
-		// syncAge is how long before routeNow the oldest folder searched last
-		// synced, which a complete cache answer reports as synced_at.
-		syncAge time.Duration
 	}{
 		{name: "fresh header query", query: "from:acme", want: "view", route: complete},
 		{name: "text with a bound in the window", query: "invoice newer_than:30d", want: "view", route: complete},
@@ -343,7 +340,11 @@ func TestSearcherRoutes(t *testing.T) {
 		{name: "forced window not done", query: "invoice newer_than:30d", source: "cache", spoil: windowOpen, want: "view", route: incomplete("text_outside_window")},
 		{name: "stale polled folder", query: "from:acme", spoil: staleArchive, want: "server", route: server},
 		{name: "forced stale", query: "from:acme", source: "cache", spoil: staleArchive, want: "view", route: incomplete("stale")},
-		{name: "watched folder at any age", query: "from:acme", spoil: oldInbox, want: "view", route: complete, syncAge: 24 * time.Hour},
+		// The fixture's Account starts at routeNow, so a watched folder last
+		// synced a day earlier was synced by a previous run: stale until this
+		// run's first pass (cache.TestFreshness covers any age within a run).
+		{name: "watched folder synced before this run", query: "from:acme", spoil: oldInbox, want: "server", route: server},
+		{name: "forced watched folder synced before this run", query: "from:acme", source: "cache", spoil: oldInbox, want: "view", route: incomplete("stale")},
 		{name: "backfilling", query: "from:acme", spoil: backfilling, want: "server", route: server},
 		{name: "forced backfilling", query: "from:acme", source: "cache", spoil: backfilling, want: "view", route: incomplete("backfilling")},
 		{name: "folder not synced", query: "from:acme", spoil: unsynced, want: "server", route: server},
@@ -383,8 +384,9 @@ func TestSearcherRoutes(t *testing.T) {
 			if got := routeKind(src); got != tt.want {
 				t.Errorf("routed to %s, want %s", got, tt.want)
 			}
-			if tt.route.Complete && tt.route.Source == cache.SourceCache && !route.SyncedAt.Equal(routeNow.Add(-tt.syncAge)) {
-				t.Errorf("synced_at = %v, want %v", route.SyncedAt, routeNow.Add(-tt.syncAge))
+			// Every folder of a complete cache answer was synced at routeNow.
+			if tt.route.Complete && tt.route.Source == cache.SourceCache && !route.SyncedAt.Equal(routeNow) {
+				t.Errorf("synced_at = %v, want %v", route.SyncedAt, routeNow)
 			}
 			route.SyncedAt = time.Time{}
 			if route != tt.route {
