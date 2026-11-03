@@ -685,8 +685,8 @@ func count(t *testing.T, s *Store, q, in string) int {
 
 func TestFakeBcc(t *testing.T) {
 	t.Parallel()
-	// The fake keeps no Bcc, as a received message has none: bcc: matches
-	// nothing and -bcc: everything, on both kinds of account.
+	// A received message has no Bcc: bcc: matches nothing and -bcc:
+	// everything, on both kinds of account.
 	for _, gmail := range []bool{false, true} {
 		s := New("acct", gmail)
 		folder := "INBOX"
