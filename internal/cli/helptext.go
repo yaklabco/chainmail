@@ -78,8 +78,8 @@ var examples = map[string]string{
 	"chainmail version": `  chainmail version`,
 	"chainmail watch": `  # resume where the triage group left off, new mail only
   chainmail watch --group triage --kind new
-  # print what is already logged for one inbox, then exit
-  chainmail watch --account work --in inbox --once`,
+  # print everything logged for one inbox, then exit
+  chainmail watch --since 0 --account work --in inbox --once`,
 	"chainmail watch groups":        `  chainmail watch groups`,
 	"chainmail watch groups delete": `  chainmail watch groups delete triage`,
 	"chainmail watch status":        `  chainmail watch status`,
