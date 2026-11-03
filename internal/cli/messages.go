@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"connectrpc.com/connect"
@@ -29,7 +30,10 @@ group, and values with spaces are quoted.
   after: before:                YYYY-MM-DD
   larger: smaller:              bytes, or KiB and MiB: 10K, 5M
   has:attachment filename: label:
-                                Google accounts only, for now
+                                Google accounts, and other accounts once
+                                their cache is complete (see chainmail
+                                cache status); label: there matches IMAP
+                                keywords
   in:                           inbox, sent, drafts, archive, trash, spam
                                 (or junk), anywhere, or a folder name
   account:                      this account; each account: term and each
@@ -39,6 +43,12 @@ Every folder except Trash and Spam is searched unless in: says otherwise.
 On accounts other than Google, dates work at day granularity on the arrival
 date, so newer_than:1d there matches since the start of yesterday.
 
+Each account is answered from the local cache when the cache can answer
+the whole query and is fresh, and by its mail server otherwise. The table
+output ends with a source line naming which answered each account.
+--source cache answers from the cache even when it is incomplete or stale,
+and says why; --source server skips the cache.
+
 The shell removes quotes, so quote the whole query when it holds a phrase
 or a quoted value, as in the second example below. Put -- before the query
 when a term starts with -, so it is not read as a flag:
@@ -47,7 +57,8 @@ when a term starts with -, so it is not read as a flag:
 Examples:
   chainmail search invoice from:acme newer_than:30d
   chainmail search 'subject:"q3 report" OR has:attachment' --account gmail
-  chainmail search is:unread in:inbox --count`
+  chainmail search is:unread in:inbox --count
+  chainmail search from:acme --source server`
 
 func newFoldersCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	var accounts []string
@@ -72,6 +83,9 @@ func newFoldersCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	return cmd
 }
 
+// searchSources are the values --source takes.
+var searchSources = []string{"auto", "cache", "server"}
+
 func newSearchCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	req := &chainmailv1.SearchRequest{}
 	cmd := &cobra.Command{
@@ -79,7 +93,10 @@ func newSearchCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		Short: "Search mail on every account, newest first",
 		Long:  searchHelp,
 		Args:  cobra.ArbitraryArgs,
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("source") && !slices.Contains(searchSources, req.GetSource()) {
+				return usageError{err: fmt.Errorf("--source must be auto, cache or server, got %q", req.GetSource()), hint: helpHint(cmd)}
+			}
 			req.QueryString = strings.Join(args, " ")
 			c := g.client(env)
 			defer c.Close()
@@ -104,6 +121,7 @@ func newSearchCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	f.BoolVar(&req.CountOnly, "count", false, "count matches instead of listing them")
 	f.BoolVar(&req.Snippets, "snippet", false, "add a snippet of up to 200 characters to each row")
 	f.BoolVar(&req.Threads, "threads", false, "show the newest message of each thread")
+	f.StringVar(&req.Source, "source", "", "where answers come from: auto, cache or server (default auto: the cache when it is complete and fresh)")
 	return cmd
 }
 

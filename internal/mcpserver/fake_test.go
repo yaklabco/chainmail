@@ -29,7 +29,7 @@ type fakeCall struct {
 	Msg       proto.Message // the request; nil for UploadAttachment
 }
 
-// fakeDaemon serves the five agent-facing services on a Unix socket. Each
+// fakeDaemon serves the six agent-facing services on a Unix socket. Each
 // RPC answers with the func a test set, or CodeUnimplemented when it is nil.
 // Set the funcs before startFake. To change an answer mid-test, close over
 // state the test guards with a mutex or an atomic.
@@ -74,6 +74,9 @@ type fakeDaemon struct {
 	GetWatchStatus unaryFn[chainmailv1.GetWatchStatusRequest, chainmailv1.GetWatchStatusResponse]
 	ListGroups     unaryFn[chainmailv1.ListGroupsRequest, chainmailv1.ListGroupsResponse]
 	DeleteGroup    unaryFn[chainmailv1.DeleteGroupRequest, chainmailv1.DeleteGroupResponse]
+	GetCacheStatus unaryFn[chainmailv1.GetCacheStatusRequest, chainmailv1.GetCacheStatusResponse]
+	RebuildCache   unaryFn[chainmailv1.RebuildCacheRequest, chainmailv1.RebuildCacheResponse]
+	EvictCache     unaryFn[chainmailv1.EvictCacheRequest, chainmailv1.EvictCacheResponse]
 
 	mu    sync.Mutex
 	calls []fakeCall
@@ -128,6 +131,7 @@ type (
 	fakeComposeSvc  struct{ f *fakeDaemon }
 	fakeOrganizeSvc struct{ f *fakeDaemon }
 	fakeWatchSvc    struct{ f *fakeDaemon }
+	fakeCacheSvc    struct{ f *fakeDaemon }
 )
 
 func (a fakeAccountSvc) ListAccounts(ctx context.Context, req *connect.Request[chainmailv1.ListAccountsRequest]) (*connect.Response[chainmailv1.ListAccountsResponse], error) {
@@ -290,6 +294,18 @@ func (w fakeWatchSvc) DeleteGroup(ctx context.Context, req *connect.Request[chai
 	return fakeUnary(ctx, w.f, chainmailv1connect.WatchServiceDeleteGroupProcedure, w.f.DeleteGroup, req)
 }
 
+func (c fakeCacheSvc) GetCacheStatus(ctx context.Context, req *connect.Request[chainmailv1.GetCacheStatusRequest]) (*connect.Response[chainmailv1.GetCacheStatusResponse], error) {
+	return fakeUnary(ctx, c.f, chainmailv1connect.CacheServiceGetCacheStatusProcedure, c.f.GetCacheStatus, req)
+}
+
+func (c fakeCacheSvc) RebuildCache(ctx context.Context, req *connect.Request[chainmailv1.RebuildCacheRequest]) (*connect.Response[chainmailv1.RebuildCacheResponse], error) {
+	return fakeUnary(ctx, c.f, chainmailv1connect.CacheServiceRebuildCacheProcedure, c.f.RebuildCache, req)
+}
+
+func (c fakeCacheSvc) EvictCache(ctx context.Context, req *connect.Request[chainmailv1.EvictCacheRequest]) (*connect.Response[chainmailv1.EvictCacheResponse], error) {
+	return fakeUnary(ctx, c.f, chainmailv1connect.CacheServiceEvictCacheProcedure, c.f.EvictCache, req)
+}
+
 // startFake serves f until the test ends and sets f.Socket. The socket
 // lives under a short os.MkdirTemp path: Unix socket paths stop at 108 bytes.
 func startFake(t *testing.T, f *fakeDaemon) {
@@ -310,6 +326,7 @@ func startFake(t *testing.T, f *fakeDaemon) {
 	mux.Handle(chainmailv1connect.NewComposeServiceHandler(fakeComposeSvc{f: f}))
 	mux.Handle(chainmailv1connect.NewOrganizeServiceHandler(fakeOrganizeSvc{f: f}))
 	mux.Handle(chainmailv1connect.NewWatchServiceHandler(fakeWatchSvc{f: f}))
+	mux.Handle(chainmailv1connect.NewCacheServiceHandler(fakeCacheSvc{f: f}))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
