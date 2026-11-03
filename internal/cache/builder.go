@@ -243,12 +243,13 @@ func (a *Account) fetchNew(ctx context.Context, fetch map[string][]uint32, progr
 }
 
 // commitSegment writes a planned segment: the fetched rows, then the
-// changes in log order, then the touched folders' LastAppliedAt, and
-// counts the headers against the budget. It reports false, having written
-// nothing, when a drop ran since epoch. Every write is idempotent, so a
-// failure part way is safe to retry. A closing gap is applied last. Each
-// change is noted in the backfill's in-flight batch, so a header fetched
-// before it is fetched again instead of written.
+// changes in log order, then the touched folders' LastAppliedAt.
+// fetchHeaders has already counted the headers against the budget. It
+// reports false, having written nothing, when a drop ran since epoch.
+// Every write is idempotent, so a failure part way is safe to retry. A
+// closing gap is applied last. Each change is noted in the backfill's
+// in-flight batch, so a header fetched before it is fetched again instead
+// of written.
 func (a *Account) commitSegment(ctx context.Context, epoch uint64, plan segmentPlan, rows []Row) (bool, error) {
 	a.wmu.Lock()
 	defer a.wmu.Unlock()
@@ -274,11 +275,6 @@ func (a *Account) commitSegment(ctx context.Context, epoch uint64, plan segmentP
 	}
 	if err := a.stampApplied(ctx, plan.touched); err != nil {
 		return false, err
-	}
-	if len(rows) > 0 {
-		if _, err := a.o.Store.AddBudget(ctx, a.name, a.day(), int64(len(rows))*headerBudgetBytes); err != nil {
-			return false, err
-		}
 	}
 	if plan.gap != nil {
 		if err := a.applyGap(ctx, *plan.gap); err != nil {

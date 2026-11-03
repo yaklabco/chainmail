@@ -109,12 +109,12 @@ func (a *Account) backfillStep(ctx context.Context, w *walk) (*walk, bool, error
 	return a.commitBatch(ctx, w, batch, rows)
 }
 
-// commitBatch stores a fetched batch, counts it against the budget, and
-// records the walk's new low UID, marking the folder done when the walk has
-// no UIDs left. A batch fetched before a drop is discarded with its walk. A
-// batch with a UID whose flags or expunge the builder applied during the
-// fetch is not written: it returns w unchanged, so the next step fetches
-// the batch again.
+// commitBatch stores a fetched batch, which fetchHeaders has already
+// counted against the budget, and records the walk's new low UID, marking
+// the folder done when the walk has no UIDs left. A batch fetched before a
+// drop is discarded with its walk. A batch with a UID whose flags or
+// expunge the builder applied during the fetch is not written: it returns
+// w unchanged, so the next step fetches the batch again.
 func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows []Row) (*walk, bool, error) {
 	a.wmu.Lock()
 	defer a.wmu.Unlock()
@@ -134,9 +134,6 @@ func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows
 	}
 	if len(rows) > 0 {
 		if err := a.o.Store.PutRows(ctx, rows); err != nil {
-			return w, false, err
-		}
-		if _, err := a.o.Store.AddBudget(ctx, a.name, a.day(), int64(len(rows))*headerBudgetBytes); err != nil {
 			return w, false, err
 		}
 	}

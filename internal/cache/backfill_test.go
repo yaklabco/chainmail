@@ -404,4 +404,9 @@ func TestBackfillRefetchesABatchChangedDuringItsFetch(t *testing.T) {
 	if want := fs.Flags(seen); !slices.Equal(row.Flags, want) {
 		t.Errorf("row flags = %q, want the server's %q", row.Flags, want)
 	}
+	// Both fetches count: the discarded one's two headers and the second
+	// one's single header.
+	if got, want := r.budget("2026-11-02"), int64(3*headerBudgetBytes); got != want {
+		t.Errorf("budget used = %d, want %d for both fetches", got, want)
+	}
 }

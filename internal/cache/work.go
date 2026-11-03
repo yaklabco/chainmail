@@ -139,7 +139,9 @@ func (a *Account) retryBusy(ctx context.Context, f func() error) error {
 
 // fetchHeaders fetches the headers of uids in src as cache rows, on a
 // background context, retrying while the pool is busy. UIDs the folder no
-// longer holds are left out.
+// longer holds are left out. Every header received counts 2048 bytes
+// against the day's budget at once, whether or not its row is written, so
+// a fetch whose result is discarded is still accounted for.
 func (a *Account) fetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32) ([]Row, error) {
 	var rows []Row
 	err := a.retryBusy(ctx, func() error {
@@ -155,7 +157,13 @@ func (a *Account) fetchHeaders(ctx context.Context, src mailstore.Source, uids [
 			return nil
 		})
 	})
-	return rows, err
+	if err != nil || len(rows) == 0 {
+		return rows, err
+	}
+	if _, err := a.o.Store.AddBudget(ctx, a.name, a.day(), int64(len(rows))*headerBudgetBytes); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // track records a baseline for each folder the account syncs that the
