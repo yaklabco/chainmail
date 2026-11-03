@@ -69,6 +69,32 @@ func (s *Store) SetWindowDone(ctx context.Context, account, folder string, done 
 	return nil
 }
 
+// CompleteWindow sets the folder's window_done in one guarded update, only
+// if no row of the folder with internal_date at or after since lacks a
+// body, unless its failure count has reached maxAttempts (final). An
+// eviction that clears window_done can never be overwritten by a check
+// made before it. It reports whether it set the flag; a folder with no
+// progress row is left without one.
+func (s *Store) CompleteWindow(ctx context.Context, account, folder string, since time.Time, maxAttempts int) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE folders SET window_done = 1
+		 WHERE account = ? AND folder = ? AND NOT EXISTS (
+		   SELECT 1 FROM messages m
+		   LEFT JOIN bodies b ON b.msg = m.id
+		   LEFT JOIN body_failures f ON f.msg = m.id
+		   WHERE m.account = ? AND m.folder = ? AND m.internal_date >= ? AND b.msg IS NULL
+		     AND (f.msg IS NULL OR f.attempts < ?))`,
+		account, folder, account, folder, since.Unix(), maxAttempts)
+	if err != nil {
+		return false, s.fail("completing the prefetch window", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, s.fail("completing the prefetch window", err)
+	}
+	return n > 0, nil
+}
+
 const (
 	// evictChunk bounds the bodies one eviction query returns and one
 	// transaction removes.

@@ -401,6 +401,115 @@ func TestPrefetchBudget(t *testing.T) {
 	}
 }
 
+// batchTweak hands out the fake's batch results as tweak edits them, and
+// records how many raw bytes the results it returned carry.
+type batchTweak struct {
+	*fake.Store
+	tweak func(refs []ref.Ref, out []mailstore.MessageResult) []mailstore.MessageResult
+	mu    *sync.Mutex
+	total *int64
+}
+
+func (b batchTweak) FetchMessages(ctx context.Context, refs []ref.Ref) []mailstore.MessageResult {
+	out := b.tweak(refs, b.Store.FetchMessages(ctx, refs))
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, res := range out {
+		if res.Message != nil {
+			*b.total += int64(len(res.Message.Raw))
+		}
+	}
+	return out
+}
+
+// Every body received from the server is charged len(raw), whether it
+// then parses and stores or not, and a batch that ends early, or a batch
+// answer the prefetcher rejects, still charges the bodies received. A
+// result carrying only an error costs nothing.
+func TestPrefetchBudgetChargesEveryBodyReceived(t *testing.T) {
+	t.Parallel()
+	type tweak = func(refs []ref.Ref, out []mailstore.MessageResult) []mailstore.MessageResult
+	tests := []struct {
+		name string
+		// rig breaks the batch at middle, the second of its three messages.
+		rig func(r *prefetchRig, middle ref.Ref) tweak
+		// want is the step's wait.
+		want time.Duration
+	}{
+		{
+			name: "malformed body",
+			rig: func(_ *prefetchRig, middle ref.Ref) tweak {
+				return func(refs []ref.Ref, out []mailstore.MessageResult) []mailstore.MessageResult {
+					for i, x := range refs {
+						if x.UID == middle.UID && out[i].Message != nil {
+							msg := *out[i].Message
+							msg.Raw = []byte("Subject: hi\r\nno colon here\r\n\r\nbody\r\n")
+							out[i].Message = &msg
+						}
+					}
+					return out
+				}
+			},
+			want: 0,
+		},
+		{
+			name: "busy mid-batch",
+			rig: func(_ *prefetchRig, middle ref.Ref) tweak {
+				return func(refs []ref.Ref, out []mailstore.MessageResult) []mailstore.MessageResult {
+					for i, x := range refs {
+						if x.UID == middle.UID {
+							out[i] = mailstore.MessageResult{Err: mailstore.ErrBusy}
+						}
+					}
+					return out
+				}
+			},
+			want: retryFloor,
+		},
+		{
+			name: "later item fails to store",
+			rig: func(r *prefetchRig, middle ref.Ref) tweak {
+				if _, err := r.st.db.ExecContext(r.t.Context(), fmt.Sprintf(
+					"CREATE TRIGGER no_body BEFORE INSERT ON bodies WHEN NEW.msg = %d BEGIN SELECT RAISE(ABORT, 'disk full'); END", r.msgID(middle))); err != nil {
+					r.t.Fatal(err)
+				}
+				return func(_ []ref.Ref, out []mailstore.MessageResult) []mailstore.MessageResult { return out }
+			},
+			want: retryFloor,
+		},
+		{
+			name: "wrong number of results",
+			rig: func(*prefetchRig, ref.Ref) tweak {
+				return func(_ []ref.Ref, out []mailstore.MessageResult) []mailstore.MessageResult { return out[:2] }
+			},
+			want: retryFloor,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newPrefetchRig(t)
+			r.add(3*oneDay, "oldest")
+			middle := r.add(2*oneDay, "middle")
+			r.add(oneDay, "newest")
+			r.track(true)
+			var total int64
+			r.mail = batchTweak{Store: r.fk, tweak: tt.rig(r, middle), mu: &sync.Mutex{}, total: &total}
+			r.step(tt.want)
+			if total == 0 {
+				t.Fatal("the batch returned no bodies")
+			}
+			got, err := r.st.Budget(t.Context(), "acme", "2026-11-03")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != total {
+				t.Errorf("budget used = %d, want %d (len(raw) of every body received)", got, total)
+			}
+		})
+	}
+}
+
 // The prefetcher pauses the whole account while one of its folders is
 // auth_required or reconnecting, skips a folder in error alone, and ignores
 // another account's trouble (integration note 12).
@@ -506,4 +615,90 @@ func TestPrefetchRun(t *testing.T) {
 	pollUntil(t, "the prefetched body", func() bool { return r.has(m) })
 	cancel()
 	wg.Wait()
+}
+
+// msgID is the cache row id of x.
+func (r *prefetchRig) msgID(x ref.Ref) int64 {
+	r.t.Helper()
+	var id int64
+	if err := r.st.db.QueryRowContext(r.t.Context(), "SELECT id FROM messages WHERE account = ? AND folder = ? AND uid = ?", x.Account, x.Folder, x.UID).Scan(&id); err != nil {
+		r.t.Fatal(err)
+	}
+	return id
+}
+
+// An eviction of a window body between the prefetcher's check and its
+// write leaves window_done false: completion is one guarded update that
+// sees the body gone.
+func TestCompleteWindowLosesToAnEviction(t *testing.T) {
+	t.Parallel()
+	r := newPrefetchRig(t)
+	m := r.add(oneDay, "kept")
+	r.track(true)
+	r.step(0)
+	ctx := t.Context()
+	now := r.clk.Now()
+	since := now.Add(-r.set.PrefetchBodies)
+	left, err := r.st.BodylessSince(ctx, "acme", "INBOX", since, maxBodyAttempts, now.Add(windowCheckAhead), 1)
+	if err != nil || len(left) != 0 {
+		t.Fatalf("window check = %v, %v; want nothing left", left, err)
+	}
+	if _, _, err := r.st.dropBodies(ctx, []evictVictim{{msg: r.msgID(m), size: 1, account: "acme", folder: "INBOX", inWindow: true}}); err != nil {
+		t.Fatal(err)
+	}
+	set, err := r.st.CompleteWindow(ctx, "acme", "INBOX", since, maxBodyAttempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set || r.windowDone() {
+		t.Errorf("CompleteWindow after the eviction = %v, window_done = %v; want false, false", set, r.windowDone())
+	}
+}
+
+// CompleteWindow sets window_done only while no row of the folder inside
+// the window lacks a body, a final failure counting as done, and reports
+// whether it set it.
+func TestCompleteWindow(t *testing.T) {
+	t.Parallel()
+	r := newPrefetchRig(t)
+	ctx := t.Context()
+	now := r.clk.Now()
+	since := now.Add(-r.set.PrefetchBodies)
+	r.add(91*oneDay, "outside")
+	failing := r.add(2*oneDay, "failing")
+	r.track(true)
+	if r.completeWindow(since) {
+		t.Fatal("set with a window body never fetched")
+	}
+	for attempt := 1; attempt < maxBodyAttempts; attempt++ {
+		if _, err := r.st.RecordBodyFailure(ctx, failing, failFetch); err != nil {
+			t.Fatal(err)
+		}
+		if r.completeWindow(since) {
+			t.Fatalf("set with a failure of %d attempts, not final", attempt)
+		}
+	}
+	if _, err := r.st.RecordBodyFailure(ctx, failing, failFetch); err != nil {
+		t.Fatal(err)
+	}
+	if !r.completeWindow(since) {
+		t.Fatal("not set with only a final failure and a body outside the window left")
+	}
+	if set, err := r.st.CompleteWindow(ctx, "acme", "Archive", since, maxBodyAttempts); err != nil || set {
+		t.Errorf("CompleteWindow(Archive) with no progress row = %v, %v; want false", set, err)
+	}
+}
+
+// completeWindow runs CompleteWindow on INBOX and checks that what it
+// reports matches window_done.
+func (r *prefetchRig) completeWindow(since time.Time) bool {
+	r.t.Helper()
+	set, err := r.st.CompleteWindow(r.t.Context(), "acme", "INBOX", since, maxBodyAttempts)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if set != r.windowDone() {
+		r.t.Fatalf("CompleteWindow = %v but window_done = %v", set, r.windowDone())
+	}
+	return set
 }

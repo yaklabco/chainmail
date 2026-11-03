@@ -158,23 +158,28 @@ func (p *prefetcher) step(ctx context.Context) time.Duration {
 
 // settleWindow sets the folder's window_done when no body in the window is
 // left to fetch, counting failures still waiting for a retry, and clears it
-// otherwise. It writes only on a change.
+// otherwise. It writes only on a change. Setting it is one guarded update
+// in the Store, so an eviction between this step's check and the write
+// leaves it clear.
 func (p *prefetcher) settleWindow(ctx context.Context, pr Progress, since, now time.Time) error {
+	if !pr.WindowDone {
+		set, err := p.o.Store.CompleteWindow(ctx, p.o.Account, pr.Folder, since, maxBodyAttempts)
+		if err != nil {
+			return err
+		}
+		if set {
+			p.o.Logger.Info("cache body window complete", "account", p.o.Account, "folder", pr.Folder)
+		}
+		return nil
+	}
 	left, err := p.o.Store.BodylessSince(ctx, p.o.Account, pr.Folder, since, maxBodyAttempts, now.Add(windowCheckAhead), 1)
 	if err != nil {
 		return err
 	}
-	done := len(left) == 0
-	if done == pr.WindowDone {
+	if len(left) == 0 {
 		return nil
 	}
-	if err := p.o.Store.SetWindowDone(ctx, p.o.Account, pr.Folder, done); err != nil {
-		return err
-	}
-	if done {
-		p.o.Logger.Info("cache body window complete", "account", p.o.Account, "folder", pr.Folder)
-	}
-	return nil
+	return p.o.Store.SetWindowDone(ctx, p.o.Account, pr.Folder, false)
 }
 
 // fetch fetches one batch of bodies on a background connection and stores
@@ -191,12 +196,17 @@ func (p *prefetcher) fetch(ctx context.Context, refs []ref.Ref, day string, set 
 	}
 	results := ms.FetchMessages(mailstore.WithBackground(ctx), refs)
 	release()
+	p.charge(ctx, day, results)
 	if len(results) != len(refs) {
 		p.o.Logger.Warn("the mail store answered a body fetch with the wrong number of results", "account", p.o.Account)
 		return retry
 	}
-	var spent int64
-	defer func() { p.spend(ctx, day, spent) }()
+	stored := false
+	defer func() {
+		if stored {
+			p.noteWrite(ctx)
+		}
+	}()
 	for i, res := range results {
 		r := refs[i]
 		if res.Err != nil {
@@ -229,20 +239,33 @@ func (p *prefetcher) fetch(ctx context.Context, refs []ref.Ref, day string, set 
 			p.warn(ctx, "storing a prefetched body", err)
 			return retry
 		}
-		spent += int64(len(msg.Raw))
+		stored = true
 	}
 	return set.BackfillPause
 }
 
-// spend adds what a batch downloaded to the day's budget and wakes the
-// evictor when the file is over max_size.
-func (p *prefetcher) spend(ctx context.Context, day string, spent int64) {
+// charge adds len(raw) of every body a batch received to the day's budget
+// before any of them is parsed or stored: a body that then fails to parse
+// or store, or that a batch ending early never reaches, was still
+// downloaded. A result carrying only an error costs nothing.
+func (p *prefetcher) charge(ctx context.Context, day string, results []mailstore.MessageResult) {
+	var spent int64
+	for _, res := range results {
+		if res.Message != nil {
+			spent += int64(len(res.Message.Raw))
+		}
+	}
 	if spent == 0 {
 		return
 	}
 	if _, err := p.o.Store.AddBudget(ctx, p.o.Account, day, spent); err != nil {
 		p.warn(ctx, "adding to the download budget", err)
 	}
+}
+
+// noteWrite wakes the evictor when the file is over max_size after a batch
+// stored bodies.
+func (p *prefetcher) noteWrite(ctx context.Context) {
 	if err := p.o.Store.noteWrite(ctx, p.o.MaxSize()); err != nil {
 		p.warn(ctx, "checking the cache size", err)
 	}
