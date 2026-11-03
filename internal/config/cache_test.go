@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/pelletier/go-toml/v2"
 )
 
 // day is one cache day, as ParseCacheDuration reads "1d".
@@ -176,17 +174,16 @@ func TestCacheSettingsUnparsedFallsBackToDefaults(t *testing.T) {
 
 func TestCacheRejectsUnknownKeys(t *testing.T) {
 	t.Parallel()
-	for name, config := range map[string]string{
-		"cache table":   "[cache]\nprefetch = \"30d\"\n",
-		"account cache": watchAccount + "[accounts.host.cache]\nwindow = \"30d\"\n",
-		"inline cache":  watchAccount + "cache = { prefetch_body = \"30d\" }\n",
+	for name, tt := range map[string]struct{ config, key string }{
+		"cache table":   {config: "[cache]\nprefetch = \"30d\"\n", key: "prefetch"},
+		"account cache": {config: watchAccount + "[accounts.host.cache]\nwindow = \"30d\"\n", key: "window"},
+		"inline cache":  {config: watchAccount + "cache = { prefetch_body = \"30d\" }\n", key: "prefetch_body"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			_, err := Parse([]byte(config))
-			var strict *toml.StrictMissingError
-			if !errors.As(err, &strict) {
-				t.Errorf("err = %v, want *toml.StrictMissingError", err)
+			_, err := Parse([]byte(tt.config))
+			if !errors.Is(err, ErrUnknownKey) || !strings.Contains(err.Error(), tt.key) {
+				t.Errorf("err = %v, want ErrUnknownKey naming %s", err, tt.key)
 			}
 		})
 	}
