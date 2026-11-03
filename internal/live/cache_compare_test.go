@@ -169,7 +169,8 @@ var errCannotCompare = errors.New("cannot compare")
 // so the row is left out of both. Rows that arrived after start are left
 // out too, since mail can land between the two searches. A folder under
 // different UIDVALIDITY on the two sides is a difference. When no row
-// read is left to compare, or a ref or cursor cannot be read, it returns
+// read is left to compare, when neither side read a row but one has more
+// pages, or when a ref or cursor cannot be read, it returns
 // errCannotCompare: never agreement.
 func rowsDiff(cache, server sourcePages, start time.Time) (onlyCache, onlyServer []string, err error) {
 	covCache, err := sideCoverage(cache)
@@ -213,8 +214,15 @@ func rowsDiff(cache, server sourcePages, start time.Time) (onlyCache, onlyServer
 		return out
 	}
 	c, s := keep(cache.rows()), keep(server.rows())
-	if len(c) == 0 && len(s) == 0 && read > 0 {
-		return nil, nil, fmt.Errorf("%w: none of the %d rows read is covered by both sides and older than the start", errCannotCompare, read)
+	if len(c) == 0 && len(s) == 0 {
+		switch {
+		case read > 0:
+			return nil, nil, fmt.Errorf("%w: none of the %d rows read is covered by both sides and older than the start", errCannotCompare, read)
+		case cache.more() || server.more():
+			// Empty pages with a cursor left: the matches may lie on a
+			// later page, so two empty answers prove nothing yet.
+			return nil, nil, fmt.Errorf("%w: no rows read, and a search is not finished", errCannotCompare)
+		}
 	}
 	for r := range c {
 		if !s[r] {
@@ -533,6 +541,13 @@ func TestSourcesDiff(t *testing.T) {
 	// sentOnly is a cache page whose cursor covers Sent but not INBOX.
 	sentOnly := resp("cache", true, "", 300)
 	sentOnly.NextCursor = ref.EncodeCursor(ref.Cursor{Query: ref.Fingerprint("q"), Sources: []ref.CursorSource{{Account: "acct", Folder: "Sent", UIDValidity: 3, Below: 4}}})
+	// emptyMore is an empty page whose cursor still holds INBOX: its
+	// matches may lie on a later page.
+	emptyMore := func(source string) *chainmailv1.SearchResponse {
+		r := resp(source, true, "")
+		r.NextCursor = ref.EncodeCursor(ref.Cursor{Query: ref.Fingerprint("q"), Sources: []ref.CursorSource{{Account: "acct", Folder: "INBOX", UIDValidity: 1, Below: 10}}})
+		return r
+	}
 	partial := resp("server", true, "", 10)
 	partial.Partial = []*chainmailv1.PartialSource{{Account: "acct", Folder: "INBOX", Reason: "SERVER_UNAVAILABLE"}}
 	tests := []struct {
@@ -549,6 +564,10 @@ func TestSourcesDiff(t *testing.T) {
 		{name: "full tied pages holding different UIDs", cache: sourcePages{tied("cache", 100)}, server: sourcePages{tied("server", 200)}, want: "50 only on the server"},
 		{name: "an empty cache against a full tied server page", cache: sourcePages{resp("cache", true, "")}, server: sourcePages{tied("server", 50)}, want: "50 only on the server"},
 		{name: "nothing both sides cover", cache: sourcePages{sentOnly}, server: sourcePages{tied("server", 50)}, want: "cannot compare"},
+		{name: "both empty and done", cache: sourcePages{resp("cache", true, "")}, server: sourcePages{resp("server", true, "")}},
+		{name: "both empty, the cache unfinished", cache: sourcePages{emptyMore("cache")}, server: sourcePages{resp("server", true, "")}, want: "cannot compare"},
+		{name: "both empty, the server unfinished", cache: sourcePages{resp("cache", true, "")}, server: sourcePages{emptyMore("server")}, want: "cannot compare"},
+		{name: "both empty, both unfinished", cache: sourcePages{emptyMore("cache")}, server: sourcePages{emptyMore("server")}, want: "cannot compare"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
