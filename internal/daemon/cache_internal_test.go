@@ -554,3 +554,18 @@ func TestCacheUsesDaemonTime(t *testing.T) {
 		t.Errorf("bodies evicted = %d, want 1: the body is outside the daemon's window", n)
 	}
 }
+
+// Housekeeping runs once at start, before its first hourly wait, so a
+// daemon restarted more often than hourly still probes and prunes.
+func TestCacheHousekeepingRunsAtStart(t *testing.T) {
+	t.Parallel()
+	s, _ := newCacheServer(t, cacheConfig)
+	clk, probes := startHousekeeping(t, s)
+	w := nextWait(t, clk)
+	if n := probes.Load(); n != 1 {
+		t.Errorf("probes before the first timer = %d, want 1", n)
+	}
+	if w.d != cacheHousekeepInterval {
+		t.Errorf("first wait = %v, want %v", w.d, cacheHousekeepInterval)
+	}
+}

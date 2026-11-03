@@ -402,15 +402,17 @@ func (s *Server) probeCache(ctx context.Context) error {
 	return err
 }
 
-// runCacheHousekeeping runs cacheHousekeep every cacheHousekeepInterval
-// on the cache clock until ctx ends.
+// runCacheHousekeeping runs cacheHousekeep at once, then every
+// cacheHousekeepInterval on the cache clock, until ctx ends. The first run
+// is at start so a daemon restarted more often than hourly still probes a
+// full disk and prunes the recovery rows.
 func (s *Server) runCacheHousekeeping(ctx context.Context) {
 	for {
+		s.cacheHousekeep(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-s.cacheClock.After(cacheHousekeepInterval):
-			s.cacheHousekeep(ctx)
 		}
 	}
 }
