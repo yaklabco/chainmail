@@ -327,3 +327,66 @@ func TestCacheAccountGlobalKeysReportedOnce(t *testing.T) {
 		t.Errorf("problems = %q, want %q", ve.Problems, want)
 	}
 }
+
+// SyncAuto marks the accounts whose supervisor syncs every folder a default
+// search covers: presets other than Google with sync.folders absent,
+// whatever watch and sync.enabled say. An explicit list, even an empty one,
+// turns it off. SyncFolders stays the watch list either way.
+func TestAccountSyncAuto(t *testing.T) {
+	t.Parallel()
+	const workspace = "[oauth_clients.ws]\nclient_id = \"id\"\n[accounts.w]\nprovider = \"google-workspace\"\naddress = \"me@ainslies.us\"\noauth_client = \"ws\"\n"
+	tests := []struct {
+		name        string
+		config      string
+		account     string
+		want        bool
+		syncFolders []string
+	}{
+		{name: "default", config: watchAccount, account: "host", want: true, syncFolders: []string{"INBOX"}},
+		{name: "empty watch", config: watchAccount + "watch = []\n", account: "host", want: true, syncFolders: []string{}},
+		{name: "two watched folders", config: watchAccount + "watch = [\"INBOX\", \"Lists\"]\n", account: "host", want: true, syncFolders: []string{"INBOX", "Lists"}},
+		{name: "sync disabled", config: watchAccount + "sync = { enabled = false }\n", account: "host", want: true, syncFolders: []string{"INBOX"}},
+		{name: "explicit sync folders", config: watchAccount + "sync = { folders = [\"Sent\"] }\n", account: "host", want: false, syncFolders: []string{"INBOX", "Sent"}},
+		{name: "explicit empty sync folders", config: watchAccount + "sync = { folders = [] }\n", account: "host", want: false, syncFolders: []string{"INBOX"}},
+		{name: "gmail", config: gmailAccount, account: "g", want: false},
+		{name: "google workspace", config: workspace, account: "w", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := Parse([]byte(tt.config))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			got, err := cfg.Account(tt.account)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.SyncAuto != tt.want {
+				t.Errorf("SyncAuto = %v, want %v", got.SyncAuto, tt.want)
+			}
+			if !slices.Equal(got.SyncFolders, tt.syncFolders) {
+				t.Errorf("SyncFolders = %q, want %q", got.SyncFolders, tt.syncFolders)
+			}
+		})
+	}
+}
+
+// A Config built without Parse resolves SyncAuto the same way.
+func TestAccountSyncAutoUnparsed(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{Accounts: map[string]Account{
+		"host": {Provider: "hostinger", Address: "me@example.com"},
+		"sent": {Provider: "hostinger", Address: "me@example.com", Sync: AccountSync{Folders: []string{"Sent"}}},
+		"g":    {Provider: "gmail", Address: "me@gmail.com"},
+	}}
+	for name, want := range map[string]bool{"host": true, "sent": false, "g": false} {
+		got, err := cfg.Account(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.SyncAuto != want {
+			t.Errorf("%s: SyncAuto = %v, want %v", name, got.SyncAuto, want)
+		}
+	}
+}

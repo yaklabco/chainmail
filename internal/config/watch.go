@@ -31,8 +31,9 @@ type WatchConfig struct {
 type AccountSync struct {
 	// Enabled defaults to true. False turns off watching and syncing.
 	Enabled *bool `toml:"enabled"`
-	// Folders lists the synced folders besides the watch list. Nil means
-	// the watch list alone.
+	// Folders lists the synced folders besides the watch list. Nil means,
+	// on accounts other than Google, every folder a default search covers
+	// (ResolvedAccount.SyncAuto); an empty list syncs the watch list alone.
 	Folders []string `toml:"folders"`
 	// Poll is how often synced folders that are not watched are checked:
 	// 30s to 24h.

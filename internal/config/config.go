@@ -213,9 +213,14 @@ type ResolvedAccount struct {
 	// Watch lists the folders watched with IDLE. Nil on Gmail presets,
 	// which watch their \All folder instead.
 	Watch []string
-	// SyncFolders lists every synced folder, Watch first, then the rest of
-	// sync.folders in config order, without duplicates. Nil on Gmail presets.
+	// SyncFolders lists the synced folders the config names: Watch first,
+	// then the rest of sync.folders in config order, without duplicates.
+	// Nil on Gmail presets. With SyncAuto the supervisor adds the folders a
+	// default search covers at run time.
 	SyncFolders []string
+	// SyncAuto is true on non-Google accounts whose sync.folders is unset:
+	// the supervisor then syncs every folder a default search covers.
+	SyncAuto bool
 	// SyncPoll is how often synced folders that are not watched are checked.
 	SyncPoll time.Duration
 	// SyncEnabled is false when sync.enabled is false.
@@ -306,6 +311,7 @@ func (c *Config) Account(name string) (ResolvedAccount, error) {
 	if !p.Gmail {
 		r.Watch = watchList(a.Watch)
 		r.SyncFolders = syncFolders(r.Watch, a.Sync.Folders)
+		r.SyncAuto = a.Sync.Folders == nil
 	}
 	return r, nil
 }
