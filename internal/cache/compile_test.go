@@ -709,8 +709,8 @@ func TestCompileClassifier(t *testing.T) {
 	t.Parallel()
 	day := func(m time.Month, d int) time.Time { return time.Date(2026, m, d, 0, 0, 0, 0, time.UTC) }
 	const (
-		text   = "text_outside_window"
-		folder = "folder_not_synced"
+		text   = cache.ReasonTextOutsideWindow
+		folder = cache.ReasonFolderNotSynced
 	)
 	tests := []struct {
 		name        string
@@ -721,6 +721,8 @@ func TestCompileClassifier(t *testing.T) {
 		since       time.Time
 		serverOnly  bool
 		reason      string
+		// unsupported: a term the cache cannot evaluate, whatever the reason.
+		unsupported bool
 	}{
 		{name: "nothing", query: ""},
 		{name: "header terms", query: "from:acme is:unread larger:1M"},
@@ -746,19 +748,24 @@ func TestCompileClassifier(t *testing.T) {
 		{name: "text bounded in its OR branch", query: "(newer_than:7d invoice) OR from:acme", needsBodies: true},
 		{name: "bounded text under NOT", query: "-(newer_than:7d invoice)", needsBodies: true},
 		{name: "a bound under OR is no top-level bound", query: "newer_than:7d OR from:acme"},
-		{name: "system flag as a label", query: `label:\Seen`, serverOnly: true},
+		{name: "system flag as a label", query: `label:\Seen`, serverOnly: true, unsupported: true},
 		{name: "system flag as a Google label", query: `label:\Seen`, gmail: true},
 		{name: "has, filename and label off Google", query: "has:attachment filename:pdf label:x"},
 		{name: "Google trash", query: "in:trash from:acme", gmail: true, serverOnly: true, reason: folder},
 		{name: "trash off Google", query: "in:trash from:acme"},
 		{name: "folder reason first", query: "in:anywhere invoice", gmail: true, needsBodies: true, serverOnly: true, reason: folder},
 		{name: "Google archive with bounded text", query: "in:archive newer_than:7d invoice", gmail: true, needsBodies: true, since: day(10, 22)},
-		{name: "text reason before an unsupported term", query: `(invoice OR from:acme) label:\Seen`, needsBodies: true, serverOnly: true, reason: text},
-		{name: "top-level text with an unsupported term", query: `invoice label:\Seen`, needsBodies: true, serverOnly: true},
-		{name: "important off Google", tree: query.Term(query.FieldIs, "important"), serverOnly: true},
+		{name: "text reason before an unsupported term", query: `(invoice OR from:acme) label:\Seen`, needsBodies: true, serverOnly: true, reason: text, unsupported: true},
+		{name: "top-level text with an unsupported term", query: `invoice label:\Seen`, needsBodies: true, serverOnly: true, unsupported: true},
+		{name: "important off Google", tree: query.Term(query.FieldIs, "important"), serverOnly: true, unsupported: true},
 		{name: "important on Google", tree: query.Term(query.FieldIs, "important"), gmail: true},
-		{name: "has other than attachment", tree: query.Term(query.FieldHas, "pdf"), serverOnly: true},
-		{name: "unknown field", tree: query.Term("color", "red"), serverOnly: true},
+		{name: "has other than attachment", tree: query.Term(query.FieldHas, "pdf"), serverOnly: true, unsupported: true},
+		{name: "unknown field", tree: query.Term("color", "red"), serverOnly: true, unsupported: true},
+		// An unsupported term stays marked when another term gives the plan
+		// its reason, so the router still sends it to the server (integration
+		// note 15).
+		{name: "unsupported term under OR with text", query: `label:\Seen OR invoice`, needsBodies: true, serverOnly: true, reason: text, unsupported: true},
+		{name: "unsupported term in an unsynced Google folder", tree: query.And(query.Term(query.FieldLabel, "trash"), query.Term(query.FieldHas, "pdf")), gmail: true, serverOnly: true, reason: folder, unsupported: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -781,6 +788,9 @@ func TestCompileClassifier(t *testing.T) {
 			if p.NeedsBodies != tt.needsBodies || !p.Since.Equal(tt.since) || p.ServerOnly != tt.serverOnly || p.Reason != tt.reason {
 				t.Errorf("%s: NeedsBodies %v, Since %v, ServerOnly %v, Reason %q; want %v, %v, %v, %q", tt.name,
 					p.NeedsBodies, p.Since, p.ServerOnly, p.Reason, tt.needsBodies, tt.since, tt.serverOnly, tt.reason)
+			}
+			if p.Unsupported != tt.unsupported {
+				t.Errorf("%s: Unsupported %v, want %v", tt.name, p.Unsupported, tt.unsupported)
 			}
 		})
 	}

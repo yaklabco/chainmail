@@ -18,24 +18,19 @@ type Plan struct {
 	NeedsBodies bool      // a text term is present
 	Since       time.Time // the top-level AND lower date bound (newer_than or after); zero when none
 	ServerOnly  bool      // the cache can never answer this query completely
-	Reason      string    // with ServerOnly: text_outside_window or folder_not_synced
+	Reason      string    // with ServerOnly: ReasonTextOutsideWindow, ReasonFolderNotSynced or ""
+	// Unsupported is set when a term is one the cache cannot evaluate at
+	// all, whatever Reason says: such a plan is ServerOnly, and the router
+	// sends it to the server even when the cache is forced, so the
+	// server's own answer or refusal reaches the caller (integration
+	// note 15).
+	Unsupported bool
 }
 
 // errMalformedQuery is a tree neither query.Parse nor query.Validate lets
 // through: an AND or OR without children, a NOT without exactly one, a nil
 // child, or an unknown node kind.
 var errMalformedQuery = errors.New("malformed query tree")
-
-// Reasons Compile gives a server-only plan. They are incomplete_reason
-// values of the search API.
-const (
-	// planTextOutsideWindow: a text term under OR or NOT, with no lower
-	// date bound on its path, can match messages of any age, whose bodies
-	// the cache may not hold, and the top-level Since does not show it.
-	planTextOutsideWindow = "text_outside_window"
-	// planFolderNotSynced: the search covers a folder the cache never holds.
-	planFolderNotSynced = "folder_not_synced"
-)
 
 // queryMinDate and queryMaxSize are the limits imapstore's compileStandard
 // enforces off Google: IMAP keeps internal dates as Unix times, and RFC
@@ -99,14 +94,17 @@ func Compile(n *query.Node, in string, gmail bool, now time.Time) (Plan, error) 
 		Where:       Where{SQL: strings.Join(conds, " AND "), Args: args, FTS: fts},
 		NeedsBodies: hasText(n),
 		Since:       lowerBound(n, now),
+		Unsupported: c.unsupported,
+		ServerOnly:  c.unsupported,
 	}
+	// Reason names what an incomplete forced answer lacks: a folder the
+	// cache never holds, else text that may lie outside the body window.
+	// An unsupported term has no reason of its own; Unsupported marks it.
 	switch {
 	case notSynced || c.notSynced:
-		p.ServerOnly, p.Reason = true, planFolderNotSynced
+		p.ServerOnly, p.Reason = true, ReasonFolderNotSynced
 	case uncoveredText(n, false, false, now):
-		p.ServerOnly, p.Reason = true, planTextOutsideWindow
-	case c.unsupported:
-		p.ServerOnly = true
+		p.ServerOnly, p.Reason = true, ReasonTextOutsideWindow
 	}
 	return p, nil
 }

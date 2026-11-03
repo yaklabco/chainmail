@@ -14,6 +14,9 @@ const (
 	ReasonBackfilling     = "backfilling"
 	ReasonStale           = "stale"
 	ReasonFolderNotSynced = "folder_not_synced"
+	// ReasonTextOutsideWindow: the query has text the cache holds bodies
+	// for only inside the prefetch window, and nothing keeps it there.
+	ReasonTextOutsideWindow = "text_outside_window"
 )
 
 // Freshness reports whether every folder is fresh (spec 6.1 check 1), the
@@ -130,12 +133,20 @@ func (a *Account) lagging(ctx context.Context, cutoff time.Time) (bool, error) {
 	}
 }
 
+// InWindow reports whether since, a query's top-level lower date bound,
+// is inside the prefetch window, so the cache can hold every body text
+// after it needs once the window is fetched. A zero since (no bound) or an
+// empty window never is.
+func (a *Account) InWindow(since time.Time) bool {
+	window := a.settings().PrefetchBodies
+	return !since.IsZero() && window > 0 && !since.Before(a.clock.Now().Add(-window))
+}
+
 // WindowCovers reports whether since is inside the prefetch window and
 // every folder has window_done. A zero since (no lower date bound) or an
 // empty window never covers.
 func (a *Account) WindowCovers(ctx context.Context, folders []string, since time.Time) (bool, error) {
-	window := a.settings().PrefetchBodies
-	if since.IsZero() || window <= 0 || since.Before(a.clock.Now().Add(-window)) {
+	if !a.InWindow(since) {
 		return false, nil
 	}
 	progress, err := a.progressMap(ctx)
