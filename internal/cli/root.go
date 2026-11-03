@@ -38,20 +38,28 @@ func Execute(ctx context.Context, args []string, env Env) int {
 	return api.ExitOK
 }
 
-// globals holds the flags every command shares.
+// globals holds the flags every command shares, and what they resolve to.
 type globals struct {
+	// socketFlag is --socket as given, empty when it was not. The daemon
+	// reads only this, so a client's settings never move its socket.
+	socketFlag string
+	// socket and output are resolved by resolve.
 	socket string
 	output string
 }
 
-func (g *globals) socketPath(env Env) string {
-	if g.socket != "" {
-		return g.socket
+// socketPath is the daemon socket clients dial.
+func (g *globals) socketPath(Env) string {
+	if g.socket == "" {
+		return config.DefaultSocket
 	}
-	if s := env.Getenv("CHAINMAIL_SOCKET"); s != "" {
-		return s
-	}
-	return config.DefaultSocket
+	return g.socket
+}
+
+// addGlobalFlags registers the flags every command shares.
+func addGlobalFlags(root *cobra.Command, g *globals) {
+	root.PersistentFlags().StringVar(&g.socketFlag, "socket", "", "daemon socket (default $CHAINMAIL_SOCKET, then cli.toml, then "+config.DefaultSocket+")")
+	root.PersistentFlags().StringVar(&g.output, "output", "", "output format: json or table (default $CHAINMAIL_OUTPUT, then cli.toml, then table on a terminal and json otherwise)")
 }
 
 // client connects to the daemon. Callers Close it, so idle connections do
@@ -76,25 +84,19 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.SetHelpCommand(newHelpCmd())
 	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
-		// Changed tells an unset flag from an explicit --output "", which is a mistake.
-		switch {
-		case !cmd.Flags().Changed("output"):
-			g.output = "json"
-			if env.StdoutTerminal {
-				g.output = "table"
-			}
-		case g.output == "json", g.output == "table":
-		default:
-			return usageError{err: fmt.Errorf("--output must be json or table, got %q", g.output), hint: "run: chainmail --help"}
+		// Completion requests resolve settings inside each completion
+		// function, against the command being completed, and must not fail
+		// on a bad cli.toml.
+		if cmd.Name() == cobra.ShellCompRequestCmd || cmd.Name() == cobra.ShellCompNoDescRequestCmd {
+			return nil
 		}
-		return nil
+		return g.resolve(env, cmd)
 	}
 	root.SetIn(env.Stdin)
 	root.SetOut(env.Stdout)
 	root.SetErr(env.Stderr)
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error { return usageError{err: err, hint: helpHint(cmd)} })
-	root.PersistentFlags().StringVar(&g.socket, "socket", "", "daemon socket (default $CHAINMAIL_SOCKET, then "+config.DefaultSocket+")")
-	root.PersistentFlags().StringVar(&g.output, "output", "", "output format: json or table (default: table on a terminal, json otherwise)")
+	addGlobalFlags(root, g)
 	root.AddCommand(
 		newVersionCmd(env, g),
 		newDaemonCmd(ctx, env, g),

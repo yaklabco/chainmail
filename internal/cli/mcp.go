@@ -17,7 +17,7 @@ const mcpHelp = `Serve chainmail's tools to an AI agent over the Model Context P
 
 The agent's MCP client starts this command and speaks MCP on stdin and
 stdout. Diagnostics go to stderr. Calls go to the daemon at --socket, then
-$CHAINMAIL_SOCKET, then the default socket, and the audit log records them
+$CHAINMAIL_SOCKET, then cli.toml, then the default socket, and the audit log records them
 with client kind mcp. The command starts and lists its tools even when the
 daemon is down; calls then fail with DAEMON_UNREACHABLE.
 

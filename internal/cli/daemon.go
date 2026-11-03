@@ -44,7 +44,10 @@ func newDaemonCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		Use:   "daemon",
 		Short: "Run the chainmail daemon",
 		Args:  exactArgs(0),
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := f.fromSettings(env, cmd.Flags()); err != nil {
+				return err
+			}
 			plan, err := f.resolve(env, g)
 			if err != nil {
 				return err
@@ -52,10 +55,10 @@ func newDaemonCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			return runDaemon(ctx, env, plan)
 		},
 	}
-	cmd.Flags().StringVar(&f.configPath, "config", config.DefaultPath, "config file")
-	cmd.Flags().StringVar(&f.stateDir, "state-dir", productionStateDir, "directory for vault.age and state.db")
-	cmd.Flags().StringVar(&f.vaultKey, "vault-key-file", "", "age identity file (default $CREDENTIALS_DIRECTORY/vault-key)")
-	cmd.Flags().BoolVar(&f.dev, "dev", false, "development mode: run as yourself with a non-production state directory")
+	cmd.Flags().StringVar(&f.configPath, "config", config.DefaultPath, "config file (default $CHAINMAIL_CONFIG, then /etc/chainmail/config.toml)")
+	cmd.Flags().StringVar(&f.stateDir, "state-dir", productionStateDir, "directory for vault.age and state.db (default $CHAINMAIL_STATE_DIR, then /var/lib/chainmail)")
+	cmd.Flags().StringVar(&f.vaultKey, "vault-key-file", "", "age identity file (default $CHAINMAIL_VAULT_KEY_FILE, then $CREDENTIALS_DIRECTORY/vault-key)")
+	cmd.Flags().BoolVar(&f.dev, "dev", false, "development mode: run as yourself with a non-production state directory (default $CHAINMAIL_DEV)")
 	return cmd
 }
 
@@ -81,12 +84,14 @@ func (f *daemonFlags) resolve(env Env, g *globals) (daemonPlan, error) {
 		return p, err
 	}
 	p.cfg = cfg
-	// Clients find the socket through --socket, then CHAINMAIL_SOCKET. A dev
-	// daemon follows the same order before its own default, so one exported
-	// variable points both at it. Production uses the config file instead.
+	// Clients find the socket through --socket, then CHAINMAIL_SOCKET, then
+	// cli.toml. A dev daemon follows --socket, then CHAINMAIL_SOCKET, before
+	// its own default, so one exported variable points both at it. It never
+	// reads cli.toml, a client setting. Production uses the config file
+	// after --socket instead.
 	switch {
-	case g.socket != "":
-		p.socket = g.socket
+	case g.socketFlag != "":
+		p.socket = g.socketFlag
 	case p.dev && env.Getenv("CHAINMAIL_SOCKET") != "":
 		p.socket = env.Getenv("CHAINMAIL_SOCKET")
 	case p.dev:
