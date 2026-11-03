@@ -48,6 +48,10 @@ type Options struct {
 	// WatchSweepFloor replaces the 5 minute floor between expunge sweeps
 	// after a server EXPUNGE. Zero keeps 5 minutes.
 	WatchSweepFloor time.Duration
+	// Cache opens cache.db in the state directory and, with Watch, runs
+	// the cache workers. It is off by default, so existing tests keep the
+	// server path.
+	Cache bool
 	// Secrets are stored in the vault before the daemon starts, by secret
 	// name such as "accounts/host". A watching test sets the account's
 	// password, so its supervisor does not park the account as needing
@@ -155,6 +159,8 @@ func Start(t testing.TB, configTOML string, opts Options) *Harness {
 		WatchHeartbeat:        opts.WatchHeartbeat,
 		DisableWatch:          !opts.Watch,
 		WatchSweepFloor:       opts.WatchSweepFloor,
+		CacheDir:              dir,
+		DisableCache:          !opts.Cache,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -182,6 +188,9 @@ func Start(t testing.TB, configTOML string, opts Options) *Harness {
 // the audit rows afterwards. The test's cleanup calls Stop too, and later
 // calls return the first result.
 func (h *Harness) Stop() error { return h.stop() }
+
+// StateDir is the daemon's state directory. It also holds cache.db.
+func (h *Harness) StateDir() string { return h.dir }
 
 // AuditRows returns every audit row in insertion order.
 func (h *Harness) AuditRows(t testing.TB) []AuditRow {

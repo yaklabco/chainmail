@@ -20,6 +20,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/audit"
 	"github.com/jamesainslie/chainmail/internal/auth"
+	"github.com/jamesainslie/chainmail/internal/cache"
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/idempotency"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
@@ -68,6 +69,14 @@ type Options struct {
 	// watched folder after the server reports an EXPUNGE. Zero means 5
 	// minutes (watch.ExpungeSweepFloor). Integration tests shorten it.
 	WatchSweepFloor time.Duration
+	// CacheDir is the directory of cache.db, created with mode 0700 when
+	// missing. Empty runs without a cache, so every search and read uses
+	// the mail servers. The CLI passes [cache] dir, or the state directory.
+	CacheDir string
+	// DisableCache runs without a cache whatever the config says.
+	// daemontest sets it unless a test asks for the cache, so tests that
+	// count mail store calls keep the server path.
+	DisableCache bool
 }
 
 const (
@@ -145,6 +154,12 @@ type Server struct {
 	supervisors supervisorSet
 	// trimInterval is how often the event log is trimmed. Tests shorten it.
 	trimInterval time.Duration
+	// cache is cache.db, or nil when the cache is off or did not open.
+	// Serve opens it before any handler, background loop or supervisor
+	// runs, and closes it after all of them have stopped.
+	cache *cache.Store
+	// cacheErr is why cache.db did not open, or nil.
+	cacheErr error
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -244,6 +259,12 @@ func (s *Server) Serve(ctx context.Context) error {
 	// request's own context has ended with its deadline. Set before any
 	// handler runs.
 	s.shutdown = base.Done()
+	// cache.db opens before the background loops and the supervisors that
+	// use it, and closes after both have stopped: deferred calls run last
+	// in, first out, and drain has stopped the supervisors before Serve
+	// returns.
+	s.openCache(base)
+	defer s.closeCache()
 	defer s.startBackground(base)()
 	// Supervisors start once sends are recovered, on base, so a shutdown
 	// cancels them with the requests. drain joins them.
