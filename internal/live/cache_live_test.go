@@ -21,8 +21,12 @@ const (
 	// cacheTries is how often a query is compared before a lasting
 	// difference fails the test.
 	cacheTries = 3
-	// cacheRows is the page compared per query.
+	// cacheRows is the page size of the compared searches.
 	cacheRows = 50
+	// cacheMaxPages bounds the pages read per source and query. A group of
+	// rows sharing one arrival time that runs past it cannot be compared,
+	// which counts as a difference.
+	cacheMaxPages = 10
 )
 
 // cacheQuery is one comparison query. name stands for it in the log, so an
@@ -81,10 +85,8 @@ func TestCacheMatchesServer(t *testing.T) {
 	ready := waitCacheReady(t, c, names)
 	for _, a := range accounts {
 		t.Run(a.GetName(), func(t *testing.T) {
-			st := ready[a.GetName()]
-			if st.GetState() != "ready" {
-				t.Skipf("the cache is %q after the wait, last error %q; run again once chainmail cache status shows it ready",
-					st.GetState(), st.GetLastError())
+			if why := cacheSkipReason(ready[a.GetName()]); why != "" {
+				t.Skip(why)
 			}
 			for _, cq := range cacheQueries(a) {
 				compareSources(t, c, a.GetName(), cq)
@@ -148,27 +150,45 @@ func cacheSettleWait(t *testing.T) {
 	}
 }
 
-// sourcePage runs q on account forced to source and returns its first page,
-// failing the test on an error or a partial result.
-func sourcePage(t *testing.T, c *client.Client, account, q, source string) *chainmailv1.SearchResponse {
+// sourcePage runs q on account forced to source, from cursor, and returns
+// the page, failing the test on an error. A partial page is returned for
+// the caller to judge: it may pass on a later try.
+func sourcePage(t *testing.T, c *client.Client, account, q, source, cursor string) *chainmailv1.SearchResponse {
 	t.Helper()
 	resp, err := c.Message.Search(t.Context(), connect.NewRequest(&chainmailv1.SearchRequest{
-		QueryString: q, Accounts: []string{account}, Limit: cacheRows, Source: source,
+		QueryString: q, Accounts: []string{account}, Limit: cacheRows, Source: source, Cursor: cursor,
 	}))
 	if err != nil {
 		t.Fatalf("Search (source %q): %v (%s)", source, err, hint(err))
 	}
-	reportPartial(t, "Search", resp.Msg.GetPartial())
 	return resp.Msg
 }
 
+// readOn reads q on account forced to source further, adding pages to p
+// while next(p) holds and p has a next cursor, up to cacheMaxPages pages.
+func readOn(t *testing.T, c *client.Client, account, q, source string, p sourcePages, next func(sourcePages) bool) sourcePages {
+	t.Helper()
+	for len(p) < cacheMaxPages && (len(p) == 0 || (p.more() && next(p))) {
+		cursor := ""
+		if len(p) > 0 {
+			cursor = p[len(p)-1].GetNextCursor()
+		}
+		p = append(p, sourcePage(t, c, account, q, source, cursor))
+	}
+	return p
+}
+
 // compareSources compares cq on account from the cache and from the
-// server. A difference can be the cache trailing by up to fresh_lag, or a
-// flag that changed between the two searches, so it is compared again
-// after cacheSettle, and only a difference that lasts cacheTries tries
-// fails the test.
+// server. Each side is read until it has a row, the cutoff is taken from
+// those pages, and each is then read on until it holds every match at or
+// after the cutoff, so rows sharing the cutoff's time are compared whole.
+// A difference can be the cache trailing by up to fresh_lag, a flag that
+// changed between the two searches, or a partial page, so it is compared
+// again after cacheSettle, and only a difference that lasts cacheTries
+// tries fails the test.
 func compareSources(t *testing.T, c *client.Client, account string, cq cacheQuery) {
 	t.Helper()
+	noRows := func(p sourcePages) bool { return len(p.rows()) == 0 }
 	diff := ""
 	for try := 1; try <= cacheTries; try++ {
 		if try > 1 {
@@ -176,10 +196,14 @@ func compareSources(t *testing.T, c *client.Client, account string, cq cacheQuer
 			cacheSettleWait(t)
 		}
 		start := time.Now()
-		cache := sourcePage(t, c, account, cq.q, "cache")
-		server := sourcePage(t, c, account, cq.q, "server")
-		if diff = sourcesDiff(cache, server, account, start, cacheRows); diff == "" {
-			t.Logf("query %s: %d rows agree", cq.name, len(server.GetRows()))
+		cache := readOn(t, c, account, cq.q, "cache", nil, noRows)
+		server := readOn(t, c, account, cq.q, "server", nil, noRows)
+		cutoff := compareCutoff(cache, server)
+		atCutoff := func(p sourcePages) bool { return needsMore(p, cutoff) }
+		cache = readOn(t, c, account, cq.q, "cache", cache, atCutoff)
+		server = readOn(t, c, account, cq.q, "server", server, atCutoff)
+		if diff = sourcesDiff(cache, server, account, start, cutoff); diff == "" {
+			t.Logf("query %s: %d rows in %d pages agree", cq.name, len(server.rows()), len(server))
 			return
 		}
 	}
@@ -187,25 +211,27 @@ func compareSources(t *testing.T, c *client.Client, account string, cq cacheQuer
 }
 
 // routesToCache requires a default search with no source to be answered by
-// the cache: done when item 1.
+// the cache: done when item 1. A partial answer counts against the try
+// that got it.
 func routesToCache(t *testing.T, c *client.Client, account string) {
 	t.Helper()
 	for try := 1; ; try++ {
-		resp := sourcePage(t, c, account, "", "")
+		resp := sourcePage(t, c, account, "", "", "")
 		var got string
 		for _, ac := range resp.GetAccountCounts() {
 			if ac.GetAccount() == account {
 				got = ac.GetSource()
 			}
 		}
-		if got == "cache" && resp.GetSource() == "cache" {
+		partial := partialDiff(resp.GetPartial())
+		if partial == "" && got == "cache" && resp.GetSource() == "cache" {
 			return
 		}
 		if try == cacheTries {
-			t.Errorf("a default search was answered by %q (response %q), want cache", got, resp.GetSource())
+			t.Errorf("a default search was answered by %q (response %q, partial %q), want cache and every folder read", got, resp.GetSource(), partial)
 			return
 		}
-		t.Logf("a default search was answered by %q; asking again after %v", got, cacheSettle)
+		t.Logf("a default search was answered by %q (partial %q); asking again after %v", got, partial, cacheSettle)
 		cacheSettleWait(t)
 	}
 }
@@ -216,7 +242,9 @@ func routesToCache(t *testing.T, c *client.Client, account string) {
 // as a client can see it.
 func readsThroughCache(t *testing.T, c *client.Client, account string) {
 	t.Helper()
-	rows := sourcePage(t, c, account, "", "cache").GetRows()
+	resp := sourcePage(t, c, account, "", "cache", "")
+	reportPartial(t, "Search", resp.GetPartial())
+	rows := resp.GetRows()
 	if len(rows) == 0 {
 		t.Fatal("the cache holds no message to read")
 	}
