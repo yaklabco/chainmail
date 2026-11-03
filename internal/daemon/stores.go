@@ -344,7 +344,11 @@ type accountStore struct {
 	e *storeEntry
 }
 
-var _ mailstore.Store = (*accountStore)(nil)
+var (
+	_ mailstore.Store         = (*accountStore)(nil)
+	_ mailstore.HeaderFetcher = (*accountStore)(nil)
+	_ mailstore.Scoper        = (*accountStore)(nil)
+)
 
 // refsFailed gives every ref the same error.
 func refsFailed(refs []ref.Ref, err error) []mailstore.RefResult {
@@ -497,6 +501,34 @@ func (a *accountStore) Thread(ctx context.Context, r ref.Ref) (refs []ref.Ref, e
 		return err
 	})
 	return refs, err
+}
+
+// FetchHeaders implements mailstore.HeaderFetcher on the current store. A
+// store without it gives ErrUnsupported.
+func (a *accountStore) FetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32) (hs []mailstore.Header, err error) {
+	err = a.call(ctx, func(st mailstore.Store) error {
+		hf, ok := st.(mailstore.HeaderFetcher)
+		if !ok {
+			return fmt.Errorf("%w: the account's store cannot fetch headers", mailstore.ErrUnsupported)
+		}
+		hs, err = hf.FetchHeaders(ctx, src, uids)
+		return err
+	})
+	return hs, err
+}
+
+// SearchFolders implements mailstore.Scoper on the current store. A store
+// without it gives ErrUnsupported.
+func (a *accountStore) SearchFolders(ctx context.Context, in string) (folders []string, err error) {
+	err = a.call(ctx, func(st mailstore.Store) error {
+		sc, ok := st.(mailstore.Scoper)
+		if !ok {
+			return fmt.Errorf("%w: the account's store cannot report search folders", mailstore.ErrUnsupported)
+		}
+		folders, err = sc.SearchFolders(ctx, in)
+		return err
+	})
+	return folders, err
 }
 
 // Close does nothing: the store set owns the store and closes it on shutdown.
