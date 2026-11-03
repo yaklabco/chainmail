@@ -145,8 +145,10 @@ func NewAccount(o AccountOptions) *Account {
 	return a
 }
 
-// Run runs the account's cache workers until ctx ends and returns once they
-// have all stopped. It returns at once when the account's cache is disabled.
+// Run runs the builder, the backfill and the body prefetcher, joined, until
+// ctx ends. Body eviction is daemon-wide (Evictor), since the size cap
+// covers the whole file. Run returns once its workers have all stopped, and
+// at once when the account's cache is disabled.
 func (a *Account) Run(ctx context.Context) {
 	if !a.settings().Enabled {
 		return
@@ -154,6 +156,7 @@ func (a *Account) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	wg.Go(func() { a.runBuilder(ctx) })
 	wg.Go(func() { a.runBackfill(ctx) })
+	wg.Go(func() { a.runPrefetch(ctx) })
 	wg.Wait()
 }
 
@@ -258,4 +261,27 @@ func (a *Account) lastError() string {
 	a.errMu.Lock()
 	defer a.errMu.Unlock()
 	return a.lastErr
+}
+
+// runPrefetch runs the account's body prefetcher until ctx ends. It shares
+// the account's options, including the clock and logger NewAccount
+// defaulted, and pauses as the other workers do (integration note 12).
+func (a *Account) runPrefetch(ctx context.Context) {
+	o := a.o
+	newPrefetcher(prefetchOptions{
+		Account:  a.name,
+		Settings: o.Settings,
+		MaxSize:  o.MaxSize,
+		Store:    o.Store,
+		State:    o.State,
+		Mail: func(ctx context.Context) (mailstore.Store, func(), error) {
+			ms, release, err := o.Mail(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			return ms, release, nil
+		},
+		Clock:  o.Clock,
+		Logger: o.Logger,
+	}).run(ctx)
 }

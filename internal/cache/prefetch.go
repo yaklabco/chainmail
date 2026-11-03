@@ -55,7 +55,8 @@ type prefetchOptions struct {
 	Mail func(ctx context.Context) (mailstore.Store, func(), error)
 	// Clock nil means the system clock.
 	Clock watch.Clock
-	// Logger nil discards.
+	// Logger nil discards. It carries the account attribute: Account passes
+	// its own logger, so the prefetcher does not add it again.
 	Logger *slog.Logger
 }
 
@@ -168,7 +169,7 @@ func (p *prefetcher) settleWindow(ctx context.Context, pr Progress, since, now t
 			return err
 		}
 		if set {
-			p.o.Logger.Info("cache body window complete", "account", p.o.Account, "folder", pr.Folder)
+			p.o.Logger.Info("cache body window complete", "folder", pr.Folder)
 		}
 		return nil
 	}
@@ -190,7 +191,7 @@ func (p *prefetcher) fetch(ctx context.Context, refs []ref.Ref, day string, set 
 	ms, release, err := p.o.Mail(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
-			p.o.Logger.Debug("no mail store for the cache prefetcher", "account", p.o.Account, "err", err)
+			p.o.Logger.Debug("no mail store for the cache prefetcher", "reason", reasonCode(err))
 		}
 		return retry
 	}
@@ -198,7 +199,7 @@ func (p *prefetcher) fetch(ctx context.Context, refs []ref.Ref, day string, set 
 	release()
 	p.charge(ctx, day, results)
 	if len(results) != len(refs) {
-		p.o.Logger.Warn("the mail store answered a body fetch with the wrong number of results", "account", p.o.Account)
+		p.o.Logger.Warn("the mail store answered a body fetch with the wrong number of results")
 		return retry
 	}
 	stored := false
@@ -278,7 +279,7 @@ func (p *prefetcher) fail(ctx context.Context, r ref.Ref, reason string) error {
 		return err
 	}
 	if n >= maxBodyAttempts {
-		p.o.Logger.Info("cache body fetch given up", "account", r.Account, "folder", r.Folder, "uid", r.UID, "reason", reason)
+		p.o.Logger.Info("cache body fetch given up", "folder", r.Folder, "uid", r.UID, "reason", reason)
 	}
 	return nil
 }
@@ -288,7 +289,7 @@ func (p *prefetcher) warn(ctx context.Context, msg string, err error) {
 	if ctx.Err() != nil {
 		return
 	}
-	p.o.Logger.Warn(msg, "account", p.o.Account, "err", err)
+	p.o.Logger.Warn(msg, "err", err)
 }
 
 // bodyFailure maps a per-message fetch error to the fixed code to record,
