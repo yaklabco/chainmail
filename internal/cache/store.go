@@ -186,3 +186,38 @@ func (s *Store) SizeBytes(ctx context.Context) (int64, error) {
 func fail(op string, err error) error {
 	return fmt.Errorf("%s: %w", op, classify(err))
 }
+
+// inTx runs fn in one transaction and commits it. Errors name op and carry
+// ErrDiskFull or ErrCorrupt when SQLite reports either.
+func (s *Store) inTx(ctx context.Context, op string, fn func(tx *sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fail(op, err)
+	}
+	defer func() { _ = tx.Rollback() }() // a no-op after Commit; an earlier error is the one to report
+	if err := fn(tx); err != nil {
+		return fail(op, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fail(op, err)
+	}
+	return nil
+}
+
+// fromUnix turns stored Unix seconds into a UTC time.
+func fromUnix(sec int64) time.Time {
+	return time.Unix(sec, 0).UTC()
+}
+
+// boolInt renders b as the 0 or 1 the flag columns hold.
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// placeholders returns n comma-separated "?".
+func placeholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?, ", n), ", ")
+}
