@@ -568,3 +568,96 @@ func TestViewFetchMessagesLeavesGoogleRecoveryToTheServer(t *testing.T) {
 		t.Errorf("err = %v, want ErrStaleRef", got[0].Err)
 	}
 }
+
+// sortedRefs returns refs ordered by folder and UID, for comparing sets.
+func sortedRefs(refs []ref.Ref) []ref.Ref {
+	out := slices.Clone(refs)
+	slices.SortFunc(out, func(a, b ref.Ref) int {
+		if c := strings.Compare(a.Folder, b.Folder); c != 0 {
+			return c
+		}
+		return int(a.UID) - int(b.UID)
+	})
+	return out
+}
+
+// TestViewThread checks that a thread comes from the cache when it holds
+// the seed and every default-scope folder is fresh, with the members the
+// server's Thread gives, and from the server otherwise.
+func TestViewThread(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		gmail  bool
+		seed   string
+		stale  bool
+		late   bool
+		source string
+	}{
+		{name: "fresh", seed: "re: plan", source: cache.SourceCache},
+		{name: "fresh gmail", gmail: true, seed: "re: plan", source: cache.SourceCache},
+		{name: "a seed without a Message-ID", seed: "note", source: cache.SourceCache},
+		{name: "a stale folder in scope", seed: "re: plan", stale: true, source: cache.SourceServer},
+		{name: "a seed the cache lacks", late: true, source: cache.SourceServer},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newReadFixture(t, tt.gmail)
+			refs := seedReadMail(f.fk, tt.gmail)
+			f.warm(t)
+			if tt.stale {
+				f.ageSync(t, "Archive")
+			}
+			seed := refs[tt.seed]
+			if tt.late {
+				seed = f.fk.Add(fake.Message{Folder: "INBOX", Date: readDaysAgo(0), Subject: "re: late", MessageID: "p3@x", References: []string{"p@x"}, Body: "late"})
+			}
+			want, err := f.fk.Thread(t.Context(), seed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			threads := f.fk.Calls("Thread")
+			got, source, err := f.view.ThreadFrom(t.Context(), seed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if source != tt.source {
+				t.Errorf("source = %q, want %q", source, tt.source)
+			}
+			if fromServer := f.fk.Calls("Thread") - threads; (fromServer == 1) != (tt.source == cache.SourceServer) {
+				t.Errorf("server Thread calls = %d for source %s", fromServer, tt.source)
+			}
+			if !slices.Equal(sortedRefs(got), sortedRefs(want)) {
+				t.Errorf("members = %v, want %v", sortedRefs(got), sortedRefs(want))
+			}
+		})
+	}
+}
+
+// TestViewThreadRecoversAStaleSeed checks that a stale seed on an account
+// other than Google is recovered by Message-ID, and the thread is the
+// recovered seed's.
+func TestViewThreadRecoversAStaleSeed(t *testing.T) {
+	t.Parallel()
+	f := newReadFixture(t, false)
+	refs := seedReadMail(f.fk, false)
+	f.warm(t)
+	old := refs["re: re: plan"]
+	f.resetFolder(t, "INBOX")
+	found, err := f.fk.FindByMessageID(t.Context(), "INBOX", "p2@x")
+	if err != nil || len(found) != 1 {
+		t.Fatalf("server lookup: %v, %v", found, err)
+	}
+	want, err := f.fk.Thread(t.Context(), found[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := f.view.ThreadFrom(t.Context(), old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(sortedRefs(got), sortedRefs(want)) {
+		t.Errorf("members = %v, want %v", sortedRefs(got), sortedRefs(want))
+	}
+}

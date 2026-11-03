@@ -275,3 +275,91 @@ func (v *View) recoverRef(ctx context.Context, r ref.Ref) (ref.Ref, bool) {
 	}
 	return found[0], true
 }
+
+// Thread implements mailstore.Store's Thread through the cache, as
+// ThreadFrom does, without saying where it came from.
+func (v *View) Thread(ctx context.Context, r ref.Ref) ([]ref.Ref, error) {
+	refs, _, err := v.ThreadFrom(ctx, r)
+	return refs, err
+}
+
+// ThreadFrom returns the thread r belongs to, as the server's Thread
+// would, and SourceCache or SourceServer for where its membership came
+// from. The cache answers when it holds r's row and every folder a default
+// search covers is fresh (cachedThread). Otherwise the server answers, and
+// on an account other than Google a seed it calls stale is recovered by
+// Message-ID once and its thread returned.
+func (v *View) ThreadFrom(ctx context.Context, r ref.Ref) ([]ref.Ref, string, error) {
+	return v.thread(ctx, r, true)
+}
+
+func (v *View) thread(ctx context.Context, r ref.Ref, recovering bool) ([]ref.Ref, string, error) {
+	if refs, ok := v.cachedThread(ctx, r); ok {
+		return refs, SourceCache, nil
+	}
+	refs, err := v.server.Thread(ctx, r)
+	if err != nil && recovering && errors.Is(err, mailstore.ErrStaleRef) {
+		if moved, ok := v.recoverRef(ctx, r); ok {
+			return v.thread(ctx, moved, false)
+		}
+	}
+	return refs, SourceServer, err
+}
+
+// cachedThread answers Thread from the cache when it holds r's row and
+// every folder a default search covers is fresh: the cached rows of those
+// folders with r's thread ID, plus r itself, as the server's Thread scopes
+// and seeds it. A row without a thread ID is a thread of one.
+func (v *View) cachedThread(ctx context.Context, r ref.Ref) ([]ref.Ref, bool) {
+	store, account := v.a.o.Store, v.a.o.Account.Name
+	if r.Account != account {
+		return nil, false
+	}
+	row, ok, err := store.Row(ctx, r)
+	if err != nil {
+		v.logReadError("reading a cached row failed", err)
+		return nil, false
+	}
+	if !ok {
+		return nil, false
+	}
+	scoper, ok := v.server.(mailstore.Scoper)
+	if !ok {
+		return nil, false
+	}
+	folders, err := scoper.SearchFolders(ctx, "")
+	if err != nil {
+		return nil, false
+	}
+	fresh, _, _, err := v.a.Freshness(ctx, folders)
+	if err != nil || !fresh {
+		return nil, false
+	}
+	if row.ThreadID == "" {
+		return []ref.Ref{r}, true
+	}
+	rows, err := store.ThreadRows(ctx, account, row.ThreadID)
+	if err != nil {
+		v.logReadError("reading a cached thread failed", err)
+		return nil, false
+	}
+	var refs []ref.Ref
+	for _, tr := range rows {
+		if slices.Contains(folders, tr.Folder) {
+			refs = append(refs, tr.Ref())
+		}
+	}
+	return withThreadSeed(refs, r), true
+}
+
+// withThreadSeed adds seed to refs unless a ref already names the same
+// message: the same folder and UID, or on Gmail the same X-GM-MSGID, as the
+// server's Thread does.
+func withThreadSeed(refs []ref.Ref, seed ref.Ref) []ref.Ref {
+	for _, r := range refs {
+		if (r.Folder == seed.Folder && r.UID == seed.UID) || (seed.GmailMsgID != 0 && r.GmailMsgID == seed.GmailMsgID) {
+			return refs
+		}
+	}
+	return append(refs, seed)
+}
