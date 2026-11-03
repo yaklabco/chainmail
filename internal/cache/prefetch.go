@@ -115,6 +115,11 @@ func (p *prefetcher) step(ctx context.Context) time.Duration {
 	if used >= set.DailyDownload {
 		return untilUTCMidnight(now)
 	}
+	held, err := p.held(ctx)
+	if err != nil {
+		p.warn(ctx, "checking the cache size", err)
+		return retry
+	}
 	progress, err := p.o.Store.AllProgress(ctx, p.o.Account)
 	if err != nil {
 		p.warn(ctx, "reading cache progress", err)
@@ -142,6 +147,9 @@ func (p *prefetcher) step(ctx context.Context) time.Duration {
 				p.warn(ctx, "recording the prefetch window", err)
 				return retry
 			}
+		}
+		if held {
+			continue
 		}
 		return p.fetch(ctx, refs, day, set)
 	}
@@ -306,4 +314,22 @@ func (p *prefetcher) watchTrouble(ctx context.Context) (paused bool, failing map
 		}
 	}
 	return paused, failing, nil
+}
+
+// held reports whether the cap hold stops prefetching: it is set after an
+// eviction under the cap removed window bodies, and lasts while the file
+// is at or over 80% of max_size. Under 80% it clears the hold.
+func (p *prefetcher) held(ctx context.Context) (bool, error) {
+	if !p.o.Store.evict.hold.Load() {
+		return false, nil
+	}
+	size, err := p.o.Store.SizeBytes(ctx)
+	if err != nil {
+		return true, err
+	}
+	if size*100 < p.o.MaxSize()*refetchPercent {
+		p.o.Store.evict.hold.Store(false)
+		return false, nil
+	}
+	return true, nil
 }

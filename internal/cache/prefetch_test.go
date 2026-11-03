@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -450,4 +451,59 @@ func TestPrefetchPausesOnWatchTrouble(t *testing.T) {
 			}
 		})
 	}
+}
+
+// After the cap took window bodies, the prefetcher fetches nothing while
+// the file is at or over 80% of max_size, still clearing window_done, and
+// resumes and drops the hold once the file is under 80%.
+func TestPrefetchCapHysteresis(t *testing.T) {
+	t.Parallel()
+	r := newPrefetchRig(t)
+	m := r.add(oneDay, "evicted under the cap")
+	r.track(true)
+	if err := r.st.SetWindowDone(t.Context(), "acme", "INBOX", true); err != nil {
+		t.Fatal(err)
+	}
+	r.st.evict.hold.Store(true)
+	size, err := r.st.SizeBytes(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.max = size * 100 / refetchPercent // the file is exactly at 80%
+	r.step(prefetchIdle)
+	if r.fetches() != 0 || r.windowDone() || !r.st.evict.hold.Load() {
+		t.Errorf("at 80%%: calls = %d, window_done = %v, hold = %v; want 0, false, true", r.fetches(), r.windowDone(), r.st.evict.hold.Load())
+	}
+	r.max = size * 2
+	r.step(0)
+	if !r.has(m) || r.st.evict.hold.Load() {
+		t.Errorf("under 80%%: body cached = %v, hold = %v; want true, false", r.has(m), r.st.evict.hold.Load())
+	}
+}
+
+// A prefetched body that leaves the file over max_size kicks the evictor.
+func TestPrefetchKicksTheEvictor(t *testing.T) {
+	t.Parallel()
+	r := newPrefetchRig(t)
+	r.add(oneDay, "m")
+	r.track(true)
+	r.max = 1
+	r.step(0)
+	if n := len(r.st.evict.kickChan()); n != 1 {
+		t.Errorf("kicks queued = %d, want 1", n)
+	}
+}
+
+// run fetches until ctx ends, and returns then.
+func TestPrefetchRun(t *testing.T) {
+	t.Parallel()
+	r := newPrefetchRig(t)
+	m := r.add(oneDay, "m")
+	r.track(true)
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	wg.Go(func() { r.p.run(ctx) })
+	pollUntil(t, "the prefetched body", func() bool { return r.has(m) })
+	cancel()
+	wg.Wait()
 }
