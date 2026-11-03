@@ -282,7 +282,7 @@ chainmail daemon --dev \
 
 The daemon logs JSON lines to stderr and stops cleanly on Ctrl-C. `--dev` refuses `/var/lib/chainmail` as its state directory, including through a symlink. It replaces a stale socket left by a crashed daemon, and refuses to start if another daemon is listening on the path.
 
-A dev daemon picks its socket from `--socket`, then `CHAINMAIL_SOCKET`, then `$XDG_RUNTIME_DIR/chainmail-dev.sock`. Clients pick theirs from `--socket`, then `CHAINMAIL_SOCKET`, then `/run/chainmail/chainmail.sock`. Clients never look at `XDG_RUNTIME_DIR`, so export `CHAINMAIL_SOCKET` (or pass `--socket`) wherever you run the CLI. Where `XDG_RUNTIME_DIR` is not set, as on macOS, the daemon needs `--socket` or `CHAINMAIL_SOCKET` as well.
+A dev daemon picks its socket from `--socket`, then `CHAINMAIL_SOCKET`, then `$XDG_RUNTIME_DIR/chainmail-dev.sock`. Clients pick theirs from `--socket`, then `CHAINMAIL_SOCKET`, then `cli.toml` (see [CLI settings](#cli-settings)), then `/run/chainmail/chainmail.sock`. The daemon never reads `cli.toml`. Clients never look at `XDG_RUNTIME_DIR`, so export `CHAINMAIL_SOCKET` (or pass `--socket`) wherever you run the CLI. Where `XDG_RUNTIME_DIR` is not set, as on macOS, the daemon needs `--socket` or `CHAINMAIL_SOCKET` as well.
 
 Store the secrets. `secret set` takes the value from `--from-pass`, from a no-echo prompt when stdin is a terminal, or from stdin. A secret is one line: a trailing newline is dropped, and a value with more than one line is refused, as is a password (`accounts/<account>`) containing a NUL byte. Setting a secret clears the auth-required state of every account that uses it.
 
@@ -345,7 +345,7 @@ Every command accepts `--socket <path>` and `--output json|table`. Without `--ou
 | `chainmail label <ref>... [--add <label>]... [--remove <label>]...` | Adds and removes Gmail labels. Google accounts only. | as `move` |
 | `chainmail folder create <name>\|rename <from> <to>\|delete <name> [--force] --account <account>` | Creates, renames and deletes folders, or labels on Google. `delete` needs `policy.allow_folder_delete`. | `{"name":...}` for `create` and `rename`, with the folder's name on the server, and `{}` for `delete` |
 | `chainmail accounts probe [<account>]...` | Measures how many IMAP connections accounts allow and sizes their pools from it. | `{"limits":[{"account":...,"imap_cap":...,"pool_size":...,"probed_at":...,"error":...}]}` |
-| `chainmail daemon` | Runs the daemon. Flags: `--dev`, `--config` (default `/etc/chainmail/config.toml`), `--state-dir` (default `/var/lib/chainmail`), `--vault-key-file` (default `$CREDENTIALS_DIRECTORY/vault-key`). | JSON log lines on stderr |
+| `chainmail daemon` | Runs the daemon. Flags: `--dev`, `--config` (default `$CHAINMAIL_CONFIG`, then `/etc/chainmail/config.toml`), `--state-dir` (default `$CHAINMAIL_STATE_DIR`, then `/var/lib/chainmail`), `--vault-key-file` (default `$CHAINMAIL_VAULT_KEY_FILE`, then `$CREDENTIALS_DIRECTORY/vault-key`). `CHAINMAIL_DEV=true` is the same as `--dev`. | JSON log lines on stderr |
 | `chainmail mcp` | Serves the tools to an AI agent over MCP on stdio. See [Agents over MCP](#agents-over-mcp). | MCP messages on stdout, text log lines on stderr |
 | `chainmail accounts list` | Lists accounts with provider, address, auth method and auth state. `auth_detail` says what to run when `auth_state` is `AUTH_STATE_REQUIRED`. `capabilities` holds `allow_expunge` and `allow_folder_delete`, the effective policy for the account after the global and per-account tables. It never includes the allowlist. | `{"accounts":[{"name":...,"auth_state":...,"capabilities":{"allow_expunge":...,"allow_folder_delete":...}}]}` |
 | `chainmail accounts test <account>` | Logs in to the account's IMAP server, then its SMTP server, and reports each check. | `{"account":...,"imap":{...},"smtp":{...}}` |
@@ -362,6 +362,15 @@ Every command accepts `--socket <path>` and `--output json|table`. Without `--ou
 Each check in `accounts test` has `ok`, `reason` (`AUTH_REJECTED`, `SERVER_UNAVAILABLE` or `TIMEOUT` when it failed), `error`, `capabilities` (IMAP only) and `latency_ms`. When a check fails, the command still prints the full result on stdout, then reports the failure on stderr and exits with its code: 5 if any server rejected the credentials, otherwise the code of the first failed check. If the account is missing a secret or already needs a human, no check runs. The command prints nothing on stdout and fails with `AUTH_REQUIRED` (exit 5).
 
 `auth login` writes its instructions to stderr before the outcome, and `secret set` writes its prompt there when stdin is a terminal. An agent driving either should parse only the last line of stderr as the error.
+
+## CLI settings
+
+Two settings apply to every client command: `socket`, the daemon socket, and `output`, `json` or `table`. Each is read from, in order, its flag (`--socket`, `--output`), its environment variable (`CHAINMAIL_SOCKET`, `CHAINMAIL_OUTPUT`), the file `$XDG_CONFIG_HOME/chainmail/cli.toml` (or `~/.config/chainmail/cli.toml`), and its default (`/run/chainmail/chainmail.sock`; `table` when stdout is a terminal, `json` otherwise).
+
+    socket = "/run/user/1000/chainmail-dev.sock"
+    output = "table"
+
+A missing file is fine. A file that does not parse, holds another key, or sets `output` to anything but `json` or `table`, is a usage error (exit 2) naming the file. The daemon's own config file is separate, and no environment variable can change it.
 
 ## Reading mail
 
