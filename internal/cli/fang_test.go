@@ -115,10 +115,10 @@ func TestStyledErrorCleansEveryField(t *testing.T) {
 	var buf strings.Builder
 	styledError(&buf, fang.Styles{}, &exitError{
 		reason: "INTERNAL\x1b[2J",
-		msg:    "bad\x1b]0;title\x07 news‮",
-		hint:   "try\x1b[31m again⁦",
+		msg:    "bad\x1b]0;title\x07 news\u202e",
+		hint:   "try\x1b[31m again\u2066",
 	})
-	if strings.ContainsAny(buf.String(), "\x1b\x07‮⁦") {
+	if strings.ContainsAny(buf.String(), "\x1b\x07\u202e\u2066") {
 		t.Errorf("styled error kept a control or bidi character: %q", buf.String())
 	}
 	for _, want := range []string{"internal", "bad", "news", "try", "again"} {
