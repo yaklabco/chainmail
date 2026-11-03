@@ -50,6 +50,10 @@ type searchPlan struct {
 	// search picks.
 	resume      map[string]map[string]resumePoint
 	fingerprint string
+	// source is where answers come from: sourceAuto, cache.SourceCache or
+	// cache.SourceServer. It is not part of the fingerprint, so a cursor
+	// continues on whichever source answers the next page.
+	source string
 }
 
 // resumePoint is one cursor source: where its folder continues, or that
@@ -80,6 +84,10 @@ func errForgedCursor(why string) error {
 }
 
 func (m *messageService) plan(req *chainmailv1.SearchRequest) (*searchPlan, error) {
+	source, err := requestSource(req.GetSource())
+	if err != nil {
+		return nil, err
+	}
 	n, err := parseSearchQuery(req)
 	if err != nil {
 		return nil, err
@@ -101,7 +109,7 @@ func (m *messageService) plan(req *chainmailv1.SearchRequest) (*searchPlan, erro
 		names[i] = a.Name
 	}
 	p := &searchPlan{
-		tree: rest, in: scope.In, named: accts, accounts: slices.Clone(accts), limit: limit,
+		tree: rest, in: scope.In, named: accts, accounts: slices.Clone(accts), limit: limit, source: source,
 		fingerprint: ref.Fingerprint(rest.String(), scope.In, strings.Join(names, ",")),
 	}
 	if req.GetCursor() == "" {
