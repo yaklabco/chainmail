@@ -18,10 +18,10 @@ var (
 // brackets, In-Reply-To, References and attachments as FetchMessages gives
 // them, in the order of uids and leaving out UIDs the folder lacks. No
 // UIDs gives nil, nil without checking src, as imapstore does.
-func (s *Store) FetchHeaders(_ context.Context, src mailstore.Source, uids []uint32) ([]mailstore.Header, error) {
+func (s *Store) FetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32) ([]mailstore.Header, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.begin("FetchHeaders"); err != nil {
+	if err := s.beginRead(ctx, "FetchHeaders"); err != nil {
 		return nil, err
 	}
 	if len(uids) == 0 {
@@ -51,10 +51,10 @@ func (s *Store) FetchHeaders(_ context.Context, src mailstore.Source, uids []uin
 // SearchFolders implements mailstore.Scoper with the folders Search picks.
 // The fake keeps no folder list, so a folder AddFolder made is in the next
 // answer.
-func (s *Store) SearchFolders(_ context.Context, in string) ([]string, error) {
+func (s *Store) SearchFolders(ctx context.Context, in string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.begin("SearchFolders"); err != nil {
+	if err := s.beginRead(ctx, "SearchFolders"); err != nil {
 		return nil, err
 	}
 	return s.sourcesLocked(in)
