@@ -207,10 +207,10 @@ func TestWindowCovers(t *testing.T) {
 	}
 }
 
-// freshRig is a rig whose INBOX is watching with its backfill done, and
+// acctFreshRig is a rig whose INBOX is watching with its backfill done, and
 // whose builder has applied the log up to its current tail, so only the
 // events published after it decide Freshness.
-func freshRig(t *testing.T) *acctRig {
+func acctFreshRig(t *testing.T) *acctRig {
 	t.Helper()
 	r := newAcctRig(t, fake.New("acme", false), acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
 	r.putFolder(watch.FolderRow{Account: "acme", Folder: "INBOX", UIDValidity: 7, UIDNext: 10, Mode: watch.ModeIdle, State: watch.StateWatching, LastSyncAt: acctStart})
@@ -221,8 +221,8 @@ func freshRig(t *testing.T) *acctRig {
 	return r
 }
 
-// freshEvent is a new event of account in INBOX at at.
-func freshEvent(account string, at time.Time) watch.Event {
+// acctFreshEvent is a new event of account in INBOX at at.
+func acctFreshEvent(account string, at time.Time) watch.Event {
 	return watch.Event{At: at, Kind: watch.KindNew, Account: account, Folder: "INBOX", Ref: "cm1:lag", Message: &watch.Message{Subject: "lag"}}
 }
 
@@ -231,8 +231,8 @@ func freshEvent(account string, at time.Time) watch.Event {
 // time.
 func TestFreshnessStaleWithATrimmedGapPending(t *testing.T) {
 	t.Parallel()
-	r := freshRig(t)
-	r.publish(freshEvent("acme", acctStart), freshEvent("acme", acctStart), freshEvent("acme", acctStart))
+	r := acctFreshRig(t)
+	r.publish(acctFreshEvent("acme", acctStart), acctFreshEvent("acme", acctStart), acctFreshEvent("acme", acctStart))
 	if _, err := r.log.Trim(t.Context(), 168*time.Hour, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -249,13 +249,13 @@ func TestFreshnessStaleWithATrimmedGapPending(t *testing.T) {
 // accounts' events still makes the account stale.
 func TestFreshnessFindsALagBehindOtherAccounts(t *testing.T) {
 	t.Parallel()
-	r := freshRig(t)
+	r := acctFreshRig(t)
 	others := make([]watch.Event, 5001)
 	for i := range others {
-		others[i] = freshEvent("other", acctStart)
+		others[i] = acctFreshEvent("other", acctStart)
 	}
 	r.publish(others...)
-	r.publish(freshEvent("acme", acctStart.Add(-time.Hour)))
+	r.publish(acctFreshEvent("acme", acctStart.Add(-time.Hour)))
 	ok, reason, _, err := r.a.Freshness(t.Context(), []string{"INBOX"})
 	if err != nil {
 		t.Fatal(err)
