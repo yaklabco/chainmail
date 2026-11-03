@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net/mail"
 	"os"
 	"regexp"
@@ -101,22 +102,31 @@ const (
 	maxMaxMessageSize = 1 << 30
 )
 
-var byteSizeRE = regexp.MustCompile(`^([0-9]{1,12})(B|KiB|MiB)?$`)
+var byteSizeRE = regexp.MustCompile(`^([0-9]{1,12})(B|KiB|MiB|GiB|TiB)?$`)
 
-// ParseByteSize parses a size such as 65536, 512B, 64KiB or 2MiB.
+// ParseByteSize parses a size such as 65536, 512B, 64KiB, 2MiB, 2GiB or
+// 1TiB. A size above math.MaxInt64 bytes is an error.
 func ParseByteSize(s string) (int64, error) {
 	m := byteSizeRE.FindStringSubmatch(s)
 	if m == nil {
-		return 0, fmt.Errorf("size %q: want a number of bytes, optionally followed by B, KiB or MiB", s)
+		return 0, fmt.Errorf("size %q: want a number of bytes, optionally followed by B, KiB, MiB, GiB or TiB", s)
 	}
 	n, _ := strconv.ParseInt(m[1], 10, 64) // at most 12 digits always fits
+	var shift uint
 	switch m[2] {
 	case "KiB":
-		n <<= 10
+		shift = 10
 	case "MiB":
-		n <<= 20
+		shift = 20
+	case "GiB":
+		shift = 30
+	case "TiB":
+		shift = 40
 	}
-	return n, nil
+	if n > math.MaxInt64>>shift {
+		return 0, fmt.Errorf("size %q: too large", s)
+	}
+	return n << shift, nil
 }
 
 // BodyLimitBytes returns body_limit in bytes. Parse has validated it. A Daemon
