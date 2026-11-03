@@ -46,33 +46,37 @@ func TestVersion(t *testing.T) {
 	}
 }
 
+// usageErrorCases are invocations that must exit 2 with USAGE.
+var usageErrorCases = []struct {
+	name string
+	args []string
+}{
+	{name: "unknown flag", args: []string{"version", "--nope"}},
+	{name: "extra argument", args: []string{"version", "extra"}},
+	{name: "unknown command", args: []string{"nope"}},
+	{name: "no arguments", args: nil},
+	{name: "bare accounts", args: []string{"accounts"}},
+	{name: "unknown accounts subcommand", args: []string{"accounts", "nope"}},
+	{name: "bare secret", args: []string{"secret"}},
+	{name: "unknown secret subcommand", args: []string{"secret", "nope"}},
+	{name: "bare auth", args: []string{"auth"}},
+	{name: "unknown auth subcommand", args: []string{"auth", "nope"}},
+	{name: "bare admin", args: []string{"admin"}},
+	{name: "unknown admin subcommand", args: []string{"admin", "nope"}},
+	{name: "extra argument to a subcommand", args: []string{"accounts", "list", "extra"}},
+	{name: "missing argument", args: []string{"accounts", "test"}},
+	{name: "daemon argument", args: []string{"daemon", "extra"}},
+	{name: "completion command", args: []string{"completion", "nope"}},
+	{name: "completion without a shell", args: []string{"completion"}},
+	{name: "completion for two shells", args: []string{"completion", "bash", "zsh"}},
+	{name: "man with an argument", args: []string{"man", "extra"}},
+	{name: "help for an unknown topic", args: []string{"help", "nope"}},
+	{name: "help for an unknown subcommand", args: []string{"help", "accounts", "nope"}},
+}
+
 func TestUsageErrorsExitTwo(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name string
-		args []string
-	}{
-		{name: "unknown flag", args: []string{"version", "--nope"}},
-		{name: "extra argument", args: []string{"version", "extra"}},
-		{name: "unknown command", args: []string{"nope"}},
-		{name: "no arguments", args: nil},
-		{name: "bare accounts", args: []string{"accounts"}},
-		{name: "unknown accounts subcommand", args: []string{"accounts", "nope"}},
-		{name: "bare secret", args: []string{"secret"}},
-		{name: "unknown secret subcommand", args: []string{"secret", "nope"}},
-		{name: "bare auth", args: []string{"auth"}},
-		{name: "unknown auth subcommand", args: []string{"auth", "nope"}},
-		{name: "bare admin", args: []string{"admin"}},
-		{name: "unknown admin subcommand", args: []string{"admin", "nope"}},
-		{name: "extra argument to a subcommand", args: []string{"accounts", "list", "extra"}},
-		{name: "missing argument", args: []string{"accounts", "test"}},
-		{name: "daemon argument", args: []string{"daemon", "extra"}},
-		{name: "completion command", args: []string{"completion", "nope"}},
-		{name: "completion for a shell", args: []string{"completion", "bash"}},
-		{name: "help for an unknown topic", args: []string{"help", "nope"}},
-		{name: "help for an unknown subcommand", args: []string{"help", "accounts", "nope"}},
-	}
-	for _, tt := range tests {
+	for _, tt := range usageErrorCases {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := runCLI(t, Env{}, tt.args...)

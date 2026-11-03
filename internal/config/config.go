@@ -14,7 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/pelletier/go-toml/v2"
+	"github.com/spf13/viper"
 
 	"github.com/jamesainslie/chainmail/internal/mailaddr/allow"
 	"github.com/jamesainslie/chainmail/internal/provider"
@@ -31,6 +33,9 @@ const (
 
 // ErrUnknownAccount means no account has the requested name.
 var ErrUnknownAccount = errors.New("unknown account")
+
+// ErrUnknownKey means the config holds a key chainmail does not know.
+var ErrUnknownKey = errors.New("unknown config key")
 
 // Config is the daemon configuration file. It holds no secrets.
 type Config struct {
@@ -236,17 +241,147 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// Parse decodes config TOML, rejecting unknown fields, applies defaults and validates the result.
+// Parse decodes config TOML, rejecting unknown keys and values of the wrong
+// type, applies defaults and validates the result. Nothing outside data is
+// read: no environment variable can set or change a key.
+//
+// go-toml's strict decoder gates the input first, refusing unknown keys and
+// values of the wrong type that viper alone would accept or change. Only
+// input that passes the gate, and the key checks after it, is loaded
+// through viper.
 func Parse(data []byte) (*Config, error) {
-	var cfg Config
-	if err := toml.NewDecoder(bytes.NewReader(data)).DisallowUnknownFields().Decode(&cfg); err != nil {
+	if err := strictGate(data); err != nil {
 		return nil, fmt.Errorf("parsing: %w", err)
 	}
+	tree, err := checkKeys(data)
+	if err != nil {
+		return nil, fmt.Errorf("parsing: %w", err)
+	}
+	v := viper.New()
+	v.SetConfigType("toml")
+	if err := v.ReadConfig(bytes.NewReader(data)); err != nil {
+		return nil, fmt.Errorf("parsing: %w", err)
+	}
+	var cfg Config
+	if err := v.Unmarshal(&cfg, strictDecoding); err != nil {
+		return nil, fmt.Errorf("parsing: %w", err)
+	}
+	restoreEmptyTables(&cfg, tree)
 	cfg.applyDefaults()
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// strictGate decodes data with go-toml's strict decoder, the one chainmail
+// always used, and refuses what it refuses: unknown keys, as ErrUnknownKey,
+// and values of the wrong type. Viper alone cannot hold that line. It drops
+// empty tables, so [policy.typo] and max_recipients = {} would vanish
+// instead of failing, and mapstructure decodes a datetime into a struct as
+// an empty one. The gate's own result is discarded; viper does the load.
+func strictGate(data []byte) error {
+	var cfg Config
+	err := toml.NewDecoder(bytes.NewReader(data)).DisallowUnknownFields().Decode(&cfg)
+	var strict *toml.StrictMissingError
+	if errors.As(err, &strict) {
+		keys := make([]string, 0, len(strict.Errors))
+		for _, e := range strict.Errors {
+			keys = append(keys, strings.Join(e.Key(), "."))
+		}
+		slices.Sort(keys)
+		return fmt.Errorf("%w: %s", ErrUnknownKey, strings.Join(keys, ", "))
+	}
+	return err
+}
+
+// strictDecoding makes viper decode by toml tag with no conversions between
+// types. The gate has already refused unknown keys and wrong types; this
+// keeps viper from converting the values the gate let through.
+func strictDecoding(c *mapstructure.DecoderConfig) {
+	c.TagName = "toml"
+	// Viper's default is true, weak typing that converts between types.
+	c.WeaklyTypedInput = false
+	// Viper's default hooks would split strings into lists.
+	c.DecodeHook = nil
+}
+
+// checkKeys refuses keys viper would change. Viper folds keys to lower
+// case and splits them at dots, so [accounts.Work] would load as work and
+// [accounts."a.b"] as a nested table. An account or OAuth client name that
+// is not a valid name is reported as the *ValidationError validate would
+// give it, since viper would otherwise change the name before validate
+// sees it.
+// It returns the decoded tree for restoreEmptyTables.
+func checkKeys(data []byte) (map[string]any, error) {
+	var tree map[string]any
+	if err := toml.Unmarshal(data, &tree); err != nil {
+		return nil, err
+	}
+	return tree, checkKeysUnder("", tree)
+}
+
+// restoreEmptyTables puts back the empty tables viper leaves out, so
+// validation sees them as the go-toml decoder did: an empty account or
+// OAuth client table, or an empty imap or smtp override, is a mistake
+// validation reports, not the absence of one.
+func restoreEmptyTables(cfg *Config, tree map[string]any) {
+	clients, _ := tree["oauth_clients"].(map[string]any)
+	for name := range clients {
+		if _, ok := cfg.OAuthClients[name]; !ok {
+			if cfg.OAuthClients == nil {
+				cfg.OAuthClients = map[string]OAuthClient{}
+			}
+			cfg.OAuthClients[name] = OAuthClient{}
+		}
+	}
+	accounts, _ := tree["accounts"].(map[string]any)
+	for name, raw := range accounts {
+		if cfg.Accounts == nil {
+			cfg.Accounts = map[string]Account{}
+		}
+		a := cfg.Accounts[name]
+		acct, _ := raw.(map[string]any)
+		for key, field := range map[string]**EndpointOverride{"imap": &a.IMAP, "smtp": &a.SMTP} {
+			if m, isTable := acct[key].(map[string]any); isTable && len(m) == 0 && *field == nil {
+				*field = &EndpointOverride{}
+			}
+		}
+		cfg.Accounts[name] = a
+	}
+}
+
+func checkKeysUnder(prefix string, v any) error {
+	switch t := v.(type) {
+	case map[string]any:
+		for _, k := range slices.Sorted(maps.Keys(t)) {
+			path := k
+			if prefix != "" {
+				path = prefix + "." + k
+			}
+			if (prefix == "accounts" || prefix == "oauth_clients") && !nameRE.MatchString(k) {
+				return &ValidationError{
+					Problems: []string{path + ": name must be lowercase letters, digits and hyphens"},
+				}
+			}
+			if strings.ToLower(k) != k {
+				return fmt.Errorf("key %q: keys must be lower case", path)
+			}
+			if strings.Contains(k, ".") {
+				return fmt.Errorf("key %q: keys must not contain dots", path)
+			}
+			if err := checkKeysUnder(path, t[k]); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, e := range t {
+			if err := checkKeysUnder(prefix, e); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // AccountNames returns the configured account names in sorted order.

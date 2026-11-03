@@ -739,7 +739,9 @@ func TestDaemonSocketResolution(t *testing.T) {
 			t.Parallel()
 			f := &daemonFlags{configPath: cfgPath, stateDir: t.TempDir(), vaultKey: "/k", dev: tt.dev}
 			env := Env{Getenv: func(k string) string { return tt.env[k] }}
-			p, err := f.resolve(env, &globals{socket: tt.flag})
+			// socket is what a client's settings resolved to. The daemon
+			// ignores it and reads only --socket, socketFlag.
+			p, err := f.resolve(env, &globals{socketFlag: tt.flag, socket: "/client-settings.sock"})
 			if tt.wantErr {
 				var ue usageError
 				if !errors.As(err, &ue) {

@@ -733,3 +733,19 @@ func TestSendHeldExitsFour(t *testing.T) {
 		t.Errorf("captured %d messages, want none", n)
 	}
 }
+
+// json chosen through CHAINMAIL_OUTPUT or cli.toml is as explicit as
+// --output json: a dry run then prints JSON, even to a terminal.
+func TestDryRunJSONFromSettings(t *testing.T) {
+	t.Parallel()
+	e := startCLISend(t, smtptest.Options{})
+	fromEnv := e.run(t, Env{StdoutTerminal: true, Getenv: vars(map[string]string{"CHAINMAIL_OUTPUT": "json"})}, sendArgs("--body", "Hello", "--dry-run")...)
+	xdg := writeCLIConfig(t, `output = "json"`)
+	fromFile := e.run(t, Env{StdoutTerminal: true, Getenv: vars(map[string]string{"XDG_CONFIG_HOME": xdg})}, sendArgs("--body", "Hello", "--dry-run")...)
+	for name, got := range map[string]cliResult{"env": fromEnv, "cli.toml": fromFile} {
+		var out dryRunJSON
+		if got.code != 0 || json.Unmarshal([]byte(got.stdout), &out) != nil || !strings.Contains(out.Result.DryRun.Raw, "Subject: Quarterly\r\n") {
+			t.Errorf("json from %s: %+v, want a JSON dry run", name, got)
+		}
+	}
+}
