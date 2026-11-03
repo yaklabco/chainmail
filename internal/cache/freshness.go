@@ -89,8 +89,8 @@ func (a *Account) syncFresh(r watch.FolderRow, now time.Time) bool {
 // an event of the account still to apply that is older than cutoff or is a
 // trimmed gap. A trimmed gap means events were lost, so it is stale at once,
 // though Read stamps it with the current time. A Read examines at most 5000
-// events, so an empty page short of the tail reads on from its Next; a ctx
-// that ends while it does reports stale.
+// events, so an empty page short of the tail reads on from its Next, up to
+// the tail; a ctx that has ended before a further read reports stale.
 func (a *Account) lagging(ctx context.Context, cutoff time.Time) (bool, error) {
 	applied := a.applied.Load()
 	if applied < 0 {
@@ -101,11 +101,15 @@ func (a *Account) lagging(ctx context.Context, cutoff time.Time) (bool, error) {
 		return false, err
 	}
 	for after := applied; ; {
+		if after != applied {
+			select {
+			case <-ctx.Done():
+				return true, nil
+			default:
+			}
+		}
 		page, err := a.o.Log.Read(ctx, watch.Query{After: after, Filter: watch.Filter{Accounts: []string{a.name}}, Limit: 1})
 		if err != nil {
-			if ctx.Err() != nil {
-				return true, nil
-			}
 			return false, err
 		}
 		if len(page.Events) > 0 {
