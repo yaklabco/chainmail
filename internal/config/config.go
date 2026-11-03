@@ -40,6 +40,8 @@ type Config struct {
 	Accounts     map[string]Account     `toml:"accounts"`
 	Policy       Policy                 `toml:"policy"`
 	Watch        WatchConfig            `toml:"watch"`
+	// Cache is the [cache] table: the local cache of every account.
+	Cache CacheConfig `toml:"cache"`
 }
 
 // DefaultMaxRecipients is the most recipients a send may have unless
@@ -173,6 +175,9 @@ type Account struct {
 	Watch *[]string `toml:"watch"`
 	// Sync is the account's sync table.
 	Sync AccountSync `toml:"sync"`
+	// Cache overrides [cache] keys for this account. max_size and dir are
+	// a config error here. Nil means no account table.
+	Cache *CacheConfig `toml:"cache"`
 }
 
 // EndpointOverride replaces a preset's server address.
@@ -325,6 +330,7 @@ func (c *Config) applyDefaults() {
 	}
 	c.Policy = c.Policy.WithDefaults()
 	c.Watch.applyDefaults()
+	c.Cache.applyDefaults()
 	for name, a := range c.Accounts {
 		if a.Username == "" {
 			a.Username = a.Address
