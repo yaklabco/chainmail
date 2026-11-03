@@ -1000,3 +1000,39 @@ func TestParseIgnoresTheEnvironment(t *testing.T) {
 		t.Errorf("environment reached the config: %+v %+v", cfg.Policy, cfg.Daemon)
 	}
 }
+
+// Viper drops empty tables, so an empty override must be put back for
+// validation to refuse it, as the go-toml decoder did.
+func TestParseRefusesEmptyEndpointOverride(t *testing.T) {
+	t.Parallel()
+	for _, table := range []string{"imap", "smtp"} {
+		t.Run(table, func(t *testing.T) {
+			t.Parallel()
+			config := "[accounts.host]\nprovider = \"hostinger\"\naddress = \"me@example.com\"\n" + table + " = {}\n"
+			_, err := Parse([]byte(config))
+			var ve *ValidationError
+			if !errors.As(err, &ve) || !strings.Contains(err.Error(), "accounts.host."+table+": host is required") {
+				t.Errorf("err = %v, want a validation error that %s needs a host", err, table)
+			}
+		})
+	}
+}
+
+// An empty account or OAuth client table names something to validate;
+// viper drops it, so it must come back to be refused.
+func TestParseRefusesEmptyNamedTables(t *testing.T) {
+	t.Parallel()
+	for name, config := range map[string]string{
+		"account":      "[accounts.host]\n",
+		"oauth client": "[accounts.host]\nprovider = \"hostinger\"\naddress = \"me@example.com\"\n\n[oauth_clients.g]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(config))
+			var ve *ValidationError
+			if !errors.As(err, &ve) {
+				t.Errorf("err = %v, want a validation error", err)
+			}
+		})
+	}
+}

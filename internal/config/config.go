@@ -246,7 +246,8 @@ func Load(path string) (*Config, error) {
 // type, applies defaults and validates the result. Nothing outside data is
 // read: no environment variable can set or change a key.
 func Parse(data []byte) (*Config, error) {
-	if err := checkKeys(data); err != nil {
+	tree, err := checkKeys(data)
+	if err != nil {
 		return nil, fmt.Errorf("parsing: %w", err)
 	}
 	v := viper.New()
@@ -263,6 +264,7 @@ func Parse(data []byte) (*Config, error) {
 		slices.Sort(md.Unused)
 		return nil, fmt.Errorf("parsing: %w: %s", ErrUnknownKey, strings.Join(md.Unused, ", "))
 	}
+	restoreEmptyTables(&cfg, tree)
 	cfg.applyDefaults()
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -303,12 +305,43 @@ func refuseFloatToInt(from, to reflect.Type, data any) (any, error) {
 // is not a valid name is reported as the *ValidationError validate would
 // give it, since viper would otherwise change the name before validate
 // sees it.
-func checkKeys(data []byte) error {
+// It returns the decoded tree for restoreEmptyTables.
+func checkKeys(data []byte) (map[string]any, error) {
 	var tree map[string]any
 	if err := toml.Unmarshal(data, &tree); err != nil {
-		return err
+		return nil, err
 	}
-	return checkKeysUnder("", tree)
+	return tree, checkKeysUnder("", tree)
+}
+
+// restoreEmptyTables puts back the empty tables viper leaves out, so
+// validation sees them as the go-toml decoder did: an empty account or
+// OAuth client table, or an empty imap or smtp override, is a mistake
+// validation reports, not the absence of one.
+func restoreEmptyTables(cfg *Config, tree map[string]any) {
+	clients, _ := tree["oauth_clients"].(map[string]any)
+	for name := range clients {
+		if _, ok := cfg.OAuthClients[name]; !ok {
+			if cfg.OAuthClients == nil {
+				cfg.OAuthClients = map[string]OAuthClient{}
+			}
+			cfg.OAuthClients[name] = OAuthClient{}
+		}
+	}
+	accounts, _ := tree["accounts"].(map[string]any)
+	for name, raw := range accounts {
+		if cfg.Accounts == nil {
+			cfg.Accounts = map[string]Account{}
+		}
+		a := cfg.Accounts[name]
+		acct, _ := raw.(map[string]any)
+		for key, field := range map[string]**EndpointOverride{"imap": &a.IMAP, "smtp": &a.SMTP} {
+			if m, isTable := acct[key].(map[string]any); isTable && len(m) == 0 && *field == nil {
+				*field = &EndpointOverride{}
+			}
+		}
+		cfg.Accounts[name] = a
+	}
 }
 
 func checkKeysUnder(prefix string, v any) error {
