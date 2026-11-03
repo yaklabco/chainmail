@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -194,60 +193,110 @@ func (cp *completer) passEntries(cmd *cobra.Command, _ []string, toComplete stri
 // walkPassStore returns the sorted entries of the password store at store
 // that start with toComplete, within lim. It follows a symlinked store but
 // no symlink inside it, and descends only into directories that can hold
-// a match. It stops early when ctx is done.
+// a match. It reads each directory in batches of passReadBatch, counting
+// every entry it reads against lim.visits and checking ctx between
+// batches, so a huge or flat store costs no more than the limits allow.
 func walkPassStore(ctx context.Context, store, toComplete string, lim passLimits) []string {
 	root, err := filepath.EvalSymlinks(store)
 	if err != nil {
 		cobra.CompDebugln("chainmail: password store: "+err.Error(), false)
 		return nil
 	}
-	var out []string
-	visits := 0
-	// WalkDir's own error is only ever the SkipAll or a callback error,
-	// and the callback returns none: what it found is in out.
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if ctx.Err() != nil {
-			return filepath.SkipAll
+	w := &passWalk{ctx: ctx, toComplete: toComplete, lim: lim}
+	w.dir(root, "")
+	slices.Sort(w.out)
+	return w.out
+}
+
+// passReadBatch is how many directory entries walkPassStore reads at once.
+const passReadBatch = 256
+
+// passWalk is the state of one walkPassStore.
+type passWalk struct {
+	ctx        context.Context
+	toComplete string
+	lim        passLimits
+	visits     int
+	out        []string
+	// done stops the walk: a limit was reached or ctx ended.
+	done bool
+}
+
+// dir reads the directory at path, named rel inside the store ("" for the
+// store itself), keeps its matching entries, then walks the subdirectories
+// that can hold a match, in name order. A directory it cannot read offers
+// nothing.
+func (w *passWalk) dir(path, rel string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	var subdirs []string
+	for !w.done {
+		if w.ctx.Err() != nil {
+			w.done = true
+			break
 		}
-		if visits++; visits > lim.visits {
-			cobra.CompDebugln(fmt.Sprintf("chainmail: password store: stopped after %d files", lim.visits), false)
-			return filepath.SkipAll
+		n := min(passReadBatch, w.lim.visits-w.visits)
+		if n <= 0 {
+			cobra.CompDebugln(fmt.Sprintf("chainmail: password store: stopped after %d files", w.lim.visits), false)
+			w.done = true
+			break
 		}
-		if err != nil {
-			// WalkDir reports errors only for the store itself or a
-			// directory it could not read: skip it, so an unreadable
-			// corner of the store offers nothing.
-			return filepath.SkipDir
-		}
-		if path == root {
-			return nil
-		}
-		// path is under root, which WalkDir walked to reach it, so Rel
-		// cannot fail.
-		rel, _ := filepath.Rel(root, path)
-		rel = filepath.ToSlash(rel)
-		if d.IsDir() {
-			// Only a directory on the way to toComplete, or under it,
-			// can hold a matching entry.
-			canMatch := strings.HasPrefix(toComplete, rel+"/") || strings.HasPrefix(rel, toComplete)
-			if strings.HasPrefix(d.Name(), ".") || !canMatch {
-				return filepath.SkipDir
+		entries, readErr := f.ReadDir(n)
+		for _, e := range entries {
+			w.visits++
+			name := e.Name()
+			r := name
+			if rel != "" {
+				r = rel + "/" + name
 			}
-			return nil
+			if e.IsDir() {
+				// Only a directory on the way to toComplete, or under it,
+				// can hold a matching entry. ReadDir does not follow
+				// symlinks, so a linked directory is never entered.
+				canMatch := strings.HasPrefix(w.toComplete, r+"/") || strings.HasPrefix(r, w.toComplete)
+				if !strings.HasPrefix(name, ".") && canMatch {
+					subdirs = append(subdirs, name)
+				}
+				continue
+			}
+			w.keep(r)
+			if w.done {
+				break
+			}
 		}
-		entry, isEntry := strings.CutSuffix(rel, ".gpg")
-		if !isEntry || !safeValue(entry) || !strings.HasPrefix(entry, toComplete) {
-			return nil
+		if readErr != nil {
+			break // io.EOF at the end, or a read error: either way no more entries
 		}
-		if len(out) == lim.candidates {
-			cobra.CompDebugln(fmt.Sprintf("chainmail: password store: stopped at %d entries", lim.candidates), false)
-			return filepath.SkipAll
+	}
+	_ = f.Close() // read-only: a close error loses nothing
+	slices.Sort(subdirs)
+	for _, name := range subdirs {
+		if w.done {
+			return
 		}
-		out = append(out, entry)
-		return nil
-	})
-	slices.Sort(out)
-	return out
+		next := name
+		if rel != "" {
+			next = rel + "/" + name
+		}
+		w.dir(filepath.Join(path, name), next)
+	}
+}
+
+// keep adds the entry for the file named rel, when it is a .gpg file whose
+// entry is safe to offer and matches, unless the candidate limit is reached.
+func (w *passWalk) keep(rel string) {
+	entry, isEntry := strings.CutSuffix(rel, ".gpg")
+	if !isEntry || !safeValue(entry) || !strings.HasPrefix(entry, w.toComplete) {
+		return
+	}
+	if len(w.out) == w.lim.candidates {
+		cobra.CompDebugln(fmt.Sprintf("chainmail: password store: stopped at %d entries", w.lim.candidates), false)
+		w.done = true
+		return
+	}
+	w.out = append(w.out, entry)
 }
 
 // listAccounts asks the daemon for its accounts.

@@ -321,9 +321,11 @@ func TestWalkPassStore(t *testing.T) {
 	if want := []string{"mai/y", "mail/work", "mailbox/x"}; !slices.Equal(got, want) {
 		t.Errorf("prefix ma: %q, want %q", got, want)
 	}
+	// Directories are read in the order the filesystem gives, so the cap
+	// keeps some three of aaa's entries, sorted.
 	got = walkPassStore(t.Context(), store, "aaa/", passLimits{visits: 100, candidates: 3})
-	if want := []string{"aaa/n00", "aaa/n01", "aaa/n02"}; !slices.Equal(got, want) {
-		t.Errorf("candidate cap: %q, want %q", got, want)
+	if len(got) != 3 || !slices.IsSorted(got) || !strings.HasPrefix(got[0], "aaa/n") || !strings.HasPrefix(got[2], "aaa/n") {
+		t.Errorf("candidate cap: %q, want three sorted aaa/ entries", got)
 	}
 	got = walkPassStore(t.Context(), store, "", passLimits{visits: 4, candidates: 500})
 	if len(got) > 4 {
@@ -333,6 +335,24 @@ func TestWalkPassStore(t *testing.T) {
 	cancel()
 	if got := walkPassStore(ctx, store, "", passLimits{visits: 100, candidates: 500}); len(got) != 0 {
 		t.Errorf("cancelled walk: %q, want none", got)
+	}
+}
+
+// A flat directory larger than the visit cap is read only as far as the cap.
+func TestWalkPassStoreFlatDirectory(t *testing.T) {
+	t.Parallel()
+	var files []string
+	for i := range 600 {
+		files = append(files, fmt.Sprintf("e%04d.gpg", i))
+	}
+	store := writePassStore(t, files...)
+	got := walkPassStore(t.Context(), store, "", passLimits{visits: 50, candidates: 500})
+	if len(got) != 50 {
+		t.Errorf("flat walk with a 50-visit cap returned %d entries, want 50", len(got))
+	}
+	got = walkPassStore(t.Context(), store, "", passLimits{visits: 10000, candidates: 1000})
+	if len(got) != 600 {
+		t.Errorf("uncapped flat walk returned %d entries, want 600", len(got))
 	}
 }
 
