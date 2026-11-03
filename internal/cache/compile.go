@@ -3,9 +3,11 @@ package cache
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
+	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/query"
 )
 
@@ -27,6 +29,14 @@ var errMalformedQuery = errors.New("malformed query tree")
 // planFolderNotSynced is the reason of a plan that searches a folder the
 // cache never holds. It is an incomplete_reason value of the search API.
 const planFolderNotSynced = "folder_not_synced"
+
+// queryMinDate and queryMaxSize are the limits imapstore's compileStandard
+// enforces off Google: IMAP keeps internal dates as Unix times, and RFC
+// 3501 numbers are 32 bits. The cache refuses the same values with the same
+// text there, so a search fails alike on either route.
+var queryMinDate = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+
+const queryMaxSize = math.MaxUint32
 
 // likeEscape follows every LIKE: likeEscaper marks %, _ and \ in the value
 // with a backslash, so they match themselves.
@@ -70,7 +80,10 @@ func Compile(n *query.Node, in string, gmail bool, now time.Time) (Plan, error) 
 		}
 		conds, args = append(conds, sql), append(args, a...)
 	}
-	p := Plan{Where: Where{SQL: strings.Join(conds, " AND "), Args: args}}
+	p := Plan{
+		Where: Where{SQL: strings.Join(conds, " AND "), Args: args},
+		Since: lowerBound(n, now),
+	}
 	switch {
 	case notSynced:
 		p.ServerOnly, p.Reason = true, planFolderNotSynced
@@ -179,6 +192,10 @@ func (c *compiler) term(n *query.Node) (string, []any, error) {
 		return c.cannot()
 	case query.FieldLabel:
 		return c.label(n)
+	case query.FieldNewerThan, query.FieldOlderThan, query.FieldAfter, query.FieldBefore:
+		return c.date(n)
+	case query.FieldLarger, query.FieldSmaller:
+		return c.size(n)
 	case query.FieldIn, query.FieldAccount:
 		return "", nil, fmt.Errorf("%s: chooses where to search and must be split off before Compile", n.Field)
 	default:
@@ -239,4 +256,150 @@ func likeContains(column, value string) (string, []any) {
 // newline-joined column, which has a newline before and after each element.
 func likeElement(column, value string) (string, []any) {
 	return column + " LIKE ?" + likeEscape, []any{"%\n" + likeEscaper.Replace(strings.ToLower(value)) + "\n%"}
+}
+
+// date compiles a date or age term. newer_than and after are IMAP SINCE,
+// on or after the day; older_than and before are BEFORE, strictly before
+// it. internal_date holds Unix seconds.
+func (c *compiler) date(n *query.Node) (string, []any, error) {
+	d, err := c.day(n)
+	if err != nil {
+		return "", nil, err
+	}
+	if n.Field == query.FieldNewerThan || n.Field == query.FieldAfter {
+		return "m.internal_date >= ?", []any{d.Unix()}, nil
+	}
+	return "m.internal_date < ?", []any{d.Unix()}, nil
+}
+
+// day is the day a date or age term compares with, as compileStandard
+// computes it, refused off Google when it is before queryMinDate.
+func (c *compiler) day(n *query.Node) (time.Time, error) {
+	var d time.Time
+	switch n.Field {
+	case query.FieldNewerThan, query.FieldOlderThan:
+		if _, _, err := query.ParseAge(n.Value); err != nil {
+			return time.Time{}, badQueryValue(n, err)
+		}
+		d = queryAgeStart(c.now, n.Value)
+	default:
+		var err error
+		if d, err = query.ParseDate(n.Value); err != nil {
+			return time.Time{}, badQueryValue(n, err)
+		}
+	}
+	if !c.gmail && d.Before(queryMinDate) {
+		return time.Time{}, fmt.Errorf("%w: %s:%s reaches back before %s, the earliest date IMAP SEARCH compares here; use a later date or a shorter age",
+			mailstore.ErrUnsupportedQuery, n.Field, n.Value, queryMinDate.Format(time.DateOnly))
+	}
+	return d, nil
+}
+
+// size compiles larger: and smaller:, both strict as IMAP's LARGER and
+// SMALLER. larger:0 is every message, as IMAP reads it (go-imap sends 0 as
+// no bound), and smaller:0 none.
+func (c *compiler) size(n *query.Node) (string, []any, error) {
+	size, err := query.ParseSize(n.Value)
+	if err != nil {
+		return "", nil, badQueryValue(n, err)
+	}
+	if !c.gmail && size > queryMaxSize {
+		return "", nil, fmt.Errorf("%w: %s:%s is %d bytes, and IMAP SEARCH sizes go up to %d bytes",
+			mailstore.ErrUnsupportedQuery, n.Field, n.Value, size, int64(queryMaxSize))
+	}
+	switch {
+	case n.Field == query.FieldLarger && size == 0:
+		return "1", nil, nil
+	case n.Field == query.FieldLarger:
+		return "m.size > ?", []any{size}, nil
+	case size == 0:
+		return "0", nil, nil
+	default:
+		return "m.size < ?", []any{size}, nil
+	}
+}
+
+// badQueryValue wraps a parse error for a term in ErrUnsupportedQuery, as
+// imapstore's badValue does. Validated trees never get here.
+func badQueryValue(n *query.Node, err error) error {
+	return fmt.Errorf("%w: %s: %w", mailstore.ErrUnsupportedQuery, n.Field, err)
+}
+
+// lowerBound is the latest lower date bound among the direct terms of n's
+// top-level AND, or of n itself when it is a term: newer_than or after.
+// Zero when there is none.
+func lowerBound(n *query.Node, now time.Time) time.Time {
+	if n == nil {
+		return time.Time{}
+	}
+	if n.Op != query.OpAnd {
+		since, _ := termBound(n, now)
+		return since
+	}
+	var (
+		since time.Time
+		found bool
+	)
+	for _, ch := range n.Children {
+		if b, ok := termBound(ch, now); ok && (!found || b.After(since)) {
+			since, found = b, true
+		}
+	}
+	return since
+}
+
+// termBound is the day n bounds the search from below, when n is a
+// newer_than or after term with a valid value.
+func termBound(n *query.Node, now time.Time) (time.Time, bool) {
+	if n == nil || n.Op != query.OpTerm {
+		return time.Time{}, false
+	}
+	switch n.Field {
+	case query.FieldNewerThan:
+		if _, _, err := query.ParseAge(n.Value); err != nil {
+			return time.Time{}, false
+		}
+		return queryAgeStart(now, n.Value), true
+	case query.FieldAfter:
+		d, err := query.ParseDate(n.Value)
+		return d, err == nil
+	default:
+		return time.Time{}, false
+	}
+}
+
+// queryAgeStart is imapstore's ageStart: the day an age such as 7d reaches
+// back to. IMAP compares dates without times, so newer_than:1d means since
+// the start of yesterday. The day is taken in now's own zone and returned
+// at midnight UTC. A month or year back from a day the target month lacks
+// is that month's last day: newer_than:1m on 31 March is since 28
+// February. The longest age the parser allows, 9999y, still fits a
+// time.Time.
+func queryAgeStart(now time.Time, v string) time.Time {
+	n, unit, _ := query.ParseAge(v) // callers parsed v first
+	y, m, d := now.Date()
+	day := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	switch unit {
+	case 'w':
+		return day.AddDate(0, 0, -7*n)
+	case 'm':
+		return queryAddMonths(day, -n)
+	case 'y':
+		return queryAddMonths(day, -12*n)
+	default:
+		return day.AddDate(0, 0, -n)
+	}
+}
+
+// queryAddMonths is imapstore's addMonths: it moves t by months, keeping
+// its time of day, and where time.AddDate would spill past the end of a
+// shorter target month, as 31 March less a month gives 3 March, it stops at
+// that month's last day.
+func queryAddMonths(t time.Time, months int) time.Time {
+	y, m, d := t.Date()
+	first := time.Date(y, m+time.Month(months), 1, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
+	if last := first.AddDate(0, 1, -1).Day(); d > last {
+		d = last
+	}
+	return first.AddDate(0, 0, d-1)
 }

@@ -1,8 +1,10 @@
 package cache_test
 
 import (
+	"errors"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -340,5 +342,180 @@ func TestCompileGmail(t *testing.T) {
 	got, p = compileSearch(t, s, false, "in:trash")
 	if !slices.Equal(got, []uint32{5, 4, 3, 2, 1}) || p.ServerOnly {
 		t.Errorf("in:trash off Google = %v, ServerOnly %v; want every row, false", got, p.ServerOnly)
+	}
+}
+
+// TestCompileDatesAndSizes checks the day boundaries and size bounds of
+// imapstore's compileStandard: SINCE is on or after the day, BEFORE is
+// strictly before it, LARGER and SMALLER are strict, larger:0 is every
+// message and smaller:0 none.
+func TestCompileDatesAndSizes(t *testing.T) {
+	t.Parallel()
+	s := openCompileStore(t)
+	runCompileCases(t, s, false, []compileCase{
+		// compileNow is 29 October 15:04:05 UTC, so newer_than:1d is since
+		// midnight UTC of 28 October: UID 1 sits on it, UID 2 a second before.
+		{"newer_than:1d", []uint32{1}},
+		{"newer_than:2d", []uint32{2, 1}},
+		{"older_than:1d", []uint32{5, 4, 3, 2}},
+		{"-newer_than:1d", []uint32{5, 4, 3, 2}},
+		{"newer_than:1y", []uint32{4, 3, 2, 1}},
+		{"after:2026-01-31", []uint32{4, 3, 2, 1}},
+		{"after:2026-02-02", []uint32{2, 1}},
+		{"before:2026-02-01", []uint32{5, 3}},
+		{"after:2026-01-31 before:2026-02-01", []uint32{3}},
+		{"newer_than:1d OR before:2000-01-01", []uint32{5, 1}},
+		// 9999 days back is 14 June 1999, UID 5's arrival.
+		{"newer_than:9999d", []uint32{5, 4, 3, 2, 1}},
+		{"older_than:9999d", nil},
+		// The earliest date and the longest age the standard dialect allows.
+		{"after:1970-01-01", []uint32{5, 4, 3, 2, 1}},
+		{"newer_than:56y", []uint32{5, 4, 3, 2, 1}},
+		{"larger:5M", []uint32{4}},
+		{"smaller:5M", []uint32{5, 2, 1}},
+		{"larger:2K", []uint32{4, 3}},
+		{"smaller:2K", []uint32{5, 2}},
+		{"larger:2047 smaller:2049", []uint32{1}},
+		{"larger:0", []uint32{5, 4, 3, 2, 1}},
+		{"smaller:0", nil},
+		{"-smaller:0", []uint32{5, 4, 3, 2, 1}},
+		{"from:dee OR smaller:0", []uint32{2}},
+		{"smaller:10M larger:5M smaller:1M", nil},
+		// The largest sizes a 32-bit IMAP number holds.
+		{"larger:4294967295 smaller:4095M", nil},
+	})
+}
+
+// TestCompileAgeStart copies imapstore's TestAgeStart through Plan.Since:
+// the day is taken in now's own zone and returned at midnight UTC, the
+// longest ages do not overflow, and months and years clamp to the last day
+// of a shorter target month. It compiles for Google, which refuses no early
+// date, so the 9999 ages compile.
+func TestCompileAgeStart(t *testing.T) {
+	t.Parallel()
+	since := func(now time.Time, age string) time.Time {
+		t.Helper()
+		p, err := cache.Compile(query.Term(query.FieldNewerThan, age), "", true, now)
+		if err != nil {
+			t.Fatalf("Compile(newer_than:%s): %v", age, err)
+		}
+		return p.Since
+	}
+	now := time.Date(2026, 10, 29, 23, 30, 0, 0, time.FixedZone("EST", -5*3600))
+	tests := map[string]time.Time{
+		"1d":    time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC),
+		"9999d": time.Date(1999, 6, 14, 0, 0, 0, 0, time.UTC),
+		"9999w": time.Date(1835, 3, 12, 0, 0, 0, 0, time.UTC),
+		"9999m": time.Date(1193, 7, 29, 0, 0, 0, 0, time.UTC),
+		"9999y": time.Date(-7973, 10, 29, 0, 0, 0, 0, time.UTC),
+	}
+	for v, want := range tests {
+		if got := since(now, v); !got.Equal(want) {
+			t.Errorf("newer_than:%s Since = %v, want %v", v, got, want)
+		}
+	}
+	ends := []struct {
+		now  time.Time
+		age  string
+		want time.Time
+	}{
+		{time.Date(2026, 3, 31, 9, 0, 0, 0, time.UTC), "1m", time.Date(2026, 2, 28, 0, 0, 0, 0, time.UTC)},
+		{time.Date(2026, 3, 31, 9, 0, 0, 0, time.UTC), "13m", time.Date(2025, 2, 28, 0, 0, 0, 0, time.UTC)},
+		{time.Date(2026, 5, 31, 9, 0, 0, 0, time.UTC), "1M", time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC)},
+		{time.Date(2028, 3, 31, 9, 0, 0, 0, time.UTC), "1m", time.Date(2028, 2, 29, 0, 0, 0, 0, time.UTC)},
+		{time.Date(2028, 2, 29, 9, 0, 0, 0, time.UTC), "1y", time.Date(2027, 2, 28, 0, 0, 0, 0, time.UTC)},
+		{time.Date(2028, 2, 29, 9, 0, 0, 0, time.UTC), "4y", time.Date(2024, 2, 29, 0, 0, 0, 0, time.UTC)},
+		{time.Date(2026, 1, 31, 9, 0, 0, 0, time.UTC), "1m", time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC)},
+	}
+	for _, tt := range ends {
+		if got := since(tt.now, tt.age); !got.Equal(tt.want) {
+			t.Errorf("newer_than:%s on %s: Since = %v, want %v", tt.age, tt.now.Format(time.DateOnly), got, tt.want)
+		}
+	}
+}
+
+// TestCompileRefuses copies imapstore's size and date refusals: off Google
+// the cache refuses exactly what compileStandard refuses, with the same
+// text, so a search fails alike on either route. Google refuses none.
+func TestCompileRefuses(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		query string
+		// detail is part of the error message.
+		detail string
+	}{
+		{"larger:4294967296", "4294967295"},
+		{"smaller:4096M", "4294967295"},
+		{"larger:999999999999M", "4294967295"},
+		{"a OR -larger:5000M", "4294967295"},
+		{"older_than:9999y", "1970-01-01"},
+		{"newer_than:9999y", "1970-01-01"},
+		{"newer_than:9999m", "1970-01-01"},
+		{"older_than:57y", "1970-01-01"},
+		{"before:1969-12-31", "1970-01-01"},
+		{"after:0000-01-01", "1970-01-01"},
+		{"after:0001-01-01", "1970-01-01"},
+		{"a OR -older_than:100y", "1970-01-01"},
+	}
+	for _, tt := range tests {
+		n, err := query.Parse(tt.query)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tt.query, err)
+		}
+		_, err = cache.Compile(n, "", false, compileNow)
+		if !errors.Is(err, mailstore.ErrUnsupportedQuery) {
+			t.Errorf("Compile(%q) = %v, want ErrUnsupportedQuery", tt.query, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), tt.detail) {
+			t.Errorf("Compile(%q) = %q, want it to mention %q", tt.query, err, tt.detail)
+		}
+		if _, err := cache.Compile(n, "", true, compileNow); err != nil {
+			t.Errorf("Compile(%q) on Google = %v, want no error", tt.query, err)
+		}
+	}
+}
+
+// TestCompileBadValues covers trees that skipped validation. A value that
+// does not parse is ErrUnsupportedQuery on both dialects; a scope term left
+// in the tree, or a malformed tree, is an error; nothing panics.
+func TestCompileBadValues(t *testing.T) {
+	t.Parallel()
+	for _, n := range []*query.Node{
+		query.Term(query.FieldNewerThan, "7x"),
+		query.Term(query.FieldOlderThan, "0d"),
+		query.Term(query.FieldAfter, "yesterday"),
+		query.Term(query.FieldBefore, "2026-13-01"),
+		query.Term(query.FieldLarger, "big"),
+		query.Term(query.FieldSmaller, "5G"),
+		query.Or(query.Term(query.FieldText, "a"), query.Not(query.Term(query.FieldNewerThan, "x"))),
+	} {
+		for _, gmail := range []bool{false, true} {
+			if _, err := cache.Compile(n, "", gmail, compileNow); !errors.Is(err, mailstore.ErrUnsupportedQuery) {
+				t.Errorf("Compile(%s, gmail %v) = %v, want ErrUnsupportedQuery", n, gmail, err)
+			}
+		}
+	}
+	tests := []struct {
+		name   string
+		n      *query.Node
+		detail string
+	}{
+		{"in: left in the tree", query.Term(query.FieldIn, "inbox"), "split off"},
+		{"account: left in the tree", query.And(query.Term(query.FieldFrom, "a"), query.Term(query.FieldAccount, "work")), "split off"},
+		{"and without children", query.And(), "malformed"},
+		{"or without children", query.Or(), "malformed"},
+		{"not without a child", &query.Node{Op: query.OpNot}, "malformed"},
+		{"not with two children", &query.Node{Op: query.OpNot, Children: []*query.Node{query.Term(query.FieldText, "a"), query.Term(query.FieldText, "b")}}, "malformed"},
+		{"nil child", query.And(query.Term(query.FieldFrom, "a"), nil), "malformed"},
+		{"unknown kind", &query.Node{Op: 99}, "malformed"},
+	}
+	for _, tt := range tests {
+		for _, gmail := range []bool{false, true} {
+			_, err := cache.Compile(tt.n, "", gmail, compileNow)
+			if err == nil || !strings.Contains(err.Error(), tt.detail) {
+				t.Errorf("%s (gmail %v): err = %v, want one mentioning %q", tt.name, gmail, err, tt.detail)
+			}
+		}
 	}
 }
