@@ -16,12 +16,16 @@ var (
 // FetchHeaders implements mailstore.HeaderFetcher: the summaries
 // FetchSummaries gives, with Cc, Bcc, the Message-ID without angle
 // brackets, In-Reply-To, References and attachments as FetchMessages gives
-// them, in the order of uids and leaving out UIDs the folder lacks.
+// them, in the order of uids and leaving out UIDs the folder lacks. No
+// UIDs gives nil, nil without checking src, as imapstore does.
 func (s *Store) FetchHeaders(_ context.Context, src mailstore.Source, uids []uint32) ([]mailstore.Header, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.begin("FetchHeaders"); err != nil {
 		return nil, err
+	}
+	if len(uids) == 0 {
+		return nil, nil
 	}
 	if v, ok := s.uidValidity[src.Folder]; !ok {
 		return nil, fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, src.Folder)

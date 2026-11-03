@@ -1526,6 +1526,18 @@ func fetchHeaders(e *env) {
 	if none, err := hf.FetchHeaders(e.ctx, src, nil); err != nil || len(none) != 0 {
 		e.t.Errorf("FetchHeaders of no UIDs = %v, %v; want none", none, err)
 	}
+	// No UIDs asks for nothing, so the source is not checked: a missing
+	// folder or another UIDVALIDITY gives nil, nil too.
+	for _, uids := range [][]uint32{nil, {}} {
+		for what, s := range map[string]mailstore.Source{
+			"in a missing folder":      {Folder: "Conformance Missing", UIDValidity: src.UIDValidity},
+			"with another UIDVALIDITY": stale,
+		} {
+			if none, err := hf.FetchHeaders(e.ctx, s, uids); err != nil || none != nil {
+				e.t.Errorf("FetchHeaders of %#v %s = %v, %v; want nil, nil", uids, what, none, err)
+			}
+		}
+	}
 	e.unread("CfHead")
 	e.unread("CfHeadPlain")
 }
