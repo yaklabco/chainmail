@@ -135,7 +135,7 @@ Temporary server errors, such as other IMAP response codes, Gmail's `ALERT` for 
 
 ## Configuration reference
 
-The daemon reads one TOML file, `/etc/chainmail/config.toml` by default or the file given with `--config`. It holds no secrets. Unknown keys are an error. Once every key is known, all invalid values are reported together. The daemon reads the file only at startup, so restart it after an edit.
+The daemon reads one TOML file, `/etc/chainmail/config.toml` by default or the file given with `--config`. It holds no secrets. Unknown keys are an error, and so are keys with capital letters, such as `[Policy]`. No environment variable can set or change a key. Once every key is known, all invalid values are reported together. The daemon reads the file only at startup, so restart it after an edit.
 
 ```toml
 [daemon]
