@@ -23,9 +23,8 @@ const (
 	cacheTries = 3
 	// cacheRows is the page size of the compared searches.
 	cacheRows = 50
-	// cacheMaxPages bounds the pages read per source and query. A group of
-	// rows sharing one arrival time that runs past it cannot be compared,
-	// which counts as a difference.
+	// cacheMaxPages bounds the empty pages read per source and query
+	// before the first row.
 	cacheMaxPages = 10
 )
 
@@ -164,11 +163,13 @@ func sourcePage(t *testing.T, c *client.Client, account, q, source, cursor strin
 	return resp.Msg
 }
 
-// readOn reads q on account forced to source further, adding pages to p
-// while next(p) holds and p has a next cursor, up to cacheMaxPages pages.
-func readOn(t *testing.T, c *client.Client, account, q, source string, p sourcePages, next func(sourcePages) bool) sourcePages {
+// readHead reads q on account forced to source until a page has a row or
+// the search ends, up to cacheMaxPages pages: a page can be empty while
+// its cursor is set.
+func readHead(t *testing.T, c *client.Client, account, q, source string) sourcePages {
 	t.Helper()
-	for len(p) < cacheMaxPages && (len(p) == 0 || (p.more() && next(p))) {
+	var p sourcePages
+	for len(p) < cacheMaxPages && (len(p) == 0 || (p.more() && len(p.rows()) == 0)) {
 		cursor := ""
 		if len(p) > 0 {
 			cursor = p[len(p)-1].GetNextCursor()
@@ -179,16 +180,14 @@ func readOn(t *testing.T, c *client.Client, account, q, source string, p sourceP
 }
 
 // compareSources compares cq on account from the cache and from the
-// server. Each side is read until it has a row, the cutoff is taken from
-// those pages, and each is then read on until it holds every match at or
-// after the cutoff, so rows sharing the cutoff's time are compared whole.
-// A difference can be the cache trailing by up to fresh_lag, a flag that
-// changed between the two searches, or a partial page, so it is compared
-// again after cacheSettle, and only a difference that lasts cacheTries
-// tries fails the test.
+// server. Each side is read until it has a row, and what both sides'
+// pages cover, by their cursors, is compared (rowsDiff), whatever the
+// rows' arrival times. A difference can be the cache trailing by up to
+// fresh_lag, a flag that changed between the two searches, or a partial
+// page, so it is compared again after cacheSettle, and only a difference
+// that lasts cacheTries tries fails the test.
 func compareSources(t *testing.T, c *client.Client, account string, cq cacheQuery) {
 	t.Helper()
-	noRows := func(p sourcePages) bool { return len(p.rows()) == 0 }
 	diff := ""
 	for try := 1; try <= cacheTries; try++ {
 		if try > 1 {
@@ -196,14 +195,10 @@ func compareSources(t *testing.T, c *client.Client, account string, cq cacheQuer
 			cacheSettleWait(t)
 		}
 		start := time.Now()
-		cache := readOn(t, c, account, cq.q, "cache", nil, noRows)
-		server := readOn(t, c, account, cq.q, "server", nil, noRows)
-		cutoff := compareCutoff(cache, server)
-		atCutoff := func(p sourcePages) bool { return needsMore(p, cutoff) }
-		cache = readOn(t, c, account, cq.q, "cache", cache, atCutoff)
-		server = readOn(t, c, account, cq.q, "server", server, atCutoff)
-		if diff = sourcesDiff(cache, server, account, start, cutoff); diff == "" {
-			t.Logf("query %s: %d rows in %d pages agree", cq.name, len(server.rows()), len(server))
+		cache := readHead(t, c, account, cq.q, "cache")
+		server := readHead(t, c, account, cq.q, "server")
+		if diff = sourcesDiff(cache, server, account, start); diff == "" {
+			t.Logf("query %s: %d and %d rows read, the covered ones agree", cq.name, len(cache.rows()), len(server.rows()))
 			return
 		}
 	}
