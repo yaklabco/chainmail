@@ -1,8 +1,8 @@
 # chainmail
 
-Email for AI agents. chainmail is one Go binary that lets agents read, write and organize mail over IMAP and SMTP without ever holding a password or token. A long-running daemon owns every credential and every connection to the mail servers. Agents talk to it through the `chainmail` CLI or through `chainmail mcp`, an MCP server. Both are thin clients on a Unix socket. Every call except `admin status`, `audit`, `watch status` and the acknowledgements a watch sends is written to an audit log.
+Email for AI agents. chainmail is one Go binary that lets agents read, write and organize mail over IMAP and SMTP without ever holding a password or token. A long-running daemon owns every credential and every connection to the mail servers. Agents talk to it through the `chainmail` CLI or through `chainmail mcp`, an MCP server. Both are thin clients on a Unix socket. Every call except `admin status`, `audit`, `watch status`, `cache status` and the acknowledgements a watch sends is written to an audit log.
 
-Six sub-projects exist today. Sub-project 1, the foundation, is the daemon and its socket, the vault, password and OAuth2 login, `secret set`, `auth login` and `accounts test`. Sub-project 2 reads mail: `folders`, `search`, `get`, `thread` and `attachment`. Sub-project 3 writes and organizes it: `send`, `send-raw`, `reply`, `forward` and `draft`, then `move`, `copy`, `archive`, `trash`, `expunge`, the flag and label commands, `folder`, and `accounts probe`. Sub-project 4 adds the send policy, which holds a send to anyone off an allowlist as a draft, the policy gates on `expunge` and `folder delete`, the `audit` command, and a NixOS module for production. Sub-project 5 adds `chainmail mcp`, which serves the same operations to AI agents as MCP tools (see [Agents over MCP](#agents-over-mcp)). Sub-project 6 watches for new mail: the daemon keeps a durable event log, which `chainmail watch` streams and the MCP tool `read_events` reads (see [Watching for mail](#watching-for-mail)). Approvals arrive in a later sub-project.
+Seven sub-projects exist today. Sub-project 1, the foundation, is the daemon and its socket, the vault, password and OAuth2 login, `secret set`, `auth login` and `accounts test`. Sub-project 2 reads mail: `folders`, `search`, `get`, `thread` and `attachment`. Sub-project 3 writes and organizes it: `send`, `send-raw`, `reply`, `forward` and `draft`, then `move`, `copy`, `archive`, `trash`, `expunge`, the flag and label commands, `folder`, and `accounts probe`. Sub-project 4 adds the send policy, which holds a send to anyone off an allowlist as a draft, the policy gates on `expunge` and `folder delete`, the `audit` command, and a NixOS module for production. Sub-project 5 adds `chainmail mcp`, which serves the same operations to AI agents as MCP tools (see [Agents over MCP](#agents-over-mcp)). Sub-project 6 watches for new mail: the daemon keeps a durable event log, which `chainmail watch` streams and the MCP tool `read_events` reads (see [Watching for mail](#watching-for-mail)). Sub-project 7 adds a local cache: the daemon keeps headers of every synced folder and recent bodies in `cache.db`, indexed for full-text search, and answers searches and reads from it when it is complete and fresh (see [Local cache](#local-cache)). Approvals arrive in a later sub-project.
 
 ```mermaid
 flowchart LR
@@ -16,6 +16,7 @@ flowchart LR
   subgraph daemon["chainmail daemon"]
     D[daemon] --> V[(vault.age)]
     D --> S[(state.db audit log and event log)]
+    D --> C[(cache.db)]
   end
   D -- "IMAP and SMTP over TLS" --> M[mail servers]
   D -- "IMAP IDLE on watched folders" --> M
@@ -24,12 +25,12 @@ flowchart LR
 
 ## Security model
 
-- **The daemon owns the credentials.** Passwords, OAuth client secrets and refresh tokens live in the daemon's vault and nowhere else. The CLI and `chainmail mcp` hold no secrets and no mail logic. In production the daemon runs as its own `chainmail` system user with its state in `/var/lib/chainmail` (mode `0700`), which your user can't read. The NixOS module sets this up (see [NixOS deployment](#nixos-deployment)). Elsewhere the daemon runs with `--dev` as your own user, which is for development only: anything running as you can read a dev vault's key.
+- **The daemon owns the credentials.** Passwords, OAuth client secrets and refresh tokens live in the daemon's vault and nowhere else. The CLI and `chainmail mcp` hold no secrets and no mail logic. In production the daemon runs as its own `chainmail` system user with its state in `/var/lib/chainmail` (mode `0700`), which your user can't read. That directory also holds `cache.db`, which keeps copies of message headers and recent bodies. It is not encrypted, so it is protected only by the directory's mode and the daemon's user, like `state.db`. `[cache] dir` can move it; the daemon creates that directory with mode `0700` too. The NixOS module sets this up (see [NixOS deployment](#nixos-deployment)). Elsewhere the daemon runs with `--dev` as your own user, which is for development only: anything running as you can read a dev vault's key.
 - **Secrets go in and never come out.** `chainmail secret set` and `chainmail auth login` write secrets. No API call returns one. `chainmail admin status` lists secret names only.
 - **The vault is encrypted at rest.** `vault.age` is an [age](https://age-encryption.org) file. In production its key arrives through systemd `LoadCredentialEncrypted=`, sealed to the host's TPM2, at `$CREDENTIALS_DIRECTORY/vault-key`. In development it is a file passed with `--vault-key-file`. The daemon refuses a key file that others can access. The file must either be owned by the daemon's user with no group or other bits (`0600` or `0400`), or be owned by `root:root` with no other bits and at most group read. The second form exists because systemd delivers a `LoadCredential` file as `0440 root:root` and grants the service user read access through an ACL.
-- **The socket has a group and a peer check.** The daemon creates its socket with mode `0660`. In production it sets the socket's group to `client_group` (default `chainmail-clients`). On every connection it reads the peer's credentials with `SO_PEERCRED` and allows only its own user and members of the client group. Membership is looked up per request, so adding a user to the group takes effect without a restart. Release builds are pure Go (`CGO_ENABLED=0`), so users, groups and memberships are read from `/etc/passwd` and `/etc/group`, not through NSS. A user or membership that exists only in NSS, such as one from LDAP or SSSD, is refused. A dev daemon allows only your own user. A refused peer gets `FORBIDDEN` (exit 3).
+- **The socket has a group and a peer check.** The daemon creates its socket with mode `0660`. In production it sets the socket's group to `client_group` (default `chainmail-clients`). On every connection it reads the peer's credentials, with `SO_PEERCRED` on Linux and `LOCAL_PEERCRED` on macOS, and allows only its own user and members of the client group. Membership is looked up per request, so adding a user to the group takes effect without a restart. Release builds are pure Go (`CGO_ENABLED=0`), so on Linux users, groups and memberships are read from `/etc/passwd` and `/etc/group`, not through NSS. A user or membership that exists only in NSS, such as one from LDAP or SSSD, is refused. A dev daemon allows only your own user. A refused peer gets `FORBIDDEN` (exit 3).
 - **Sends off the allowlist are held, not sent.** A send to any recipient that is not on the policy's allowlist is never transmitted. The daemon saves the exact message to the account's Drafts folder, and you send, edit or delete it from your own mail client. A recipient that is not a plain `local@domain` address, such as one with a quoted local part, is always held, whatever the allowlist says. `expunge` and `folder delete` are refused unless the config enables them. See [Policy](#policy). Any client that passes the socket's peer check can still send as any configured account to anyone on the allowlist, and can move, archive, flag and trash mail. Give the socket only to users and agents you trust that far. Every send and every change is audited, so you can see afterwards what was done.
-- **Every change is audited.** The `audit` table in `state.db` records the time, caller UID, client kind (`cli`, `mcp`, `live-test`, or `daemon` for work the daemon starts itself, such as a background probe), account, action, targets, result and error reason for each call. The audited reads are `accounts.list`, `account.test`, `secret.set`, `auth.login.begin`, `auth.login.finish`, `folders.list`, `search`, `get`, `get.raw`, `thread`, `attachment`, `watch.subscribe`, `watch.read` and `watch.groups.list`. The audited writes are `send`, `send_raw`, `reply`, `forward`, `upload`, `draft.create`, `draft.update`, `draft.send`, `draft.delete`, `move`, `copy`, `archive`, `trash`, `expunge`, `flags`, `labels`, `folders.create`, `folders.rename`, `folders.delete`, `limits.probe` and `watch.groups.delete`. Every call except `admin status`, `audit`, `watch status` and a watch's acknowledgements (the `Ack` call) is recorded. A `watch.subscribe` or `watch.read` row names where the read starts (`group=<name>`, `since=<id>` or `live`), the number of accounts in the filter, the kinds and whether `in` was set, never the `in` value or any event content. A `watch.read` row also counts the events returned, a `watch.groups.list` row the groups, and a `watch.groups.delete` row names the group. A send's row names the account and the Message-ID, never the recipients, subject or body. A reply or forward row also names the original's ref, and a draft row the draft's ref. A batch that spans accounts records one row per account, a repeated send records the decision `duplicate`, and a dry run the decision `dry_run`. A send the policy passed records `allowed`, a held send `held`, and a refused `expunge` or `folder delete` `denied` (see [Policy](#policy)). The client kind is self-reported in the `Chainmail-Client` header, so any local caller can claim any kind. The caller UID comes from the socket and is the authoritative identity. Rows never contain secret values or message content. A read's row holds counts and refs only, never subjects, addresses or the search query. An account or secret name that is not a valid name, or a client kind that is not a short lowercase name, is recorded as `(invalid)`, and the call fails with `INVALID_ARGUMENT`. The table is append-only: triggers refuse updates and deletes. If the audit write fails, the call fails too, so chainmail never reports success for something it could not record. Read the log with `chainmail audit` (see [Reading the audit log](#reading-the-audit-log)).
+- **Every change is audited.** The `audit` table in `state.db` records the time, caller UID, client kind (`cli`, `mcp`, `live-test`, or `daemon` for work the daemon starts itself, such as a background probe), account, action, targets, result and error reason for each call. The audited reads are `accounts.list`, `account.test`, `secret.set`, `auth.login.begin`, `auth.login.finish`, `folders.list`, `search`, `get`, `get.raw`, `thread`, `attachment`, `watch.subscribe`, `watch.read` and `watch.groups.list`. The audited writes are `send`, `send_raw`, `reply`, `forward`, `upload`, `draft.create`, `draft.update`, `draft.send`, `draft.delete`, `move`, `copy`, `archive`, `trash`, `expunge`, `flags`, `labels`, `folders.create`, `folders.rename`, `folders.delete`, `limits.probe`, `watch.groups.delete`, `cache.rebuild` and `cache.evict`. Every call except `admin status`, `audit`, `watch status`, `cache status` and a watch's acknowledgements (the `Ack` call) is recorded. A `watch.subscribe` or `watch.read` row names where the read starts (`group=<name>`, `since=<id>` or `live`), the number of accounts in the filter, the kinds and whether `in` was set, never the `in` value or any event content. A `watch.read` row also counts the events returned, a `watch.groups.list` row the groups, and a `watch.groups.delete` row names the group. A send's row names the account and the Message-ID, never the recipients, subject or body. A reply or forward row also names the original's ref, and a draft row the draft's ref. A batch that spans accounts records one row per account, a repeated send records the decision `duplicate`, and a dry run the decision `dry_run`. A send the policy passed records `allowed`, a held send `held`, and a refused `expunge` or `folder delete` `denied` (see [Policy](#policy)). The client kind is self-reported in the `Chainmail-Client` header, so any local caller can claim any kind. The caller UID comes from the socket and is the authoritative identity. Rows never contain secret values or message content. A read's row holds counts and refs only, never subjects, addresses or the search query. A `search`, `get` or `thread` row also names what answered it: `source=cache`, `source=server` or, when accounts or messages differed, `source=mixed`. A `cache.rebuild` row names the folder (`folder=<name>`, or `folder=(all)` for every folder of the account) and how many folders it dropped (`rebuilt=<n>`), and a `cache.evict` row the bodies it removed and the bytes they held (`bodies=<n>`, `freed=<bytes>`). An account or secret name that is not a valid name, or a client kind that is not a short lowercase name, is recorded as `(invalid)`, and the call fails with `INVALID_ARGUMENT`. The table is append-only: triggers refuse updates and deletes. If the audit write fails, the call fails too, so chainmail never reports success for something it could not record. Read the log with `chainmail audit` (see [Reading the audit log](#reading-the-audit-log)).
 - **Root is out of scope.** chainmail stops accidents and prompt injection that run through chainmail. It does not stop an agent that can become root. If your user has passwordless sudo or is in the `docker` group, an agent with an unrestricted shell can read the vault through root. Closing that gap means running agents without sudo or docker, which is outside chainmail.
 
 ## Build
@@ -52,13 +53,19 @@ Other stave targets: `check` (the default, and what CI runs: generated code chec
 
 ## Development
 
-`check` runs the unit tests only. They include the IMAP store's tests against an in-memory fake Gmail server, which need nothing installed. `test:integration` runs the IMAP store's package, the daemon's package and the MCP server's package again with the `integration` tag, which adds tests against a real Dovecot server in a Docker container. The IMAP store's tests include a Dovecot whose personal namespace is under `INBOX.`. The daemon's test sends through the policy and checks that a held send lands in Dovecot's Drafts folder with its Bcc and reaches no SMTP server. It also watches a Dovecot mailbox over IDLE with CONDSTORE: another IMAP client delivers, flags and expunges a message, and a group stream gets the `new`, `flags` and `expunged` events. Then the daemon stops, three messages arrive while it is down, and after a restart on the same state the group resumes with exactly those three. The MCP server's test builds the binary, runs it as `chainmail mcp` against a real daemon, searches, reads, files and archives a message, saves a draft, has a send held, and checks that the audit log records every call with client kind `mcp`. A second MCP test waits for mail with `read_events` and a group, and checks that each read is audited as `watch.read` with client kind `mcp`. It needs Docker. Each test binary starts its own container from a pinned image and removes it when the run ends, whether the tests pass or fail. If the run is killed before it can clean up, the container stops itself after 20 minutes, and the next run removes it. The run times out after 15 minutes and uses a quarter of the cores.
+`check` runs the unit tests only. They include the IMAP store's tests against an in-memory fake Gmail server, which need nothing installed. `test:integration` runs the IMAP store's package, the daemon's package and the MCP server's package again with the `integration` tag, which adds tests against a real Dovecot server in a Docker container. The IMAP store's tests include a Dovecot whose personal namespace is under `INBOX.`. The daemon's test sends through the policy and checks that a held send lands in Dovecot's Drafts folder with its Bcc and reaches no SMTP server. It also watches a Dovecot mailbox over IDLE with CONDSTORE: another IMAP client delivers, flags and expunges a message, and a group stream gets the `new`, `flags` and `expunged` events. Then the daemon stops, three messages arrive while it is down, and after a restart on the same state the group resumes with exactly those three. The daemon's package also runs the cache against Dovecot. It seeds a mailbox across the inbox, Sent, Archive and Trash, waits for the backfill and the body prefetch, and checks that the cache and the server return the same rows for a fixed set of queries, page for page, with a cursor carried from one to the other. It checks that text outside the body window and Trash go to the server, that `has:`, `filename:` and `label:` are answered by the cache, that a `get` of a cached message makes no read of the mail server, that the cache follows a delivery, a flag and an expunge within seconds, that `cache rebuild` and `cache evict` work and are audited, that a renumbered folder is rebuilt and an old ref is found again by its Message-ID, and that deleting `cache.db` while the daemon is stopped rebuilds it while a watch group loses and repeats nothing. The MCP server's test builds the binary, runs it as `chainmail mcp` against a real daemon, searches, reads, files and archives a message, saves a draft, has a send held, and checks that the audit log records every call with client kind `mcp`. A second MCP test waits for mail with `read_events` and a group, and checks that each read is audited as `watch.read` with client kind `mcp`. A third MCP test searches and reads through the cache and calls `cache_status`. It needs Docker. Each test binary starts its own container from a pinned image and removes it when the run ends, whether the tests pass or fail. If the run is killed before it can clean up, the container stops itself after 20 minutes, and the next run removes it. The run times out after 15 minutes and uses a quarter of the cores.
 
 ```fish
 nix develop -c go tool stave test:integration
 ```
 
-`test:live` runs against real accounts (see the [Dev quickstart](#dev-quickstart)). Among its write tests, a watch test opens a live stream of each account's `new` events, as `chainmail watch --account <account> --kind new` does, sends a message to the account's own address and requires the event for the delivered copy within 30 seconds. On Google that event is for the one All Mail message and must carry the `\Sent` label. Whether it also carries `\Inbox` is logged, not required.
+CI also runs the unit tests on macOS and cross-builds the binary for macOS and Linux, on arm64 and amd64, so a change that only works on Linux fails the pull request. The Dovecot tests need Docker, so they run on Linux only.
+
+`test:live` runs against real accounts (see the [Dev quickstart](#dev-quickstart)). Among its write tests, a watch test opens a live stream of each account's `new` events, as `chainmail watch --account <account> --kind new` does, sends a message to the account's own address and requires the event for the delivered copy within 30 seconds. On Google that event is for the one All Mail message and must carry the `\Sent` label. Whether it also carries `\Inbox` is logged, not required. A cache test, which only reads, waits up to 30 minutes for every account's cache to report ready, then requires 10 header queries per account to return the same refs from the cache and from the server, a default search to be answered by the cache, and a second read of a message to come from the cache. An account whose cache is still not ready after the wait is skipped with the reason. It changes no mail, so it can run against the production daemon:
+
+```fish
+CHAINMAIL_SOCKET=/run/chainmail/chainmail.sock nix develop -c go test -tags live -count=1 -timeout 60m -v -run TestCacheMatchesServer ./internal/live/
+```
 
 ## Provider setup
 
@@ -173,7 +180,7 @@ archive_folder = "Archive"       # where archive moves mail; default the \Archiv
 pool = 2                         # IMAP connections; default from the probe
 max_message_size = "35MiB"       # largest message it sends; default from the preset
 watch = ["INBOX"]                # folders watched with IDLE; [] watches nothing
-sync = { folders = ["INBOX", "Sent"], poll = "5m" }   # Sent is polled every 5m
+sync = { folders = ["INBOX", "Sent"], poll = "5m" }   # only these sync; without folders, every folder a default search covers
 
 [accounts.lab]
 provider = "custom"
@@ -204,6 +211,20 @@ max_events = 200000
 expunge_sweep = "1h"
 idle_fallback_poll = "30s"       # watched folders on servers without IDLE
 google_check = "5s"              # how often a Google account's All Mail is synced while it idles
+
+[cache]
+enabled = true                   # false: no cache work; every search and get uses the server
+prefetch_bodies = "90d"          # bodies of mail that arrived within this are fetched ahead
+read_retention = "30d"           # bodies read outside the window are kept this long
+max_size = "2GiB"                # the whole cache.db file
+daily_download = "1GiB"          # per account per UTC day, for backfill and prefetch
+backfill_batch = 250
+backfill_pause = "250ms"
+fresh_lag = "30s"                # how far the cache may trail mail events and still answer
+# dir = "/var/cache/chainmail"   # default: the daemon's --state-dir
+
+[accounts.personal.cache]
+prefetch_bodies = "30d"          # any [cache] key but max_size and dir, for one account
 ```
 
 | Key | Required | Default | Meaning |
@@ -230,7 +251,7 @@ google_check = "5s"              # how often a Google account's All Mail is sync
 | `accounts.<name>.pool` | no | from the probe, else the preset | IMAP connections the daemon keeps for the account, 1 to 12. Set it to override the probed size. See [Connection probing and pool sizing](#connection-probing-and-pool-sizing). |
 | `accounts.<name>.max_message_size` | no | `25MiB` for Google and custom servers, `35MiB` for iCloud and Hostinger | The largest message the account sends, attachments included, between `1KiB` and `1024MiB`. Also caps each upload. Whatever it is set to, a `send-raw` message, a body or HTML file, and a dry run's output are limited to 40 MiB, the most one API request or response holds. |
 | `accounts.<name>.watch` | no | `["INBOX"]` | Folders watched with IDLE, each on a connection of its own. `[]` watches nothing. A folder may not be listed twice or be empty. Not allowed on the Google presets, which always watch All Mail. See [Watching for mail](#watching-for-mail). |
-| `accounts.<name>.sync.folders` | no | none, so only the watch list syncs | Folders synced as well as the watched ones. Every watched folder is synced. A synced folder that is not watched is polled every `sync.poll`. Not allowed on the Google presets. |
+| `accounts.<name>.sync.folders` | no | every folder a default search covers: each selectable folder except Trash, Junk and a virtual All folder, listed again every `watch.expunge_sweep` | Folders synced as well as the watched ones. Every watched folder is synced. A synced folder that is not watched is polled every `sync.poll`. Setting it limits syncing, and so the cache, to the watch list and these folders, and `[]` syncs the watch list alone. Not allowed on the Google presets. |
 | `accounts.<name>.sync.poll` | no | `5m` | How often synced folders that are not watched are checked, as a Go duration between `30s` and `24h`. Also how often a missing folder is tried again. |
 | `accounts.<name>.sync.enabled` | no | `true` | `false` turns off watching and syncing for the account, Google presets included. |
 | `accounts.<name>.policy.send_allow` | no | `[]` | Allowlist entries added to the global `policy.send_allow` for this account only. No other key is allowed in this table. See [Policy](#policy). |
@@ -243,6 +264,16 @@ google_check = "5s"              # how often a Google account's All Mail is sync
 | `watch.expunge_sweep` | no | `1h` | How often synced folders are swept for expunged mail. Between `5m` and `24h`. |
 | `watch.idle_fallback_poll` | no | `30s` | How often a watched folder is synced on a server without IDLE. Between `10s` and `10m`. |
 | `watch.google_check` | no | `5s` | How often a Google account's All Mail is synced while its IDLE waits. Gmail can tell an IDLE about new mail 30 seconds or more after it arrives, so this bounds how late a `new` event can be. Between `2s` and `10m`. |
+| `cache.enabled` | no | `true` | `false` stops all cache work, and every search and `get` uses the mail servers. The rows already cached stay in `cache.db` until you delete it (see [Local cache](#local-cache)). `cache rebuild` refuses an account whose cache is off. |
+| `cache.prefetch_bodies` | no | `90d` | The body window: bodies of messages that arrived within it are fetched ahead and kept. `0d` fetches bodies only when read. Days as `<n>d`, or a Go duration, between `0d` and `3650d`. |
+| `cache.read_retention` | no | `30d` | How long a body outside the window is kept after a `get` read it. Between `0d` and `3650d`. |
+| `cache.max_size` | no | `2GiB` | The most space `cache.db` may take, headers and index included. A number of bytes, optionally followed by `B`, `KiB`, `MiB`, `GiB` or `TiB`, between `64MiB` and `1TiB`. Global only. |
+| `cache.daily_download` | no | `1GiB` | The most the backfill and the body prefetch download per account per UTC day, counting each body's size and 2 KiB per header. A `get` of a message the cache lacks counts too. A size as for `max_size`, between `16MiB` and `100GiB`. |
+| `cache.backfill_batch` | no | `250` | Headers fetched per backfill batch, 10 to 1000. |
+| `cache.backfill_pause` | no | `250ms` | Pause between backfill batches, between `0s` and `60s`. |
+| `cache.fresh_lag` | no | `30s` | How far the cache may trail the account's mail events and still answer searches. Between `1s` and `10m`. |
+| `cache.dir` | no | the daemon's `--state-dir` | Directory for `cache.db`, as an absolute path. Global only. |
+| `accounts.<name>.cache.<key>` | no | the `[cache]` value | Any `[cache]` key except `max_size` and `dir`, which are global and are a config error here, for one account. |
 
 Vault secret names:
 
@@ -254,9 +285,9 @@ Vault secret names:
 
 `secret set` accepts only names the config uses: `accounts/<account>` where the account has `auth = "password"`, and `oauth_clients/<client>` where the client is defined. It refuses `tokens/<account>`, because only `auth login` writes a refresh token.
 
-Each watched folder holds one IMAP connection of its own, outside the pool, and a Google account holds one for All Mail. These watcher connections count toward the account's connection cap: the probed cap when there is one, else the preset's (10 for Google, 3 for the others). The pool shrinks to fit what the watchers leave, never below 1, and a configured `pool` is capped the same way. The watchers never shrink. A Hostinger account watching only its inbox therefore runs 1 watcher and a pool of 2 until a probe measures it. See [Connection probing and pool sizing](#connection-probing-and-pool-sizing).
+Each watched folder holds one IMAP connection of its own, outside the pool, and a Google account holds one for All Mail. These watcher connections count toward the account's connection cap: the probed cap when there is one, else the preset's (10 for Google, 3 for the others). The pool shrinks to fit what the watchers leave, never below 1, and a configured `pool` is capped the same way. The watchers never shrink. Polled folders and the cache use the pool too. The cache's background work takes a connection only when one is idle, or when the pool has room and no request is waiting, and gives it back after one batch, so it slows down rather than delay a request. A Hostinger account watching only its inbox therefore runs 1 watcher and a pool of 2 until a probe measures it. See [Connection probing and pool sizing](#connection-probing-and-pool-sizing).
 
-Keys from the full design, such as `rules` and `prefetch_bodies`, belong to later sub-projects. This version rejects them as unknown.
+Keys from the full design, such as `rules`, belong to later sub-projects. This version rejects them as unknown.
 
 ## Dev quickstart
 
@@ -329,9 +360,9 @@ Every command accepts `--socket <path>` and `--output json|table`. Without `--ou
 |---|---|---|
 | `chainmail version` | Prints the client's version. Needs no daemon. | `{"version":"..."}` |
 | `chainmail folders [--account <account>]` | Lists each account's folders with their role, message count and unseen count. `--account` is repeatable. | `{"accounts":[{"account":...,"folders":[...]}],"partial":[...]}` |
-| `chainmail search [query...]` | Searches mail on every account, newest first. Flags: `--account` (repeatable), `--limit`, `--cursor`, `--count`, `--snippet`, `--threads`. | `{"rows":[...],"next_cursor":...,"count":...,"account_counts":[...],"partial":[...],...}` |
-| `chainmail get <ref>...` | Reads 1 to 50 messages. `--full` keeps quotes and signatures and skips the `body_limit` cut. `--raw` writes the original RFC 5322 bytes of one message to stdout instead. | `{"items":[{"ref":...,"message":{...}}],...}` |
-| `chainmail thread <ref>` | Reads the whole thread a message belongs to, oldest first. Takes `--full`, as `get` does. | `{"thread_id":...,"messages":[...],"truncated":...,"omitted_refs":[...],...}` |
+| `chainmail search [query...]` | Searches mail on every account, newest first. Flags: `--account` (repeatable), `--limit`, `--cursor`, `--count`, `--snippet`, `--threads`, and `--source auto\|cache\|server`, which picks what answers (default `auto`). See [Local cache](#local-cache). | `{"rows":[...],"next_cursor":...,"count":...,"account_counts":[{"account":...,"count":...,"source":...,"synced_at":...,"complete":...,"incomplete_reason":...}],"partial":[...],"source":...,"fetched_at":...}` |
+| `chainmail get <ref>...` | Reads 1 to 50 messages. `--full` keeps quotes and signatures and skips the `body_limit` cut. `--raw` writes the original RFC 5322 bytes of one message to stdout instead. Each message's `source` says whether the cache or the server answered. | `{"items":[{"ref":...,"message":{...,"source":...}}],"source":...,"fetched_at":...}` |
+| `chainmail thread <ref>` | Reads the whole thread a message belongs to, oldest first. Takes `--full`, as `get` does. | `{"thread_id":...,"messages":[...],"source":...,"fetched_at":...,"truncated":...,"omitted_refs":[...]}` |
 | `chainmail attachment <ref> <part> --out <path>` | Downloads one attachment, decoded, to a file, or to stdout with `--out -`. | `{"path":...,"bytes":...,"content_type":...,"filename":{"untrusted":...}}` |
 | `chainmail send` | Sends a new message from one account. See [Sending mail](#sending-mail). | `{"result":{"sent":{"message_id":...,"sent_ref":...,"duplicate":...,"sent_copy_error":...}}}`, or `{"result":{"held":{...}}}` and exit 4 when the policy holds it (see [Policy](#policy)) |
 | `chainmail send-raw (--file <f> \| -)` | Sends a finished RFC 5322 message as given. | as `send` |
@@ -351,7 +382,10 @@ Every command accepts `--socket <path>` and `--output json|table`. Without `--ou
 | `chainmail accounts test <account>` | Logs in to the account's IMAP server, then its SMTP server, and reports each check. | `{"account":...,"imap":{...},"smtp":{...}}` |
 | `chainmail secret set <name> [--from-pass <entry>]` | Stores a secret in the vault. The name must be `accounts/<account>` for a configured password account, or `oauth_clients/<client>` for a configured OAuth2 client. Any other name, including `tokens/<account>`, fails with `INVALID_ARGUMENT` (exit 2). For an account password it then probes the account's connection limit. | `{"name":...,"set":true}`, plus `"limit":{...}` for `accounts/<account>` |
 | `chainmail auth login <account>` | Runs the OAuth2 paste-back flow, stores the refresh token, then probes the account's connection limit. | `{"account":...,"logged_in":true,"limit":{...}}` |
-| `chainmail admin status` | Shows the daemon's version, start time, dev mode, stored secret names and the sync state of each synced folder. | `{"version":...,"started_at":...,"dev_mode":...,"secret_names":[...],"sync":[...]}` |
+| `chainmail admin status` | Shows the daemon's version, start time, dev mode, stored secret names, the sync state of each synced folder, and a one-line cache summary per account. | `{"version":...,"started_at":...,"dev_mode":...,"secret_names":[...],"sync":[...],"cache":[...]}` |
+| `chainmail cache status [--account <account>]` | Shows each account's cache: state, today's download against the budget, the last error code, and per folder the headers and bodies cached, backfill progress, window coverage and final body failures, plus the size of `cache.db` against `max_size`. `--account` is repeatable. Not audited. See [Local cache](#local-cache). | `{"size_bytes":...,"max_size_bytes":...,"accounts":[{"account":...,"enabled":...,"state":...,"budget_used_bytes":...,"budget_bytes":...,"last_error":...,"folders":[...]}]}` |
+| `chainmail cache rebuild [--account NAME [--folder FOLDER]]` | Drops the cached rows of every account, of the account `--account` names, or of one of its folders, and backfills them again. Without `--account`, accounts whose cache is off are skipped. Audited as `cache.rebuild`, one row per account. | `{"accounts":[{"account":...,"folders":[...]}],"skipped":[...]}`, with `skipped` left out when empty |
+| `chainmail cache evict` | Runs a body eviction sweep now and reports the bodies and bytes freed. Audited as `cache.evict`. | `{"bodies_evicted":...,"freed_bytes":...}` |
 | `chainmail watch [--group NAME \| --since ID] [--account NAME]... [--kind KIND[,KIND]...] [--in FOLDER] [--once] [--heartbeat]` | Streams mail events from the daemon's event log, one per line. See [Watching for mail](#watching-for-mail). | one JSON object per event on its own line, and `{"heartbeat":{...}}` lines with `--heartbeat` |
 | `chainmail watch status` | Shows each synced folder's mode, state, CONDSTORE support, last sync, last sweep and last error. Not audited. | `{"folders":[{"account":...,"folder":...,"mode":...,"state":...,"condstore":...,"last_sync_at":...,"last_sweep_at":...,"last_error":...}]}` |
 | `chainmail watch groups` | Lists watch groups with their acknowledged event, lag in events, creation time and last use. | `{"groups":[{"name":...,"acked_id":...,"lag":...,"created_at":...,"last_seen_at":...}]}` |
@@ -414,7 +448,7 @@ chainmail attachment $ref 2 --out ~/Downloads/invoice.pdf
 | `newer_than:`, `older_than:` | an age in days, weeks, months or years, such as `7d`, `2w`, `3m` or `1y` |
 | `after:`, `before:` | a date as `YYYY-MM-DD` |
 | `larger:`, `smaller:` | a size in bytes, or in KiB with `K` or MiB with `M`, such as `10K` or `5M` |
-| `has:attachment`, `filename:`, `label:` | Google accounts only, for now |
+| `has:attachment`, `filename:`, `label:` | an attachment, an attachment file name containing the value, or a Gmail label. On other accounts `label:` matches an IMAP keyword, and all three are answered from the cache once it is complete (see [Local cache](#local-cache)) |
 | `in:` | `inbox`, `sent`, `drafts`, `archive`, `trash`, `spam` (or `junk`), `anywhere`, or a folder name |
 | `account:` | the named account |
 
@@ -422,9 +456,11 @@ Terms separated by spaces must all match. `OR` between two terms matches either,
 
 Every folder except Trash and Spam is searched unless `in:` says otherwise. `in:anywhere` searches them too. On Google accounts the search runs in All Mail, and `in:` values other than `trash`, `spam`, `junk` and `anywhere` filter within it, as in Gmail. Elsewhere a virtual All folder, such as Dovecot's, is searched only when `in:` names it, since it holds copies of the other folders' messages.
 
-`has:`, `filename:` and `label:` work on Google accounts only until the local index arrives. Other accounts refuse them with `INVALID_ARGUMENT`. When other accounts answered, the refusal appears in `partial` and the search still succeeds.
+On accounts other than Google, `has:`, `filename:` and `label:` are answered only by the cache, so they work once the account's cache has backfilled and is fresh. Until then they are refused with `INVALID_ARGUMENT` and a hint to check `chainmail cache status`. When other accounts answered, the refusal appears in `partial` and the search still succeeds. On those accounts `label:x` matches the IMAP keyword `x`, ignoring case. System flags such as `\Seen` are not labels, so `label:\Seen` there is always refused: use `is:read`.
 
 On accounts other than Google, `newer_than:`, `older_than:`, `after:` and `before:` work on the arrival date at day granularity, so `newer_than:1d` there matches since the start of yesterday.
+
+A search answered from the cache uses the same rules, with one difference on Google accounts: dates there are also compared by arrival day, where Gmail's own search reads `newer_than:` its own way. Text matching differs too; see [How the cache matches text](#how-the-cache-matches-text).
 
 The shell removes quotes before chainmail sees them, so quote the whole query when it holds a phrase or a quoted value. Put `--` before the query when a term starts with `-`, so it is not read as a flag.
 
@@ -445,7 +481,7 @@ set cursor (chainmail search invoice | jq -r .next_cursor)
 chainmail search invoice --cursor $cursor
 ```
 
-A ref goes stale when its message is gone, and a ref or cursor goes stale when its folder is rebuilt on the server, which IMAP signals with a new `UIDVALIDITY`. The call then fails with `STALE_REF` (exit 6), and the fix is to search again for fresh refs. On Google accounts a ref also carries Gmail's message ID, so it survives a rebuilt All Mail. The daemon keeps folders open on its pooled connections. Before it uses an open folder again it opens it afresh if the daemon has changed mail since, and otherwise asks the server what changed there, unless it last asked less than a second ago or opened the folder then. So a ref that a change through the daemon returned works at once. New mail and changes made by another mail client show once the server reports them in answer to that question, which the daemon asks at most once a second on each connection. Most servers report a change in that answer, but Gmail can report a message that another client moved into a folder some time later, so a search can miss such a message for longer than a second. A get, attachment or thread that names a message the server leaves out of an open folder, or that Gmail cannot find there by its message ID, opens the folder afresh and asks once more before it fails with `STALE_REF`, so a ref to a message that has only just arrived reads at once too. Until the server reports such a message, a search can still miss it and a change through its ref can still fail with `STALE_REF`, so search again after a moment. A cursor naming a folder that was deleted or renamed since its first page fails with `INVALID_ARGUMENT`, and the fix is the same. An account or folder that a search or folder list could not read is listed in `partial` with its reason and hint. The rest of the response is still valid, and the command still succeeds. It fails only when every source failed.
+A ref goes stale when its message is gone, and a ref or cursor goes stale when its folder is rebuilt on the server, which IMAP signals with a new `UIDVALIDITY`. The call then fails with `STALE_REF` (exit 6), and the fix is to search again for fresh refs. On Google accounts a ref also carries Gmail's message ID, so it survives a rebuilt All Mail. On other accounts `get` and `thread` first look for the message by its Message-ID in the cache (see [Reading through the cache](#reading-through-the-cache)). The daemon keeps folders open on its pooled connections. Before it uses an open folder again it opens it afresh if the daemon has changed mail since, and otherwise asks the server what changed there, unless it last asked less than a second ago or opened the folder then. So a ref that a change through the daemon returned works at once. New mail and changes made by another mail client show once the server reports them in answer to that question, which the daemon asks at most once a second on each connection. Most servers report a change in that answer, but Gmail can report a message that another client moved into a folder some time later, so a search can miss such a message for longer than a second. A get, attachment or thread that names a message the server leaves out of an open folder, or that Gmail cannot find there by its message ID, opens the folder afresh and asks once more before it fails with `STALE_REF`, so a ref to a message that has only just arrived reads at once too. Until the server reports such a message, a search can still miss it and a change through its ref can still fail with `STALE_REF`, so search again after a moment. A cursor naming a folder that was deleted or renamed since its first page fails with `INVALID_ARGUMENT`, and the fix is the same. An account or folder that a search or folder list could not read is listed in `partial` with its reason and hint. The rest of the response is still valid, and the command still succeeds. It fails only when every source failed.
 
 ### Output
 
@@ -778,9 +814,9 @@ If the daemon is down or the user cannot reach the socket, `chainmail mcp` still
 | `list_accounts` | Lists accounts with provider, address, auth state, and `allow_expunge` and `allow_folder_delete` per account. |
 | `test_account` | Logs in to an account's IMAP and SMTP servers and reports each check. |
 | `list_folders` | Lists folders with role, message count and unseen count, for every account or those named. |
-| `search` | Searches with the [query language](#the-query-language), newest first. `limit` is 25 by default and at most 200. Pass `next_cursor` as `cursor` for the next page. |
-| `get_message` | Reads 1 to 50 messages by ref: headers, body text and attachment list. Reading never marks mail read. |
-| `get_thread` | Reads every message in a ref's thread, oldest first. |
+| `search` | Searches with the [query language](#the-query-language), newest first. `limit` is 25 by default and at most 200. Pass `next_cursor` as `cursor` for the next page. `source` picks what answers (`auto`, `cache` or `server`); the result says which did, per account, and whether a forced cache answer was complete. |
+| `get_message` | Reads 1 to 50 messages by ref: headers, body text and attachment list. Reading never marks mail read. Each message says whether it came from the cache or the server. |
+| `get_thread` | Reads every message in a ref's thread, oldest first. Each message says whether it came from the cache or the server. |
 | `download_attachment` | Saves one attachment to a new file and returns its path (see [Files](#files)). |
 | `save_raw_message` | Saves a message's original RFC 5322 bytes to a new `.eml` file and returns its path. |
 | `send_email` | Sends a new message from an account. |
@@ -801,12 +837,13 @@ If the daemon is down or the user cannot reach the socket, `chainmail mcp` still
 | `expunge` | Deletes messages for good. Listed only while the policy allows it. |
 | `delete_folder` | Deletes a folder, and with `force` the mail in it. Listed only while the policy allows it. |
 | `read_events` | Reads mail events after a cursor or a group's acknowledged position, waiting up to 60 seconds for the first. A group read acknowledges what it returns. New events carry the message summary as untrusted. See [Watching for mail](#watching-for-mail). |
+| `cache_status` | Reports each account's cache: state, backfill and body coverage per folder, today's download and the cache's size. Read-only, and holds no message content. Folder names are untrusted. See [Local cache](#local-cache). |
 
 Inputs take refs, addresses and folder names as plain strings. Outputs give dates in RFC 3339. A message's `flags` are the system flags by short name: `seen`, `flagged`, `answered`, `draft` and `deleted`. Every other flag, such as `$Forwarded`, is in `keywords`, as untrusted. The send and draft tools take `attachments` and `inline[].path` as absolute file paths. The batch tools take 1 to 500 refs. Every tool sets the four MCP annotations: the read and file tools are read-only, and `expunge` and `delete_folder` are destructive. `read_events` changes no mail, but it is neither read-only nor idempotent, since a read with a group moves the group's acknowledged position. It is not destructive. `update_draft`, `send_draft` and `delete_draft` are destructive while the policy allows expunge on at least one account, since the daemon then expunges the old draft instead of moving it to Trash, and are not destructive otherwise. No other annotation depends on the policy.
 
 `expunge` and `delete_folder` are listed only while the policy allows them on at least one account, as `list_accounts` reports. The server asks the daemon at start, and again before a `tools/list` once its last check is 60 seconds old. It runs no timer, so an idle session writes no audit rows. Each check is one `accounts.list` row. The same check sets the draft tools' `destructiveHint`. When the answer changes the list or that hint, the server sends `notifications/tools/list_changed`. While the daemon cannot be reached, the two tools are not listed and the draft tools are not marked destructive. A check cut short because the client cancelled its `tools/list` changes nothing, and the next `tools/list` checks again. The daemon still checks the policy on every call, so a stale list leads at worst to a `POLICY_DENIED` result.
 
-Not exposed: the admin calls (secrets, `auth login`, `admin status`, `audit`), `send-raw`, `accounts probe`, uploads as a tool of their own, and the rest of the watch service. `read_events` reads a page at a time in place of the event stream, a group read acknowledges itself in place of a separate `Ack`, and `watch status`, `watch groups` and `watch groups delete` have no tool.
+Not exposed: the admin calls (secrets, `auth login`, `admin status`, `audit`), `send-raw`, `accounts probe`, `cache rebuild` and `cache evict`, which are operator actions, uploads as a tool of their own, and the rest of the watch service. `read_events` reads a page at a time in place of the event stream, a group read acknowledges itself in place of a separate `Ack`, and `watch status`, `watch groups` and `watch groups delete` have no tool.
 
 ### Untrusted content
 
@@ -866,7 +903,7 @@ The daemon watches each account's mail and writes what changes to an event log i
 
 ### What is watched
 
-The daemon runs one supervisor for each account with `sync.enabled` on, from start to shutdown. On the Google presets it watches All Mail, the folder with the `\All` attribute, on one connection. All Mail holds every message whatever its labels, so that one connection sees every label, and a Google account polls nothing. Other accounts watch each folder in `watch` with IDLE, each on a connection of its own, and poll the rest of `sync.folders` every `sync.poll`. A poll asks the server for the folder's status on a pooled connection and syncs only when it changed, or every time on a server without CONDSTORE, whose status cannot show a flag change. A server without IDLE gets its watched folders synced every `idle_fallback_poll` on their own connections instead. An IDLE ends after 25 minutes at most, and the folder is synced before the next one starts. On the Google presets it ends after `google_check` (5 seconds by default) instead: Gmail tells an IDLE about new mail late, often around 30 seconds after the mail arrives and sometimes later, while a fresh sync sees it at once. A check that finds nothing changed costs ending and restarting the IDLE, one SELECT and a checkpoint write.
+The daemon runs one supervisor for each account with `sync.enabled` on, from start to shutdown. On the Google presets it watches All Mail, the folder with the `\All` attribute, on one connection. All Mail holds every message whatever its labels, so that one connection sees every label, and a Google account polls nothing. Other accounts watch each folder in `watch` with IDLE, each on a connection of its own, and poll the rest of `sync.folders` every `sync.poll`. Without `sync.folders`, an account other than Google syncs every folder a default search covers: every selectable folder except Trash, Junk and a virtual All folder. The daemon lists the folders when the account connects and again every `watch.expunge_sweep`. A folder that appears is synced as soon as a listing finds it, starting with a silent first sync, and one that disappears stops being synced and leaves `watch status`. So `chainmail watch` also reports `new`, `flags` and `expunged` events from folders such as Sent and Archive; filter with `--in inbox` to see only the inbox. A poll asks the server for the folder's status on a pooled connection and syncs only when it changed, or every time on a server without CONDSTORE, whose status cannot show a flag change. A server without IDLE gets its watched folders synced every `idle_fallback_poll` on their own connections instead. An IDLE ends after 25 minutes at most, and the folder is synced before the next one starts. On the Google presets it ends after `google_check` (5 seconds by default) instead: Gmail tells an IDLE about new mail late, often around 30 seconds after the mail arrives and sometimes later, while a fresh sync sees it at once. A check that finds nothing changed costs ending and restarting the IDLE, one SELECT and a checkpoint write.
 
 The first sync of a folder records where it stands and the messages it holds, and publishes a `status` event with state `baselined`. It reports nothing for the mail already there. After that, each new message produces a `new` event within seconds on a watched folder, and within `sync.poll` on a polled one. A sync commits its events together with the folder's checkpoint, so a crash neither loses nor repeats one. When the daemon starts, every folder catches up from its checkpoint, at most 500 messages per commit, so mail that arrived while the daemon was down produces its events in order.
 
@@ -980,7 +1017,7 @@ A client that cancels the request ends the wait. A `status` event with state `au
 
 ### Sync status
 
-`chainmail watch status`, and the `sync` section of `chainmail admin status`, show each synced folder's mode, state, whether it has CONDSTORE, its last sync and sweep, and its last error. Both print the same table. Neither is audited.
+`chainmail watch status`, and the `sync` section of `chainmail admin status`, show each synced folder's mode, state, whether it has CONDSTORE, its last sync and sweep, and its last error. Both print the same table. Neither is audited. `chainmail watch status` lists every synced folder, so an account without `sync.folders` shows each folder of its default search.
 
 ```fish
 chainmail watch status --output table
@@ -1000,6 +1037,127 @@ The mode is `idle` for a folder watched with IDLE and `poll` for a polled one, i
 The event schema also names a `catching_up` state. It is reserved and not published yet: a folder catches up inside one sync, which reports its events as it commits them.
 
 When the daemon shuts down, each watcher ends its IDLE and logs out, within 5 seconds.
+
+## Local cache
+
+The daemon keeps `cache.db`, a local copy of every synced folder: headers for all of it, and bodies for the body window plus recently read mail, indexed with SQLite's full-text search. A search or a read is answered from it when the cache can answer completely and is fresh, and from the mail server otherwise, and every answer says which. It needs no configuration (see the `cache.*` keys under [Configuration reference](#configuration-reference) to tune it). `cache.db` lives beside `state.db` in `--state-dir`, or in `[cache] dir`, and can be deleted at any time: the daemon builds it again. Stop the daemon first, and delete `cache.db-wal` and `cache.db-shm` with it.
+
+The cache follows the watcher's event log, so it covers the folders an account syncs (see [What is watched](#what-is-watched)). An account with `sync.enabled = false` has no cache.
+
+### What is cached
+
+For every synced folder (on Google, All Mail), each message's headers: From, To, Cc, Bcc, subject, dates, Message-ID, In-Reply-To, References, flags, Gmail labels, size and the attachment list. For the body window and recent reads, also its body as `get` reads it: the original header and the text parts, without attachment bodies. Attachments and raw messages are never cached, so `attachment` and `get --raw` always stream from the server.
+
+Gmail's Trash and Spam are not in All Mail, so on Google `in:trash`, `in:spam`, `in:junk` and `in:anywhere`, and `label:` with those names, go to the server. Off Google a default sync leaves out Trash and Junk the same way, so `in:trash` there goes to the server too. On Google the cache reads `in:` and `label:` as Gmail does: `inbox`, `sent`, `drafts`, `starred` and `important` mean the system labels, `in:archive` means mail without the Inbox label, and any other label matches with case folded and every space and slash read as a hyphen, so `label:work-clients` finds `Work/Clients`.
+
+How it fills: when the cache starts on a folder, new mail arrives through the event log within seconds, and a backfill walks the older mail from newest to oldest, `backfill_batch` headers at a time with `backfill_pause` between batches, the watched folders first. Once a folder's backfill is done, a body prefetch fetches the bodies of its mail inside the window, newest first, 25 at a time. A body that fails to fetch is tried at most 3 times, 8 hours apart, then counted as a final failure, and its headers stay searchable. Filling the cache never marks mail read: every fetch uses `BODY.PEEK`.
+
+### Which answers come from the cache
+
+Each account is decided on its own, for each page, so one search can mix the cache and the servers. With `--source auto`, the default, the cache answers an account when every folder the search covers is synced, fresh and backfilled, and the cache can answer the whole query. Otherwise the account's mail server answers.
+
+A folder is fresh when it is watched (state `watching`) or polled with its last poll successful within twice `sync.poll`, and the account's cache trails its mail events by no more than `fresh_lag`.
+
+Every operator except text is answered from the headers. Text (words and phrases) needs bodies, so the cache answers it only when the query's top level has `newer_than:` or `after:` inside the body window and every folder's window is complete. The bound counts in days, so with the default window of 90 days `newer_than:89d` can use the cache and `newer_than:90d` cannot. A query with text and no such bound, such as `invoice` alone or `invoice OR receipt`, goes to the server.
+
+A term the cache cannot evaluate at all, such as `label:\Seen` off Google, goes to the server whatever `--source` says, and the server answers or refuses it as before.
+
+Cursors work across sources: a page from the cache continues on the server and the other way round, with no row missed or repeated.
+
+### The source of an answer
+
+A search response's `source` is `cache`, `server` or `mixed`, when some accounts were answered by the cache and others by their servers. Each entry of `account_counts` has `source`, `synced_at` (with the cache, the oldest last sync of the folders searched), `complete` and `incomplete_reason`. In `get` and `thread`, each message carries its own `source`, and the response's `source` sums them up the same way.
+
+`--source cache` (on MCP, `source: "cache"`) answers from the cache even when a check fails. The account's count then has `complete` false and one of these reasons:
+
+| Reason | Meaning |
+|---|---|
+| `backfilling` | A folder's backfill is not done, so older mail is missing. |
+| `stale` | A folder is not watched and was not polled within twice `sync.poll`, or the cache trails the account's mail events by more than `fresh_lag`. |
+| `text_outside_window` | The query has text without a lower date bound inside the body window, the window is `0d`, or a folder's window is not complete yet. |
+| `folder_not_synced` | The search covers a folder the account does not sync, such as Trash. That folder gives no rows. |
+| `cache_disabled` | The account has no cache: `cache.enabled` is false, the account does not sync, or `cache.db` cannot be used because it did not open or its disk is full. The account gives no rows, not an error. |
+
+`--source server` skips the cache. In table output a footer names the source of each account, and why a forced answer is incomplete:
+
+```
+source: gm cache (incomplete: backfilling), host cache (incomplete: cache_disabled)
+```
+
+```fish
+chainmail search --source cache 'from:acme newer_than:30d'
+```
+
+### Reading through the cache
+
+A message's body never changes for a given UID, so a cached body is always valid. `get` renders it with `body_limit`, `--full` and quote trimming exactly as it renders one from the server. Flags and labels come from the cache when the folder is fresh, and from one quick fetch from the server otherwise. A message the cache does not hold is read from the server as before, and its body is kept when the cache tracks its folder. Every read sets the body's last-read time, which [body retention](#body-retention) uses. `thread` comes from the cache when the cache holds the message and every folder a default search covers is fresh.
+
+On accounts other than Google, a read of a ref that went stale, because the folder was renumbered or the message moved, is retried on the message's new ref when its Message-ID names exactly one current message in the cache, and the response carries the new ref. Zero or several matches give `STALE_REF` as before. This covers `get` and `thread` only: writes with a stale ref still fail with `STALE_REF`. Google keeps its own recovery by Gmail's message ID.
+
+### Body retention
+
+The window keeps the bodies of mail that arrived within `prefetch_bodies`. A body outside it stays while it was read within `read_retention`. `max_size` caps the whole file. An eviction sweep runs hourly, and as soon as a write leaves the file over `max_size`:
+
+1. It removes bodies outside the window that were not read within `read_retention`.
+2. If the file is still over `max_size`, it removes bodies outside the window, least recently read first, then window bodies, oldest arrival first, until the file is at 90% of `max_size`.
+
+Headers are never removed. If headers alone exceed `max_size`, the cache stays correct and its state is `over_cap`. A window body removed for space makes that folder's text searches go to the server until it is fetched again, and the prefetch waits until the file is under 80% of `max_size` before it fetches again. Changing the window or the retention takes a restart of the daemon, not a rebuild.
+
+### Download budget
+
+The backfill and the body prefetch spend at most `daily_download` per account per UTC day, counting each body's size and 2 KiB per header. When it is spent, background work waits until 00:00 UTC and the account's state is `budget_exhausted`. The headers of new mail and a `get` of a message the cache lacks still run, and count. The default of 1 GiB stays well inside Gmail's IMAP download limit of 2.5 GB a day. The headers of a large Google account fit in one day of the default budget: 200,000 messages count as about 400 MB.
+
+### How the cache matches text
+
+Words and phrases are matched as whole tokens over the subject, the display names, the addresses and the body text, ignoring case and accents. There is no stemming, no synonyms and no partial words: `invoice` does not match `invoices`, where Gmail's search might. The mail server of an account other than Google matches substrings instead. Header operators (`from:` and the rest) match substrings on both paths, as described under [The query language](#the-query-language).
+
+### Cache status, rebuild and evict
+
+`chainmail cache status` shows each account's cache, and the size of `cache.db` against `max_size`. The MCP tool `cache_status` reports the same, and `chainmail admin status` adds one line per account. It is not audited.
+
+```fish
+chainmail cache status --output table
+```
+
+```
+size  12.0 MiB of 2.0 GiB
+
+ACCOUNT  CACHE  STATE        BUDGET TODAY          ERROR
+gm       on     backfilling  1.5 MiB of 1.0 GiB    -
+host     on     ready        512.0 KiB of 1.0 GiB  -
+
+ACCOUNT  FOLDER            STATE        HEADERS  BACKFILL         BODIES  BODY SIZE  WINDOW      FAILED  LAST APPLIED
+gm       [Gmail]/All Mail  backfilling  1200     at 4100 of 9000  300     1.2 MiB    300/310     0       2026-11-02 08:58
+host     INBOX             ready        42       done             40      80.0 KiB   38/40 done  2       2026-11-02 09:00
+```
+
+An account's state is the most pressing of these:
+
+| State | Meaning |
+|---|---|
+| `disabled` | `cache.enabled` is false for the account, or the account does not sync. |
+| `error` | `cache.db` could not be opened, the disk holding it is full, or the cache's last step failed inside the cache. While the disk is full every search and read goes to the mail servers, and a write is tried again hourly; the cache comes back on once one succeeds. |
+| `paused` | One of the account's folders is `reconnecting` or `auth_required`. The cache waits for the watcher. A folder in `error` is skipped alone. |
+| `over_cap` | Headers alone fill `max_size`, so no body can be kept. Searches stay correct. Raise `max_size`. |
+| `budget_exhausted` | Today's `daily_download` is spent. Background work resumes at 00:00 UTC. |
+| `backfilling` | A folder's headers are still being fetched. |
+| `prefetching` | Every folder is backfilled, and a folder's window still lacks bodies. |
+| `ready` | Every folder is backfilled and its window complete. |
+
+A folder's state is `paused`, `backfilling`, `prefetching` or `ready`. `last_error` is a reason code such as `SERVER_UNAVAILABLE`, never server text.
+
+`chainmail cache rebuild` drops the cached rows of every account, of one account, or of one of its folders, and backfills them again. Searches go to the server for what is being rebuilt until its backfill is done. `chainmail cache evict` runs an eviction sweep now and reports what it freed. Both are audited.
+
+```fish
+chainmail cache rebuild --account work --folder INBOX
+chainmail cache evict
+```
+
+The daemon logs, at info, the start and end of each folder's backfill, a complete body window, a spent budget, rebuilds and evictions, and at warn, `over_cap`, a full disk and repeated failures. The logs name accounts and folders, never message content.
+
+### Failures
+
+No cache failure blocks watching or a request. A lagging or failed cache only sends searches and reads to the mail servers. A corrupt `cache.db`, or one of another schema version, is deleted and built again when the daemon starts.
 
 ## NixOS deployment
 
@@ -1052,6 +1210,8 @@ sudo systemd-creds encrypt --with-key=tpm2 --name=vault-key ~/.config/chainmail-
 ```
 
 The first start creates `/var/lib/chainmail` with an empty vault. To move a dev daemon's state over, stop the dev daemon first, so SQLite folds its write-ahead log into `state.db` and no settled send is lost. If a `state.db-wal` file is still there afterwards, copy it along with `state.db`. Then stop `chainmail.service`, copy `vault.age` and `state.db` into `/var/lib/chainmail/` owned by `chainmail:chainmail` with mode `0600`, and start it again. Client users then reach it through the default socket, so `chainmail accounts list` needs no `--socket`.
+
+The cache needs no NixOS settings. `cache.db` is created in the service's state directory, `/var/lib/chainmail`, beside `state.db`. To tune it, set `services.chainmail.settings.cache` (for example `cache.prefetch_bodies = "30d";`), or per account `settings.accounts.<name>.cache`. `cache.db` need not move with the rest of the state: a new daemon builds its own.
 
 On x86_64-linux, `nix flake check` also runs a NixOS VM test of the module, which starts the service and checks its user, directories, socket permissions, the policy table in the config, and that only client users can connect.
 
