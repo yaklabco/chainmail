@@ -341,11 +341,20 @@ func TestCacheAgainstDovecot(t *testing.T) {
 func waitCacheReady(t *testing.T, h *daemontest.Harness) *chainmailv1.AccountCacheStatus {
 	t.Helper()
 	deadline := time.Now().Add(cacheReadyWithin)
+	// Every call ends by the deadline, so a stalled one fails the wait in
+	// time, with the last status seen.
+	ctx, cancel := context.WithDeadline(t.Context(), deadline)
+	defer cancel()
+	var last *chainmailv1.GetCacheStatusResponse
 	for {
-		resp, err := h.Client.Cache.GetCacheStatus(t.Context(), connect.NewRequest(&chainmailv1.GetCacheStatusRequest{Accounts: []string{"dove"}}))
+		resp, err := h.Client.Cache.GetCacheStatus(ctx, connect.NewRequest(&chainmailv1.GetCacheStatusRequest{Accounts: []string{"dove"}}))
 		if err != nil {
+			if ctx.Err() != nil {
+				t.Fatalf("the cache of dove is not ready within %v: GetCacheStatus: %v; last status %v", cacheReadyWithin, err, last)
+			}
 			t.Fatalf("GetCacheStatus: %v", err)
 		}
+		last = resp.Msg
 		if st := readyStatus(resp.Msg, "dove"); st != nil {
 			return st
 		}
@@ -393,29 +402,52 @@ type cachePage struct {
 // partial result.
 func searchPage(t *testing.T, h *daemontest.Harness, req *chainmailv1.SearchRequest) *chainmailv1.SearchResponse {
 	t.Helper()
-	resp, err := h.Client.Message.Search(t.Context(), connect.NewRequest(req))
+	resp, err := searchPageCtx(t.Context(), h, req)
 	if err != nil {
-		t.Fatalf("search %q (source %q): %v", req.GetQueryString(), req.GetSource(), err)
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// searchPageCtx runs one search page under ctx and returns an error on a
+// failed call or a partial result.
+func searchPageCtx(ctx context.Context, h *daemontest.Harness, req *chainmailv1.SearchRequest) (*chainmailv1.SearchResponse, error) {
+	resp, err := h.Client.Message.Search(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, fmt.Errorf("search %q (source %q): %w", req.GetQueryString(), req.GetSource(), err)
 	}
 	if p := resp.Msg.GetPartial(); len(p) > 0 {
-		t.Fatalf("search %q (source %q): partial %v", req.GetQueryString(), req.GetSource(), p)
+		return nil, fmt.Errorf("search %q (source %q): partial %v", req.GetQueryString(), req.GetSource(), p)
 	}
-	return resp.Msg
+	return resp.Msg, nil
 }
 
 // searchDove pages through q on dove with source, limit rows a page.
 func searchDove(t *testing.T, h *daemontest.Harness, q, source string, limit uint32, snippets, threads bool) cachePage {
 	t.Helper()
+	out, err := searchDoveCtx(t.Context(), h, q, source, limit, snippets, threads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// searchDoveCtx is searchDove under ctx, returning an error instead of
+// failing the test.
+func searchDoveCtx(ctx context.Context, h *daemontest.Harness, q, source string, limit uint32, snippets, threads bool) (cachePage, error) {
 	var out cachePage
 	cursor := ""
 	for page := 0; ; page++ {
 		if page == 50 {
-			t.Fatalf("search %q (source %q): still a next_cursor after 50 pages", q, source)
+			return cachePage{}, fmt.Errorf("search %q (source %q): still a next_cursor after 50 pages", q, source)
 		}
-		resp := searchPage(t, h, &chainmailv1.SearchRequest{
+		resp, err := searchPageCtx(ctx, h, &chainmailv1.SearchRequest{
 			QueryString: q, Accounts: []string{"dove"}, Limit: limit, Cursor: cursor,
 			Source: source, Snippets: snippets, Threads: threads,
 		})
+		if err != nil {
+			return cachePage{}, err
+		}
 		if page == 0 {
 			out.source = resp.GetSource()
 			for _, ac := range resp.GetAccountCounts() {
@@ -435,7 +467,7 @@ func searchDove(t *testing.T, h *daemontest.Harness, q, source string, limit uin
 			out.rows = append(out.rows, line)
 		}
 		if cursor = resp.GetNextCursor(); cursor == "" {
-			return out
+			return out, nil
 		}
 	}
 }
@@ -678,8 +710,20 @@ func checkReads(t *testing.T, h *daemontest.Harness, reads *atomic.Int64, refs m
 func waitCacheRows(t *testing.T, h *daemontest.Harness, q string, want []string, within time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(within)
+	// Every search ends by the deadline, so a stalled one fails the wait
+	// in time, with the last answer seen.
+	ctx, cancel := context.WithDeadline(t.Context(), deadline)
+	defer cancel()
+	var got []string
 	for {
-		got := searchDove(t, h, q, "cache", 50, false, false).rows
+		p, err := searchDoveCtx(ctx, h, q, "cache", 50, false, false)
+		if err != nil {
+			if ctx.Err() != nil {
+				t.Fatalf("the cache answers %q with %v, then %v, after %v, want %v", q, got, err, within, want)
+			}
+			t.Fatal(err)
+		}
+		got = p.rows
 		if slices.Equal(got, want) {
 			return
 		}
@@ -746,16 +790,23 @@ func checkRecovery(t *testing.T, h *daemontest.Harness, dove *dovecot.Server, re
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(cacheRecoverWithin)
+	// Every Get ends by the deadline, so a stalled one fails the wait in
+	// time, with what the last answer was still waiting for.
+	ctx, cancel := context.WithDeadline(t.Context(), deadline)
+	defer cancel()
+	waiting := "no Get of the old ref answered"
 	for {
-		resp, err := h.Client.Message.Get(t.Context(), connect.NewRequest(&chainmailv1.GetRequest{Refs: []string{refs["lunch"]}}))
+		resp, err := h.Client.Message.Get(ctx, connect.NewRequest(&chainmailv1.GetRequest{Refs: []string{refs["lunch"]}}))
 		if err != nil {
+			if ctx.Err() != nil {
+				t.Fatalf("after %v: %s; then Get of the old ref: %v", cacheRecoverWithin, waiting, err)
+			}
 			t.Fatalf("Get of the old ref: %v", err)
 		}
 		items := resp.Msg.GetItems()
 		if len(items) != 1 {
 			t.Fatalf("Get of the old ref: %d items, want 1", len(items))
 		}
-		var waiting string
 		if m := items[0].GetMessage(); m != nil {
 			got := parseRef(t, m.GetRef())
 			if got != old {
@@ -770,7 +821,7 @@ func checkRecovery(t *testing.T, h *daemontest.Harness, dove *dovecot.Server, re
 		} else {
 			reason := items[0].GetError().GetReason()
 			if reason != api.ReasonStaleRef && reason != api.ReasonServerUnavailable {
-				t.Fatalf("Get of the old ref: %s, want STALE_REF until the message is found by its Message-ID", reason)
+				t.Fatalf("Get of the old ref: %s, want STALE_REF or SERVER_UNAVAILABLE until the message is found by its Message-ID", reason)
 			}
 			waiting = "the old ref was not recovered by Message-ID (last answer " + reason + ")"
 		}

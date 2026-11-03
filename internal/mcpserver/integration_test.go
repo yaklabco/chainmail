@@ -4,6 +4,7 @@ package mcpserver_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -405,11 +406,20 @@ var mcpCacheFolders = []string{"Archive", "Drafts", "INBOX", "Sent"}
 func waitDoveCache(t *testing.T, h *daemontest.Harness) {
 	t.Helper()
 	deadline := time.Now().Add(90 * time.Second)
+	// Every call ends by the deadline, so a stalled one fails the wait in
+	// time, with the last status seen.
+	ctx, cancel := context.WithDeadline(t.Context(), deadline)
+	defer cancel()
+	var last *chainmailv1.GetCacheStatusResponse
 	for {
-		resp, err := h.Client.Cache.GetCacheStatus(t.Context(), connect.NewRequest(&chainmailv1.GetCacheStatusRequest{Accounts: []string{"dove"}}))
+		resp, err := h.Client.Cache.GetCacheStatus(ctx, connect.NewRequest(&chainmailv1.GetCacheStatusRequest{Accounts: []string{"dove"}}))
 		if err != nil {
+			if ctx.Err() != nil {
+				t.Fatalf("the cache of dove is not ready within 90s: GetCacheStatus: %v; last status %v", err, last)
+			}
 			t.Fatalf("GetCacheStatus: %v", err)
 		}
+		last = resp.Msg
 		for _, a := range resp.Msg.GetAccounts() {
 			if a.GetAccount() != "dove" || a.GetState() != "ready" {
 				continue
