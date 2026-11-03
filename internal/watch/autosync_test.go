@@ -247,3 +247,89 @@ func TestSupervisorWithoutSyncAutoPollsOnlyItsConfiguredFolders(t *testing.T) {
 		t.Errorf("rows = %v, want only Sent", rows)
 	}
 }
+
+// A folder that disappears is dropped when the set is resolved again: its
+// sync_folders row and UIDs are deleted before it would be polled, so it
+// never reports FOLDER_NOT_FOUND, and no later poll writes it back.
+func TestSupervisorSyncAutoDropsARemovedFolder(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	fs.AddFolder("Projects", mailstore.RoleNone)
+	fs.Add(supMsg("Projects", "plan"))
+	acct := supAutoAccount(t, []string{})
+	r := supAutoRig(t, fs, acct, nil)
+	r.start()
+	r.waitSeen("Projects polling", supStatus("Projects", StatePolling))
+	r.clock.expectAfter(t, acct.SyncPoll)
+	if uids, err := r.state.uids(t.Context(), "acme", "Projects"); err != nil || len(uids) != 1 {
+		t.Fatalf("Projects UIDs = %v, %v; want the baselined one", uids, err)
+	}
+	r.pollTick(acct.SyncPoll) // 5m: an ordinary poll
+
+	if err := fs.DeleteFolder(t.Context(), "Projects", true); err != nil {
+		t.Fatal(err)
+	}
+	r.pollTick(acct.SyncPoll) // 10m: the set is resolved again and Projects dropped
+	if _, ok, err := r.state.Folder(t.Context(), "acme", "Projects"); err != nil || ok {
+		t.Errorf("Projects row after it disappeared: present %v, err %v; want gone", ok, err)
+	}
+	if uids, err := r.state.uids(t.Context(), "acme", "Projects"); err != nil || len(uids) != 0 {
+		t.Errorf("Projects UIDs after it disappeared = %v, %v; want none", uids, err)
+	}
+	r.pollTick(acct.SyncPoll) // 15m: another poll writes nothing back
+	if _, ok, err := r.state.Folder(t.Context(), "acme", "Projects"); err != nil || ok {
+		t.Errorf("Projects row a poll later: present %v, err %v; want gone", ok, err)
+	}
+	if n := supCount(r.all(), supStatus("Projects", StateError)); n != 0 {
+		t.Errorf("%d error events for the dropped Projects, want 0", n)
+	}
+	for _, folder := range supDefaultScope {
+		if row := r.row(folder); row.Mode != ModePoll {
+			t.Errorf("%s mode = %q, want poll", folder, row.Mode)
+		}
+	}
+}
+
+// dropUnsynced deletes the account's rows for folders neither watched nor
+// in the resolved set, whatever left them: a folder gone while the daemon
+// was down, or one an earlier sync.folders named. Watched folders, folders
+// in the set and other accounts' rows stay, and a dropped folder is
+// forgotten, so a parking does not write its row back.
+func TestSupervisorDropUnsynced(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	r := supAutoRig(t, fs, supAutoAccount(t, []string{"INBOX"}), nil)
+	ctx := t.Context()
+	for _, row := range []struct {
+		account, folder string
+		mode            Mode
+	}{
+		{"acme", "INBOX", ModeIdle},
+		{"acme", "Sent", ModePoll},
+		{"acme", "Old", ModePoll},
+		{"acme", "Trash", ModePoll},
+		{"other", "Old", ModePoll},
+	} {
+		if err := r.state.SetStatus(ctx, row.account, row.folder, row.mode, StatePolling, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.sup.know("Old", ModePoll)
+	r.sup.dropUnsynced(ctx, []string{"Sent"})
+	rows, err := r.state.Folders(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, row := range rows {
+		got = append(got, row.Account+"/"+row.Folder)
+	}
+	if want := []string{"acme/INBOX", "acme/Sent", "other/Old"}; !slices.Equal(got, want) {
+		t.Errorf("rows = %q, want %q", got, want)
+	}
+	for _, st := range r.sup.knownFolders() {
+		if st.name == "Old" {
+			t.Error("Old is still known after it was dropped, so a parking would write its row back")
+		}
+	}
+}

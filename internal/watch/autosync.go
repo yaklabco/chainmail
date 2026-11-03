@@ -48,8 +48,9 @@ func (s *Supervisor) autoFolders(ctx context.Context) ([]string, error) {
 // refreshAuto resolves a SyncAuto account's polled set again (autoFolders)
 // and returns sched changed to match, keeping the schedule of each folder
 // that stays. A folder that appears is due at once, and its first pass
-// baselines it silently. When the set cannot be resolved, sched stays as
-// it is.
+// baselines it silently. The account's rows for folders it no longer syncs
+// are dropped (dropUnsynced). When the set cannot be resolved, sched stays
+// as it is and nothing is dropped.
 func (s *Supervisor) refreshAuto(ctx context.Context, sched []*polled) []*polled {
 	want, err := s.autoFolders(ctx)
 	if err != nil {
@@ -69,6 +70,7 @@ func (s *Supervisor) refreshAuto(ctx context.Context, sched []*polled) []*polled
 		}
 		next = append(next, pf)
 	}
+	s.dropUnsynced(ctx, want)
 	s.setAutoSet(want)
 	return next
 }
@@ -102,4 +104,33 @@ func (s *Supervisor) setAutoSet(folders []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.auto = slices.Clone(folders)
+}
+
+// dropUnsynced deletes the account's sync_folders rows, with their UIDs,
+// for folders that are neither watched nor in want, and forgets them, so a
+// parking does not write them back. That covers a folder that disappeared
+// since the last resolution, one deleted while the daemon was down, and one
+// an earlier sync.folders named. A failure is logged and left for the next
+// resolution, which finds the row again.
+func (s *Supervisor) dropUnsynced(ctx context.Context, want []string) {
+	rows, err := s.o.State.Folders(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.logger.Warn("listing sync state to drop unsynced folders failed", "reason", failureReason(err))
+		}
+		return
+	}
+	for _, r := range rows {
+		if r.Account != s.o.Account.Name || slices.Contains(want, r.Folder) || slices.Contains(s.o.Account.Watch, r.Folder) {
+			continue
+		}
+		if err := s.o.State.DropFolder(ctx, s.o.Account.Name, r.Folder); err != nil {
+			if ctx.Err() == nil {
+				s.logger.Warn("dropping the sync state of a folder no longer synced failed", "folder", r.Folder, "reason", failureReason(err))
+			}
+			continue
+		}
+		s.forget(r.Folder)
+		s.logger.Info("stopped syncing a folder a default search no longer covers", "folder", r.Folder)
+	}
 }
