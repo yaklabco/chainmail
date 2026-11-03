@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/fang"
 	"github.com/spf13/cobra"
 
 	"github.com/jamesainslie/chainmail/internal/api"
@@ -14,7 +15,9 @@ import (
 	"github.com/jamesainslie/chainmail/internal/config"
 )
 
-// Execute runs chainmail with args and returns the process exit code.
+// Execute runs chainmail with args and returns the process exit code. On a
+// terminal, help and errors are styled by fang; otherwise errors are one
+// line of JSON on stderr. The exit code is the same either way.
 func Execute(ctx context.Context, args []string, env Env) int {
 	root := newRoot(ctx, env)
 	// cobra reads os.Args when args is nil, which would parse the host's command line.
@@ -22,6 +25,13 @@ func Execute(ctx context.Context, args []string, env Env) int {
 		args = []string{}
 	}
 	root.SetArgs(args)
+	if env.StderrTerminal {
+		// fang has already shown the error through styledError.
+		if err := fang.Execute(ctx, root, fangOptions()...); err != nil {
+			return classify(err).code
+		}
+		return api.ExitOK
+	}
 	if err := root.ExecuteContext(ctx); err != nil {
 		return reportError(env.Stderr, err)
 	}
@@ -107,7 +117,43 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 		newWatchCmd(ctx, env, g),
 	)
 	root.AddCommand(newOrganizeCmds(ctx, env, g)...)
+	root.AddGroup(commandGroups...)
+	for _, c := range root.Commands() {
+		c.GroupID = groupOf[c.Name()]
+	}
+	root.SetHelpCommandGroupID("admin")
 	return root
+}
+
+// commandGroups orders the top-level commands in help.
+var commandGroups = []*cobra.Group{
+	{ID: "read", Title: "Read"},
+	{ID: "compose", Title: "Compose"},
+	{ID: "organize", Title: "Organize"},
+	{ID: "watch", Title: "Watch"},
+	{ID: "accounts", Title: "Accounts and auth"},
+	{ID: "admin", Title: "Admin"},
+}
+
+// groupOf names each top-level command's group. A test fails for a
+// visible top-level command missing from it.
+var groupOf = map[string]string{
+	"search": "read", "get": "read", "thread": "read", "attachment": "read", "folders": "read",
+	"send": "compose", "send-raw": "compose", "reply": "compose", "forward": "compose", "draft": "compose",
+	"move": "organize", "copy": "organize", "archive": "organize", "trash": "organize", "expunge": "organize",
+	"read": "organize", "unread": "organize", "flag": "organize", "unflag": "organize", "flags": "organize",
+	"label": "organize", "folder": "organize",
+	"watch":    "watch",
+	"accounts": "accounts", "auth": "accounts", "secret": "accounts",
+	"admin": "admin", "audit": "admin", "daemon": "admin", "mcp": "admin", "version": "admin", "completion": "admin",
+}
+
+// walk calls fn for cmd and every command below it, parents first.
+func walk(cmd *cobra.Command, fn func(*cobra.Command)) {
+	fn(cmd)
+	for _, c := range cmd.Commands() {
+		walk(c, fn)
+	}
 }
 
 // newGroup returns a command that only holds subcommands. It runs only when

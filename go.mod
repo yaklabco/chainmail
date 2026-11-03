@@ -5,6 +5,7 @@ go 1.26.10
 require (
 	connectrpc.com/connect v1.21.1
 	filippo.io/age v1.3.2
+	github.com/charmbracelet/fang v1.0.0
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/emersion/go-message v0.18.2
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
@@ -32,7 +33,6 @@ require (
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/caarlos0/svu/v3 v3.4.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
-	github.com/charmbracelet/fang v1.0.0 // indirect
 	github.com/charmbracelet/lipgloss v1.1.0 // indirect
 	github.com/charmbracelet/log v1.0.0 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20261008173134-6b8d4baf91b4 // indirect

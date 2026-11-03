@@ -30,6 +30,9 @@ type Env struct {
 	PassShow func(ctx context.Context, path string) ([]byte, error)
 	// StdoutTerminal says stdout is a terminal, which makes table the default output.
 	StdoutTerminal bool
+	// StderrTerminal says stderr is a terminal: help and errors are then
+	// styled for a person instead of written as one line of JSON.
+	StderrTerminal bool
 	// TZ is the time zone tables and text show dates in. Nil means UTC.
 	TZ *time.Location
 	// Now reads the clock, for times relative to now such as audit --since.
@@ -44,7 +47,8 @@ type Env struct {
 func DefaultEnv() Env {
 	env := Env{
 		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Getenv: os.Getenv, PassShow: passShow,
-		StdoutTerminal: term.IsTerminal(int(os.Stdout.Fd())), TZ: time.Local, Now: time.Now, After: time.After,
+		StdoutTerminal: term.IsTerminal(int(os.Stdout.Fd())), StderrTerminal: term.IsTerminal(int(os.Stderr.Fd())),
+		TZ: time.Local, Now: time.Now, After: time.After,
 	}
 	if fd := int(os.Stdin.Fd()); term.IsTerminal(fd) {
 		env.ReadPassword = func() ([]byte, error) { return readTerminalPassword(fd) }
