@@ -89,6 +89,7 @@ func TestReadEventsRejectsBadInput(t *testing.T) {
 		{name: "limit above 200", args: map[string]any{"limit": 201}, inMessage: "limit must be 1 to 200"},
 		{name: "unknown kind", args: map[string]any{"kinds": []string{"new", "bounced"}}, inMessage: `unknown kind "bounced"`},
 		{name: "kinds are lowercase", args: map[string]any{"kinds": []string{"New"}}, inMessage: `unknown kind "New"`},
+		{name: "cache group", args: map[string]any{"group": "cache.work"}, inMessage: `"cache." are reserved`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

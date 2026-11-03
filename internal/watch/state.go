@@ -200,6 +200,29 @@ func (s *State) SetStatus(ctx context.Context, account, folder string, mode Mode
 	return nil
 }
 
+// DropFolder deletes the folder's sync_folders row and its known UIDs in
+// one transaction. A folder with no rows is not an error. The supervisor
+// calls it when a folder it polled leaves the account's search scope, so
+// the cache, which tracks the rows here, stops tracking it too.
+func (s *State) DropFolder(ctx context.Context, account, folder string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning drop of %s/%s: %w", account, folder, err)
+	}
+	defer func() { _ = tx.Rollback() }() // a no-op after Commit; an earlier error is the one to report
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM sync_uids WHERE account = ? AND folder = ?", account, folder); err != nil {
+		return fmt.Errorf("dropping UIDs of %s/%s: %w", account, folder, err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM sync_folders WHERE account = ? AND folder = ?", account, folder); err != nil {
+		return fmt.Errorf("dropping folder %s/%s: %w", account, folder, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing drop of %s/%s: %w", account, folder, err)
+	}
+	return nil
+}
+
 // boolInt renders b as the 0 or 1 the condstore column holds.
 func boolInt(b bool) int {
 	if b {

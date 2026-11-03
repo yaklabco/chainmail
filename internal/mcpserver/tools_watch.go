@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -20,6 +21,11 @@ const (
 	// readEventsMargin is how long past wait_seconds the daemon may take to
 	// answer, as for any other call, before the read fails with TIMEOUT.
 	readEventsMargin = 30 * time.Second
+	// reservedGroupPrefix starts the daemon's own cache groups
+	// (watch.CacheGroup). The daemon refuses them too; checking here keeps
+	// the refusal in the agent's terms, and mcpserver does not import
+	// internal/watch, which would pull in SQLite.
+	reservedGroupPrefix = "cache."
 )
 
 // eventKinds are the event kinds the daemon records and read_events filters on.
@@ -42,7 +48,7 @@ func (s *Server) registerWatchTools() {
 }
 
 type readEventsIn struct {
-	Group       string   `json:"group,omitempty" jsonschema:"a consumer group name of lowercase letters, digits, dot, dash and underscore, up to 64 characters; reads after the group's acknowledged event and acknowledges what it returns; not with cursor"`
+	Group       string   `json:"group,omitempty" jsonschema:"a consumer group name of lowercase letters, digits, dot, dash and underscore, up to 64 characters, not starting with cache.; reads after the group's acknowledged event and acknowledges what it returns; not with cursor"`
 	Cursor      *int64   `json:"cursor,omitempty" jsonschema:"next_cursor from an earlier read; reads the events after it; 0 reads from the oldest event kept; not with group"`
 	Kinds       []string `json:"kinds,omitempty" jsonschema:"event kinds to return: new, flags, expunged, status, gap; empty means every kind; status and gap events pass a list that names neither"`
 	Accounts    []string `json:"accounts,omitempty" jsonschema:"accounts to return events for; empty means every account"`
@@ -76,6 +82,9 @@ type readEventsOut struct {
 // readEventsRequest checks in and builds the daemon request. Every refusal
 // is an invalidArg built from in alone, before any daemon call.
 func readEventsRequest(in readEventsIn) (*chainmailv1.ReadEventsRequest, error) {
+	if strings.HasPrefix(in.Group, reservedGroupPrefix) {
+		return nil, invalidArg("group names starting with %q are reserved for the daemon's cache; pick another name", reservedGroupPrefix)
+	}
 	if in.Group != "" && in.Cursor != nil {
 		return nil, invalidArg("set group or cursor, not both: a group read resumes after the group's acknowledged event")
 	}

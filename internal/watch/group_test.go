@@ -166,6 +166,10 @@ func TestValidGroupName(t *testing.T) {
 		{"bot/1", false},
 		{"bot:1", false},
 		{"bøt", false},
+		{"cache.work", false},
+		{"cache.", false},
+		{"cache", true},
+		{"caches.work", true},
 	}
 	for _, tt := range tests {
 		if got := ValidGroupName(tt.name); got != tt.want {
