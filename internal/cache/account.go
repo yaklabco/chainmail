@@ -147,6 +147,7 @@ func (a *Account) Run(ctx context.Context) {
 	}
 	var wg sync.WaitGroup
 	wg.Go(func() { a.runBuilder(ctx) })
+	wg.Go(func() { a.runBackfill(ctx) })
 	wg.Wait()
 }
 
