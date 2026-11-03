@@ -88,7 +88,8 @@ func (a *Account) backfillStep(ctx context.Context, w *walk) (*walk, bool, error
 		return nil, false, err
 	}
 	defer a.endInflight()
-	if err := a.waitReady(ctx, true); err != nil {
+	allowance, err := a.waitAllowance(ctx)
+	if err != nil {
 		return w, false, err
 	}
 	if w == nil || w.folder != p.Folder || w.uidValidity != p.UIDValidity || w.epoch != epoch {
@@ -98,7 +99,7 @@ func (a *Account) backfillStep(ctx context.Context, w *walk) (*walk, bool, error
 		}
 		w = &walk{folder: p.Folder, uidValidity: p.UIDValidity, epoch: epoch, uids: uids}
 	}
-	batch := w.uids[:min(len(w.uids), max(1, a.settings().BackfillBatch))]
+	batch := w.uids[:min(len(w.uids), max(1, a.settings().BackfillBatch), allowance)]
 	var rows []Row
 	if len(batch) > 0 {
 		src := mailstore.Source{Folder: w.folder, UIDValidity: w.uidValidity}

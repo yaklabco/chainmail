@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"math"
 	"slices"
 	"time"
 
@@ -72,32 +73,40 @@ func (a *Account) paused(ctx context.Context) (bool, error) {
 }
 
 // waitReady blocks while the account is paused, checking again every
-// backfill_pause and at least every second. With background set it also
-// blocks while the day's download budget is spent, until 00:00 UTC. It
-// returns ctx's error when ctx ends first.
-func (a *Account) waitReady(ctx context.Context, background bool) error {
-	logged := false
+// backfill_pause and at least every second. It returns ctx's error when
+// ctx ends first.
+func (a *Account) waitReady(ctx context.Context) error {
 	for {
 		paused, err := a.paused(ctx)
 		if err != nil {
 			return err
 		}
-		if paused {
-			if !a.sleep(ctx, max(a.settings().BackfillPause, pauseRecheck)) {
-				return ctx.Err()
-			}
-			continue
-		}
-		if !background {
+		if !paused {
 			return nil
+		}
+		if !a.sleep(ctx, max(a.settings().BackfillPause, pauseRecheck)) {
+			return ctx.Err()
+		}
+	}
+}
+
+// waitAllowance blocks as waitReady does, and also while the day's
+// remaining download budget holds less than one header, until 00:00 UTC.
+// It returns how many headers the remaining budget holds, at least one,
+// which bounds the next background batch.
+func (a *Account) waitAllowance(ctx context.Context) (int, error) {
+	logged := false
+	for {
+		if err := a.waitReady(ctx); err != nil {
+			return 0, err
 		}
 		used, err := a.o.Store.Budget(ctx, a.name, a.day())
 		if err != nil {
-			return err
+			return 0, err
 		}
 		limit := a.settings().DailyDownload
-		if used < limit {
-			return nil
+		if n := (limit - used) / headerBudgetBytes; n >= 1 {
+			return int(min(n, math.MaxInt32)), nil
 		}
 		if !logged {
 			a.logger.InfoContext(ctx, "cache download budget spent; background work resumes at 00:00 UTC",
@@ -105,7 +114,7 @@ func (a *Account) waitReady(ctx context.Context, background bool) error {
 			logged = true
 		}
 		if !a.sleep(ctx, untilUTCMidnight(a.clock.Now())) {
-			return ctx.Err()
+			return 0, ctx.Err()
 		}
 	}
 }

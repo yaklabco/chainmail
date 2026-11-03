@@ -185,6 +185,41 @@ func TestBackfillBudgetWaitsForTheNextUTCDay(t *testing.T) {
 	}
 }
 
+// A batch never fetches more headers than the day's remaining budget
+// holds: with three and a half headers left, the next batch fetches three,
+// and the half header left waits for 00:00 UTC like a spent budget.
+func TestBackfillBatchFitsTheRemainingBudget(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	for _, n := range []string{"one", "two", "three", "four", "five"} {
+		fs.Add(acctMsg("INBOX", n))
+	}
+	r.pass("INBOX")
+	const half = headerBudgetBytes / 2
+	r.setSettings(func(s *config.CacheSettings) { s.DailyDownload = 10*headerBudgetBytes + half })
+	if _, err := r.store.AddBudget(t.Context(), "acme", "2026-11-02", 7*headerBudgetBytes); err != nil {
+		t.Fatal(err)
+	}
+	r.clock.Advance(14 * time.Hour) // 23:00 UTC
+	r.start()
+	r.clock.expectAfter(t, time.Hour)
+	if p := r.progress("INBOX"); p.BackfillLowUID != 3 || p.BackfillDone {
+		t.Errorf("progress while the budget is spent = %+v, want low UID 3, not done", p)
+	}
+	if got, want := r.budget("2026-11-02"), int64(10*headerBudgetBytes); got != want {
+		t.Errorf("budget used = %d, want %d", got, want)
+	}
+	if n := r.count("INBOX", 1); n != 3 {
+		t.Errorf("%d rows before the day ends, want 3", n)
+	}
+	r.clock.Advance(time.Hour)
+	r.waitBackfilled("INBOX")
+	if got, want := r.budget("2026-11-03"), int64(2*headerBudgetBytes); got != want {
+		t.Errorf("next day's budget = %d, want %d", got, want)
+	}
+}
+
 // Both workers pause while a folder of the account is auth_required,
 // checking again every second, and resume once it is not.
 func TestWorkersPauseWhileAuthRequired(t *testing.T) {

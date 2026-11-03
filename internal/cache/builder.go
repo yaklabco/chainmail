@@ -215,7 +215,7 @@ func (a *Account) fetchNew(ctx context.Context, fetch map[string][]uint32, progr
 	if len(fetch) == 0 {
 		return nil, nil
 	}
-	if err := a.waitReady(ctx, false); err != nil {
+	if err := a.waitReady(ctx); err != nil {
 		return nil, err
 	}
 	synced, err := a.syncRows(ctx)
