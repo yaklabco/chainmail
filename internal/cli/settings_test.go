@@ -195,3 +195,41 @@ func TestDaemonIgnoresClientSettings(t *testing.T) {
 		t.Errorf("daemon failed on client settings: %s", got.stderr)
 	}
 }
+
+// Viper drops empty tables, so cli.toml is checked as written.
+func TestSettingsRefuseEmptyTables(t *testing.T) {
+	t.Parallel()
+	for name, file := range map[string]string{
+		"empty table for output": "output = {}",
+		"empty unknown table":    "[unexpected]",
+		"empty inline unknown":   "extra = {}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := resolveWith(t, Env{Getenv: vars(map[string]string{"XDG_CONFIG_HOME": writeCLIConfig(t, file)})})
+			var ue usageError
+			if !errors.As(err, &ue) {
+				t.Errorf("err = %v, want a usage error for %q", err, file)
+			}
+		})
+	}
+}
+
+// An explicit --dev wins over CHAINMAIL_DEV, so a bad value there does not matter.
+func TestDaemonDevFlagBeatsABadEnvironment(t *testing.T) {
+	t.Parallel()
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(twoAccounts), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, dev := range []string{"--dev=false", "--dev=true"} {
+		t.Run(dev, func(t *testing.T) {
+			t.Parallel()
+			got := runCLI(t, Env{Getenv: vars(map[string]string{"CHAINMAIL_DEV": "maybe"})},
+				"daemon", dev, "--config", cfgPath, "--state-dir", "/var/lib/chainmail", "--vault-key-file", "/x")
+			if strings.Contains(got.stderr, "CHAINMAIL_DEV") {
+				t.Errorf("%s still failed on CHAINMAIL_DEV: %s", dev, got.stderr)
+			}
+		})
+	}
+}

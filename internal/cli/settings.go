@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -11,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -113,12 +113,12 @@ func readCLIConfig(path string) (map[string]any, error) {
 	if err != nil {
 		return nil, usageError{err: fmt.Errorf("reading %s: %w", path, err), hint: hint}
 	}
-	v := viper.New()
-	v.SetConfigType("toml")
-	if err := v.ReadConfig(bytes.NewReader(data)); err != nil {
+	// Read as written, not through viper, which drops empty tables and so
+	// would let output = {} or an empty [unexpected] table pass.
+	var all map[string]any
+	if err := toml.Unmarshal(data, &all); err != nil {
 		return nil, usageError{err: fmt.Errorf("parsing %s: %w", path, err), hint: hint}
 	}
-	all := v.AllSettings()
 	for _, key := range slices.Sorted(maps.Keys(all)) {
 		if !slices.ContainsFunc(clientBindings, func(b binding) bool { return b.key == key }) {
 			return nil, usageError{err: fmt.Errorf("%s: unknown key %q", path, key), hint: hint}
@@ -163,7 +163,8 @@ func (g *globals) resolve(env Env, cmd *cobra.Command) error {
 // fromSettings fills f from its flags, else the CHAINMAIL_* environment
 // variables, else the flag defaults.
 func (f *daemonFlags) fromSettings(env Env, flags *pflag.FlagSet) error {
-	if s := env.Getenv("CHAINMAIL_DEV"); s != "" {
+	// An explicit --dev wins, so CHAINMAIL_DEV is only checked when it is used.
+	if s := env.Getenv("CHAINMAIL_DEV"); s != "" && !flags.Changed("dev") {
 		if _, err := strconv.ParseBool(s); err != nil {
 			return usageError{err: fmt.Errorf("CHAINMAIL_DEV must be true or false, got %q", s), hint: daemonHint}
 		}
