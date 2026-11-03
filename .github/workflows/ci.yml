@@ -25,8 +25,10 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: |
-          GOOS=darwin GOARCH=arm64 go build ./...
-          GOOS=linux GOARCH=amd64 go build ./...
+          for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            echo "building for $target"
+            GOOS=${target%/*} GOARCH=${target#*/} go build ./...
+          done
   macos:
     # The unit tests on macOS. The Dovecot tests need Docker, so they stay
     # in the integration job on Linux; their integration build tag keeps
