@@ -65,7 +65,6 @@ var ignored = map[string]string{
 	chainmailv1connect.ComposeServiceSendProcedure + " draft":      "create_draft saves a new message to Drafts",
 	chainmailv1connect.ComposeServiceReplyProcedure + " dry_run":   "as Send dry_run",
 	chainmailv1connect.ComposeServiceForwardProcedure + " dry_run": "as Send dry_run",
-	chainmailv1connect.MessageServiceSearchProcedure + " source":   "added with the local cache; the search tool maps it once the cache tools land",
 }
 
 // agentServices are the services the coverage test holds to account.
@@ -172,7 +171,7 @@ func coverageSamples(file string) map[string][]map[string]any {
 		"list_accounts":       {{}},
 		"test_account":        {{"account": "work"}},
 		"list_folders":        {{"accounts": []string{"work"}}},
-		"search":              {{"query": "x", "accounts": []string{"work"}, "limit": 5, "cursor": "c1.x", "count_only": true, "snippets": true, "threads": true}},
+		"search":              {{"query": "x", "accounts": []string{"work"}, "limit": 5, "cursor": "c1.x", "count_only": true, "snippets": true, "threads": true, "source": "cache"}},
 		"get_message":         {{"refs": []string{testRef}, "full": true}},
 		"get_thread":          {{"ref": testRef, "full": true}},
 		"download_attachment": {{"ref": testRef, "part": "2"}},

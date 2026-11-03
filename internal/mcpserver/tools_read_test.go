@@ -86,9 +86,17 @@ func TestReadToolRequests(t *testing.T) {
 		},
 		{
 			name: "search passes everything", tool: "search",
-			args: map[string]any{"query": "from:ann", "accounts": []string{"work"}, "limit": 200, "cursor": "c1.abc", "count_only": true, "snippets": true, "threads": true},
+			args: map[string]any{"query": "from:ann", "accounts": []string{"work"}, "limit": 200, "cursor": "c1.abc", "count_only": true, "snippets": true, "threads": true, "source": "cache"},
 			proc: chainmailv1connect.MessageServiceSearchProcedure,
-			want: &chainmailv1.SearchRequest{QueryString: "from:ann", Accounts: []string{"work"}, Limit: 200, Cursor: "c1.abc", CountOnly: true, Snippets: true, Threads: true},
+			want: &chainmailv1.SearchRequest{QueryString: "from:ann", Accounts: []string{"work"}, Limit: 200, Cursor: "c1.abc", CountOnly: true, Snippets: true, Threads: true, Source: "cache"},
+		},
+		{
+			name: "search passes source auto", tool: "search", args: map[string]any{"source": "auto"},
+			proc: chainmailv1connect.MessageServiceSearchProcedure, want: &chainmailv1.SearchRequest{Limit: 25, Source: "auto"},
+		},
+		{
+			name: "search passes source server", tool: "search", args: map[string]any{"source": "server"},
+			proc: chainmailv1connect.MessageServiceSearchProcedure, want: &chainmailv1.SearchRequest{Limit: 25, Source: "server"},
 		},
 		{
 			name: "get_message", tool: "get_message", args: map[string]any{"refs": []string{testRef, testRef2}, "full": true},
