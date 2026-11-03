@@ -640,8 +640,9 @@ type SearchRequest struct {
 	// or query, not both. Neither matches every message. On accounts other
 	// than Google, newer_than, older_than, after and before work on the
 	// arrival date at day granularity, so newer_than:1d there matches since the
-	// start of yesterday. has:, filename: and label: work on Google accounts
-	// only until the local index arrives.
+	// start of yesterday. has:, filename: and label: work on Google accounts,
+	// and on other accounts once their cache is complete, where label:
+	// matches IMAP keywords.
 	QueryString string `protobuf:"bytes,1,opt,name=query_string,json=queryString,proto3" json:"query_string,omitempty"`
 	Query       *Query `protobuf:"bytes,2,opt,name=query,proto3" json:"query,omitempty"`
 	// Accounts to search, added to those account: terms name. Empty, with no
@@ -656,7 +657,11 @@ type SearchRequest struct {
 	// Add a snippet of up to 200 characters to each row.
 	Snippets bool `protobuf:"varint,7,opt,name=snippets,proto3" json:"snippets,omitempty"`
 	// Collapse rows to the newest message of each thread.
-	Threads       bool `protobuf:"varint,8,opt,name=threads,proto3" json:"threads,omitempty"`
+	Threads bool `protobuf:"varint,8,opt,name=threads,proto3" json:"threads,omitempty"`
+	// Where answers come from: "" or "auto" (the cache when it can answer
+	// completely and is fresh, else the server), "cache" (the cache even when
+	// incomplete or stale), or "server".
+	Source        string `protobuf:"bytes,9,opt,name=source,proto3" json:"source,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -745,6 +750,13 @@ func (x *SearchRequest) GetThreads() bool {
 		return x.Threads
 	}
 	return false
+}
+
+func (x *SearchRequest) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
 }
 
 type MessageRow struct {
@@ -909,11 +921,21 @@ func (x *MessageRow) GetThreadCount() uint32 {
 }
 
 type AccountCount struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Account       string                 `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
-	Count         uint64                 `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Account string                 `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
+	Count   uint64                 `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"`
+	// "cache" or "server": what answered for this account.
+	Source string `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`
+	// With source "cache": the oldest last sync of the folders searched.
+	SyncedAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=synced_at,json=syncedAt,proto3" json:"synced_at,omitempty"`
+	// False only when source "cache" was forced and the cache could not
+	// answer completely.
+	Complete bool `protobuf:"varint,5,opt,name=complete,proto3" json:"complete,omitempty"`
+	// Set when complete is false: backfilling, stale, text_outside_window,
+	// folder_not_synced or cache_disabled.
+	IncompleteReason string `protobuf:"bytes,6,opt,name=incomplete_reason,json=incompleteReason,proto3" json:"incomplete_reason,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *AccountCount) Reset() {
@@ -960,6 +982,34 @@ func (x *AccountCount) GetCount() uint64 {
 	return 0
 }
 
+func (x *AccountCount) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *AccountCount) GetSyncedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.SyncedAt
+	}
+	return nil
+}
+
+func (x *AccountCount) GetComplete() bool {
+	if x != nil {
+		return x.Complete
+	}
+	return false
+}
+
+func (x *AccountCount) GetIncompleteReason() string {
+	if x != nil {
+		return x.IncompleteReason
+	}
+	return ""
+}
+
 type SearchResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Rows  []*MessageRow          `protobuf:"bytes,1,rep,name=rows,proto3" json:"rows,omitempty"`
@@ -969,7 +1019,9 @@ type SearchResponse struct {
 	Count         uint64           `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`
 	AccountCounts []*AccountCount  `protobuf:"bytes,4,rep,name=account_counts,json=accountCounts,proto3" json:"account_counts,omitempty"`
 	Partial       []*PartialSource `protobuf:"bytes,5,rep,name=partial,proto3" json:"partial,omitempty"`
-	// "server": the mail servers answered. The local index will say "cache".
+	// "cache", "server" or "mixed": what answered. "mixed" means the cache
+	// answered for some accounts and the mail servers for others;
+	// account_counts says which.
 	Source        string                 `protobuf:"bytes,6,opt,name=source,proto3" json:"source,omitempty"`
 	FetchedAt     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=fetched_at,json=fetchedAt,proto3" json:"fetched_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1202,23 +1254,25 @@ func (x *Attachment) GetSize() int64 {
 }
 
 type Message struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ref           string                 `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	Account       string                 `protobuf:"bytes,2,opt,name=account,proto3" json:"account,omitempty"`
-	Folder        string                 `protobuf:"bytes,3,opt,name=folder,proto3" json:"folder,omitempty"`
-	Date          *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=date,proto3" json:"date,omitempty"`
-	From          []*Address             `protobuf:"bytes,5,rep,name=from,proto3" json:"from,omitempty"`
-	To            []*Address             `protobuf:"bytes,6,rep,name=to,proto3" json:"to,omitempty"`
-	Cc            []*Address             `protobuf:"bytes,7,rep,name=cc,proto3" json:"cc,omitempty"`
-	Subject       *Untrusted             `protobuf:"bytes,8,opt,name=subject,proto3" json:"subject,omitempty"`
-	MessageId     *Untrusted             `protobuf:"bytes,9,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
-	InReplyTo     []*Untrusted           `protobuf:"bytes,10,rep,name=in_reply_to,json=inReplyTo,proto3" json:"in_reply_to,omitempty"`
-	References    []*Untrusted           `protobuf:"bytes,11,rep,name=references,proto3" json:"references,omitempty"`
-	Flags         []string               `protobuf:"bytes,12,rep,name=flags,proto3" json:"flags,omitempty"`
-	Labels        []string               `protobuf:"bytes,13,rep,name=labels,proto3" json:"labels,omitempty"`
-	ThreadId      string                 `protobuf:"bytes,14,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
-	Body          *Body                  `protobuf:"bytes,15,opt,name=body,proto3" json:"body,omitempty"`
-	Attachments   []*Attachment          `protobuf:"bytes,16,rep,name=attachments,proto3" json:"attachments,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Ref         string                 `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
+	Account     string                 `protobuf:"bytes,2,opt,name=account,proto3" json:"account,omitempty"`
+	Folder      string                 `protobuf:"bytes,3,opt,name=folder,proto3" json:"folder,omitempty"`
+	Date        *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=date,proto3" json:"date,omitempty"`
+	From        []*Address             `protobuf:"bytes,5,rep,name=from,proto3" json:"from,omitempty"`
+	To          []*Address             `protobuf:"bytes,6,rep,name=to,proto3" json:"to,omitempty"`
+	Cc          []*Address             `protobuf:"bytes,7,rep,name=cc,proto3" json:"cc,omitempty"`
+	Subject     *Untrusted             `protobuf:"bytes,8,opt,name=subject,proto3" json:"subject,omitempty"`
+	MessageId   *Untrusted             `protobuf:"bytes,9,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	InReplyTo   []*Untrusted           `protobuf:"bytes,10,rep,name=in_reply_to,json=inReplyTo,proto3" json:"in_reply_to,omitempty"`
+	References  []*Untrusted           `protobuf:"bytes,11,rep,name=references,proto3" json:"references,omitempty"`
+	Flags       []string               `protobuf:"bytes,12,rep,name=flags,proto3" json:"flags,omitempty"`
+	Labels      []string               `protobuf:"bytes,13,rep,name=labels,proto3" json:"labels,omitempty"`
+	ThreadId    string                 `protobuf:"bytes,14,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	Body        *Body                  `protobuf:"bytes,15,opt,name=body,proto3" json:"body,omitempty"`
+	Attachments []*Attachment          `protobuf:"bytes,16,rep,name=attachments,proto3" json:"attachments,omitempty"`
+	// "cache" or "server": where this message was read from.
+	Source        string `protobuf:"bytes,17,opt,name=source,proto3" json:"source,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1363,6 +1417,13 @@ func (x *Message) GetAttachments() []*Attachment {
 		return x.Attachments
 	}
 	return nil
+}
+
+func (x *Message) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
 }
 
 type ItemError struct {
@@ -1571,8 +1632,10 @@ func (x *GetRequest) GetFull() bool {
 }
 
 type GetResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Items         []*GetItem             `protobuf:"bytes,1,rep,name=items,proto3" json:"items,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Items []*GetItem             `protobuf:"bytes,1,rep,name=items,proto3" json:"items,omitempty"`
+	// "cache", "server" or "mixed": where the messages were read from. Each
+	// message's source says which.
 	Source        string                 `protobuf:"bytes,2,opt,name=source,proto3" json:"source,omitempty"`
 	FetchedAt     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=fetched_at,json=fetchedAt,proto3" json:"fetched_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1777,7 +1840,9 @@ type GetThreadResponse struct {
 	ThreadId string                 `protobuf:"bytes,1,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
 	// Oldest first. A member deleted or moved since the thread was listed is
 	// left out without a trace.
-	Messages  []*Message             `protobuf:"bytes,2,rep,name=messages,proto3" json:"messages,omitempty"`
+	Messages []*Message `protobuf:"bytes,2,rep,name=messages,proto3" json:"messages,omitempty"`
+	// "cache", "server" or "mixed": where the messages were read from. Each
+	// message's source says which.
 	Source    string                 `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`
 	FetchedAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=fetched_at,json=fetchedAt,proto3" json:"fetched_at,omitempty"`
 	// Some members are not in messages: omitted_refs lists them.
@@ -2101,7 +2166,7 @@ const file_chainmail_v1_message_proto_rawDesc = "" +
 	"\x05nodes\x18\x01 \x03(\v2\x13.chainmail.v1.QueryR\x05nodes\"7\n" +
 	"\tQueryTerm\x12\x14\n" +
 	"\x05field\x18\x01 \x01(\tR\x05field\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value\"\xfc\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"\x94\x02\n" +
 	"\rSearchRequest\x12!\n" +
 	"\fquery_string\x18\x01 \x01(\tR\vqueryString\x12)\n" +
 	"\x05query\x18\x02 \x01(\v2\x13.chainmail.v1.QueryR\x05query\x12\x1a\n" +
@@ -2111,7 +2176,8 @@ const file_chainmail_v1_message_proto_rawDesc = "" +
 	"\n" +
 	"count_only\x18\x06 \x01(\bR\tcountOnly\x12\x1a\n" +
 	"\bsnippets\x18\a \x01(\bR\bsnippets\x12\x18\n" +
-	"\athreads\x18\b \x01(\bR\athreads\"\xa2\x04\n" +
+	"\athreads\x18\b \x01(\bR\athreads\x12\x16\n" +
+	"\x06source\x18\t \x01(\tR\x06source\"\xa2\x04\n" +
 	"\n" +
 	"MessageRow\x12\x10\n" +
 	"\x03ref\x18\x01 \x01(\tR\x03ref\x12\x18\n" +
@@ -2129,10 +2195,14 @@ const file_chainmail_v1_message_proto_rawDesc = "" +
 	"\tthread_id\x18\f \x01(\tR\bthreadId\x12\x16\n" +
 	"\x06labels\x18\r \x03(\tR\x06labels\x121\n" +
 	"\asnippet\x18\x0e \x01(\v2\x17.chainmail.v1.UntrustedR\asnippet\x12!\n" +
-	"\fthread_count\x18\x0f \x01(\rR\vthreadCount\">\n" +
+	"\fthread_count\x18\x0f \x01(\rR\vthreadCount\"\xd8\x01\n" +
 	"\fAccountCount\x12\x18\n" +
 	"\aaccount\x18\x01 \x01(\tR\aaccount\x12\x14\n" +
-	"\x05count\x18\x02 \x01(\x04R\x05count\"\xc2\x02\n" +
+	"\x05count\x18\x02 \x01(\x04R\x05count\x12\x16\n" +
+	"\x06source\x18\x03 \x01(\tR\x06source\x127\n" +
+	"\tsynced_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\bsyncedAt\x12\x1a\n" +
+	"\bcomplete\x18\x05 \x01(\bR\bcomplete\x12+\n" +
+	"\x11incomplete_reason\x18\x06 \x01(\tR\x10incompleteReason\"\xc2\x02\n" +
 	"\x0eSearchResponse\x12,\n" +
 	"\x04rows\x18\x01 \x03(\v2\x18.chainmail.v1.MessageRowR\x04rows\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +
@@ -2153,7 +2223,7 @@ const file_chainmail_v1_message_proto_rawDesc = "" +
 	"\x04part\x18\x01 \x01(\tR\x04part\x123\n" +
 	"\bfilename\x18\x02 \x01(\v2\x17.chainmail.v1.UntrustedR\bfilename\x12!\n" +
 	"\fcontent_type\x18\x03 \x01(\tR\vcontentType\x12\x12\n" +
-	"\x04size\x18\x04 \x01(\x03R\x04size\"\x82\x05\n" +
+	"\x04size\x18\x04 \x01(\x03R\x04size\"\x9a\x05\n" +
 	"\aMessage\x12\x10\n" +
 	"\x03ref\x18\x01 \x01(\tR\x03ref\x12\x18\n" +
 	"\aaccount\x18\x02 \x01(\tR\aaccount\x12\x16\n" +
@@ -2174,7 +2244,8 @@ const file_chainmail_v1_message_proto_rawDesc = "" +
 	"\x06labels\x18\r \x03(\tR\x06labels\x12\x1b\n" +
 	"\tthread_id\x18\x0e \x01(\tR\bthreadId\x12&\n" +
 	"\x04body\x18\x0f \x01(\v2\x12.chainmail.v1.BodyR\x04body\x12:\n" +
-	"\vattachments\x18\x10 \x03(\v2\x18.chainmail.v1.AttachmentR\vattachments\"Q\n" +
+	"\vattachments\x18\x10 \x03(\v2\x18.chainmail.v1.AttachmentR\vattachments\x12\x16\n" +
+	"\x06source\x18\x11 \x01(\tR\x06source\"Q\n" +
 	"\tItemError\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x12\n" +
@@ -2290,46 +2361,47 @@ var file_chainmail_v1_message_proto_depIdxs = []int32{
 	1,  // 14: chainmail.v1.MessageRow.to:type_name -> chainmail.v1.Address
 	0,  // 15: chainmail.v1.MessageRow.subject:type_name -> chainmail.v1.Untrusted
 	0,  // 16: chainmail.v1.MessageRow.snippet:type_name -> chainmail.v1.Untrusted
-	11, // 17: chainmail.v1.SearchResponse.rows:type_name -> chainmail.v1.MessageRow
-	12, // 18: chainmail.v1.SearchResponse.account_counts:type_name -> chainmail.v1.AccountCount
-	4,  // 19: chainmail.v1.SearchResponse.partial:type_name -> chainmail.v1.PartialSource
-	28, // 20: chainmail.v1.SearchResponse.fetched_at:type_name -> google.protobuf.Timestamp
-	0,  // 21: chainmail.v1.Attachment.filename:type_name -> chainmail.v1.Untrusted
-	28, // 22: chainmail.v1.Message.date:type_name -> google.protobuf.Timestamp
-	1,  // 23: chainmail.v1.Message.from:type_name -> chainmail.v1.Address
-	1,  // 24: chainmail.v1.Message.to:type_name -> chainmail.v1.Address
-	1,  // 25: chainmail.v1.Message.cc:type_name -> chainmail.v1.Address
-	0,  // 26: chainmail.v1.Message.subject:type_name -> chainmail.v1.Untrusted
-	0,  // 27: chainmail.v1.Message.message_id:type_name -> chainmail.v1.Untrusted
-	0,  // 28: chainmail.v1.Message.in_reply_to:type_name -> chainmail.v1.Untrusted
-	0,  // 29: chainmail.v1.Message.references:type_name -> chainmail.v1.Untrusted
-	14, // 30: chainmail.v1.Message.body:type_name -> chainmail.v1.Body
-	15, // 31: chainmail.v1.Message.attachments:type_name -> chainmail.v1.Attachment
-	16, // 32: chainmail.v1.GetItem.message:type_name -> chainmail.v1.Message
-	17, // 33: chainmail.v1.GetItem.error:type_name -> chainmail.v1.ItemError
-	18, // 34: chainmail.v1.GetResponse.items:type_name -> chainmail.v1.GetItem
-	28, // 35: chainmail.v1.GetResponse.fetched_at:type_name -> google.protobuf.Timestamp
-	16, // 36: chainmail.v1.GetThreadResponse.messages:type_name -> chainmail.v1.Message
-	28, // 37: chainmail.v1.GetThreadResponse.fetched_at:type_name -> google.protobuf.Timestamp
-	0,  // 38: chainmail.v1.AttachmentHeader.filename:type_name -> chainmail.v1.Untrusted
-	26, // 39: chainmail.v1.DownloadAttachmentResponse.header:type_name -> chainmail.v1.AttachmentHeader
-	5,  // 40: chainmail.v1.MessageService.ListFolders:input_type -> chainmail.v1.ListFoldersRequest
-	10, // 41: chainmail.v1.MessageService.Search:input_type -> chainmail.v1.SearchRequest
-	19, // 42: chainmail.v1.MessageService.Get:input_type -> chainmail.v1.GetRequest
-	21, // 43: chainmail.v1.MessageService.GetRaw:input_type -> chainmail.v1.GetRawRequest
-	23, // 44: chainmail.v1.MessageService.GetThread:input_type -> chainmail.v1.GetThreadRequest
-	25, // 45: chainmail.v1.MessageService.DownloadAttachment:input_type -> chainmail.v1.DownloadAttachmentRequest
-	6,  // 46: chainmail.v1.MessageService.ListFolders:output_type -> chainmail.v1.ListFoldersResponse
-	13, // 47: chainmail.v1.MessageService.Search:output_type -> chainmail.v1.SearchResponse
-	20, // 48: chainmail.v1.MessageService.Get:output_type -> chainmail.v1.GetResponse
-	22, // 49: chainmail.v1.MessageService.GetRaw:output_type -> chainmail.v1.GetRawResponse
-	24, // 50: chainmail.v1.MessageService.GetThread:output_type -> chainmail.v1.GetThreadResponse
-	27, // 51: chainmail.v1.MessageService.DownloadAttachment:output_type -> chainmail.v1.DownloadAttachmentResponse
-	46, // [46:52] is the sub-list for method output_type
-	40, // [40:46] is the sub-list for method input_type
-	40, // [40:40] is the sub-list for extension type_name
-	40, // [40:40] is the sub-list for extension extendee
-	0,  // [0:40] is the sub-list for field type_name
+	28, // 17: chainmail.v1.AccountCount.synced_at:type_name -> google.protobuf.Timestamp
+	11, // 18: chainmail.v1.SearchResponse.rows:type_name -> chainmail.v1.MessageRow
+	12, // 19: chainmail.v1.SearchResponse.account_counts:type_name -> chainmail.v1.AccountCount
+	4,  // 20: chainmail.v1.SearchResponse.partial:type_name -> chainmail.v1.PartialSource
+	28, // 21: chainmail.v1.SearchResponse.fetched_at:type_name -> google.protobuf.Timestamp
+	0,  // 22: chainmail.v1.Attachment.filename:type_name -> chainmail.v1.Untrusted
+	28, // 23: chainmail.v1.Message.date:type_name -> google.protobuf.Timestamp
+	1,  // 24: chainmail.v1.Message.from:type_name -> chainmail.v1.Address
+	1,  // 25: chainmail.v1.Message.to:type_name -> chainmail.v1.Address
+	1,  // 26: chainmail.v1.Message.cc:type_name -> chainmail.v1.Address
+	0,  // 27: chainmail.v1.Message.subject:type_name -> chainmail.v1.Untrusted
+	0,  // 28: chainmail.v1.Message.message_id:type_name -> chainmail.v1.Untrusted
+	0,  // 29: chainmail.v1.Message.in_reply_to:type_name -> chainmail.v1.Untrusted
+	0,  // 30: chainmail.v1.Message.references:type_name -> chainmail.v1.Untrusted
+	14, // 31: chainmail.v1.Message.body:type_name -> chainmail.v1.Body
+	15, // 32: chainmail.v1.Message.attachments:type_name -> chainmail.v1.Attachment
+	16, // 33: chainmail.v1.GetItem.message:type_name -> chainmail.v1.Message
+	17, // 34: chainmail.v1.GetItem.error:type_name -> chainmail.v1.ItemError
+	18, // 35: chainmail.v1.GetResponse.items:type_name -> chainmail.v1.GetItem
+	28, // 36: chainmail.v1.GetResponse.fetched_at:type_name -> google.protobuf.Timestamp
+	16, // 37: chainmail.v1.GetThreadResponse.messages:type_name -> chainmail.v1.Message
+	28, // 38: chainmail.v1.GetThreadResponse.fetched_at:type_name -> google.protobuf.Timestamp
+	0,  // 39: chainmail.v1.AttachmentHeader.filename:type_name -> chainmail.v1.Untrusted
+	26, // 40: chainmail.v1.DownloadAttachmentResponse.header:type_name -> chainmail.v1.AttachmentHeader
+	5,  // 41: chainmail.v1.MessageService.ListFolders:input_type -> chainmail.v1.ListFoldersRequest
+	10, // 42: chainmail.v1.MessageService.Search:input_type -> chainmail.v1.SearchRequest
+	19, // 43: chainmail.v1.MessageService.Get:input_type -> chainmail.v1.GetRequest
+	21, // 44: chainmail.v1.MessageService.GetRaw:input_type -> chainmail.v1.GetRawRequest
+	23, // 45: chainmail.v1.MessageService.GetThread:input_type -> chainmail.v1.GetThreadRequest
+	25, // 46: chainmail.v1.MessageService.DownloadAttachment:input_type -> chainmail.v1.DownloadAttachmentRequest
+	6,  // 47: chainmail.v1.MessageService.ListFolders:output_type -> chainmail.v1.ListFoldersResponse
+	13, // 48: chainmail.v1.MessageService.Search:output_type -> chainmail.v1.SearchResponse
+	20, // 49: chainmail.v1.MessageService.Get:output_type -> chainmail.v1.GetResponse
+	22, // 50: chainmail.v1.MessageService.GetRaw:output_type -> chainmail.v1.GetRawResponse
+	24, // 51: chainmail.v1.MessageService.GetThread:output_type -> chainmail.v1.GetThreadResponse
+	27, // 52: chainmail.v1.MessageService.DownloadAttachment:output_type -> chainmail.v1.DownloadAttachmentResponse
+	47, // [47:53] is the sub-list for method output_type
+	41, // [41:47] is the sub-list for method input_type
+	41, // [41:41] is the sub-list for extension type_name
+	41, // [41:41] is the sub-list for extension extendee
+	0,  // [0:41] is the sub-list for field type_name
 }
 
 func init() { file_chainmail_v1_message_proto_init() }

@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package chainmail.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// CacheService reports and maintains the daemon's local mail cache.
+service CacheService {
+  // GetCacheStatus reports the cache of every account, or of those named.
+  rpc GetCacheStatus(GetCacheStatusRequest) returns (GetCacheStatusResponse);
+  // RebuildCache drops the cached rows of an account, or one of its
+  // folders, and backfills them again.
+  rpc RebuildCache(RebuildCacheRequest) returns (RebuildCacheResponse);
+  // EvictCache runs a body eviction sweep now.
+  rpc EvictCache(EvictCacheRequest) returns (EvictCacheResponse);
+}
+
+message GetCacheStatusRequest {
+  // Empty means every account.
+  repeated string accounts = 1;
+}
+
+message GetCacheStatusResponse {
+  // The size of cache.db: page_count times page_size.
+  int64 size_bytes = 1;
+  // The [cache] max_size cap.
+  int64 max_size_bytes = 2;
+  repeated AccountCacheStatus accounts = 3;
+}
+
+// AccountCacheStatus is the cache of one account.
+message AccountCacheStatus {
+  string account = 1;
+  bool enabled = 2;
+  // backfilling, prefetching, ready, budget_exhausted, paused, disabled,
+  // error or over_cap.
+  string state = 3;
+  // Bytes downloaded for the cache today, UTC.
+  int64 budget_used_bytes = 4;
+  // The daily_download budget.
+  int64 budget_bytes = 5;
+  // An api reason code, never server text.
+  string last_error = 6;
+  repeated FolderCacheStatus folders = 7;
+}
+
+// FolderCacheStatus is the cache of one synced folder.
+message FolderCacheStatus {
+  string folder = 1;
+  string state = 2;
+  // Messages whose headers are cached.
+  uint64 headers = 3;
+  bool backfill_done = 4;
+  // Backfill walks down from baseline_uid; backfill_low_uid is the lowest done.
+  uint32 baseline_uid = 5;
+  uint32 backfill_low_uid = 6;
+  // Messages whose bodies are cached, and their size.
+  uint64 bodies = 7;
+  int64 body_bytes = 8;
+  // Messages inside the prefetch_bodies window, and how many of them have
+  // a cached body.
+  uint64 window_messages = 9;
+  uint64 window_bodies = 10;
+  // Every message in the window has a body or a final failure.
+  bool window_done = 11;
+  // Bodies that failed to fetch 3 times and are not retried.
+  uint64 body_failures = 12;
+  google.protobuf.Timestamp last_applied_at = 13;
+}
+
+message RebuildCacheRequest {
+  string account = 1;
+  // Empty: every folder of the account.
+  string folder = 2;
+}
+
+message RebuildCacheResponse {
+  // The folders dropped, which backfill again.
+  repeated string folders = 1;
+}
+
+message EvictCacheRequest {}
+
+message EvictCacheResponse {
+  uint64 bodies_evicted = 1;
+  int64 freed_bytes = 2;
+}

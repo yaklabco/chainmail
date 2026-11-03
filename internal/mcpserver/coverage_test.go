@@ -65,6 +65,7 @@ var ignored = map[string]string{
 	chainmailv1connect.ComposeServiceSendProcedure + " draft":      "create_draft saves a new message to Drafts",
 	chainmailv1connect.ComposeServiceReplyProcedure + " dry_run":   "as Send dry_run",
 	chainmailv1connect.ComposeServiceForwardProcedure + " dry_run": "as Send dry_run",
+	chainmailv1connect.MessageServiceSearchProcedure + " source":   "added with the local cache; the search tool maps it once the cache tools land",
 }
 
 // agentServices are the services the coverage test holds to account.
