@@ -73,7 +73,10 @@ type Message struct {
 	// Date is both the Date header and the internal date.
 	Date time.Time
 	// From is an address.
-	From      string
+	From string
+	// Cc and Bcc are addresses; empty means none.
+	Cc        string
+	Bcc       string
 	Subject   string
 	MessageID string // without angle brackets
 	InReplyTo string // without angle brackets
@@ -91,6 +94,12 @@ func (m Message) Raw() []byte {
 	header := func(k, v string) { fmt.Fprintf(&b, "%s: %s\r\n", k, v) }
 	header("From", m.From)
 	header("To", "me@example.test")
+	if m.Cc != "" {
+		header("Cc", m.Cc)
+	}
+	if m.Bcc != "" {
+		header("Bcc", m.Bcc)
+	}
 	header("Subject", m.Subject)
 	header("Date", m.Date.Format(time.RFC1123Z))
 	if m.MessageID != "" {
@@ -532,6 +541,8 @@ var cases = []testCase{
 	{"FetchMessages reads headers and attachments", both, fetchMessages},
 	{"StreamPart streams the message and its parts", both, streamPart},
 	{"Thread", both, thread},
+	{"FetchHeaders keeps order, drops gone UIDs and never sets \\Seen", both, fetchHeaders},
+	{"SearchFolders names the folders Search uses", both, searchFolders},
 }
 
 func appendReadable(e *env) {
@@ -1448,6 +1459,138 @@ func thread(e *env) {
 	if err != nil || len(single) != 1 {
 		e.t.Errorf("Thread of a lone message = %v, %v", single, err)
 	}
+}
+
+func fetchHeaders(e *env) {
+	hf, ok := e.s.(mailstore.HeaderFetcher)
+	if !ok {
+		e.t.Fatalf("%T does not implement mailstore.HeaderFetcher", e.s)
+	}
+	want := e.richMessage("CfHead")
+	want.Cc, want.Bcc = "carol@conformance.test", "dave@conformance.test"
+	e.seed(e.t, want, e.msg("CfHeadPlain"))
+	r, plain := e.ref("CfHead"), e.ref("CfHeadPlain")
+	// A write first leaves the folder open read-write; the reads after it
+	// still must not set \Seen.
+	e.checkKept(one(e.t, e.s.StoreFlags(e.ctx, []ref.Ref{plain}, []string{"$Conformance"}, nil)), plain)
+	src := mailstore.Source{Folder: r.Folder, UIDValidity: r.UIDValidity}
+	gone := max(r.UID, plain.UID) + 1000
+	hs, err := hf.FetchHeaders(e.ctx, src, []uint32{plain.UID, gone, r.UID})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if len(hs) != 2 || hs[0].Summary.Ref != plain || hs[1].Summary.Ref != r {
+		e.t.Fatalf("FetchHeaders gave %d headers, want CfHeadPlain then CfHead with the gone UID left out", len(hs))
+	}
+	sums, err := e.s.FetchSummaries(e.ctx, src, []uint32{plain.UID, r.UID}, mailstore.SummaryOptions{})
+	if err != nil || len(sums) != 2 {
+		e.t.Fatalf("FetchSummaries = %v, %v", refsOf(sums), err)
+	}
+	for i, h := range hs {
+		if !SameSummary(h.Summary, sums[i]) {
+			e.t.Errorf("header %d summary = %+v, want FetchSummaries' %+v", i, h.Summary, sums[i])
+		}
+		if h.Summary.Preview != nil || h.Summary.Sample != nil {
+			e.t.Errorf("header %d carries a snippet", i)
+		}
+	}
+	h := hs[1]
+	if !slices.Equal(h.Cc, []mailstore.Address{{Email: want.Cc}}) || !slices.Equal(h.Bcc, []mailstore.Address{{Email: want.Bcc}}) {
+		e.t.Errorf("Cc = %v, Bcc = %v; want %s and %s", h.Cc, h.Bcc, want.Cc, want.Bcc)
+	}
+	if h.MessageID != want.MessageID {
+		e.t.Errorf("MessageID = %q, want %q without angle brackets", h.MessageID, want.MessageID)
+	}
+	if got := mailstore.MessageIDs(h.InReplyTo); !slices.Equal(got, []string{want.InReplyTo}) {
+		e.t.Errorf("In-Reply-To = %q", h.InReplyTo)
+	}
+	if got := mailstore.MessageIDs(h.References); !slices.Equal(got, want.References) {
+		e.t.Errorf("References = %q, want %q", h.References, want.References)
+	}
+	if len(h.Attachments) != len(want.Attachments) {
+		e.t.Fatalf("attachments = %+v", h.Attachments)
+	}
+	for i, a := range want.Attachments {
+		wantA := mailstore.Attachment{Part: AttachmentPart(i), Filename: a.Filename, ContentType: a.ContentType, Size: int64(base64.StdEncoding.EncodedLen(len(a.Data)))}
+		if h.Attachments[i] != wantA {
+			e.t.Errorf("attachment %d = %+v, want %+v", i, h.Attachments[i], wantA)
+		}
+	}
+	if p := hs[0]; len(p.Cc) != 0 || len(p.Bcc) != 0 || len(p.Attachments) != 0 {
+		e.t.Errorf("plain header = %+v, want no Cc, Bcc or attachments", p)
+	}
+	stale := src
+	stale.UIDValidity++
+	_, err = hf.FetchHeaders(e.ctx, stale, []uint32{r.UID})
+	wantErr(e.t, "FetchHeaders with another UIDVALIDITY", err, mailstore.ErrStaleRef)
+	if none, err := hf.FetchHeaders(e.ctx, src, nil); err != nil || len(none) != 0 {
+		e.t.Errorf("FetchHeaders of no UIDs = %v, %v; want none", none, err)
+	}
+	// No UIDs asks for nothing, so the source is not checked: a missing
+	// folder or another UIDVALIDITY gives nil, nil too.
+	for _, uids := range [][]uint32{nil, {}} {
+		for what, s := range map[string]mailstore.Source{
+			"in a missing folder":      {Folder: "Conformance Missing", UIDValidity: src.UIDValidity},
+			"with another UIDVALIDITY": stale,
+		} {
+			if none, err := hf.FetchHeaders(e.ctx, s, uids); err != nil || none != nil {
+				e.t.Errorf("FetchHeaders of %#v %s = %v, %v; want nil, nil", uids, what, none, err)
+			}
+		}
+	}
+	e.unread("CfHead")
+	e.unread("CfHeadPlain")
+}
+
+func searchFolders(e *env) {
+	sc, ok := e.s.(mailstore.Scoper)
+	if !ok {
+		e.t.Fatalf("%T does not implement mailstore.Scoper", e.s)
+	}
+	for _, in := range []string{"", "inbox", "trash", pick(e.gmail, "spam", "junk"), "anywhere"} {
+		got, err := sc.SearchFolders(e.ctx, in)
+		if err != nil {
+			e.t.Errorf("SearchFolders(%q): %v", in, err)
+			continue
+		}
+		res, err := e.s.Search(e.ctx, mailstore.SearchRequest{In: in, CountOnly: true})
+		if err != nil {
+			e.t.Errorf("Search(in:%q): %v", in, err)
+			continue
+		}
+		var searched []string
+		for _, r := range res {
+			searched = append(searched, r.Source.Folder)
+		}
+		if !slices.Equal(got, searched) {
+			e.t.Errorf("SearchFolders(%q) = %q, but Search ran in %q", in, got, searched)
+		}
+	}
+	def, err := sc.SearchFolders(e.ctx, "")
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if !slices.Contains(def, e.home()) || slices.Contains(def, e.trash()) || slices.Contains(def, e.spam()) {
+		e.t.Errorf("SearchFolders(\"\") = %q, want %s and neither %s nor %s", def, e.home(), e.trash(), e.spam())
+	}
+	if got, err := sc.SearchFolders(e.ctx, "trash"); err != nil || !slices.Equal(got, []string{e.trash()}) {
+		e.t.Errorf("SearchFolders(trash) = %q, %v; want %s", got, err, e.trash())
+	}
+	if !e.gmail {
+		_, err := sc.SearchFolders(e.ctx, "Conformance Missing")
+		wantErr(e.t, "SearchFolders of a missing folder", err, mailstore.ErrNotFound)
+	}
+}
+
+// SameSummary reports whether two summaries of one message agree, the
+// times compared as instants, since two reads may parse them into
+// different locations. Preview and Sample are not compared. Store tests
+// outside the suite use it too, so every store is held to one rule.
+func SameSummary(a, b mailstore.Summary) bool {
+	return a.Ref == b.Ref && a.Date.Equal(b.Date) && a.InternalDate.Equal(b.InternalDate) &&
+		slices.Equal(a.From, b.From) && slices.Equal(a.To, b.To) && a.Subject == b.Subject &&
+		slices.Equal(a.Flags, b.Flags) && a.Size == b.Size && a.HasAttachment == b.HasAttachment &&
+		a.ThreadID == b.ThreadID && slices.Equal(a.Labels, b.Labels)
 }
 
 func sortRefs(refs []ref.Ref) {

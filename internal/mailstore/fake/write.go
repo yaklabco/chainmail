@@ -331,7 +331,7 @@ func parseRaw(raw []byte) Message {
 		}
 		return out
 	}
-	m.From, m.To, m.Cc = addrs("From"), addrs("To"), addrs("Cc")
+	m.From, m.To, m.Cc, m.Bcc = addrs("From"), addrs("To"), addrs("Cc"), addrs("Bcc")
 	m.Subject = h.Get("Subject")
 	if dec, err := new(mime.WordDecoder).DecodeHeader(m.Subject); err == nil {
 		m.Subject = dec
