@@ -78,7 +78,7 @@ func newSendCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			if err := m.check(); err != nil {
 				return err
 			}
-			jsonOut := explicitJSON(cmd, g)
+			jsonOut := g.jsonChosen()
 			if dryRun {
 				if err := checkDryRunOutput(env, jsonOut); err != nil {
 					return err
@@ -168,7 +168,7 @@ twice. To send it again on purpose, pass a new --idempotency-key.`,
 			if err != nil {
 				return err
 			}
-			return writeComposeResult(env, g, explicitJSON(cmd, g), resp.Msg, resp.Msg.GetResult())
+			return writeComposeResult(env, g, g.jsonChosen(), resp.Msg, resp.Msg.GetResult())
 		},
 	}
 	f := cmd.Flags()
@@ -176,12 +176,6 @@ twice. To send it again on purpose, pass a new --idempotency-key.`,
 	f.StringVar(&file, "file", "", "the message to send")
 	f.StringVar(&key, "idempotency-key", "", "the key that stops a repeat from sending again (default: derived from the bytes)")
 	return cmd
-}
-
-// explicitJSON says json output was chosen, by --output, CHAINMAIL_OUTPUT
-// or cli.toml, rather than defaulted to because stdout is not a terminal.
-func explicitJSON(_ *cobra.Command, g *globals) bool {
-	return g.outputChosen && g.output == "json"
 }
 
 // checkDryRunOutput refuses to write a dry run's raw MIME to a terminal, as

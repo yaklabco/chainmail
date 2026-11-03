@@ -8,7 +8,6 @@ import (
 	"maps"
 	"net/mail"
 	"os"
-	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -245,6 +244,11 @@ func Load(path string) (*Config, error) {
 // Parse decodes config TOML, rejecting unknown keys and values of the wrong
 // type, applies defaults and validates the result. Nothing outside data is
 // read: no environment variable can set or change a key.
+//
+// go-toml's strict decoder gates the input first, refusing unknown keys and
+// values of the wrong type that viper alone would accept or change. Only
+// input that passes the gate, and the key checks after it, is loaded
+// through viper.
 func Parse(data []byte) (*Config, error) {
 	if err := strictGate(data); err != nil {
 		return nil, fmt.Errorf("parsing: %w", err)
@@ -259,13 +263,8 @@ func Parse(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("parsing: %w", err)
 	}
 	var cfg Config
-	var md mapstructure.Metadata
-	if err := v.Unmarshal(&cfg, strictDecoding(&md)); err != nil {
+	if err := v.Unmarshal(&cfg, strictDecoding); err != nil {
 		return nil, fmt.Errorf("parsing: %w", err)
-	}
-	if len(md.Unused) > 0 {
-		slices.Sort(md.Unused)
-		return nil, fmt.Errorf("parsing: %w: %s", ErrUnknownKey, strings.Join(md.Unused, ", "))
 	}
 	restoreEmptyTables(&cfg, tree)
 	cfg.applyDefaults()
@@ -296,31 +295,15 @@ func strictGate(data []byte) error {
 	return err
 }
 
-// strictDecoding makes viper decode as go-toml's strict decoder did: by
-// toml tag, with no conversions between types, and with every key it did
-// not use recorded in md. Viper's defaults are weak typing and hooks that
-// split strings into lists, which would accept watch = "INBOX".
-func strictDecoding(md *mapstructure.Metadata) viper.DecoderConfigOption {
-	return func(c *mapstructure.DecoderConfig) {
-		c.TagName = "toml"
-		c.WeaklyTypedInput = false
-		c.Metadata = md
-		c.DecodeHook = refuseFloatToInt
-	}
-}
-
-// refuseFloatToInt stops mapstructure truncating a TOML float into an int
-// field, which it does even without weak typing.
-func refuseFloatToInt(from, to reflect.Type, data any) (any, error) {
-	isFloat := from.Kind() == reflect.Float32 || from.Kind() == reflect.Float64
-	switch to.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		if isFloat {
-			return nil, fmt.Errorf("%v is not a whole number", data)
-		}
-	}
-	return data, nil
+// strictDecoding makes viper decode by toml tag with no conversions between
+// types. The gate has already refused unknown keys and wrong types; this
+// keeps viper from converting the values the gate let through.
+func strictDecoding(c *mapstructure.DecoderConfig) {
+	c.TagName = "toml"
+	// Viper's default is true, weak typing that converts between types.
+	c.WeaklyTypedInput = false
+	// Viper's default hooks would split strings into lists.
+	c.DecodeHook = nil
 }
 
 // checkKeys refuses keys viper would change. Viper folds keys to lower
@@ -377,9 +360,9 @@ func checkKeysUnder(prefix string, v any) error {
 				path = prefix + "." + k
 			}
 			if (prefix == "accounts" || prefix == "oauth_clients") && !nameRE.MatchString(k) {
-				return fmt.Errorf("key %q: %w", path, &ValidationError{
+				return &ValidationError{
 					Problems: []string{path + ": name must be lowercase letters, digits and hyphens"},
-				})
+				}
 			}
 			if strings.ToLower(k) != k {
 				return fmt.Errorf("key %q: keys must be lower case", path)

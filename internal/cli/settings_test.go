@@ -2,13 +2,17 @@ package cli
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/config"
 )
 
@@ -119,9 +123,9 @@ func TestSettingsErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			env := map[string]string{}
-			for k, v := range tt.env {
-				env[k] = v
+			env := maps.Clone(tt.env)
+			if env == nil {
+				env = map[string]string{}
 			}
 			if tt.file != "" {
 				env["XDG_CONFIG_HOME"] = writeCLIConfig(t, tt.file)
@@ -194,6 +198,10 @@ func TestDaemonIgnoresClientSettings(t *testing.T) {
 	if strings.Contains(got.stderr, "output") || strings.Contains(got.stderr, "cli.toml") {
 		t.Errorf("daemon failed on client settings: %s", got.stderr)
 	}
+	// It got past the settings and failed on its own config file instead.
+	if got.code != api.ExitInternal || !strings.Contains(got.stderr, "reading config") {
+		t.Errorf("got %+v, want exit %d reading the config file", got, api.ExitInternal)
+	}
 }
 
 // Viper drops empty tables, so cli.toml is checked as written.
@@ -222,14 +230,154 @@ func TestDaemonDevFlagBeatsABadEnvironment(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(twoAccounts), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, dev := range []string{"--dev=false", "--dev=true"} {
-		t.Run(dev, func(t *testing.T) {
+	// Each flag value fails later in its own way, which shows it was used.
+	tests := []struct {
+		dev, stateDir, want string
+		code                int
+	}{
+		// Not dev: the production state directory is allowed, and the
+		// missing vault key is what stops it.
+		{dev: "--dev=false", stateDir: t.TempDir(), want: "vault key", code: api.ExitInternal},
+		{dev: "--dev=true", stateDir: "/var/lib/chainmail", want: "--state-dir other than", code: api.ExitUsage},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dev, func(t *testing.T) {
 			t.Parallel()
 			got := runCLI(t, Env{Getenv: vars(map[string]string{"CHAINMAIL_DEV": "maybe"})},
-				"daemon", dev, "--config", cfgPath, "--state-dir", "/var/lib/chainmail", "--vault-key-file", "/x")
+				"daemon", tt.dev, "--config", cfgPath, "--state-dir", tt.stateDir, "--vault-key-file", "/nonexistent/vault-key")
 			if strings.Contains(got.stderr, "CHAINMAIL_DEV") {
-				t.Errorf("%s still failed on CHAINMAIL_DEV: %s", dev, got.stderr)
+				t.Errorf("%s still failed on CHAINMAIL_DEV: %s", tt.dev, got.stderr)
+			}
+			if got.code != tt.code || !strings.Contains(got.stderr, tt.want) {
+				t.Errorf("got %+v, want exit %d with %q", got, tt.code, tt.want)
 			}
 		})
 	}
+}
+
+// cliTOMLPath returns where cli.toml lives under a new XDG_CONFIG_HOME,
+// with its directory made, and that XDG_CONFIG_HOME.
+func cliTOMLPath(t *testing.T) (path, xdg string) {
+	t.Helper()
+	xdg = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(xdg, "chainmail"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(xdg, "chainmail", "cli.toml"), xdg
+}
+
+// A cli.toml that is a FIFO with no writer would block a plain read
+// forever, hanging every command. It must be refused at once.
+func TestSettingsRefuseAFIFO(t *testing.T) {
+	t.Parallel()
+	path, xdg := cliTOMLPath(t)
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan cliResult, 1)
+	go func() { done <- runCLI(t, Env{Getenv: vars(map[string]string{"XDG_CONFIG_HOME": xdg})}, "version") }()
+	select {
+	case got := <-done:
+		if got.code != api.ExitUsage || !strings.Contains(got.stderr, "not a regular file") || !strings.Contains(got.stderr, path) {
+			t.Errorf("got %+v, want a usage error that %s is not a regular file", got, path)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("reading a FIFO cli.toml hung")
+	}
+}
+
+func TestSettingsRefuseNonRegularAndLargeFiles(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		make  func(t *testing.T, path string)
+		wants []string
+	}{
+		{
+			name:  "directory",
+			make:  func(t *testing.T, path string) { t.Helper(); mustMkdir(t, path) },
+			wants: []string{"not a regular file"},
+		},
+		{
+			name: "over 64 KiB",
+			make: func(t *testing.T, path string) {
+				t.Helper()
+				body := "# " + strings.Repeat("x", 64<<10) + "\n"
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wants: []string{"larger than 64 KiB"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path, xdg := cliTOMLPath(t)
+			tt.make(t, path)
+			_, err := resolveWith(t, Env{Getenv: vars(map[string]string{"XDG_CONFIG_HOME": xdg})})
+			var ue usageError
+			if !errors.As(err, &ue) || !strings.Contains(err.Error(), path) {
+				t.Fatalf("err = %v, want a usage error naming %s", err, path)
+			}
+			for _, want := range tt.wants {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("err = %v, want %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// A cli.toml of exactly 64 KiB is still read.
+func TestSettingsReadAFileAtTheLimit(t *testing.T) {
+	t.Parallel()
+	path, xdg := cliTOMLPath(t)
+	line := "socket = \"/limit.sock\"\n"
+	body := line + "#" + strings.Repeat("x", 64<<10-len(line)-2) + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g, err := resolveWith(t, Env{Getenv: vars(map[string]string{"XDG_CONFIG_HOME": xdg})})
+	if err != nil || g.socket != "/limit.sock" {
+		t.Errorf("socket %q, err %v, want /limit.sock", g.socket, err)
+	}
+}
+
+func mustMkdir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// help, completion, man and daemon use neither client setting, so a bad
+// cli.toml must not stop them. A client command still refuses it.
+func TestSettingsSkippedByCommandsThatDoNotUseThem(t *testing.T) {
+	t.Parallel()
+	xdg := writeCLIConfig(t, `colour = "red"`)
+	env := func() Env { return Env{Getenv: vars(map[string]string{"XDG_CONFIG_HOME": xdg})} }
+	for _, args := range [][]string{{"help"}, {"help", "accounts"}, {"completion", "bash"}, {"man"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			t.Parallel()
+			got := runCLI(t, env(), args...)
+			if got.code != 0 || got.stdout == "" {
+				t.Errorf("got %+v, want exit 0 with output", got)
+			}
+		})
+	}
+	t.Run("daemon", func(t *testing.T) {
+		t.Parallel()
+		got := runCLI(t, env(), "daemon", "--dev", "--state-dir", "/var/lib/chainmail")
+		if got.code != api.ExitUsage || !strings.Contains(got.stderr, "--state-dir other than") {
+			t.Errorf("got %+v, want the daemon's own usage error", got)
+		}
+	})
+	t.Run("version", func(t *testing.T) {
+		t.Parallel()
+		got := runCLI(t, env(), "version")
+		if got.code != api.ExitUsage || !strings.Contains(got.stderr, `unknown key \"colour\"`) {
+			t.Errorf("got %+v, want a usage error for the unknown key", got)
+		}
+	})
 }

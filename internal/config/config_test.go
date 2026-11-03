@@ -937,9 +937,9 @@ func TestParseRefusesKeysViperWouldFold(t *testing.T) {
 	tests := []struct {
 		name, config, want string
 	}{
-		{name: "upper table", config: "[accounts.Work]\nprovider = \"hostinger\"\naddress = \"a@b.c\"", want: `"accounts.Work"`},
+		{name: "upper table", config: "[accounts.Work]\nprovider = \"hostinger\"\naddress = \"a@b.c\"", want: `accounts.Work: name must be`},
 		{name: "upper key", config: "[accounts.work]\nProvider = \"hostinger\"\naddress = \"a@b.c\"", want: `"accounts.work.Provider"`},
-		{name: "dotted key", config: "[accounts.\"a.b\"]\nprovider = \"hostinger\"\naddress = \"a@b.c\"", want: `"accounts.a.b"`},
+		{name: "dotted key", config: "[accounts.\"a.b\"]\nprovider = \"hostinger\"\naddress = \"a@b.c\"", want: `accounts.a.b: name must be`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1066,5 +1066,19 @@ func TestParseGateRefusesWhatViperWouldAccept(t *testing.T) {
 				t.Errorf("err = %v, want ErrUnknownKey", err)
 			}
 		})
+	}
+}
+
+// A bad account name is reported once, as validation reports it, not
+// behind a second copy of the key.
+func TestParseNamesABadAccountNameOnce(t *testing.T) {
+	t.Parallel()
+	_, err := Parse([]byte("[accounts.Work]\nprovider = \"hostinger\"\naddress = \"a@b.c\"\n"))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err = %v, want a validation error", err)
+	}
+	if n := strings.Count(err.Error(), "accounts.Work"); n != 1 {
+		t.Errorf("err = %q names accounts.Work %d times, want once", err, n)
 	}
 }

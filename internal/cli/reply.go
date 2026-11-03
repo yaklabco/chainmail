@@ -97,7 +97,7 @@ func (a *answerFlags) run(ctx context.Context, env Env, g *globals, cmd *cobra.C
 	if err := a.content.check(); err != nil {
 		return err
 	}
-	jsonOut := explicitJSON(cmd, g)
+	jsonOut := g.jsonChosen()
 	if a.dryRun {
 		if err := checkDryRunOutput(env, jsonOut); err != nil {
 			return err
