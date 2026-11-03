@@ -2,6 +2,7 @@ package cache
 
 import (
 	"testing"
+	"time"
 
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/config"
@@ -68,7 +69,10 @@ func TestStatusStates(t *testing.T) {
 			r.putFolder(watch.FolderRow{Account: "acme", Folder: "INBOX", UIDValidity: 7, UIDNext: 10, Mode: watch.ModeIdle, State: watch.StateWatching})
 		}, want: StateBackfilling},
 		{name: "no folders yet", setup: func(*acctRig) {}, want: StateBackfilling},
-		{name: "prefetching", setup: func(r *acctRig) { acctReadyFolder(r, "INBOX", false) }, want: StatePrefetching},
+		{name: "prefetching", setup: func(r *acctRig) {
+			r.setSettings(func(s *config.CacheSettings) { s.PrefetchBodies = 90 * 24 * time.Hour })
+			acctReadyFolder(r, "INBOX", false)
+		}, want: StatePrefetching},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -81,6 +85,44 @@ func TestStatusStates(t *testing.T) {
 			}
 			if st.State != tt.want {
 				t.Errorf("State = %q, want %q", st.State, tt.want)
+			}
+		})
+	}
+}
+
+// An empty prefetch window (prefetch_bodies 0d, bodies only on read) has
+// nothing to prefetch, so a folder whose backfill is done is ready even
+// though the prefetcher never sets its window_done. A non-zero window with
+// bodies still missing keeps the folder and the account prefetching.
+func TestStatusEmptyWindowIsComplete(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		window time.Duration
+		want   string
+	}{
+		{name: "empty window", window: 0, want: StateReady},
+		{name: "window with bodies missing", window: 90 * 24 * time.Hour, want: StatePrefetching},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newAcctRig(t, fake.New("acme", false), acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+			r.setSettings(func(s *config.CacheSettings) { s.PrefetchBodies = tt.window })
+			acctReadyFolder(r, "INBOX", false)
+			r.putRows(Row{Account: "acme", Folder: "INBOX", UIDValidity: 7, UID: 5, Subject: "a", MessageID: "a@example.com", InternalDate: acctStart, Date: acctStart})
+			st, err := r.a.Status(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.State != tt.want {
+				t.Errorf("State = %q, want %q", st.State, tt.want)
+			}
+			if len(st.Folders) != 1 || st.Folders[0].State != tt.want {
+				t.Errorf("Folders = %+v, want INBOX %s", st.Folders, tt.want)
+			}
+			if p := r.progress("INBOX"); p.WindowDone {
+				t.Errorf("window_done = true, want Status to leave it unset")
 			}
 		})
 	}

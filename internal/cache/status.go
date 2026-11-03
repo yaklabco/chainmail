@@ -70,6 +70,10 @@ func (a *Account) Status(ctx context.Context) (AccountStatus, error) {
 	for _, fs := range stats {
 		byFolder[fs.Folder] = fs
 	}
+	// An empty window (bodies only on read) has nothing to prefetch, so it
+	// counts as complete. The prefetcher never sets window_done for it, and
+	// Status only derives the state: WindowCovers still answers false.
+	emptyWindow := s.PrefetchBodies <= 0
 	paused, backfilling, prefetching := false, len(rows) == 0, false
 	for _, r := range rows {
 		f := FolderStatus{FolderStats: byFolder[r.Folder]}
@@ -84,7 +88,7 @@ func (a *Account) Status(ctx context.Context) (AccountStatus, error) {
 			f.State, paused = StatePaused, true
 		case !p.BackfillDone:
 			f.State, backfilling = StateBackfilling, true
-		case !p.WindowDone:
+		case !p.WindowDone && !emptyWindow:
 			f.State, prefetching = StatePrefetching, true
 		default:
 			f.State = StateReady
