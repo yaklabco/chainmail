@@ -653,7 +653,9 @@ func TestCompleteWindowLosesToAnEviction(t *testing.T) {
 	if err != nil || len(left) != 0 {
 		t.Fatalf("window check = %v, %v; want nothing left", left, err)
 	}
-	if _, _, err := r.st.dropBodies(ctx, []evictVictim{{msg: r.msgID(m), size: 1, account: "acme", folder: "INBOX", inWindow: true}}); err != nil {
+	if _, _, err := r.st.dropBodies(ctx, []evictVictim{{
+		msg: r.msgID(m), size: 1, account: "acme", folder: "INBOX", uidValidity: m.UIDValidity, uid: m.UID, winStart: since.Unix(), inWindow: true,
+	}}); err != nil {
 		t.Fatal(err)
 	}
 	set, err := r.st.CompleteWindow(ctx, "acme", "INBOX", since, maxBodyAttempts)

@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -133,13 +134,22 @@ func (r *EvictResult) add(bodies uint64, freed int64) {
 	r.FreedBytes += freed
 }
 
-// evictVictim is a body a sweep removes.
+// evictVictim is a body a sweep removes: its row id, and the immutable
+// identity of the message that row held when the victim query ran, which
+// dropBodies checks again inside its transaction, since SQLite reuses the
+// id of a deleted row. winStart is the account's window start in Unix
+// seconds. inWindow is the victim query's view of the window, which orders
+// the cap's victims; dropBodies derives the window effect from the row as
+// it is when it deletes.
 type evictVictim struct {
-	msg      int64
-	size     int64
-	account  string
-	folder   string
-	inWindow bool
+	msg         int64
+	size        int64
+	account     string
+	folder      string
+	uidValidity uint32
+	uid         uint32
+	winStart    int64
+	inWindow    bool
 }
 
 // Evict applies body retention and the size cap to every account's bodies,
@@ -238,11 +248,11 @@ func (s *Store) bodyAccounts(ctx context.Context) ([]string, error) {
 func (s *Store) retentionVictims(ctx context.Context, account string, windowStart, readCut int64) ([]evictVictim, error) {
 	const op = "finding bodies past retention"
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT b.msg, b.size_bytes, m.account, m.folder, 0
+		`SELECT b.msg, b.size_bytes, m.account, m.folder, m.uidvalidity, m.uid, ?, 0
 		 FROM bodies b JOIN messages m ON m.id = b.msg
 		 WHERE m.account = ? AND m.internal_date < ? AND (b.last_read_at IS NULL OR b.last_read_at < ?)
 		 ORDER BY b.msg LIMIT ?`,
-		account, windowStart, readCut, evictChunk)
+		windowStart, account, windowStart, readCut, evictChunk)
 	if err != nil {
 		return nil, s.fail(op, err)
 	}
@@ -261,7 +271,7 @@ func scanVictims(rows *sql.Rows, need int64) ([]evictVictim, error) {
 	var sum int64
 	for rows.Next() {
 		var v evictVictim
-		if err := rows.Scan(&v.msg, &v.size, &v.account, &v.folder, &v.inWindow); err != nil {
+		if err := rows.Scan(&v.msg, &v.size, &v.account, &v.folder, &v.uidValidity, &v.uid, &v.winStart, &v.inWindow); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -274,8 +284,11 @@ func scanVictims(rows *sql.Rows, need int64) ([]evictVictim, error) {
 }
 
 // dropBodies removes the victims' bodies in one transaction and returns how
-// many it removed and their size_bytes. A folder that lost a window body
-// has window_done cleared, and the cap hold is set.
+// many it removed and their size_bytes. A victim whose row id no longer
+// holds the message the victim query saw (deleted, its id perhaps reused
+// by another message) is skipped. A folder that lost a window body, as the
+// row reads inside the transaction, has window_done cleared, and the cap
+// hold is set.
 func (s *Store) dropBodies(ctx context.Context, victims []evictVictim) (uint64, int64, error) {
 	if len(victims) == 0 {
 		return 0, 0, nil
@@ -287,7 +300,7 @@ func (s *Store) dropBodies(ctx context.Context, victims []evictVictim) (uint64, 
 	)
 	err := s.inTx(ctx, "evicting bodies", func(tx *sql.Tx) error {
 		for _, v := range victims {
-			dropped, err := dropBody(ctx, tx, v.msg)
+			dropped, inWindow, err := dropBody(ctx, tx, v)
 			if err != nil {
 				return err
 			}
@@ -296,7 +309,7 @@ func (s *Store) dropBodies(ctx context.Context, victims []evictVictim) (uint64, 
 			}
 			n++
 			freed += v.size
-			if v.inWindow {
+			if inWindow {
 				cleared[[2]string{v.account, v.folder}] = true
 			}
 		}
@@ -316,36 +329,47 @@ func (s *Store) dropBodies(ctx context.Context, victims []evictVictim) (uint64, 
 	return n, freed, nil
 }
 
-// dropBody deletes one message's body and rewrites its FTS row with the
-// header terms alone. It reports false when the body was already gone, and
-// then leaves the FTS row alone: a message deleted since the victim query
-// must not get an orphan FTS row that a reused id would inherit.
-func dropBody(ctx context.Context, tx *sql.Tx, msg int64) (bool, error) {
-	res, err := tx.ExecContext(ctx, `DELETE FROM bodies WHERE msg = ?`, msg)
-	if err != nil {
-		return false, fmt.Errorf("deleting the body of message %d: %w", msg, err)
-	}
-	if n, err := res.RowsAffected(); err != nil || n == 0 {
-		return false, err
-	}
+// dropBody deletes the victim's body and rewrites its FTS row with the
+// header terms alone, only while the victim's row id still holds the same
+// message: account, folder, UIDVALIDITY and UID, which never change for a
+// row. It reports false when the row is gone or holds another message, or
+// the body was already gone, and then changes nothing: a message deleted
+// since the victim query must not get an orphan FTS row that a reused id
+// would inherit, and a reused id's body is not the victim's. It also
+// reports whether the row is inside the window, from its internal_date.
+func dropBody(ctx context.Context, tx *sql.Tx, v evictVictim) (dropped, inWindow bool, err error) {
 	var (
 		row               Row
+		internalDate      int64
 		from, to, cc, bcc string
 	)
-	err = tx.QueryRowContext(ctx, `SELECT subject, from_json, to_json, cc_json, bcc_json FROM messages WHERE id = ?`, msg).
-		Scan(&row.Subject, &from, &to, &cc, &bcc)
+	err = tx.QueryRowContext(ctx,
+		`SELECT internal_date, subject, from_json, to_json, cc_json, bcc_json FROM messages
+		 WHERE id = ? AND account = ? AND folder = ? AND uidvalidity = ? AND uid = ?`,
+		v.msg, v.account, v.folder, int64(v.uidValidity), int64(v.uid)).
+		Scan(&internalDate, &row.Subject, &from, &to, &cc, &bcc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
 	if err != nil {
-		return false, fmt.Errorf("reading the header of message %d: %w", msg, err)
+		return false, false, fmt.Errorf("reading the header of message %d: %w", v.msg, err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM bodies WHERE msg = ?`, v.msg)
+	if err != nil {
+		return false, false, fmt.Errorf("deleting the body of message %d: %w", v.msg, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return false, false, err
 	}
 	for _, l := range []struct {
 		dst  *[]mailstore.Address
 		json string
 	}{{&row.From, from}, {&row.To, to}, {&row.Cc, cc}, {&row.Bcc, bcc}} {
 		if *l.dst, err = decodeList[mailstore.Address](l.json); err != nil {
-			return false, fmt.Errorf("decoding the addresses of message %d: %w", msg, err)
+			return false, false, fmt.Errorf("decoding the addresses of message %d: %w", v.msg, err)
 		}
 	}
-	return true, writeFTS(ctx, tx, msg, row, "")
+	return true, internalDate >= v.winStart, writeFTS(ctx, tx, v.msg, row, "")
 }
 
 // vacuum returns free pages to the file system and reports the file size.
@@ -376,7 +400,7 @@ func (s *Store) capVictims(ctx context.Context, starts map[string]int64, need in
 	args = append(args, evictChunk)
 	rows, err := s.db.QueryContext(ctx,
 		`WITH w(account, win_start) AS (VALUES `+strings.Join(values, ", ")+`)
-		 SELECT b.msg, b.size_bytes, m.account, m.folder, m.internal_date >= w.win_start
+		 SELECT b.msg, b.size_bytes, m.account, m.folder, m.uidvalidity, m.uid, w.win_start, m.internal_date >= w.win_start
 		 FROM bodies b JOIN messages m ON m.id = b.msg JOIN w ON w.account = m.account
 		 ORDER BY m.internal_date >= w.win_start,
 		          CASE WHEN m.internal_date >= w.win_start THEN m.internal_date ELSE coalesce(b.last_read_at, -1) END,
