@@ -1,7 +1,11 @@
 package daemon_test
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +19,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
 	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
+	"github.com/jamesainslie/chainmail/internal/watch"
 )
 
 // cacheRunConfig has one account with the cache and one with it off.
@@ -238,5 +243,88 @@ func TestEvictCacheRuns(t *testing.T) {
 	want := []daemontest.AuditRow{{Client: "test", Action: "cache.evict", Targets: `["bodies=0","freed=0"]`, Result: "ok"}}
 	if got := cacheAudit(t, h); !slices.Equal(got, want) {
 		t.Errorf("audit rows = %+v, want %+v", got, want)
+	}
+}
+
+// keepOpen is a fake store the daemon cannot close, so a restarted daemon
+// serves the same mailbox. Everything but Close is the fake's.
+type keepOpen struct{ *fake.Store }
+
+func (keepOpen) Close() error { return nil }
+
+// With [cache] enabled = false no cache.db is created, every account says
+// disabled, and evict and rebuild are refused.
+func TestCacheOffInTheConfig(t *testing.T) {
+	t.Parallel()
+	h := startCacheRun(t, hostingerConfig+"\n[cache]\nenabled = false\n", map[string]mailstore.Store{"host": fake.New("host", false)}, nil)
+	resp := getCacheStatus(t, h)
+	if host := accountStatus(t, resp, "host"); host.GetEnabled() || host.GetState() != "disabled" {
+		t.Errorf("host = %v, want disabled", host)
+	}
+	if resp.GetSizeBytes() != 0 {
+		t.Errorf("size = %d, want 0 without a cache", resp.GetSizeBytes())
+	}
+	if _, err := os.Stat(filepath.Join(h.StateDir(), "cache.db")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("cache.db stat = %v, want not exist", err)
+	}
+	_, err := h.Client.Cache.EvictCache(t.Context(), connect.NewRequest(&chainmailv1.EvictCacheRequest{}))
+	if reasonOf(err) != api.ReasonInvalidArgument {
+		t.Errorf("EvictCache: %v, want INVALID_ARGUMENT", err)
+	}
+	_, err = h.Client.Cache.RebuildCache(t.Context(), connect.NewRequest(&chainmailv1.RebuildCacheRequest{Account: "host"}))
+	if reasonOf(err) != api.ReasonInvalidArgument {
+		t.Errorf("RebuildCache: %v, want INVALID_ARGUMENT", err)
+	}
+}
+
+// Deleting cache.db while the daemon is stopped loses nothing: after the
+// restart the workers fill a new cache, including mail delivered while the
+// daemon was down, and a watch group sees that mail exactly once.
+func TestCacheRebuiltAfterDeleteWhileWatching(t *testing.T) {
+	t.Parallel()
+	fk := fake.New("host", false)
+	now := time.Now()
+	fk.Add(fake.Message{Folder: "INBOX", Subject: "one", Date: now.Add(-2 * time.Hour)})
+	fk.Add(fake.Message{Folder: "INBOX", Subject: "two", Date: now.Add(-time.Hour)})
+	stores := map[string]mailstore.Store{"host": keepOpen{fk}}
+	h := startCacheRun(t, hostingerConfig, stores, nil)
+	awaitCacheFolder(t, h, "host", "INBOX", cached(2))
+
+	read := func(h *daemontest.Harness, wait int32) []string {
+		t.Helper()
+		resp, err := h.Client.Watch.ReadEvents(t.Context(), connect.NewRequest(&chainmailv1.ReadEventsRequest{Group: "bot", WaitSeconds: wait, Limit: 200}))
+		if err != nil {
+			t.Fatalf("ReadEvents: %v", err)
+		}
+		var subjects []string
+		for _, ev := range resp.Msg.GetEvents() {
+			if ev.GetKind() == string(watch.KindNew) {
+				subjects = append(subjects, ev.GetMessage().GetSubject().GetUntrusted())
+			}
+		}
+		return subjects
+	}
+	read(h, 0) // creates the group at the tail
+
+	if err := h.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	for _, name := range []string{"cache.db", "cache.db-wal", "cache.db-shm"} {
+		if err := os.Remove(filepath.Join(h.StateDir(), name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	fk.Add(fake.Message{Folder: "INBOX", Subject: "while stopped", Date: now})
+
+	restarted := startCacheRun(t, hostingerConfig, stores, h)
+	awaitCacheFolder(t, restarted, "host", "INBOX", cached(3))
+	var seen []string
+	deadline := time.Now().Add(cacheRunWait)
+	for len(seen) == 0 && time.Now().Before(deadline) {
+		seen = append(seen, read(restarted, 1)...)
+	}
+	seen = append(seen, read(restarted, 0)...)
+	if !slices.Equal(seen, []string{"while stopped"}) {
+		t.Errorf("new events after the restart = %q, want [while stopped] once", seen)
 	}
 }
