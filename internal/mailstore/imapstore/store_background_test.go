@@ -203,3 +203,25 @@ func TestStoreForegroundStillWaitsForAConnection(t *testing.T) {
 		t.Fatal("the waiting foreground call never got the connection")
 	}
 }
+
+// StreamPart ignores the background mark: the cache never streams, and a
+// reader holds its connection until it is closed, so it waits for a
+// connection as a foreground call does.
+func TestStreamPartIgnoresTheBackgroundMark(t *testing.T) {
+	t.Parallel()
+	s, _, _ := backgroundStore(t, 1, nil, nil)
+	r, release := holdConn(t, s)
+	ctx, cancel := context.WithTimeout(mailstore.WithBackground(t.Context()), 30*time.Millisecond)
+	defer cancel()
+	if _, _, err := s.StreamPart(ctx, r, ""); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("background StreamPart on a full pool = %v, want it to wait as a foreground call does", err)
+	}
+	release()
+	_, rc, err := s.StreamPart(mailstore.WithBackground(t.Context()), r, "")
+	if err != nil {
+		t.Fatalf("background StreamPart with an idle connection = %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Error(err)
+	}
+}
