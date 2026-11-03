@@ -19,6 +19,16 @@
           subPackages = [ "cmd/chainmail" ];
           env.CGO_ENABLED = 0;
           ldflags = [ "-s" "-w" "-X github.com/jamesainslie/chainmail/internal/version.Version=${version}" ];
+          nativeBuildInputs = [ pkgs.installShellFiles ];
+          # Generating the scripts runs the built binary, which a cross build cannot.
+          postInstall = pkgs.lib.optionalString (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) ''
+            installShellCompletion --cmd chainmail \
+              --bash <($out/bin/chainmail completion bash) \
+              --zsh <($out/bin/chainmail completion zsh) \
+              --fish <($out/bin/chainmail completion fish)
+            $out/bin/chainmail man > chainmail.1
+            installManPage chainmail.1
+          '';
         };
       });
 
