@@ -624,3 +624,71 @@ func TestCacheHousekeepingRunsAtStart(t *testing.T) {
 		t.Errorf("first wait = %v, want %v", w.d, cacheHousekeepInterval)
 	}
 }
+
+// When a sweep leaves cache.db over max_size with headers alone, status
+// reports a ready or prefetching account as over_cap and keeps every other
+// state, which says more about why the cache is not ready.
+func TestCacheStatusOverCap(t *testing.T) {
+	t.Parallel()
+	const day = 1 << 30 // the default daily_download
+	tests := []struct {
+		name     string
+		progress *cache.Progress // INBOX's, nil for none
+		syncWith string          // INBOX's sync_folders state
+		spent    int64
+		overCap  bool
+		want     string
+	}{
+		{name: "ready under the cap", progress: &cache.Progress{BackfillDone: true, WindowDone: true}, want: cache.StateReady},
+		{name: "ready", progress: &cache.Progress{BackfillDone: true, WindowDone: true}, overCap: true, want: cache.StateOverCap},
+		{name: "prefetching", progress: &cache.Progress{BackfillDone: true}, overCap: true, want: cache.StateOverCap},
+		{name: "backfilling", overCap: true, want: cache.StateBackfilling},
+		{name: "paused", syncWith: "auth_required", overCap: true, want: cache.StatePaused},
+		{name: "budget exhausted", progress: &cache.Progress{BackfillDone: true, WindowDone: true}, spent: day, overCap: true, want: cache.StateBudgetExhausted},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s, stateDB := newCacheServer(t, cacheConfig)
+			ctx := t.Context()
+			if _, err := stateDB.ExecContext(ctx,
+				"INSERT INTO sync_folders (account, folder, uidvalidity, uidnext, state) VALUES ('host', 'INBOX', 7, 100, ?)", tt.syncWith); err != nil {
+				t.Fatal(err)
+			}
+			if p := tt.progress; p != nil {
+				p.Account, p.Folder, p.UIDValidity, p.BaselineUIDNext = "host", "INBOX", 7, 100
+				if err := s.cache.PutProgress(ctx, *p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.spent > 0 {
+				if _, err := s.cache.AddBudget(ctx, "host", s.opts.Now().UTC().Format(cacheBudgetDay), tt.spent); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.overCap {
+				// No file fits in 1 byte, and there is no body to evict.
+				ev := cache.NewEvictor(cache.EvictorOptions{
+					Store:     s.cache,
+					Window:    func(string) time.Duration { return 0 },
+					Retention: func(string) time.Duration { return 0 },
+					MaxSize:   func() int64 { return 1 },
+				})
+				if _, err := ev.Sweep(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if !s.cache.OverCap() {
+					t.Fatal("a sweep with a 1 byte max_size left the cache under the cap")
+				}
+			}
+			acct, err := s.opts.Config.Account("host")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.cacheAccounts = map[string]*cache.Account{"host": cache.NewAccount(s.cacheAccountOptions(acct))}
+			if got := s.cacheStatus(ctx, acct, false).GetState(); got != tt.want {
+				t.Errorf("state = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
