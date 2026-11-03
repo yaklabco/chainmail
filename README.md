@@ -266,7 +266,7 @@ prefetch_bodies = "30d"          # any [cache] key but max_size and dir, for one
 | `watch.google_check` | no | `5s` | How often a Google account's All Mail is synced while its IDLE waits. Gmail can tell an IDLE about new mail 30 seconds or more after it arrives, so this bounds how late a `new` event can be. Between `2s` and `10m`. |
 | `cache.enabled` | no | `true` | `false` stops all cache work, and every search and `get` uses the mail servers. The rows already cached stay in `cache.db` until you delete it (see [Local cache](#local-cache)). `cache rebuild` refuses an account whose cache is off. |
 | `cache.prefetch_bodies` | no | `90d` | The body window: bodies of messages that arrived within it are fetched ahead and kept. `0d` fetches bodies only when read. Days as `<n>d`, or a Go duration, between `0d` and `3650d`. |
-| `cache.read_retention` | no | `30d` | How long a body outside the window is kept after a `get` read it. Between `0d` and `3650d`. |
+| `cache.read_retention` | no | `30d` | How long a body outside the window is kept after a `get` or `thread` read it. Between `0d` and `3650d`. |
 | `cache.max_size` | no | `2GiB` | The most space `cache.db` may take, headers and index included. A number of bytes, optionally followed by `B`, `KiB`, `MiB`, `GiB` or `TiB`, between `64MiB` and `1TiB`. Global only. |
 | `cache.daily_download` | no | `1GiB` | The most the backfill and the body prefetch download per account per UTC day, counting each body's size and 2 KiB per header. A `get` of a message the cache lacks counts too. A size as for `max_size`, between `16MiB` and `100GiB`. |
 | `cache.backfill_batch` | no | `250` | Headers fetched per backfill batch, 10 to 1000. |
@@ -1090,7 +1090,7 @@ chainmail search --source cache 'from:acme newer_than:30d'
 
 ### Reading through the cache
 
-A message's body never changes for a given UID, so a cached body is always valid. `get` renders it with `body_limit`, `--full` and quote trimming exactly as it renders one from the server. Flags and labels come from the cache when the folder is fresh, and from one quick fetch from the server otherwise. A message the cache does not hold is read from the server as before, and its body is kept when the cache tracks its folder. Every read sets the body's last-read time, which [body retention](#body-retention) uses. `thread` comes from the cache when the cache holds the message and every folder a default search covers is fresh.
+A message's body never changes for a given UID, so a cached body is always valid. `get` renders it with `body_limit`, `--full` and quote trimming exactly as it renders one from the server. Flags and labels come from the cache when the folder is fresh, and from one quick fetch from the server otherwise. A message the cache does not hold is read from the server as before, and its body is kept when the cache tracks its folder. Every read sets the body's last-read time, which [body retention](#body-retention) uses. `thread` comes from the cache when the cache holds the message and every folder a default search covers is fresh and backfilled.
 
 On accounts other than Google, a read of a ref that went stale, because the folder was renumbered or the message moved, is retried on the message's new ref when its Message-ID names exactly one current message in the cache, and the response carries the new ref. Zero or several matches give `STALE_REF` as before. This covers `get` and `thread` only: writes with a stale ref still fail with `STALE_REF`. Google keeps its own recovery by Gmail's message ID.
 
