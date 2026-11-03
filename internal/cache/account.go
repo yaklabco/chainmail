@@ -145,7 +145,9 @@ func (a *Account) Run(ctx context.Context) {
 	if !a.settings().Enabled {
 		return
 	}
-	<-ctx.Done()
+	var wg sync.WaitGroup
+	wg.Go(func() { a.runBuilder(ctx) })
+	wg.Wait()
 }
 
 // settings reads the account's cache settings now.
