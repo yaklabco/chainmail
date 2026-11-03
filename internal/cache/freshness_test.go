@@ -347,3 +347,58 @@ func TestFreshnessNeedsASyncInThisRun(t *testing.T) {
 		})
 	}
 }
+
+// The daemon starts each account's supervisor before its cache Account, so
+// this run's first pass can stamp last_sync_at before NewAccount runs. With
+// AccountOptions.Started set to the run's start, taken before any
+// supervisor, that pass counts as this run's. Without it, NewAccount's own
+// time is the start, and the same pass reads as a previous run's.
+func TestFreshnessCountsAPassBeforeNewAccount(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		started   bool
+		wantFresh bool
+	}{
+		{name: "run start given", started: true, wantFresh: true},
+		{name: "no run start", started: false, wantFresh: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fs := fake.New("acme", false)
+			r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+			fs.Add(acctMsg("INBOX", "one"))
+
+			// The run starts, its supervisor's first pass stamps INBOX a
+			// second later, and the cache Account is created a second
+			// after that.
+			runStart := r.clock.Now()
+			r.clock.Advance(time.Second)
+			r.pass("INBOX")
+			row := r.syncRow("INBOX")
+			p := Progress{Account: "acme", Folder: "INBOX", UIDValidity: row.UIDValidity, BaselineUIDNext: row.UIDNext, BackfillLowUID: 1, BackfillDone: true}
+			if err := r.store.PutProgress(t.Context(), p); err != nil {
+				t.Fatal(err)
+			}
+			r.clock.Advance(time.Second)
+			o := AccountOptions{
+				Account: r.acct, Settings: r.cacheSettings, MaxSize: r.maxSize.Load,
+				Store: r.store, Log: r.log, State: r.state, Mail: r.openMail, Clock: r.clock,
+			}
+			if tt.started {
+				o.Started = runStart
+			}
+			a := NewAccount(o)
+			a.applied.Store(r.tail())
+
+			ok, reason, _, err := a.Freshness(t.Context(), []string{"INBOX"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok != tt.wantFresh {
+				t.Errorf("Freshness of a pass between the run start and NewAccount = %v, %q; want fresh %v", ok, reason, tt.wantFresh)
+			}
+		})
+	}
+}

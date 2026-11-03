@@ -212,8 +212,10 @@ func folderCacheProto(f cache.FolderStatus) *chainmailv1.FolderCacheStatus {
 // startCacheAccounts starts a cache worker for each of accts with the
 // cache enabled, on wg, and records them in cacheAccounts. startWatch calls
 // it with the supervisors' context and WaitGroup, so the workers stop with
-// the supervisors, before drain closes the stores. It does no IO.
-func (s *Server) startCacheAccounts(ctx context.Context, accts []config.ResolvedAccount, wg *sync.WaitGroup) {
+// the supervisors, before drain closes the stores, and with runStart, the
+// time it took before starting any supervisor, so every Account counts
+// a pass from that time on as this run's. It does no IO.
+func (s *Server) startCacheAccounts(ctx context.Context, accts []config.ResolvedAccount, wg *sync.WaitGroup, runStart time.Time) {
 	if s.cache == nil {
 		return
 	}
@@ -224,7 +226,9 @@ func (s *Server) startCacheAccounts(ctx context.Context, accts []config.Resolved
 		if !cfg.CacheSettings(acct.Name).Enabled {
 			continue
 		}
-		ca := cache.NewAccount(s.cacheAccountOptions(acct))
+		o := s.cacheAccountOptions(acct)
+		o.Started = runStart
+		ca := cache.NewAccount(o)
 		workers[acct.Name] = ca
 		names = append(names, acct.Name)
 		wg.Go(func() { ca.Run(ctx) })

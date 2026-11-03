@@ -959,3 +959,64 @@ func TestSearchCacheReadFailureForcedOrRefused(t *testing.T) {
 		t.Errorf("automatic has: after a cache failure: %v (hint %q), want the refusal saying the cache failed", err, hint)
 	}
 }
+
+// startWatch starts each supervisor before the cache Accounts, so a
+// supervisor's first pass can stamp a folder before NewAccount runs. The
+// run's start, which startWatch takes before any supervisor, reaches every
+// Account, so that pass counts as this run's and the folder is fresh.
+func TestCacheAccountsCountPassesFromTheRunStart(t *testing.T) {
+	t.Parallel()
+	runStart := routeNow
+	fk := fake.New("host", false)
+	fk.SetNow(routeClock{}.Now)
+	// The daemon's clock reads two seconds after the run start, when
+	// startCacheAccounts creates the Accounts.
+	s, stateDB := newCacheServerOptions(t, routeConfig, Options{
+		NewStore: func(config.ResolvedAccount) mailstore.Store { return fk },
+		Now:      func() time.Time { return runStart.Add(2 * time.Second) },
+	})
+	f := &routeFixture{s: s, stateDB: stateDB}
+	// This run's first pass synced INBOX a second after the run start.
+	f.putSync(t, watch.FolderRow{
+		Account: "host", Folder: "INBOX", UIDValidity: 1, UIDNext: 1,
+		Mode: watch.ModeIdle, State: watch.StateWatching, LastSyncAt: runStart.Add(time.Second),
+	})
+	if err := s.cache.PutProgress(t.Context(), cache.Progress{
+		Account: "host", Folder: "INBOX", UIDValidity: 1, BaselineUIDNext: 1,
+		BackfillLowUID: 1, BackfillDone: true, WindowDone: true, LastAppliedAt: runStart,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	acct, err := s.opts.Config.Account("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	s.startCacheAccounts(ctx, []config.ResolvedAccount{acct}, &wg, runStart)
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+	a := s.cacheAccounts["host"]
+	if a == nil {
+		t.Fatal("startCacheAccounts started no cache worker for host")
+	}
+	// Freshness is stale until the builder opens its group, which against
+	// an empty log it does at once.
+	deadline := time.Now().Add(routeSettleWait)
+	for {
+		ok, reason, _, err := a.Freshness(t.Context(), []string{"INBOX"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("INBOX synced after the run start is %q after %v, want fresh", reason, routeSettleWait)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}

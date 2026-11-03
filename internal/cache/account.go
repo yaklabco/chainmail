@@ -55,6 +55,10 @@ type AccountOptions struct {
 	// EvictorOptions.OnError does, so the daemon can turn the cache off on
 	// a full disk at once. Nil drops them after logging.
 	OnError func(err error)
+	// Started is when the daemon began this run, taken before any
+	// supervisor starts. A folder is fresh only once a pass at or after it
+	// has synced the folder. Zero means NewAccount's time on Clock.
+	Started time.Time
 }
 
 // Account keeps one mail account's part of the cache. Its builder applies
@@ -96,10 +100,10 @@ type Account struct {
 	// applied is the builder's acknowledged event ID, -1 until the builder
 	// has opened its group.
 	applied atomic.Int64
-	// started is when NewAccount ran, on the account's clock. A folder is
-	// fresh only once a pass of this run has synced it: a sync row from a
-	// previous run says nothing of the mail that arrived while the daemon
-	// was down.
+	// started is the run's start, AccountOptions.Started or else when
+	// NewAccount ran, on the account's clock. A folder is fresh only once
+	// a pass of this run has synced it: a sync row from a previous run
+	// says nothing of the mail that arrived while the daemon was down.
 	started time.Time
 
 	// throttled is the pause the server's quota or bandwidth refusal of a
@@ -175,7 +179,10 @@ func NewAccount(o AccountOptions) *Account {
 	// carry the same defaults.
 	a.o.Clock, a.o.Logger = a.clock, a.logger
 	a.applied.Store(-1)
-	a.started = a.clock.Now()
+	a.started = o.Started
+	if a.started.IsZero() {
+		a.started = a.clock.Now()
+	}
 	return a
 }
 

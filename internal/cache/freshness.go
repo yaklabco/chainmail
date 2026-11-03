@@ -25,12 +25,12 @@ const (
 //
 // A folder is fresh when it has a sync_folders row with a UIDVALIDITY
 // (else folder_not_synced), is watching at any age or polling with a pass
-// within twice sync.poll, and has been synced by a pass since this Account
-// was created (else stale), and has finished its backfill under
-// that UIDVALIDITY (else backfilling), checked in that order and in folder
-// order. The account is then stale while the builder has an event of the
-// account older than fresh_lag, or a trimmed gap, still to apply, or has
-// not opened its group.
+// within twice sync.poll, and has been synced by a pass since the run
+// started, AccountOptions.Started (else stale), and has finished its
+// backfill under that UIDVALIDITY (else backfilling), checked in that
+// order and in folder order. The account is then stale while the builder
+// has an event of the account older than fresh_lag, or a trimmed gap,
+// still to apply, or has not opened its group.
 func (a *Account) Freshness(ctx context.Context, folders []string) (ok bool, reason string, syncedAt time.Time, err error) {
 	rows, err := a.syncRows(ctx)
 	if err != nil {
