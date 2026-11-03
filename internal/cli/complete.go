@@ -279,6 +279,12 @@ func with(sets ...map[string]cobra.CompletionFunc) map[string]cobra.CompletionFu
 func (cp *completer) specs() map[string]compSpec {
 	allAccounts := cp.accounts(nil, 0)
 	compose := with(contentFlagSpecs(), recipientFlagSpecs(), map[string]cobra.CompletionFunc{"subject": noComplete})
+	inboxRefs := cp.refs("in:inbox", unbounded, sender)
+	oneInboxRef := cp.refs("in:inbox", 1, sender)
+	oneDraft := cp.refs("in:drafts", 1, recipient)
+	refFolders := cp.folders(argAccounts, nil, 0, false)
+	labels := cp.folders(cp.googleAccounts, labelFolder, 0, false)
+	answer := with(contentFlagSpecs(), recipientFlagSpecs(), map[string]cobra.CompletionFunc{"idempotency-key": noComplete})
 	return map[string]compSpec{
 		"chainmail": {args: noComplete, flags: map[string]cobra.CompletionFunc{
 			"socket": files,
@@ -310,15 +316,38 @@ func (cp *completer) specs() map[string]compSpec {
 		"chainmail watch status":   {args: noComplete},
 		"chainmail watch": {args: noComplete, flags: map[string]cobra.CompletionFunc{
 			"account": allAccounts, "kind": commaList(watchKinds...), "since": noComplete,
+			"in": cp.folders(anyAccount, nil, 0, false),
 		}},
 		"chainmail audit": {args: noComplete, flags: map[string]cobra.CompletionFunc{
 			"account": allAccounts, "limit": noComplete, "before-id": noComplete,
 			"since": fixed("1h", "24h", "168h"),
 		}},
-		"chainmail flags": {flags: map[string]cobra.CompletionFunc{
+		"chainmail flags": {args: inboxRefs, flags: map[string]cobra.CompletionFunc{
 			"add": fixed(`\Seen`, `\Flagged`, `\Answered`, `\Draft`), "remove": fixed(`\Seen`, `\Flagged`, `\Answered`, `\Draft`),
 		}},
-		"chainmail secret set": {flags: map[string]cobra.CompletionFunc{"from-pass": cp.passEntries}},
+		"chainmail secret set":    {flags: map[string]cobra.CompletionFunc{"from-pass": cp.passEntries}},
+		"chainmail get":           {args: inboxRefs},
+		"chainmail thread":        {args: oneInboxRef},
+		"chainmail attachment":    {args: cp.refThenPart(oneInboxRef), flags: map[string]cobra.CompletionFunc{"out": files}},
+		"chainmail archive":       {args: inboxRefs},
+		"chainmail trash":         {args: inboxRefs},
+		"chainmail expunge":       {args: inboxRefs},
+		"chainmail read":          {args: inboxRefs},
+		"chainmail unread":        {args: inboxRefs},
+		"chainmail flag":          {args: inboxRefs},
+		"chainmail unflag":        {args: inboxRefs},
+		"chainmail move":          {args: inboxRefs, flags: map[string]cobra.CompletionFunc{"to": refFolders}},
+		"chainmail copy":          {args: inboxRefs, flags: map[string]cobra.CompletionFunc{"to": refFolders}},
+		"chainmail label":         {args: inboxRefs, flags: map[string]cobra.CompletionFunc{"add": labels, "remove": labels}},
+		"chainmail reply":         {args: oneInboxRef, flags: answer},
+		"chainmail forward":       {args: oneInboxRef, flags: answer},
+		"chainmail draft send":    {args: oneDraft, flags: map[string]cobra.CompletionFunc{"idempotency-key": noComplete}},
+		"chainmail draft delete":  {args: oneDraft},
+		"chainmail draft update":  {args: oneDraft, flags: compose},
+		"chainmail folder":        {args: noComplete, flags: map[string]cobra.CompletionFunc{"account": allAccounts}},
+		"chainmail folder create": {args: cp.folders(flagAccount, nil, 1, true)},
+		"chainmail folder delete": {args: cp.folders(flagAccount, nil, 1, false)},
+		"chainmail folder rename": {args: cp.folders(flagAccount, nil, 1, false)},
 	}
 }
 
