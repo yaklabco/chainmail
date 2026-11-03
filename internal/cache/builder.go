@@ -132,6 +132,15 @@ type segmentPlan struct {
 	touched map[string]bool
 	// gap is the gap that closes the segment, or nil.
 	gap *watch.Event
+	// rewalk lists, per folder, the new messages fetchNew skipped because
+	// the folder was in error, for commitSegment to record a new walk.
+	rewalk map[string]skipped
+}
+
+// skipped is the highest UID of a folder's new messages that the builder
+// skipped while the folder was in error, under its UIDVALIDITY.
+type skipped struct {
+	uidValidity, high uint32
 }
 
 // change is one flags or expunged event to apply.
@@ -193,10 +202,11 @@ func (a *Account) apply(ctx context.Context, seg []watch.Event) error {
 			return err
 		}
 		plan := a.planSegment(ctx, seg, progress)
-		rows, err := a.fetchNew(ctx, plan.fetch, progress)
+		rows, rewalk, err := a.fetchNew(ctx, plan.fetch, progress)
 		if err != nil {
 			return err
 		}
+		plan.rewalk = rewalk
 		done, err := a.commitSegment(ctx, epoch, plan, rows)
 		if err != nil || done {
 			return err
@@ -209,24 +219,27 @@ func (a *Account) apply(ctx context.Context, seg []watch.Event) error {
 // UIDVALIDITY changed since its events is skipped: its gap follows. A
 // message the fetch no longer finds is left out: its expunged event
 // follows. A folder whose sync state is error is skipped alone
-// (integration note 12): its new messages are not fetched, and its
-// events are acknowledged like those of an untracked folder.
-func (a *Account) fetchNew(ctx context.Context, fetch map[string][]uint32, progress map[string]Progress) ([]Row, error) {
+// (integration note 12): its new messages are not fetched, and it is
+// returned with the highest UID skipped, so commitSegment records a new
+// walk of the folder before its events are acknowledged.
+func (a *Account) fetchNew(ctx context.Context, fetch map[string][]uint32, progress map[string]Progress) ([]Row, map[string]skipped, error) {
 	if len(fetch) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err := a.waitReady(ctx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	synced, err := a.syncRows(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	errored := erroredFolders(synced)
 	var rows []Row
+	rewalk := map[string]skipped{}
 	for _, folder := range slices.Sorted(maps.Keys(fetch)) {
 		if errored[folder] {
 			a.logger.InfoContext(ctx, "cache builder skipped new mail of a folder in error", "folder", folder)
+			rewalk[folder] = skipped{uidValidity: progress[folder].UIDValidity, high: slices.Max(fetch[folder])}
 			continue
 		}
 		src := mailstore.Source{Folder: folder, UIDValidity: progress[folder].UIDValidity}
@@ -235,15 +248,16 @@ func (a *Account) fetchNew(ctx context.Context, fetch map[string][]uint32, progr
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		rows = append(rows, got...)
 	}
-	return rows, nil
+	return rows, rewalk, nil
 }
 
 // commitSegment writes a planned segment: the fetched rows, then the
-// changes in log order, then the touched folders' LastAppliedAt.
+// changes in log order, then a new walk of each folder whose new mail
+// was skipped in error, then the touched folders' LastAppliedAt.
 // fetchHeaders has already counted the headers against the budget. It
 // reports false, having written nothing, when a drop ran since epoch.
 // Every write is idempotent, so a failure part way is safe to retry. A
@@ -273,6 +287,9 @@ func (a *Account) commitSegment(ctx context.Context, epoch uint64, plan segmentP
 			return false, err
 		}
 	}
+	if err := a.recordRewalks(ctx, plan.rewalk); err != nil {
+		return false, err
+	}
 	if err := a.stampApplied(ctx, plan.touched); err != nil {
 		return false, err
 	}
@@ -300,6 +317,39 @@ func (a *Account) stampApplied(ctx context.Context, folders map[string]bool) err
 		if err := a.o.Store.PutProgress(ctx, p); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// recordRewalks records, for each folder whose new mail fetchNew skipped
+// in error, a new walk from above the highest skipped UID down: the
+// baseline rises to cover it, and the backfill starts over below it once
+// the folder leaves error. Rows already cached are upserted again, so
+// nothing is lost, and Freshness reports backfilling until the walk ends.
+// A folder whose progress is gone or has another UIDVALIDITY is left to
+// its gap. The caller holds wmu.
+func (a *Account) recordRewalks(ctx context.Context, rewalk map[string]skipped) error {
+	recorded := false
+	for _, folder := range slices.Sorted(maps.Keys(rewalk)) {
+		s := rewalk[folder]
+		p, ok, err := a.o.Store.Progress(ctx, a.name, folder)
+		if err != nil {
+			return err
+		}
+		if !ok || p.UIDValidity != s.uidValidity {
+			continue
+		}
+		p.BaselineUIDNext = max(p.BaselineUIDNext, s.high+1)
+		p.BackfillLowUID, p.BackfillDone = 0, false
+		if err := a.o.Store.PutProgress(ctx, p); err != nil {
+			return err
+		}
+		a.logger.InfoContext(ctx, "cache backfill walks a folder again for new mail skipped in error",
+			"folder", folder, "baseline_uidnext", p.BaselineUIDNext)
+		recorded = true
+	}
+	if recorded {
+		a.poke()
 	}
 	return nil
 }

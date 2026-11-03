@@ -401,6 +401,86 @@ func TestBackfillResumesAFolderLeavingError(t *testing.T) {
 	}
 }
 
+// New mail the builder skips while its folder is in error is not lost when
+// the folder recovers under the same UIDVALIDITY: before acknowledging the
+// skipped events the builder records a walk of the folder from above the
+// highest skipped UID, which the backfill makes once the folder leaves
+// error. Freshness reports backfilling until it has.
+func TestBackfillRewalksNewMailSkippedInError(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	fs.AddFolder("Accounts", mailstore.RoleNone)
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", nil, []string{"Accounts", "INBOX"}))
+	fs.Add(acctMsg("Accounts", "ledger"))
+	r.pass("Accounts")
+	r.pass("INBOX")
+	r.start()
+	r.waitBackfilled("Accounts", "INBOX")
+	r.waitApplied()
+
+	r.setState("Accounts", watch.StateError)
+	late := fs.Add(acctMsg("Accounts", "late"))
+	r.passWith("Accounts", false) // the folder stays in error
+	r.waitApplied()
+	if _, ok := r.row(late); ok {
+		t.Fatal("cached new mail of a folder in error")
+	}
+	if p := r.progress("Accounts"); p.BaselineUIDNext != late.UID+1 || p.BackfillLowUID != 0 || p.BackfillDone {
+		t.Errorf("progress after a skipped fetch = %+v, want baseline %d, low UID 0, not done", p, late.UID+1)
+	}
+
+	r.setState("Accounts", watch.StateWatching)
+	ok, reason, _, err := r.a.Freshness(t.Context(), []string{"Accounts", "INBOX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok || reason != ReasonBackfilling {
+		t.Errorf("Freshness before the walk = %v, %q; want false, %q", ok, reason, ReasonBackfilling)
+	}
+	r.publish(watch.Event{Kind: watch.KindStatus, Account: "acme", Folder: "Accounts", State: watch.StateWatching})
+	r.waitBackfilled("Accounts")
+	if _, ok := r.row(late); !ok {
+		t.Error("new mail skipped in error was not cached after the folder recovered")
+	}
+	if n := r.count("Accounts", late.UIDValidity); n != 2 {
+		t.Errorf("%d Accounts rows, want 2", n)
+	}
+	r.waitApplied()
+	if ok, reason, _, err := r.a.Freshness(t.Context(), []string{"Accounts", "INBOX"}); err != nil || !ok {
+		t.Errorf("Freshness after the walk = %v, %q, %v; want fresh", ok, reason, err)
+	}
+}
+
+// A walk listed before the builder records a new walk of its folder is
+// discarded, so the new walk starts from its new baseline instead of
+// resuming the old listing over it.
+func TestCommitBatchDiscardsAWalkTheBuilderRestarted(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	fs.Add(acctMsg("INBOX", "one"))
+	fs.Add(acctMsg("INBOX", "two"))
+	r.pass("INBOX")
+	if err := r.a.track(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	p := r.progress("INBOX")
+	w := &walk{folder: "INBOX", uidValidity: 1, epoch: r.a.epoch, baseline: p.BaselineUIDNext, low: p.BackfillLowUID, uids: []uint32{2, 1}}
+	// The builder records a new walk while the batch is fetched.
+	p.BaselineUIDNext, p.BackfillLowUID, p.BackfillDone = 9, 0, false
+	if err := r.store.PutProgress(t.Context(), p); err != nil {
+		t.Fatal(err)
+	}
+	row := Row{Account: "acme", Folder: "INBOX", UIDValidity: 1, UID: 2, Subject: "two", MessageID: "two@example.com", InternalDate: acctStart, Date: acctStart}
+	next, more, err := r.a.commitBatch(t.Context(), w, []uint32{2}, []Row{row})
+	if err != nil || next != nil || !more {
+		t.Fatalf("commitBatch = %v, %v, %v; want nil, true, nil after a new walk", next, more, err)
+	}
+	if got := r.progress("INBOX"); got.BaselineUIDNext != 9 || got.BackfillLowUID != 0 || got.BackfillDone {
+		t.Errorf("progress = %+v, want the new walk untouched", got)
+	}
+}
+
 // A flags or expunged event the builder applies while the backfill is
 // fetching a batch that holds its UID makes the backfill fetch that batch
 // again: the header it fetched may predate the change, so writing it would

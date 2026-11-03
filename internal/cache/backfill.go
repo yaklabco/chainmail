@@ -20,7 +20,16 @@ type walk struct {
 	folder      string
 	uidValidity uint32
 	epoch       uint64
+	baseline    uint32   // the progress BaselineUIDNext the walk was listed under
+	low         uint32   // the progress BackfillLowUID the walk last left
 	uids        []uint32 // still to fetch, highest first
+}
+
+// matches reports whether p is still the progress the walk left: the
+// builder records a new walk of a folder by raising its baseline and
+// resetting its low UID.
+func (w *walk) matches(p Progress) bool {
+	return w.baseline == p.BaselineUIDNext && w.low == p.BackfillLowUID
 }
 
 // runBackfill fetches the headers of mail older than each folder's
@@ -75,7 +84,8 @@ func (a *Account) idle(ctx context.Context) bool {
 // backfillStep fetches one batch of the first folder whose backfill is not
 // done, and reports whether there may be more to do. It starts a new walk,
 // listing the folder's UIDs below where the last batch stopped, when w is
-// nil, is on another folder or UIDVALIDITY, or predates a drop.
+// nil, is on another folder or UIDVALIDITY, predates a drop, or no longer
+// matches the folder's progress because the builder recorded a new walk.
 func (a *Account) backfillStep(ctx context.Context, w *walk) (*walk, bool, error) {
 	a.wmu.Lock()
 	epoch := a.epoch
@@ -92,12 +102,12 @@ func (a *Account) backfillStep(ctx context.Context, w *walk) (*walk, bool, error
 	if err != nil {
 		return w, false, err
 	}
-	if w == nil || w.folder != p.Folder || w.uidValidity != p.UIDValidity || w.epoch != epoch {
+	if w == nil || w.folder != p.Folder || w.uidValidity != p.UIDValidity || w.epoch != epoch || !w.matches(p) {
 		uids, err := a.listBackfill(ctx, p)
 		if err != nil {
 			return nil, false, err
 		}
-		w = &walk{folder: p.Folder, uidValidity: p.UIDValidity, epoch: epoch, uids: uids}
+		w = &walk{folder: p.Folder, uidValidity: p.UIDValidity, epoch: epoch, baseline: p.BaselineUIDNext, low: p.BackfillLowUID, uids: uids}
 	}
 	batch := w.uids[:min(len(w.uids), max(1, a.settings().BackfillBatch), allowance)]
 	var rows []Row
@@ -113,7 +123,8 @@ func (a *Account) backfillStep(ctx context.Context, w *walk) (*walk, bool, error
 // commitBatch stores a fetched batch, which fetchHeaders has already
 // counted against the budget, and records the walk's new low UID, marking
 // the folder done when the walk has no UIDs left. A batch fetched before a
-// drop is discarded with its walk. A batch with a UID whose flags or
+// drop, or before the builder recorded a new walk of the folder, is
+// discarded with its walk. A batch with a UID whose flags or
 // expunge the builder applied during the fetch is not written: it returns
 // w unchanged, so the next step fetches the batch again.
 func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows []Row) (*walk, bool, error) {
@@ -126,7 +137,7 @@ func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows
 	if err != nil {
 		return w, false, err
 	}
-	if !ok || p.UIDValidity != w.uidValidity {
+	if !ok || p.UIDValidity != w.uidValidity || !w.matches(p) {
 		return nil, true, nil
 	}
 	if a.inflight.hit(batch) {
@@ -146,7 +157,7 @@ func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows
 	if err := a.o.Store.PutProgress(ctx, p); err != nil {
 		return w, false, err
 	}
-	w.uids = rest
+	w.uids, w.low = rest, p.BackfillLowUID
 	if p.BackfillDone {
 		a.logger.InfoContext(ctx, "cache backfill done", "folder", w.folder)
 	}
