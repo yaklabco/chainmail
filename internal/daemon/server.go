@@ -306,11 +306,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	return err
 }
 
-// drain waits for every handler to return, stops the supervisors and the
-// background probes, then logs out of the mail servers. The supervisors
-// stop first, closing their watch connections within
-// watch.ShutdownLogout, so none holds a store closeAll is closing. Each
-// store logs out within 5 seconds, all in parallel.
+// drain waits for every handler to return, stops the supervisors, the
+// cache workers and the background probes, then logs out of the mail
+// servers. The supervisors and workers stop first, closing their watch
+// connections within watch.ShutdownLogout, so none holds a store closeAll
+// is closing. Each store logs out within 5 seconds, all in parallel.
 func (s *Server) drain() {
 	s.handlers.wait()
 	s.stopWatch()

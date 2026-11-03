@@ -16,6 +16,9 @@ import (
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/cache"
+	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
 )
 
 // cacheConfig has one account with the cache and one with it turned off.
@@ -269,5 +272,43 @@ func TestGetCacheStatus(t *testing.T) {
 	}
 	if n := auditCount(t, stateDB); n != 0 {
 		t.Errorf("audit rows = %d, want 0", n)
+	}
+}
+
+// plainStore hides every method but mailstore.Store's.
+type plainStore struct{ mailstore.Store }
+
+// A cache worker gets the account's store only when it can fetch headers
+// and say which folders a search covers.
+func TestCacheAccountMail(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		store   mailstore.Store
+		wantErr error
+	}{
+		{name: "fake store", store: fake.New("host", false)},
+		{name: "without HeaderFetcher and Scoper", store: plainStore{fake.New("host", false)}, wantErr: mailstore.ErrUnsupported},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s, _ := newTestServerOptions(t, cacheConfig, Options{NewStore: func(config.ResolvedAccount) mailstore.Store { return tt.store }})
+			acct, err := s.opts.Config.Account("host")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ms, release, err := s.cacheAccountOptions(acct).Mail(t.Context())
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Mail err = %v, want %v", err, tt.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			if ms == nil {
+				t.Error("Mail returned no store")
+			}
+			release()
+		})
 	}
 }

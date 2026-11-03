@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"connectrpc.com/connect"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/cache"
 	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
 )
 
 // cacheFile is the cache database's name in Options.CacheDir.
@@ -190,5 +192,63 @@ func folderCacheProto(f cache.FolderStatus) *chainmailv1.FolderCacheStatus {
 		WindowDone:     f.WindowDone,
 		BodyFailures:   f.BodyFailures,
 		LastAppliedAt:  timestamp(f.LastAppliedAt),
+	}
+}
+
+// startCacheAccounts starts a cache worker for each of accts with the
+// cache enabled, on wg, and records them in cacheAccounts. startWatch calls
+// it with the supervisors' context and WaitGroup, so the workers stop with
+// the supervisors, before drain closes the stores. It does no IO.
+func (s *Server) startCacheAccounts(ctx context.Context, accts []config.ResolvedAccount, wg *sync.WaitGroup) {
+	if s.cache == nil {
+		return
+	}
+	cfg := s.opts.Config
+	workers := make(map[string]*cache.Account, len(accts))
+	var names []string
+	for _, acct := range accts {
+		if !cfg.CacheSettings(acct.Name).Enabled {
+			continue
+		}
+		ca := cache.NewAccount(s.cacheAccountOptions(acct))
+		workers[acct.Name] = ca
+		names = append(names, acct.Name)
+		wg.Go(func() { ca.Run(ctx) })
+	}
+	s.cacheAccounts = workers
+	if len(names) > 0 {
+		s.opts.Logger.Info("caching accounts", "accounts", names)
+	}
+}
+
+// cacheAccountOptions wires acct's cache worker to the daemon. Like the
+// supervisor, the worker takes the account entry's read lock through
+// acquire, one batch at a time, so a probe's replace gets through between
+// batches. The entry is taken once, here, for the reason
+// supervisorOptions gives.
+func (s *Server) cacheAccountOptions(acct config.ResolvedAccount) cache.AccountOptions {
+	e := s.stores.entry(acct)
+	cfg := s.opts.Config
+	name := acct.Name
+	return cache.AccountOptions{
+		Account:  acct,
+		Settings: func() config.CacheSettings { return cfg.CacheSettings(name) },
+		MaxSize:  cfg.CacheMaxSize,
+		Store:    s.cache,
+		Log:      s.watchLog,
+		State:    s.watchState,
+		Mail: func(ctx context.Context) (cache.MailStore, func(), error) {
+			st, release, err := e.acquire(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			ms, ok := st.(cache.MailStore)
+			if !ok {
+				release()
+				return nil, nil, mailstore.ErrUnsupported
+			}
+			return ms, release, nil
+		},
+		Logger: s.opts.Logger,
 	}
 }
