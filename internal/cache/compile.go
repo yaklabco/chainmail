@@ -29,8 +29,9 @@ var errMalformedQuery = errors.New("malformed query tree")
 // Reasons Compile gives a server-only plan. They are incomplete_reason
 // values of the search API.
 const (
-	// planTextOutsideWindow: a text term can match messages of any age,
-	// whose bodies the cache may not hold.
+	// planTextOutsideWindow: a text term under OR or NOT, with no lower
+	// date bound on its path, can match messages of any age, whose bodies
+	// the cache may not hold, and the top-level Since does not show it.
 	planTextOutsideWindow = "text_outside_window"
 	// planFolderNotSynced: the search covers a folder the cache never holds.
 	planFolderNotSynced = "folder_not_synced"
@@ -102,7 +103,7 @@ func Compile(n *query.Node, in string, gmail bool, now time.Time) (Plan, error) 
 	switch {
 	case notSynced || c.notSynced:
 		p.ServerOnly, p.Reason = true, planFolderNotSynced
-	case uncoveredText(n, false, now):
+	case uncoveredText(n, false, false, now):
 		p.ServerOnly, p.Reason = true, planTextOutsideWindow
 	case c.unsupported:
 		p.ServerOnly = true
@@ -552,19 +553,25 @@ func hasText(n *query.Node) bool {
 	return false
 }
 
-// uncoveredText reports whether some text term in n has no lower date bound
-// on its path from the root: no AND above it, the root included, holds a
-// newer_than or after term directly. Such a term can match messages of any
-// age. A bound covers its AND's text whatever OR or NOT lies between them,
-// since outside the bound the AND is false whatever the text says. bounded
-// says an AND above n already holds a bound.
-func uncoveredText(n *query.Node, bounded bool, now time.Time) bool {
+// uncoveredText reports whether some text term in n lies under an OR or
+// NOT with no lower date bound on its path from the root: no AND above it,
+// the root included, holds a newer_than or after term directly. Such a
+// term can match messages of any age, and the top-level Since does not
+// show it. A bound covers its AND's text whatever OR or NOT lies between
+// them, since outside the bound the AND is false whatever the text says.
+// Text reached only through ANDs is not counted: its missing bound is a
+// zero Since, which the router already reads as not covered. bounded says
+// an AND above n already holds a bound; branched says an OR or NOT lies
+// above n.
+func uncoveredText(n *query.Node, bounded, branched bool, now time.Time) bool {
 	if n == nil {
 		return false
 	}
 	switch n.Op {
 	case query.OpTerm:
-		return n.Field == query.FieldText && !bounded
+		return n.Field == query.FieldText && branched && !bounded
+	case query.OpOr, query.OpNot:
+		branched = true
 	case query.OpAnd:
 		for _, ch := range n.Children {
 			if _, ok := termBound(ch, now); ok {
@@ -574,7 +581,7 @@ func uncoveredText(n *query.Node, bounded bool, now time.Time) bool {
 		}
 	}
 	for _, ch := range n.Children {
-		if uncoveredText(ch, bounded, now) {
+		if uncoveredText(ch, bounded, branched, now) {
 			return true
 		}
 	}

@@ -702,3 +702,32 @@ func (r *prefetchRig) completeWindow(since time.Time) bool {
 	}
 	return set
 }
+
+// A prefetcher that found nothing to fetch, because no folder's backfill
+// had finished, starts fetching as soon as one finishes, without waiting
+// out prefetchIdle. The clock never moves, so only that wake can start it.
+func TestPrefetchWakesWhenABackfillCompletes(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	r.setSettings(func(s *config.CacheSettings) { s.PrefetchBodies = 90 * oneDay })
+	one, two := fs.Add(acctMsg("INBOX", "one")), fs.Add(acctMsg("INBOX", "two"))
+	r.pass("INBOX")
+	stall := newAcctStallMail(fs)
+	r.mail = stall
+	r.start()
+	select {
+	case <-stall.entered:
+	case <-time.After(acctWait):
+		t.Fatal("the backfill never fetched a batch")
+	}
+	r.clock.expectAfter(t, prefetchIdle) // the prefetcher idles with nothing done
+	if r.fs.Calls("FetchMessages") != 0 {
+		t.Fatal("bodies fetched before the backfill finished")
+	}
+	close(stall.release)
+	r.waitBackfilled("INBOX")
+	r.eventually("the window bodies", func() (bool, error) {
+		return hasBody(t, r.store, one) && hasBody(t, r.store, two), nil
+	})
+}

@@ -174,7 +174,7 @@ func TestSearchAuditNamesTheCallsAccountsOnEveryPage(t *testing.T) {
 	if _, err := m.search(t, &chainmailv1.SearchRequest{Limit: 1, Cursor: page1.GetNextCursor()}); err != nil {
 		t.Fatal(err)
 	}
-	if row := lastMailAudit(t, m); row.Action != "search" || row.Account != "" || row.Targets != `["accounts=2","rows=1"]` {
+	if row := lastMailAudit(t, m); row.Action != "search" || row.Account != "" || row.Targets != `["accounts=2","rows=1","source=server"]` {
 		t.Errorf("page 2 audit = %+v, want both accounts", row)
 	}
 }

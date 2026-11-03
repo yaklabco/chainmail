@@ -14,6 +14,7 @@ import (
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/audit"
+	"github.com/jamesainslie/chainmail/internal/cache"
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/query"
@@ -50,6 +51,10 @@ type searchPlan struct {
 	// search picks.
 	resume      map[string]map[string]resumePoint
 	fingerprint string
+	// source is where answers come from: sourceAuto, cache.SourceCache or
+	// cache.SourceServer. It is not part of the fingerprint, so a cursor
+	// continues on whichever source answers the next page.
+	source string
 }
 
 // resumePoint is one cursor source: where its folder continues, or that
@@ -80,6 +85,10 @@ func errForgedCursor(why string) error {
 }
 
 func (m *messageService) plan(req *chainmailv1.SearchRequest) (*searchPlan, error) {
+	source, err := requestSource(req.GetSource())
+	if err != nil {
+		return nil, err
+	}
 	n, err := parseSearchQuery(req)
 	if err != nil {
 		return nil, err
@@ -101,7 +110,7 @@ func (m *messageService) plan(req *chainmailv1.SearchRequest) (*searchPlan, erro
 		names[i] = a.Name
 	}
 	p := &searchPlan{
-		tree: rest, in: scope.In, named: accts, accounts: slices.Clone(accts), limit: limit,
+		tree: rest, in: scope.In, named: accts, accounts: slices.Clone(accts), limit: limit, source: source,
 		fingerprint: ref.Fingerprint(rest.String(), scope.In, strings.Join(names, ",")),
 	}
 	if req.GetCursor() == "" {
@@ -150,6 +159,21 @@ func (p *searchPlan) checkSources(account string, results []mailstore.SourceResu
 		}
 	}
 	return nil
+}
+
+// uncovered returns account's cursor sources whose folder results lack,
+// ordered by folder. A forced cache leaves out folders it does not hold;
+// their cursor sources are carried, as a failed source's are, so a later
+// page the server answers resumes them, and that page's checkSources
+// checks them.
+func (p *searchPlan) uncovered(account string, results []mailstore.SourceResult) []ref.CursorSource {
+	var out []ref.CursorSource
+	for _, cs := range p.cursorSources(account) {
+		if !slices.ContainsFunc(results, func(r mailstore.SourceResult) bool { return r.Source.Folder == cs.Folder }) {
+			out = append(out, cs)
+		}
+	}
+	return out
 }
 
 // resumeAt returns where a folder continues. ok is false when the plan
@@ -227,6 +251,15 @@ type mergedRow struct {
 	count int
 }
 
+// accountSearch is one account's part of a page: where it runs, what
+// answered, and what its Search returned.
+type accountSearch struct {
+	src     searchSource
+	route   routeInfo
+	results []mailstore.SourceResult
+	err     error
+}
+
 func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequest) (*chainmailv1.SearchResponse, audit.Entry, error) {
 	entry := audit.Entry{Action: "search"}
 	p, err := m.plan(req)
@@ -236,24 +269,24 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 	entry.Account = singleAccount(p.named)
 	resp := &chainmailv1.SearchResponse{Source: sourceServer, FetchedAt: timestamppb.New(m.s.opts.Now())}
 
-	type outcome struct {
-		results []mailstore.SourceResult
-		err     error
-	}
-	outcomes := make([]outcome, len(p.accounts))
+	outcomes := make([]accountSearch, len(p.accounts))
 	var wg sync.WaitGroup
 	for i, a := range p.accounts {
 		wg.Go(func() {
 			// Sources are picked afresh on every page, never taken from the
-			// cursor, which resumeAt and narrow then apply to them.
-			res, err := m.store(a).Search(ctx, mailstore.SearchRequest{Query: p.tree, In: p.in, CountOnly: req.GetCountOnly()})
-			outcomes[i] = outcome{res, err}
+			// cursor, which resumeAt and narrow then apply to them, and so is
+			// whether the cache or the server answers them.
+			src, route := m.searcher(ctx, a, p, p.source)
+			res, err := src.Search(ctx, mailstore.SearchRequest{Query: p.tree, In: p.in, CountOnly: req.GetCountOnly()})
+			outcomes[i] = accountSearch{src: src, route: route, results: res, err: err}
 		})
 	}
 	wg.Wait()
 	if p.continuing() {
 		for i, a := range p.accounts {
-			if outcomes[i].err != nil {
+			// An incomplete cache answer may leave out folders the cache does
+			// not hold; the loop below carries their cursor sources instead.
+			if outcomes[i].err != nil || !outcomes[i].route.Complete {
 				continue
 			}
 			if err := p.checkSources(a.Name, outcomes[i].results); err != nil {
@@ -264,11 +297,13 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 
 	var failures []error
 	var states []*sourceState
-	// carried are cursor sources a failure kept this page from reaching.
-	// They go into the next cursor as they were, so a later page retries
-	// them, and that page's plan and checkSources check them again.
+	// carried are cursor sources a failure, or an incomplete cache answer,
+	// kept this page from reaching. They go into the next cursor as they
+	// were, so a later page retries them, and that page's plan and
+	// checkSources check them again.
 	var carried []ref.CursorSource
 	counts := map[string]uint64{}
+	sources := map[string]searchSource{}
 	for i, a := range p.accounts {
 		o := outcomes[i]
 		if o.err != nil {
@@ -276,6 +311,10 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 			failures = append(failures, o.err)
 			carried = append(carried, p.cursorSources(a.Name)...)
 			continue
+		}
+		sources[a.Name] = o.src
+		if p.continuing() && !o.route.Complete {
+			carried = append(carried, p.uncovered(a.Name, o.results)...)
 		}
 		for _, r := range o.results {
 			rp, ok := p.resumeAt(a.Name, r.Source.Folder)
@@ -302,18 +341,29 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 	if len(states) == 0 && len(failures) > 0 {
 		return nil, entry, mostSevere(failures)
 	}
-	for _, a := range p.accounts {
-		if n, ok := counts[a.Name]; ok {
-			resp.AccountCounts = append(resp.AccountCounts, &chainmailv1.AccountCount{Account: a.Name, Count: n})
-			resp.Count += n
+	var answered []string
+	for i, a := range p.accounts {
+		o := outcomes[i]
+		if o.err != nil {
+			continue
 		}
+		answered = append(answered, o.route.Source)
+		// An incomplete account is listed even with nothing counted, so its
+		// reason reaches the caller.
+		n, ok := counts[a.Name]
+		if !ok && o.route.Complete {
+			continue
+		}
+		resp.AccountCounts = append(resp.AccountCounts, accountCount(a.Name, n, o.route))
+		resp.Count += n
 	}
+	resp.Source = cache.CombineSource(answered...)
 	if req.GetCountOnly() {
-		entry.Targets = []string{tally("accounts", len(p.named)), tally("matches", int(resp.GetCount()))}
+		entry.Targets = []string{tally("accounts", len(p.named)), tally("matches", int(resp.GetCount())), "source=" + resp.GetSource()}
 		return resp, entry, nil
 	}
 
-	m.fetchRows(ctx, p, states, req.GetSnippets())
+	m.fetchRows(ctx, p, sources, states, req.GetSnippets())
 	ok := 0
 	for _, st := range states {
 		if st.err != nil {
@@ -334,16 +384,13 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 		resp.Rows = append(resp.Rows, rowFromSummary(r.sum, req.GetSnippets(), count))
 	}
 	resp.NextCursor = nextCursor(p, states, carried)
-	entry.Targets = []string{tally("accounts", len(p.named)), tally("rows", len(resp.GetRows()))}
+	entry.Targets = []string{tally("accounts", len(p.named)), tally("rows", len(resp.GetRows())), "source=" + resp.GetSource()}
 	return resp, entry, nil
 }
 
-// fetchRows fetches summaries for up to limit UIDs of each source, in parallel.
-func (m *messageService) fetchRows(ctx context.Context, p *searchPlan, states []*sourceState, snippets bool) {
-	byName := map[string]config.ResolvedAccount{}
-	for _, a := range p.accounts {
-		byName[a.Name] = a
-	}
+// fetchRows fetches summaries for up to limit UIDs of each source, in
+// parallel, from where its account's page runs.
+func (m *messageService) fetchRows(ctx context.Context, p *searchPlan, sources map[string]searchSource, states []*sourceState, snippets bool) {
 	var wg sync.WaitGroup
 	for _, st := range states {
 		take := st.uids[:min(len(st.uids), p.limit)]
@@ -351,8 +398,9 @@ func (m *messageService) fetchRows(ctx context.Context, p *searchPlan, states []
 		if len(take) == 0 {
 			continue
 		}
+		src := sources[st.account]
 		wg.Go(func() {
-			st.rows, st.err = m.store(byName[st.account]).FetchSummaries(ctx, st.src, take, mailstore.SummaryOptions{Snippets: snippets})
+			st.rows, st.err = src.FetchSummaries(ctx, st.src, take, mailstore.SummaryOptions{Snippets: snippets})
 		})
 	}
 	wg.Wait()

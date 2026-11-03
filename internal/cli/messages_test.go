@@ -333,10 +333,12 @@ func TestSearchTableFlags(t *testing.T) {
 		t.Fatalf("exit %d: %s", got.code, got.stderr)
 	}
 	lines := strings.Split(strings.TrimSuffix(got.stdout, "\n"), "\n")
-	if len(lines) != 3 || !strings.HasSuffix(lines[0], "SNIPPET") || !strings.Contains(lines[1], "Noon?") || !strings.HasPrefix(lines[2], "more: --cursor ") {
+	// The daemon reports what answered each account, so the source footer
+	// sits between the rows and the cursor.
+	if len(lines) != 4 || !strings.HasSuffix(lines[0], "SNIPPET") || !strings.Contains(lines[1], "Noon?") || lines[2] != "source: gmail server, host server" || !strings.HasPrefix(lines[3], "more: --cursor ") {
 		t.Fatalf("stdout = %s", got.stdout)
 	}
-	next := m.run(t, Env{}, "--output", "table", "search", "--limit", "1", "--cursor", strings.TrimPrefix(lines[2], "more: --cursor "))
+	next := m.run(t, Env{}, "--output", "table", "search", "--limit", "1", "--cursor", strings.TrimPrefix(lines[3], "more: --cursor "))
 	if next.code != 0 || !strings.Contains(next.stdout, "Invoice 7") || strings.Contains(next.stdout, "Lunch") {
 		t.Errorf("next page: exit %d, stdout %s, stderr %s", next.code, next.stdout, next.stderr)
 	}
