@@ -537,3 +537,66 @@ func (s *Store) ThreadRows(ctx context.Context, account, threadID string) ([]Row
 	}
 	return rows, nil
 }
+
+// DeleteRow deletes a cached row with its body, body failure and FTS row.
+// A missing row is not an error.
+func (s *Store) DeleteRow(ctx context.Context, r ref.Ref) error {
+	return s.inTx(ctx, "deleting a row", func(tx *sql.Tx) error {
+		return dropMessages(ctx, tx, msgKey, refArgs(r)...)
+	})
+}
+
+// dropMessages deletes the messages rows matching where, with their FTS
+// rows; bodies and body failures go with them through ON DELETE CASCADE.
+func dropMessages(ctx context.Context, tx *sql.Tx, where string, args ...any) error {
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE "+where+")", args...); err != nil {
+		return fmt.Errorf("deleting index rows: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM messages WHERE "+where, args...); err != nil {
+		return fmt.Errorf("deleting rows: %w", err)
+	}
+	return nil
+}
+
+// DropFolder deletes a folder's rows (and bodies, failures, FTS rows) and
+// its progress row. With keepRecovery, each row's Message-ID is first copied
+// to ref_recovery.
+func (s *Store) DropFolder(ctx context.Context, account, folder string, keepRecovery bool) error {
+	now := s.now().Unix()
+	return s.inTx(ctx, "dropping a folder", func(tx *sql.Tx) error {
+		if keepRecovery {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT OR REPLACE INTO ref_recovery (account, folder, uidvalidity, uid, message_id, removed_at)
+				 SELECT account, folder, uidvalidity, uid, message_id, ? FROM messages
+				 WHERE account = ? AND folder = ? AND message_id != ''`,
+				now, account, folder); err != nil {
+				return fmt.Errorf("keeping Message-IDs: %w", err)
+			}
+		}
+		if err := dropMessages(ctx, tx, "account = ? AND folder = ?", account, folder); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM folders WHERE account = ? AND folder = ?", account, folder); err != nil {
+			return fmt.Errorf("deleting progress: %w", err)
+		}
+		return nil
+	})
+}
+
+// DropAccount deletes every row, progress row and recovery row of the
+// account. Its download budget stays, so a rebuild cannot exceed the day's.
+func (s *Store) DropAccount(ctx context.Context, account string) error {
+	return s.inTx(ctx, "dropping an account", func(tx *sql.Tx) error {
+		if err := dropMessages(ctx, tx, "account = ?", account); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM folders WHERE account = ?", account); err != nil {
+			return fmt.Errorf("deleting progress: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM ref_recovery WHERE account = ?", account); err != nil {
+			return fmt.Errorf("deleting recovery rows: %w", err)
+		}
+		return nil
+	})
+}
