@@ -1,0 +1,43 @@
+package mailstore
+
+import "context"
+
+// Header is what the local cache keeps of a message without its body: the
+// summary a search row shows and the fields a summary leaves out.
+type Header struct {
+	// Summary has Ref, the dates, From, To, Subject, Flags, Size,
+	// HasAttachment, ThreadID and Labels, as FetchSummaries gives them.
+	// Preview and Sample are nil.
+	Summary Summary
+	Cc      []Address
+	// Bcc is what a message in Sent or Drafts carries. A received message
+	// has none.
+	Bcc []Address
+	// MessageID is the Message-ID without angle brackets, as
+	// Message.MessageID.
+	MessageID string
+	// InReplyTo and References are as Message has them.
+	InReplyTo  []string
+	References []string
+	// Attachments are the attachment parts, as Message has them.
+	Attachments []Attachment
+}
+
+// HeaderFetcher is implemented by stores that can fetch headers for the
+// local cache.
+type HeaderFetcher interface {
+	// FetchHeaders returns the headers of uids in src.Folder, in the order
+	// of uids, leaving out UIDs the folder no longer holds. A folder whose
+	// UIDVALIDITY is not src.UIDValidity is ErrStaleRef. It never sets
+	// \Seen.
+	FetchHeaders(ctx context.Context, src Source, uids []uint32) ([]Header, error)
+}
+
+// Scoper is implemented by stores that can say which folders a search
+// covers.
+type Scoper interface {
+	// SearchFolders returns the folders Search uses for the in: value in,
+	// with Bounds nil, in the order Search reports them, and the same
+	// errors.
+	SearchFolders(ctx context.Context, in string) ([]string, error)
+}
