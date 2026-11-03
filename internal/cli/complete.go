@@ -316,16 +316,21 @@ func (cp *completer) specs() map[string]compSpec {
 		"chainmail watch status":   {args: noComplete},
 		"chainmail watch": {args: noComplete, flags: map[string]cobra.CompletionFunc{
 			"account": allAccounts, "kind": commaList(watchKinds...), "since": noComplete,
-			"in": cp.folders(anyAccount, nil, 0, false),
+			"in":    cp.folders(anyAccount, nil, 0, false),
+			"group": cp.groups(0),
 		}},
+		"chainmail watch groups delete": {args: cp.groups(1)},
 		"chainmail audit": {args: noComplete, flags: map[string]cobra.CompletionFunc{
 			"account": allAccounts, "limit": noComplete, "before-id": noComplete,
-			"since": fixed("1h", "24h", "168h"),
+			"since": fixed("1h", "24h", "168h"), "action": cp.auditActions,
+		}},
+		"chainmail search": {args: cp.searchTerms, flags: map[string]cobra.CompletionFunc{
+			"account": allAccounts, "cursor": noComplete, "limit": noComplete,
 		}},
 		"chainmail flags": {args: inboxRefs, flags: map[string]cobra.CompletionFunc{
 			"add": fixed(`\Seen`, `\Flagged`, `\Answered`, `\Draft`), "remove": fixed(`\Seen`, `\Flagged`, `\Answered`, `\Draft`),
 		}},
-		"chainmail secret set":    {flags: map[string]cobra.CompletionFunc{"from-pass": cp.passEntries}},
+		"chainmail secret set":    {args: cp.secretNames, flags: map[string]cobra.CompletionFunc{"from-pass": cp.passEntries}},
 		"chainmail get":           {args: inboxRefs},
 		"chainmail thread":        {args: oneInboxRef},
 		"chainmail attachment":    {args: cp.refThenPart(oneInboxRef), flags: map[string]cobra.CompletionFunc{"out": files}},
