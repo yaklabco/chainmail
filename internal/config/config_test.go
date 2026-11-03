@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pelletier/go-toml/v2"
-
 	"github.com/jamesainslie/chainmail/internal/provider"
 )
 
@@ -245,9 +243,8 @@ func TestParseRejectsUnknownFields(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			_, err := Parse([]byte(tt.config))
-			var strict *toml.StrictMissingError
-			if !errors.As(err, &strict) {
-				t.Errorf("err = %v, want *toml.StrictMissingError", err)
+			if !errors.Is(err, ErrUnknownKey) {
+				t.Errorf("err = %v, want ErrUnknownKey", err)
 			}
 		})
 	}
@@ -564,9 +561,8 @@ func TestPolicyRejectsUnknownKeys(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			_, err := Parse([]byte(config))
-			var strict *toml.StrictMissingError
-			if !errors.As(err, &strict) {
-				t.Errorf("err = %v, want *toml.StrictMissingError", err)
+			if !errors.Is(err, ErrUnknownKey) {
+				t.Errorf("err = %v, want ErrUnknownKey", err)
 			}
 		})
 	}
@@ -919,10 +915,88 @@ func TestWatchRejectsUnknownKeys(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			_, err := Parse([]byte(config))
-			var strict *toml.StrictMissingError
-			if !errors.As(err, &strict) {
-				t.Errorf("err = %v, want *toml.StrictMissingError", err)
+			if !errors.Is(err, ErrUnknownKey) {
+				t.Errorf("err = %v, want ErrUnknownKey", err)
 			}
 		})
+	}
+}
+
+func TestParseNamesTheUnknownKey(t *testing.T) {
+	t.Parallel()
+	_, err := Parse([]byte("[accounts.x]\nprovider = \"hostinger\"\naddress = \"a@b.c\"\nprovder = \"x\""))
+	// mapstructure writes the path as accounts[x].provder; only the key's
+	// own name is pinned here.
+	if !errors.Is(err, ErrUnknownKey) || !strings.Contains(err.Error(), "provder") {
+		t.Errorf("err = %v, want ErrUnknownKey naming provder", err)
+	}
+}
+
+func TestParseRefusesKeysViperWouldFold(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, config, want string
+	}{
+		{name: "upper table", config: "[accounts.Work]\nprovider = \"hostinger\"\naddress = \"a@b.c\"", want: `"accounts.Work"`},
+		{name: "upper key", config: "[accounts.work]\nProvider = \"hostinger\"\naddress = \"a@b.c\"", want: `"accounts.work.Provider"`},
+		{name: "dotted key", config: "[accounts.\"a.b\"]\nprovider = \"hostinger\"\naddress = \"a@b.c\"", want: `"accounts.a.b"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(tt.config))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("err = %v, want one naming %s", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseRefusesWrongTypes(t *testing.T) {
+	t.Parallel()
+	base := "[accounts.host]\nprovider = \"hostinger\"\naddress = \"me@example.com\"\n"
+	for name, extra := range map[string]string{
+		"float for int":   "pool = 1.5",
+		"string for int":  `pool = "3"`,
+		"int for string":  "display_name = 3",
+		"string for list": `watch = "INBOX"`,
+		"bool for string": "signature = true",
+		"string for bool": "[accounts.host.sync]\nenabled = \"yes\"",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Parse([]byte(base + extra)); err == nil {
+				t.Errorf("Parse accepted %q", extra)
+			}
+		})
+	}
+}
+
+func TestParseKeepsAnEmptyWatchList(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse([]byte("[accounts.host]\nprovider = \"hostinger\"\naddress = \"me@example.com\"\nwatch = []\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := cfg.Account("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Watch == nil || len(a.Watch) != 0 {
+		t.Errorf("Watch = %#v, want an empty, non-nil list", a.Watch)
+	}
+}
+
+// Not parallel: it sets the process environment.
+func TestParseIgnoresTheEnvironment(t *testing.T) {
+	t.Setenv("CHAINMAIL_POLICY_ALLOW_EXPUNGE", "true")
+	t.Setenv("POLICY_ALLOW_EXPUNGE", "true")
+	t.Setenv("CHAINMAIL_DAEMON_SOCKET", "/evil.sock")
+	cfg, err := Parse([]byte("[accounts.host]\nprovider = \"hostinger\"\naddress = \"me@example.com\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Policy.AllowExpunge || cfg.Daemon.Socket == "/evil.sock" {
+		t.Errorf("environment reached the config: %+v %+v", cfg.Policy, cfg.Daemon)
 	}
 }
