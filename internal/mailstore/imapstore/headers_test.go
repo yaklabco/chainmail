@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/mailstore/storetest"
 	"github.com/jamesainslie/chainmail/internal/provider"
 	"github.com/jamesainslie/chainmail/internal/ref"
 	"github.com/jamesainslie/chainmail/internal/testutil/fakegmail"
@@ -51,15 +52,6 @@ func headersStore(t *testing.T) (*Store, mailstore.Source) {
 	return s, res[0].Source
 }
 
-// summariesAgree reports whether two summaries of one message agree, the
-// times compared as instants.
-func summariesAgree(a, b mailstore.Summary) bool {
-	return a.Ref == b.Ref && a.Date.Equal(b.Date) && a.InternalDate.Equal(b.InternalDate) &&
-		slices.Equal(a.From, b.From) && slices.Equal(a.To, b.To) && a.Subject == b.Subject &&
-		slices.Equal(a.Flags, b.Flags) && a.Size == b.Size && a.HasAttachment == b.HasAttachment &&
-		a.ThreadID == b.ThreadID && slices.Equal(a.Labels, b.Labels)
-}
-
 func TestFetchHeadersStandard(t *testing.T) {
 	t.Parallel()
 	s, src := headersStore(t)
@@ -76,7 +68,7 @@ func TestFetchHeadersStandard(t *testing.T) {
 		t.Fatalf("FetchSummaries = %v, %v", sums, err)
 	}
 	for i, h := range hs {
-		if !summariesAgree(h.Summary, sums[i]) {
+		if !storetest.SameSummary(h.Summary, sums[i]) {
 			t.Errorf("header %d summary = %+v, want FetchSummaries' %+v", i, h.Summary, sums[i])
 		}
 		if h.Summary.Preview != nil || h.Summary.Sample != nil {
@@ -169,7 +161,7 @@ func TestFetchHeadersGmail(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := range hs {
-		if !summariesAgree(hs[i].Summary, sums[i]) {
+		if !storetest.SameSummary(hs[i].Summary, sums[i]) {
 			t.Errorf("header %d summary = %+v, want FetchSummaries' %+v", i, hs[i].Summary, sums[i])
 		}
 		if slices.Contains(sums[i].Flags, `\Seen`) {

@@ -1487,7 +1487,7 @@ func fetchHeaders(e *env) {
 		e.t.Fatalf("FetchSummaries = %v, %v", refsOf(sums), err)
 	}
 	for i, h := range hs {
-		if !sameSummary(h.Summary, sums[i]) {
+		if !SameSummary(h.Summary, sums[i]) {
 			e.t.Errorf("header %d summary = %+v, want FetchSummaries' %+v", i, h.Summary, sums[i])
 		}
 		if h.Summary.Preview != nil || h.Summary.Sample != nil {
@@ -1582,10 +1582,11 @@ func searchFolders(e *env) {
 	}
 }
 
-// sameSummary reports whether two summaries of one message agree, the
+// SameSummary reports whether two summaries of one message agree, the
 // times compared as instants, since two reads may parse them into
-// different locations.
-func sameSummary(a, b mailstore.Summary) bool {
+// different locations. Preview and Sample are not compared. Store tests
+// outside the suite use it too, so every store is held to one rule.
+func SameSummary(a, b mailstore.Summary) bool {
 	return a.Ref == b.Ref && a.Date.Equal(b.Date) && a.InternalDate.Equal(b.InternalDate) &&
 		slices.Equal(a.From, b.From) && slices.Equal(a.To, b.To) && a.Subject == b.Subject &&
 		slices.Equal(a.Flags, b.Flags) && a.Size == b.Size && a.HasAttachment == b.HasAttachment &&
