@@ -358,8 +358,8 @@ func TestCommitBatchDiscardsAfterReset(t *testing.T) {
 	if err := r.a.track(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	w := &walk{folder: "INBOX", uidValidity: 1, epoch: r.a.epoch, uids: []uint32{1}}
-	r.a.epoch++ // a drop ran while the batch was fetched
+	w := &walk{folder: "INBOX", uidValidity: 1, epoch: r.a.epoch.Load(), uids: []uint32{1}}
+	r.a.epoch.Add(1) // a drop ran while the batch was fetched
 	row := Row{Account: "acme", Folder: "INBOX", UIDValidity: 1, UID: 1, Subject: "one", MessageID: "one@example.com", InternalDate: acctStart, Date: acctStart}
 	next, more, err := r.a.commitBatch(t.Context(), w, []uint32{1}, []Row{row})
 	if err != nil || next != nil || !more {
@@ -510,7 +510,7 @@ func TestCommitBatchDiscardsAWalkTheBuilderRestarted(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := r.progress("INBOX")
-	w := &walk{folder: "INBOX", uidValidity: 1, epoch: r.a.epoch, baseline: p.BaselineUIDNext, low: p.BackfillLowUID, uids: []uint32{2, 1}}
+	w := &walk{folder: "INBOX", uidValidity: 1, epoch: r.a.epoch.Load(), baseline: p.BaselineUIDNext, low: p.BackfillLowUID, uids: []uint32{2, 1}}
 	// The builder records a new walk while the batch is fetched.
 	p.BaselineUIDNext, p.BackfillLowUID, p.BackfillDone = 9, 0, false
 	if err := r.store.PutProgress(t.Context(), p); err != nil {

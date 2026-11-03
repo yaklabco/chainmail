@@ -383,3 +383,41 @@ func TestThreadRows(t *testing.T) {
 		t.Errorf("ThreadRows of an empty thread ID = %v, %v; want none", rows, err)
 	}
 }
+
+// TestRootThreadRows checks the standard server's thread rule over cached
+// rows: a row joins the thread rooted at p@x when its Message-ID is p@x or
+// its References or In-Reply-To hold p@x as a whole entry, bare or in
+// angle brackets, whatever its own thread ID. An ID that only contains
+// p@x, another account's row, and an empty root find nothing.
+func TestRootThreadRows(t *testing.T) {
+	t.Parallel()
+	s, _ := openStore(t)
+	root := testRow("INBOX", 1)
+	root.MessageID = "p@x"
+	byRefs := testRow("Sent", 2)
+	byRefs.References = []string{"other@x", "p@x"}
+	bracketed := testRow("INBOX", 3)
+	bracketed.References = []string{"<p@x>"}
+	byReply := testRow("Archive", 4)
+	byReply.InReplyTo = []string{"p@x"}
+	nearMiss := testRow("INBOX", 5)
+	nearMiss.References = []string{"xp@x", "p@x.org"}
+	nearMiss.InReplyTo = []string{"<xp@x>"}
+	other := testRow("INBOX", 6)
+	other.Account = "other"
+	other.References = []string{"p@x"}
+	putRows(t, s, root, byRefs, bracketed, byReply, nearMiss, other)
+	rows, err := s.RootThreadRows(t.Context(), testAccount, "p@x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []uint32
+	for _, r := range rows {
+		got = append(got, r.UID)
+	}
+	wantUIDs(t, "RootThreadRows", got, 4, 3, 2, 1)
+	rows, err = s.RootThreadRows(t.Context(), testAccount, "")
+	if err != nil || len(rows) != 0 {
+		t.Errorf("RootThreadRows of an empty root = %v, %v; want none", rows, err)
+	}
+}

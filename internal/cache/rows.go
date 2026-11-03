@@ -538,6 +538,29 @@ func (s *Store) ThreadRows(ctx context.Context, account, threadID string) ([]Row
 	return rows, nil
 }
 
+// RootThreadRows returns the account's cached rows that a standard (not
+// Google) server's Thread finds for the thread rooted at root: the rows
+// whose Message-ID is root, or whose References or In-Reply-To hold root
+// as a whole entry, bare or in angle brackets. A row joins whatever its own
+// thread ID is. They are ordered as ThreadRows orders them. An empty root
+// has no rows.
+func (s *Store) RootThreadRows(ctx context.Context, account, root string) ([]Row, error) {
+	if root == "" {
+		return nil, nil
+	}
+	bracketed := "<" + root + ">"
+	rows, err := s.queryRows(ctx, "SELECT "+rowColumns+` FROM messages m WHERE m.account = ? AND (
+		m.message_id IN (?, ?)
+		OR EXISTS (SELECT 1 FROM json_each(m.references_json) WHERE value IN (?, ?))
+		OR EXISTS (SELECT 1 FROM json_each(m.in_reply_to_json) WHERE value IN (?, ?)))
+		ORDER BY m.date, m.internal_date, m.folder, m.uid`,
+		account, root, bracketed, root, bracketed, root, bracketed)
+	if err != nil {
+		return nil, s.fail("reading a thread by its root", err)
+	}
+	return rows, nil
+}
+
 // DeleteRow deletes a cached row with its body, body failure and FTS row.
 // A missing row is not an error.
 func (s *Store) DeleteRow(ctx context.Context, r ref.Ref) error {

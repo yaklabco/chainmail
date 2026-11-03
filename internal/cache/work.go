@@ -205,8 +205,8 @@ func (a *Account) track(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	a.wmu.Lock()
-	defer a.wmu.Unlock()
+	a.lock()
+	defer a.unlock()
 	have, err := a.progressMap(ctx)
 	if err != nil {
 		return err
@@ -232,7 +232,7 @@ func (a *Account) track(ctx context.Context) error {
 		if err := a.o.Store.DropFolder(ctx, a.name, folder, false); err != nil {
 			return err
 		}
-		a.epoch++
+		a.epoch.Add(1)
 		a.logger.InfoContext(ctx, "cache dropped a folder that is no longer synced", "folder", folder)
 	}
 	if added {

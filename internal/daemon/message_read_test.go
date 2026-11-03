@@ -69,7 +69,7 @@ func TestGetBatchWithPerItemErrors(t *testing.T) {
 		t.Errorf("source %q, fetched at %v", resp.GetSource(), resp.GetFetchedAt().AsTime())
 	}
 	row := lastMailAudit(t, m)
-	wantTargets := fmt.Sprintf(`[%q,%q,%q,"(invalid)",%q,"messages=2","errors=3"]`, a.String(), b.String(), stale.String(), other.String())
+	wantTargets := fmt.Sprintf(`[%q,%q,%q,"(invalid)",%q,"messages=2","errors=3","source=server"]`, a.String(), b.String(), stale.String(), other.String())
 	if row.Action != "get" || row.Account != "" || row.Targets != wantTargets || row.Result != "ok" {
 		t.Errorf("audit = %+v, want targets %s", row, wantTargets)
 	}
@@ -88,7 +88,7 @@ func TestGetRepeatedRef(t *testing.T) {
 			t.Errorf("item %d = %v", i, it)
 		}
 	}
-	if row := lastMailAudit(t, m); row.Account != "host" || row.Targets != fmt.Sprintf(`[%q,%q,"messages=2","errors=0"]`, r.String(), r.String()) {
+	if row := lastMailAudit(t, m); row.Account != "host" || row.Targets != fmt.Sprintf(`[%q,%q,"messages=2","errors=0","source=server"]`, r.String(), r.String()) {
 		t.Errorf("audit = %+v", row)
 	}
 }
@@ -166,7 +166,7 @@ func TestGetResponseCap(t *testing.T) {
 			t.Errorf("item %d ref = %q", i+2, it.GetRef())
 		}
 	}
-	if row := lastMailAudit(t, m); !strings.HasSuffix(row.Targets, `"messages=2","errors=2"]`) || row.Result != "ok" {
+	if row := lastMailAudit(t, m); !strings.HasSuffix(row.Targets, `"messages=2","errors=2","source=server"]`) || row.Result != "ok" {
 		t.Errorf("audit = %+v", row)
 	}
 }
@@ -294,7 +294,7 @@ func TestGetThreadOldestFirst(t *testing.T) {
 	if resp.Msg.GetMessages()[1].GetBody().GetUntrusted() != "Thanks." {
 		t.Errorf("thread bodies are not trimmed: %q", resp.Msg.GetMessages()[1].GetBody().GetUntrusted())
 	}
-	if row := lastMailAudit(t, m); row.Action != "thread" || row.Account != "host" || row.Targets != fmt.Sprintf(`[%q,"messages=3"]`, reply.String()) {
+	if row := lastMailAudit(t, m); row.Action != "thread" || row.Account != "host" || row.Targets != fmt.Sprintf(`[%q,"messages=3","source=server"]`, reply.String()) {
 		t.Errorf("audit = %+v", row)
 	}
 }
@@ -338,7 +338,7 @@ func TestGetThreadResponseCap(t *testing.T) {
 	if resp.Msg.GetThreadId() != mailstore.ThreadKey("p0@x") {
 		t.Errorf("thread id = %q", resp.Msg.GetThreadId())
 	}
-	if row := lastMailAudit(t, m); row.Targets != fmt.Sprintf(`[%q,"messages=2","omitted=1"]`, refs[2]) {
+	if row := lastMailAudit(t, m); row.Targets != fmt.Sprintf(`[%q,"messages=2","omitted=1","source=server"]`, refs[2]) {
 		t.Errorf("audit = %+v", row)
 	}
 }
@@ -584,7 +584,7 @@ func TestGetThreadLeavesOutUnreadableMembers(t *testing.T) {
 			t.Errorf("seed %s: thread id = %q", seed, resp.GetThreadId())
 		}
 	}
-	if row := lastMailAudit(t, m.fakeMail); row.Result != "ok" || row.Targets != fmt.Sprintf(`[%q,"messages=1","omitted=2"]`, rendered) {
+	if row := lastMailAudit(t, m.fakeMail); row.Result != "ok" || row.Targets != fmt.Sprintf(`[%q,"messages=1","omitted=2","source=server"]`, rendered) {
 		t.Errorf("audit = %+v", row)
 	}
 }
