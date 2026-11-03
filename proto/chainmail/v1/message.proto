@@ -79,8 +79,9 @@ message SearchRequest {
   // or query, not both. Neither matches every message. On accounts other
   // than Google, newer_than, older_than, after and before work on the
   // arrival date at day granularity, so newer_than:1d there matches since the
-  // start of yesterday. has:, filename: and label: work on Google accounts
-  // only until the local index arrives.
+  // start of yesterday. has:, filename: and label: work on Google accounts,
+  // and on other accounts once their cache is complete, where label:
+  // matches IMAP keywords.
   string query_string = 1;
   Query query = 2;
   // Accounts to search, added to those account: terms name. Empty, with no
@@ -96,6 +97,10 @@ message SearchRequest {
   bool snippets = 7;
   // Collapse rows to the newest message of each thread.
   bool threads = 8;
+  // Where answers come from: "" or "auto" (the cache when it can answer
+  // completely and is fresh, else the server), "cache" (the cache even when
+  // incomplete or stale), or "server".
+  string source = 9;
 }
 
 message MessageRow {
@@ -124,6 +129,16 @@ message MessageRow {
 message AccountCount {
   string account = 1;
   uint64 count = 2;
+  // "cache" or "server": what answered for this account.
+  string source = 3;
+  // With source "cache": the oldest last sync of the folders searched.
+  google.protobuf.Timestamp synced_at = 4;
+  // False only when source "cache" was forced and the cache could not
+  // answer completely.
+  bool complete = 5;
+  // Set when complete is false: backfilling, stale, text_outside_window,
+  // folder_not_synced or cache_disabled.
+  string incomplete_reason = 6;
 }
 
 message SearchResponse {
@@ -134,7 +149,9 @@ message SearchResponse {
   uint64 count = 3;
   repeated AccountCount account_counts = 4;
   repeated PartialSource partial = 5;
-  // "server": the mail servers answered. The local index will say "cache".
+  // "cache", "server" or "mixed": what answered. "mixed" means the cache
+  // answered for some accounts and the mail servers for others;
+  // account_counts says which.
   string source = 6;
   google.protobuf.Timestamp fetched_at = 7;
 }
@@ -180,6 +197,8 @@ message Message {
   string thread_id = 14;
   Body body = 15;
   repeated Attachment attachments = 16;
+  // "cache" or "server": where this message was read from.
+  string source = 17;
 }
 
 message ItemError {
@@ -206,6 +225,8 @@ message GetRequest {
 
 message GetResponse {
   repeated GetItem items = 1;
+  // "cache", "server" or "mixed": where the messages were read from. Each
+  // message's source says which.
   string source = 2;
   google.protobuf.Timestamp fetched_at = 3;
 }
@@ -230,6 +251,8 @@ message GetThreadResponse {
   // Oldest first. A member deleted or moved since the thread was listed is
   // left out without a trace.
   repeated Message messages = 2;
+  // "cache", "server" or "mixed": where the messages were read from. Each
+  // message's source says which.
   string source = 3;
   google.protobuf.Timestamp fetched_at = 4;
   // Some members are not in messages: omitted_refs lists them.
