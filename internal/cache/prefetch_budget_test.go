@@ -248,3 +248,52 @@ func TestPrefetchThrottledWaitsForTheNextUTCDay(t *testing.T) {
 		t.Error("body not fetched after 00:00 UTC")
 	}
 }
+
+// spendTheRest hands out the fake's bodies and, on the first
+// FetchMessages call, spends the day's budget so that charging that call
+// leaves exactly 0 bytes: a foreground read meanwhile, sized to the byte.
+type spendTheRest struct {
+	*fake.Store
+	r    *prefetchRig
+	once *sync.Once
+}
+
+func (s spendTheRest) FetchMessages(ctx context.Context, refs []ref.Ref) []mailstore.MessageResult {
+	out := s.Store.FetchMessages(ctx, refs)
+	s.once.Do(func() {
+		var raw int64
+		for _, res := range out {
+			if res.Message != nil {
+				raw += int64(len(res.Message.Raw))
+			}
+		}
+		day := utcDay(s.r.clk.Now())
+		used, err := s.r.st.Budget(ctx, "acme", day)
+		if err != nil {
+			s.r.t.Error(err)
+			return
+		}
+		if _, err := s.r.st.AddBudget(ctx, "acme", day, s.r.set.DailyDownload-used-raw); err != nil {
+			s.r.t.Error(err)
+		}
+	})
+	return out
+}
+
+// With exactly 0 bytes left after a download, the recheck before the next
+// one admits nothing, not even a body whose stored size is 0.
+func TestPrefetchZeroLeftAdmitsNoEmptyBody(t *testing.T) {
+	t.Parallel()
+	r := newPrefetchRig(t)
+	first := r.add(oneDay, "first")
+	empty := r.addSized(2*oneDay, "empty", 0)
+	r.track(true)
+	r.mail = spendTheRest{Store: r.fk, r: r, once: &sync.Once{}}
+	r.step(untilUTCMidnight(r.clk.Now()))
+	if !r.has(first) || r.has(empty) || r.fetches() != 1 {
+		t.Errorf("bodies cached first %v empty %v, FetchMessages calls %d; want true, false, 1", r.has(first), r.has(empty), r.fetches())
+	}
+	if got := r.budgetOn(utcDay(r.clk.Now())); got != r.set.DailyDownload {
+		t.Errorf("budget used = %d, want exactly %d", got, r.set.DailyDownload)
+	}
+}

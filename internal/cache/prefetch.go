@@ -284,7 +284,7 @@ func (p *prefetcher) fetch(ctx context.Context, queue []queued, set config.Cache
 			p.warn(ctx, "reading the download budget", err)
 			return retry
 		}
-		if q.size > left {
+		if left <= 0 || q.size > left {
 			return untilUTCMidnight(now)
 		}
 		got, wait, ended := p.download(ctx, q.ref, set)
