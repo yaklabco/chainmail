@@ -6,6 +6,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/jamesainslie/chainmail/internal/mailstore"
 )
 
 // errPoolClosed is returned by get once the store has closed.
@@ -52,10 +54,14 @@ type pool[C pooled] struct {
 	// peak is the most of open, closing and outside since the last
 	// resetConnPeak. Only a dial raises the sum: a logout moves a
 	// connection from open to closing.
-	peak   int
-	idle   []*idleConn[C]
-	wake   chan struct{}
-	closed bool
+	peak int
+	// waiting counts foreground calls blocked in get for a connection.
+	// Background work (tryGet) takes nothing while one waits, so a
+	// connection that comes back goes to the waiter.
+	waiting int
+	idle    []*idleConn[C]
+	wake    chan struct{}
+	closed  bool
 }
 
 func newPool[C pooled](dial func(context.Context) (C, error), opts poolOptions) *pool[C] {
@@ -64,48 +70,80 @@ func newPool[C pooled](dial func(context.Context) (C, error), opts poolOptions) 
 
 // get borrows a connection, preferring an idle one with folder open in a
 // mode that will do: read-write when writable, either mode otherwise. It
-// dials when the pool has room and waits otherwise. The caller hands it back
-// with put, or with discard when it broke.
+// dials when the pool has room and waits otherwise, counted in waiting
+// while it does. The caller hands it back with put, or with discard when it
+// broke.
 func (p *pool[C]) get(ctx context.Context, folder string, writable bool) (C, error) {
+	return p.take(ctx, folder, writable, false)
+}
+
+// tryGet is get for background work. It never waits: it takes an idle
+// connection, or dials when the pool has room, only while no foreground
+// call waits in get, and otherwise fails at once with mailstore.ErrBusy.
+func (p *pool[C]) tryGet(ctx context.Context, folder string, writable bool) (C, error) {
+	return p.take(ctx, folder, writable, true)
+}
+
+// take is get, or tryGet when background is set.
+func (p *pool[C]) take(ctx context.Context, folder string, writable, background bool) (C, error) {
 	var zero C
+	waited := false
 	for {
 		p.mu.Lock()
+		if waited {
+			p.waiting--
+			waited = false
+		}
 		if p.closed {
 			p.mu.Unlock()
 			return zero, errPoolClosed
 		}
-		if e := p.takeIdleLocked(folder, writable); e != nil {
-			p.mu.Unlock()
-			if p.opts.now().Sub(e.since) > p.opts.noopAfter {
-				if err := e.c.Noop(ctx); err != nil {
-					p.discard(e.c)
-					if ctx.Err() != nil {
-						return zero, ctx.Err()
-					}
-					continue
-				}
-			}
-			return e.c, nil
-		}
-		if p.open < p.max {
-			p.open++
-			p.peak = max(p.peak, p.slotsLocked())
-			p.mu.Unlock()
-			c, err := p.dial(ctx)
-			if err != nil {
-				p.mu.Lock()
-				p.open--
-				p.broadcastLocked()
+		// A connection put or discard frees goes to a waiting foreground
+		// call: background work takes nothing until no one waits, even
+		// in the moment before the woken waiter takes the lock.
+		if !background || p.waiting == 0 {
+			if e := p.takeIdleLocked(folder, writable); e != nil {
 				p.mu.Unlock()
-				return zero, err
+				if p.opts.now().Sub(e.since) > p.opts.noopAfter {
+					if err := e.c.Noop(ctx); err != nil {
+						p.discard(e.c)
+						if ctx.Err() != nil {
+							return zero, ctx.Err()
+						}
+						continue
+					}
+				}
+				return e.c, nil
 			}
-			return c, nil
+			if p.open < p.max {
+				p.open++
+				p.peak = max(p.peak, p.slotsLocked())
+				p.mu.Unlock()
+				c, err := p.dial(ctx)
+				if err != nil {
+					p.mu.Lock()
+					p.open--
+					p.broadcastLocked()
+					p.mu.Unlock()
+					return zero, err
+				}
+				return c, nil
+			}
 		}
+		if background {
+			p.mu.Unlock()
+			return zero, mailstore.ErrBusy
+		}
+		p.waiting++
+		waited = true
 		wake := p.wake
 		p.mu.Unlock()
 		select {
 		case <-wake:
 		case <-ctx.Done():
+			p.mu.Lock()
+			p.waiting--
+			p.mu.Unlock()
 			return zero, ctx.Err()
 		}
 	}
