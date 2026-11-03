@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/ref"
 	"github.com/jamesainslie/chainmail/internal/watch"
 )
 
@@ -79,10 +80,14 @@ func (a *Account) backfillStep(ctx context.Context, w *walk) (*walk, bool, error
 	a.wmu.Lock()
 	epoch := a.epoch
 	p, ok, err := a.nextBackfill(ctx)
+	if err == nil && ok {
+		a.inflight = &inflightBatch{folder: p.Folder, uidValidity: p.UIDValidity, changed: map[uint32]bool{}}
+	}
 	a.wmu.Unlock()
 	if err != nil || !ok {
 		return nil, false, err
 	}
+	defer a.endInflight()
 	if err := a.waitReady(ctx, true); err != nil {
 		return w, false, err
 	}
@@ -106,7 +111,10 @@ func (a *Account) backfillStep(ctx context.Context, w *walk) (*walk, bool, error
 
 // commitBatch stores a fetched batch, counts it against the budget, and
 // records the walk's new low UID, marking the folder done when the walk has
-// no UIDs left. A batch fetched before a drop is discarded with its walk.
+// no UIDs left. A batch fetched before a drop is discarded with its walk. A
+// batch with a UID whose flags or expunge the builder applied during the
+// fetch is not written: it returns w unchanged, so the next step fetches
+// the batch again.
 func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows []Row) (*walk, bool, error) {
 	a.wmu.Lock()
 	defer a.wmu.Unlock()
@@ -119,6 +127,10 @@ func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows
 	}
 	if !ok || p.UIDValidity != w.uidValidity {
 		return nil, true, nil
+	}
+	if a.inflight.hit(batch) {
+		a.logger.InfoContext(ctx, "cache backfill fetches a batch again after a change during its fetch", "folder", w.folder)
+		return w, true, nil
 	}
 	if len(rows) > 0 {
 		if err := a.o.Store.PutRows(ctx, rows); err != nil {
@@ -210,4 +222,36 @@ func (a *Account) listBackfill(ctx context.Context, p Progress) ([]uint32, error
 		})
 	})
 	return uids, err
+}
+
+// inflightBatch records the flags and expunged changes the builder applies
+// to one folder while the backfill fetches a batch of it with wmu
+// released. The epoch catches a folder drop in that window; this catches a
+// change to one message, which a write of the fetched header would undo:
+// an expunged message would come back as a ghost row, a flag change would
+// be lost, and no later event would repair either.
+type inflightBatch struct {
+	folder      string
+	uidValidity uint32
+	changed     map[uint32]bool
+}
+
+// note records that the builder applied a flags or expunged change to r.
+// It records nothing on a nil batch or for another folder or UIDVALIDITY.
+func (b *inflightBatch) note(r ref.Ref) {
+	if b != nil && b.folder == r.Folder && b.uidValidity == r.UIDValidity {
+		b.changed[r.UID] = true
+	}
+}
+
+// hit reports whether a change was noted for any of uids.
+func (b *inflightBatch) hit(uids []uint32) bool {
+	return b != nil && slices.ContainsFunc(uids, func(uid uint32) bool { return b.changed[uid] })
+}
+
+// endInflight forgets the backfill's in-flight batch once its step ends.
+func (a *Account) endInflight() {
+	a.wmu.Lock()
+	defer a.wmu.Unlock()
+	a.inflight = nil
 }

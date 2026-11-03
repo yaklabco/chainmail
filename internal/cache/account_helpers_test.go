@@ -527,3 +527,36 @@ func (r *acctRig) failInserts() func() {
 		_ = conn.Close() // a close error changes nothing for the test
 	}
 }
+
+// acctStallMail is a MailStore whose first header fetch reads the fake's
+// state, then holds its answer until release closes, so a test can change
+// the folder between the read and the backfill's write. Later fetches pass
+// straight through.
+type acctStallMail struct {
+	*fake.Store
+	entered chan struct{} // closed once the first fetch has read the fake
+	release chan struct{} // closed by the test to let it return
+	once    sync.Once
+}
+
+var _ MailStore = (*acctStallMail)(nil)
+
+func newAcctStallMail(fs *fake.Store) *acctStallMail {
+	return &acctStallMail{Store: fs, entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (m *acctStallMail) FetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32) ([]mailstore.Header, error) {
+	hs, err := m.Store.FetchHeaders(ctx, src, uids)
+	first := false
+	m.once.Do(func() { first = true })
+	if !first {
+		return hs, err
+	}
+	close(m.entered)
+	select {
+	case <-m.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return hs, err
+}

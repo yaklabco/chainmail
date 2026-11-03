@@ -365,3 +365,43 @@ func TestBackfillResumesAFolderLeavingError(t *testing.T) {
 		t.Errorf("%d Accounts rows, want 1", n)
 	}
 }
+
+// A flags or expunged event the builder applies while the backfill is
+// fetching a batch that holds its UID makes the backfill fetch that batch
+// again: the header it fetched may predate the change, so writing it would
+// bring back an expunged message as a ghost row or lose a flag change,
+// with no later event to repair either.
+func TestBackfillRefetchesABatchChangedDuringItsFetch(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	stall := newAcctStallMail(fs)
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	r.mail = stall
+	gone := fs.Add(acctMsg("INBOX", "gone"))
+	seen := fs.Add(acctMsg("INBOX", "seen"))
+	r.pass("INBOX")
+	r.start()
+	select {
+	case <-stall.entered:
+	case <-time.After(acctWait):
+		t.Fatal("the backfill never fetched its first batch")
+	}
+
+	fs.ExternalExpunge("INBOX", gone.UID)
+	fs.ExternalFlags("INBOX", seen.UID, []string{`\Seen`}, nil)
+	r.sweep("INBOX")
+	r.waitApplied()
+	close(stall.release)
+	r.waitBackfilled("INBOX")
+
+	if _, ok := r.row(gone); ok {
+		t.Error("the message expunged during the batch's fetch is cached")
+	}
+	row, ok := r.row(seen)
+	if !ok {
+		t.Fatal("the flagged message is not cached")
+	}
+	if want := fs.Flags(seen); !slices.Equal(row.Flags, want) {
+		t.Errorf("row flags = %q, want the server's %q", row.Flags, want)
+	}
+}

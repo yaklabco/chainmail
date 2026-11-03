@@ -70,6 +70,12 @@ type Account struct {
 	// instead of written over a drop.
 	wmu   sync.Mutex
 	epoch uint64
+	// inflight is the backfill batch being fetched with wmu released, or
+	// nil. The builder notes in it every flags or expunged change it
+	// applies to the batch's folder, and commitBatch fetches the batch
+	// again when a change hit one of its UIDs: the header it fetched may
+	// predate the change. Guarded by wmu.
+	inflight *inflightBatch
 
 	// applied is the builder's acknowledged event ID, -1 until the builder
 	// has opened its group.
