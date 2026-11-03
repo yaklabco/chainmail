@@ -178,10 +178,10 @@ twice. To send it again on purpose, pass a new --idempotency-key.`,
 	return cmd
 }
 
-// explicitJSON says --output json was given, rather than defaulted to
-// because stdout is not a terminal.
-func explicitJSON(cmd *cobra.Command, g *globals) bool {
-	return cmd.Flags().Changed("output") && g.output == "json"
+// explicitJSON says json output was chosen, by --output, CHAINMAIL_OUTPUT
+// or cli.toml, rather than defaulted to because stdout is not a terminal.
+func explicitJSON(_ *cobra.Command, g *globals) bool {
+	return g.outputChosen && g.output == "json"
 }
 
 // checkDryRunOutput refuses to write a dry run's raw MIME to a terminal, as

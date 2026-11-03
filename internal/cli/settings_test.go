@@ -184,3 +184,14 @@ func TestDaemonFlagsFromEnvironment(t *testing.T) {
 		})
 	}
 }
+
+// The daemon uses neither client setting, so a bad one must not stop it.
+func TestDaemonIgnoresClientSettings(t *testing.T) {
+	t.Parallel()
+	xdg := writeCLIConfig(t, "colour = \"red\"")
+	env := Env{Getenv: vars(map[string]string{"CHAINMAIL_OUTPUT": "yaml", "XDG_CONFIG_HOME": xdg})}
+	got := runCLI(t, env, "daemon", "--dev", "--config", "/nonexistent/config.toml", "--state-dir", t.TempDir(), "--vault-key-file", "/x")
+	if strings.Contains(got.stderr, "output") || strings.Contains(got.stderr, "cli.toml") {
+		t.Errorf("daemon failed on client settings: %s", got.stderr)
+	}
+}

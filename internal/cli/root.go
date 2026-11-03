@@ -46,6 +46,9 @@ type globals struct {
 	// socket and output are resolved by resolve.
 	socket string
 	output string
+	// outputChosen says output came from --output, CHAINMAIL_OUTPUT or
+	// cli.toml rather than the terminal default.
+	outputChosen bool
 }
 
 // socketPath is the daemon socket clients dial.
@@ -59,7 +62,7 @@ func (g *globals) socketPath(Env) string {
 // addGlobalFlags registers the flags every command shares.
 func addGlobalFlags(root *cobra.Command, g *globals) {
 	root.PersistentFlags().StringVar(&g.socketFlag, "socket", "", "daemon socket (default $CHAINMAIL_SOCKET, then cli.toml, then "+config.DefaultSocket+")")
-	root.PersistentFlags().StringVar(&g.output, "output", "", "output format: json or table (default $CHAINMAIL_OUTPUT, then cli.toml, then table on a terminal and json otherwise)")
+	root.PersistentFlags().StringVar(&g.output, "output", "", "output format: json or table (default $CHAINMAIL_OUTPUT, then cli.toml, then table on a terminal, json otherwise)")
 }
 
 // client connects to the daemon. Callers Close it, so idle connections do
@@ -88,7 +91,9 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 		// Completion requests resolve settings inside each completion
 		// function, against the command being completed, and must not fail
 		// on a bad cli.toml.
-		if cmd.Name() == cobra.ShellCompRequestCmd || cmd.Name() == cobra.ShellCompNoDescRequestCmd {
+		// The daemon uses neither client setting, so a bad cli.toml or
+		// CHAINMAIL_OUTPUT in its environment must not stop it.
+		if cmd.Name() == cobra.ShellCompRequestCmd || cmd.Name() == cobra.ShellCompNoDescRequestCmd || cmd.Name() == "daemon" {
 			return nil
 		}
 		return g.resolve(env, cmd)

@@ -152,8 +152,9 @@ func (g *globals) resolve(env Env, cmd *cobra.Command) error {
 	}
 	v.SetDefault("output", out)
 	g.socket, g.output = v.GetString("socket"), v.GetString("output")
+	from := source(flags, clientBindings[1], env, path, file)
+	g.outputChosen = from != "the default"
 	if g.output != "json" && g.output != "table" {
-		from := source(flags, clientBindings[1], env, path, file)
 		return usageError{err: fmt.Errorf("--output must be json or table, got %q from %s", g.output, from), hint: "run: chainmail --help"}
 	}
 	return nil
