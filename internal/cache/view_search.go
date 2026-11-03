@@ -111,8 +111,9 @@ func (v *View) FetchSummaries(ctx context.Context, src mailstore.Source, uids []
 	if !opts.Snippets {
 		return out, nil
 	}
+	// at holds every row of a UID, since uids may repeat one.
 	var missing []uint32
-	at := map[uint32]int{}
+	at := map[uint32][]int{}
 	for i := range out {
 		b, held, err := store.Body(ctx, out[i].Ref)
 		if err != nil {
@@ -122,8 +123,11 @@ func (v *View) FetchSummaries(ctx context.Context, src mailstore.Source, uids []
 			out[i].Preview = &snippet
 			continue
 		}
-		missing = append(missing, out[i].Ref.UID)
-		at[out[i].Ref.UID] = i
+		uid := out[i].Ref.UID
+		if len(at[uid]) == 0 {
+			missing = append(missing, uid)
+		}
+		at[uid] = append(at[uid], i)
 	}
 	if len(missing) == 0 {
 		return out, nil
@@ -133,7 +137,7 @@ func (v *View) FetchSummaries(ctx context.Context, src mailstore.Source, uids []
 		return nil, err
 	}
 	for _, s := range sums {
-		if i, ok := at[s.Ref.UID]; ok {
+		for _, i := range at[s.Ref.UID] {
 			out[i].Preview, out[i].Sample = s.Preview, s.Sample
 		}
 	}

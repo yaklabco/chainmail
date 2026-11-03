@@ -527,3 +527,33 @@ func TestViewFetchSummariesSnippets(t *testing.T) {
 		t.Errorf("server FetchSummaries calls = %v, want one for UID %d only", calls, late.UID)
 	}
 }
+
+// TestViewFetchSummariesRepeatedMissingUID checks that a UID asked for twice
+// whose body the cache lacks gets the server's snippet in both rows, as the
+// server's own FetchSummaries gives it.
+func TestViewFetchSummariesRepeatedMissingUID(t *testing.T) {
+	t.Parallel()
+	f := newSearchFixture(t, false)
+	seedSearchMail(f.server.Store, false)
+	f.warm(t)
+	late := f.server.Add(fake.Message{Folder: "INBOX", Date: searchDaysAgo(0), Subject: "late", Body: "arrived after the prefetch"})
+	src := mailstore.Source{Folder: "INBOX", UIDValidity: late.UIDValidity}
+	f.cacheFolder(t, src, []uint32{late.UID}, false)
+	uids := []uint32{late.UID, late.UID}
+	want, err := f.server.FetchSummaries(t.Context(), src, uids, mailstore.SummaryOptions{Snippets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.view.FetchSummaries(t.Context(), src, uids, mailstore.SummaryOptions{Snippets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%d rows, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if g, w := snippetText(got[i]), snippetText(want[i]); g != w || g == "" {
+			t.Errorf("row %d snippet = %q, want %q", i, g, w)
+		}
+	}
+}
