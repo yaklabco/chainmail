@@ -19,6 +19,26 @@ jobs:
           version: v2.15.0
           install-only: true
       - run: go tool stave check
+      # chainmail runs on any Linux and on macOS, so a build that works on
+      # only one of them fails here.
+      - name: cross-build
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          GOOS=darwin GOARCH=arm64 go build ./...
+          GOOS=linux GOARCH=amd64 go build ./...
+  macos:
+    # The unit tests on macOS. The Dovecot tests need Docker, so they stay
+    # in the integration job on Linux; their integration build tag keeps
+    # them out of this run, as the live tag keeps out the live tests.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -short -race -p 2 ./...
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 20
