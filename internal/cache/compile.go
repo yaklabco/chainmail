@@ -100,7 +100,7 @@ func Compile(n *query.Node, in string, gmail bool, now time.Time) (Plan, error) 
 		Since:       lowerBound(n, now),
 	}
 	switch {
-	case notSynced:
+	case notSynced || c.notSynced:
 		p.ServerOnly, p.Reason = true, planFolderNotSynced
 	case uncoveredText(n, false, now):
 		p.ServerOnly, p.Reason = true, planTextOutsideWindow
@@ -112,32 +112,51 @@ func Compile(n *query.Node, in string, gmail bool, now time.Time) (Plan, error) 
 
 // gmailIn compiles the in: value of a Google account, where every message
 // lives once in All Mail and in: names a label, as compileGmail sends it
-// to X-GM-RAW. synced is false for trash, spam, junk and anywhere, whose
-// folders lie outside All Mail: the cache holds none of their messages.
+// to X-GM-RAW. "" is no condition and archive is everything outside the
+// inbox; the rest reads as label: does. synced is false for trash, spam,
+// junk and anywhere, whose folders lie outside All Mail.
 func gmailIn(in string) (sql string, args []any, synced bool) {
 	switch strings.ToLower(in) {
 	case "":
 		return "", nil, true
+	case "archive":
+		sql, args = likeElement("m.labels_norm", `\Inbox`)
+		return "NOT (" + sql + ")", args, true
+	default:
+		return gmailLabel(in)
+	}
+}
+
+// gmailLabel compiles a Google label as Gmail search reads it, for label:
+// and in: alike. The system names (inbox, sent, draft or drafts, starred,
+// important) mean the system labels, starred being the \Flagged flag. Any
+// other label matches with case folded and every space and slash read as
+// a hyphen, on both sides, so work-clients finds "Work/Clients". synced is
+// false, with no condition, for trash, spam, junk and anywhere: the cache
+// holds none of their messages.
+func gmailLabel(label string) (sql string, args []any, synced bool) {
+	switch strings.ToLower(label) {
 	case "trash", "spam", "junk", "anywhere":
 		return "", nil, false
 	case "inbox":
 		sql, args = likeElement("m.labels_norm", `\Inbox`)
-	case "archive":
-		sql, args = likeElement("m.labels_norm", `\Inbox`)
-		sql = "NOT (" + sql + ")"
 	case "sent":
 		sql, args = likeElement("m.labels_norm", `\Sent`)
-	case "drafts":
+	case "draft", "drafts":
 		sql, args = likeElement("m.labels_norm", `\Draft`)
 	case "starred":
 		sql, args = likeElement("m.flags_norm", `\Flagged`)
 	case "important":
 		sql, args = likeElement("m.labels_norm", `\Important`)
 	default:
-		sql, args = likeElement("m.labels_norm", in)
+		sql, args = likeElement(`replace(replace(m.labels_norm, ' ', '-'), '/', '-')`, gmailLabelFolder.Replace(label))
 	}
 	return sql, args, true
 }
+
+// gmailLabelFolder reads a label's spaces and slashes as hyphens, as Gmail
+// search does.
+var gmailLabelFolder = strings.NewReplacer(" ", "-", "/", "-")
 
 // compiler holds what compiling one tree needs and learns.
 type compiler struct {
@@ -146,6 +165,9 @@ type compiler struct {
 	// unsupported is set when a term the cache cannot evaluate compiled
 	// to 0.
 	unsupported bool
+	// notSynced is set when a Google label: names a folder the cache
+	// never holds.
+	notSynced bool
 }
 
 // node compiles n to a condition over messages aliased m.
@@ -316,8 +338,12 @@ func ftsTextual(n *query.Node) bool {
 
 // ftsString quotes v as one FTS5 string, doubling any quote inside it.
 func ftsString(v string) string {
-	return `"` + strings.ReplaceAll(v, `"`, `""`) + `"`
+	return `"` + ftsQuoter.Replace(v) + `"`
 }
+
+// ftsQuoter doubles quotes for ftsString, and turns NUL, which ends an
+// FTS5 string early, into a space, a token separator like any other.
+var ftsQuoter = strings.NewReplacer(`"`, `""`, "\x00", " ")
 
 // term compiles one operator term.
 func (c *compiler) term(n *query.Node) (string, []any, error) {
@@ -374,12 +400,18 @@ func (c *compiler) is(n *query.Node) (string, []any, error) {
 	return c.cannot()
 }
 
-// label compiles label:. On Google it is a label; elsewhere an IMAP
-// keyword, and a system flag such as \Seen is not a label.
+// label compiles label:. On Google it is a label, read as gmailLabel
+// reads it, and trash, spam, junk and anywhere match nothing the cache
+// holds; elsewhere an IMAP keyword, and a system flag such as \Seen is not
+// a label.
 func (c *compiler) label(n *query.Node) (string, []any, error) {
 	switch {
 	case c.gmail:
-		sql, args := likeElement("m.labels_norm", n.Value)
+		sql, args, synced := gmailLabel(n.Value)
+		if !synced {
+			c.notSynced = true
+			return "0", nil, nil
+		}
 		return sql, args, nil
 	case strings.HasPrefix(n.Value, `\`):
 		return c.cannot()

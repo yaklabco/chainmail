@@ -95,7 +95,7 @@ func compileFixture() []compileRow {
 		{row: r4, body: "the q3 report is attached"},
 		{row: r5},
 		{row: gm(11, "Inbox mail", []string{`\Inbox`, `\Important`}, []string{`\Seen`})},
-		{row: gm(12, "Archived receipt", []string{"Receipts"}, []string{`\Flagged`})},
+		{row: gm(12, "Archived receipt", []string{"Receipts", "My Label"}, []string{`\Flagged`})},
 		{row: gm(13, "Sent one", []string{`\Sent`}, []string{`\Seen`})},
 		{row: gm(14, "Draft", []string{`\Draft`}, []string{`\Draft`})},
 		{row: gm(15, "Client note", []string{"Work/Clients", `\Inbox`}, nil)},
@@ -345,6 +345,60 @@ func TestCompileGmail(t *testing.T) {
 	}
 }
 
+// TestCompileGmailLabels checks that label: matches labels the way Gmail
+// search does: the system names mean the system labels, as in: reads them,
+// and any other label matches with case, spaces and slashes folded, so
+// label:work-clients finds "Work/Clients". A label is one whole element,
+// never a substring.
+func TestCompileGmailLabels(t *testing.T) {
+	t.Parallel()
+	s := openCompileStore(t)
+	for _, tt := range []compileCase{
+		{"inbox", []uint32{15, 11}},
+		{"INBOX", []uint32{15, 11}},
+		{"sent", []uint32{13}},
+		{"draft", []uint32{14}},
+		{"drafts", []uint32{14}},
+		{"starred", []uint32{12}},
+		{"important", []uint32{11}},
+		{"work-clients", []uint32{15}},
+		{"Work/Clients", []uint32{15}},
+		{"my-label", []uint32{12}},
+	} {
+		label, lp := compileSearch(t, s, true, "label:"+tt.query)
+		in, ip := compileSearch(t, s, true, "in:"+tt.query)
+		if !slices.Equal(label, tt.want) || lp.ServerOnly {
+			t.Errorf("label:%s = %v, ServerOnly %v; want %v, false\nwhere %+v", tt.query, label, lp.ServerOnly, tt.want, lp.Where)
+		}
+		if !slices.Equal(in, tt.want) || ip.ServerOnly {
+			t.Errorf("in:%s = %v, ServerOnly %v; want %v, false\nwhere %+v", tt.query, in, ip.ServerOnly, tt.want, ip.Where)
+		}
+	}
+	runCompileCases(t, s, true, []compileCase{
+		{`label:"My Label"`, []uint32{12}},
+		{"label:work", nil},
+		{"label:clients", nil},
+		{"in:work", nil},
+	})
+
+	for _, label := range []string{"trash", "spam", "Trash", "junk", "anywhere"} {
+		_, p := compileSearch(t, s, true, "label:"+label)
+		if !p.ServerOnly || p.Reason != "folder_not_synced" {
+			t.Errorf("label:%s: ServerOnly %v, Reason %q; want true, folder_not_synced", label, p.ServerOnly, p.Reason)
+		}
+		_, p = compileSearch(t, s, true, "from:gail OR label:"+label)
+		if !p.ServerOnly || p.Reason != "folder_not_synced" {
+			t.Errorf("from:gail OR label:%s: ServerOnly %v, Reason %q; want true, folder_not_synced", label, p.ServerOnly, p.Reason)
+		}
+	}
+
+	// IMAP keywords keep their exact names: no folding off Google.
+	runCompileCases(t, s, false, []compileCase{
+		{"label:receipts", []uint32{3}},
+		{"label:inbox", nil},
+	})
+}
+
 // TestCompileDatesAndSizes checks the day boundaries and size bounds of
 // imapstore's compileStandard: SINCE is on or after the day, BEFORE is
 // strictly before it, LARGER and SMALLER are strict, larger:0 is every
@@ -567,6 +621,12 @@ func TestCompileText(t *testing.T) {
 	got, _ := compileSearchTree(t, s, false, query.Term(query.FieldText, `say "hi"`), "")
 	if len(got) != 0 {
 		t.Errorf(`text say "hi" = %v, want none`, got)
+	}
+	// A NUL from a caller that skipped validation would end the FTS5
+	// string early; it reads as a space instead.
+	got, _ = compileSearchTree(t, s, false, query.Term(query.FieldText, "a\x00b"), "")
+	if len(got) != 0 {
+		t.Errorf(`text "a\x00b" = %v, want none`, got)
 	}
 }
 
