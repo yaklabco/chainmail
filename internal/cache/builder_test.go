@@ -245,3 +245,100 @@ func TestCommitSegmentDiscardsAfterReset(t *testing.T) {
 		t.Error("a segment fetched before the reset was written")
 	}
 }
+
+// A uidvalidity gap drops the folder's rows, keeping each Message-ID for
+// ref recovery, and records the new UIDVALIDITY with the folder's current
+// UIDNEXT as its baseline.
+func TestBuilderUIDValidityGapDropsTheFolder(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	r.pass("INBOX")
+	r.start()
+	r.waitApplied()
+	old := r.add("INBOX", "one", "two")
+	r.waitApplied()
+	if _, ok := r.row(old[0]); !ok {
+		t.Fatal("the new message was not cached")
+	}
+
+	fs.NewUIDValidity("INBOX")
+	r.pass("INBOX")
+	r.waitApplied()
+	if _, ok := r.row(old[0]); ok {
+		t.Error("the gap left the row under the old UIDVALIDITY")
+	}
+	id, ok, err := r.store.MessageIDOf(t.Context(), old[0])
+	if err != nil || !ok || id != "one@example.com" {
+		t.Errorf("MessageIDOf(old ref) = %q, %v, %v; want one@example.com kept for recovery", id, ok, err)
+	}
+	p, row := r.progress("INBOX"), r.syncRow("INBOX")
+	if p.UIDValidity != row.UIDValidity || p.UIDValidity == old[0].UIDValidity || p.BaselineUIDNext != row.UIDNext {
+		t.Errorf("progress = %+v, want UIDVALIDITY %d and baseline %d from the sync row", p, row.UIDValidity, row.UIDNext)
+	}
+}
+
+// A trimmed gap rebuilds the whole account: rows the server never had are
+// gone, the baseline is the folder's current UIDNEXT, and events after the
+// gap still apply.
+func TestBuilderTrimmedGapRebuilds(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	r.pass("INBOX")
+	r.start()
+	r.waitApplied()
+	first := r.add("INBOX", "one")[0]
+	r.waitApplied()
+	bogus := ref.Ref{Account: "acme", Folder: "INBOX", UIDValidity: first.UIDValidity, UID: 50}
+	r.putRows(Row{Account: "acme", Folder: "INBOX", UIDValidity: first.UIDValidity, UID: 50, Subject: "bogus", MessageID: "bogus@example.com", InternalDate: acctStart, Date: acctStart})
+	r.stop()
+
+	r.add("INBOX", "two")
+	later := r.add("INBOX", "three")[0]
+	if _, err := r.log.Trim(t.Context(), 168*time.Hour, 1); err != nil {
+		t.Fatal(err)
+	}
+	r.renew()
+	r.start()
+	r.waitApplied()
+	if _, ok := r.row(bogus); ok {
+		t.Error("the trimmed gap kept a row the rebuild should have dropped")
+	}
+	if _, ok := r.row(later); !ok {
+		t.Error("the event after the gap was not applied")
+	}
+	if p, row := r.progress("INBOX"), r.syncRow("INBOX"); p.BaselineUIDNext != row.UIDNext {
+		t.Errorf("baseline = %d, want the current UIDNEXT %d", p.BaselineUIDNext, row.UIDNext)
+	}
+}
+
+// A group acknowledged past the log's tail, as a reset state.db leaves it,
+// rebuilds the account and moves the group back to the tail.
+func TestBuilderRecoversAGroupPastTheTail(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	r.pass("INBOX")
+	r.start()
+	r.waitApplied()
+	first := r.add("INBOX", "one")[0]
+	r.waitApplied()
+	r.stop()
+
+	acked := r.acked()
+	if ok, err := r.log.ResetGroup(t.Context(), watch.CacheGroup("acme"), acked, acked+100); err != nil || !ok {
+		t.Fatalf("ResetGroup = %v, %v", ok, err)
+	}
+	bogus := ref.Ref{Account: "acme", Folder: "INBOX", UIDValidity: first.UIDValidity, UID: 50}
+	r.putRows(Row{Account: "acme", Folder: "INBOX", UIDValidity: first.UIDValidity, UID: 50, Subject: "bogus", MessageID: "bogus@example.com", InternalDate: acctStart, Date: acctStart})
+	r.renew()
+	r.start()
+	r.waitApplied()
+	if got, tail := r.acked(), r.tail(); got != tail {
+		t.Errorf("acked %d, want it moved back to the tail %d", got, tail)
+	}
+	if _, ok := r.row(bogus); ok {
+		t.Error("the rebuild kept a row of the lost log")
+	}
+}
