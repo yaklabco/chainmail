@@ -1927,7 +1927,7 @@
           ]
         },
         "group": {
-          "description": "a consumer group name of lowercase letters, digits, dot, dash and underscore, up to 64 characters; reads after the group's acknowledged event and acknowledges what it returns; not with cursor",
+          "description": "a consumer group name of lowercase letters, digits, dot, dash and underscore, up to 64 characters, not starting with cache.; reads after the group's acknowledged event and acknowledges what it returns; not with cursor",
           "type": "string"
         },
         "in": {
