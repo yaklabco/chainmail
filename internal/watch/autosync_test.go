@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -331,5 +332,92 @@ func TestSupervisorDropUnsynced(t *testing.T) {
 		if st.name == "Old" {
 			t.Error("Old is still known after it was dropped, so a parking would write its row back")
 		}
+	}
+}
+
+// supNoScoper is the fake without its SearchFolders, as a store that does
+// not implement mailstore.Scoper. Embedding the two interfaces promotes
+// only their methods.
+type supNoScoper struct {
+	mailstore.Store
+	mailstore.Watcher
+}
+
+// When the set cannot be resolved the poller keeps polling the last one,
+// drops nothing, and logs a fixed reason without the store's text. The
+// next resolution that succeeds picks the changes up.
+func TestSupervisorSyncAutoKeepsTheLastSetWhenResolvingFails(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	var logs syncBuffer
+	acct := supAutoAccount(t, []string{})
+	r := supAutoRig(t, fs, acct, &logs)
+	r.start()
+	for _, folder := range supDefaultScope {
+		r.waitSeen(folder+" polling", supStatus(folder, StatePolling))
+	}
+	r.clock.expectAfter(t, acct.SyncPoll)
+
+	fs.Fail("SearchFolders", fmt.Errorf("%w: server says hello", mailstore.ErrUnavailable))
+	fs.AddFolder("Projects", mailstore.RoleNone)
+	r.pollTick(acct.SyncPoll) // 5m
+	r.pollTick(acct.SyncPoll) // 10m: resolving fails
+	if n := fs.Calls("SearchFolders"); n != 2 {
+		t.Errorf("SearchFolders ran %d times, want 2", n)
+	}
+	if n := supCount(r.all(), supKind("Projects", KindStatus)); n != 0 {
+		t.Errorf("Projects was polled although the set could not be resolved:%s", supDump(r.all()))
+	}
+	rows := r.syncRows()
+	for _, folder := range supDefaultScope {
+		if _, ok := rows[folder]; !ok {
+			t.Errorf("%s row dropped after a failed resolution", folder)
+		}
+	}
+	got := logs.String()
+	want := `level=WARN msg="resolving the folders to poll failed; polling the last set" account=acme reason=unavailable`
+	if !strings.Contains(got, want) {
+		t.Errorf("logs =\n%s\nwant a line with\n%s", got, want)
+	}
+	if strings.Contains(got, "hello") {
+		t.Errorf("logs carry the store's text:\n%s", got)
+	}
+
+	fs.Add(supMsg("Sent", "during"))
+	fs.Fail("SearchFolders", nil)
+	r.clock.Advance(acct.SyncPoll) // 15m: the last set is still polled
+	r.waitSeen("new event for during", supNew("Sent", "during"))
+	r.clock.expectAfter(t, acct.SyncPoll)
+	if n := supCount(r.all(), supKind("Projects", KindStatus)); n != 0 {
+		t.Errorf("Projects was polled before the next resolution:%s", supDump(r.all()))
+	}
+	r.clock.Advance(acct.SyncPoll) // 20m: resolved again
+	r.waitSeen("Projects polling", supStatus("Projects", StatePolling))
+}
+
+// A store without mailstore.Scoper cannot resolve the set: the poller
+// polls the configured set less the watched folders, never lists folders
+// for it, and logs a fixed reason.
+func TestSupervisorSyncAutoWithoutScoper(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	var logs syncBuffer
+	acct := supAutoAccount(t, []string{})
+	acct.SyncFolders = []string{"Sent"} // hand-built, so the fallback has a folder to poll
+	r := supAutoRig(t, fs, acct, &logs)
+	r.store = supNoScoper{Store: fs, Watcher: fs}
+	r.start()
+	r.waitFor("Sent polling", supStatus("Sent", StatePolling))
+	r.clock.expectAfter(t, acct.SyncPoll)
+	rows := r.syncRows()
+	if _, ok := rows["Sent"]; !ok || len(rows) != 1 {
+		t.Errorf("rows = %v, want only Sent", rows)
+	}
+	if n := fs.Calls("ListFolders"); n != 0 {
+		t.Errorf("ListFolders ran %d times for a store that cannot resolve the set, want 0", n)
+	}
+	want := `level=WARN msg="resolving the folders to poll failed; polling the last set" account=acme reason=no_scoper`
+	if got := logs.String(); !strings.Contains(got, want) {
+		t.Errorf("logs =\n%s\nwant a line with\n%s", got, want)
 	}
 }

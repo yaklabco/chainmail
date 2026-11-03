@@ -999,6 +999,8 @@ func failureReason(err error) string {
 		return "unavailable"
 	case errors.Is(err, errNoWatcher):
 		return "no_watcher"
+	case errors.Is(err, errNoScoper):
+		return "no_scoper"
 	default:
 		return "other"
 	}

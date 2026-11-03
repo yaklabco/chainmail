@@ -50,10 +50,13 @@ func (s *Supervisor) autoFolders(ctx context.Context) ([]string, error) {
 // that stays. A folder that appears is due at once, and its first pass
 // baselines it silently. The account's rows for folders it no longer syncs
 // are dropped (dropUnsynced). When the set cannot be resolved, sched stays
-// as it is and nothing is dropped.
+// as it is, nothing is dropped, and the failure is logged without its text.
 func (s *Supervisor) refreshAuto(ctx context.Context, sched []*polled) []*polled {
 	want, err := s.autoFolders(ctx)
 	if err != nil {
+		if ctx.Err() == nil {
+			s.logger.Warn("resolving the folders to poll failed; polling the last set", "reason", failureReason(err))
+		}
 		return sched
 	}
 	have := make(map[string]*polled, len(sched))
