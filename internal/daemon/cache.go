@@ -158,6 +158,7 @@ func (s *Server) cacheStatus(ctx context.Context, acct config.ResolvedAccount, w
 	}
 	st, err := ca.Status(ctx)
 	if err != nil {
+		s.noteCacheErr(err)
 		if ctx.Err() == nil {
 			s.opts.Logger.Warn("reading an account's cache status", "account", acct.Name, "err", err)
 		}
