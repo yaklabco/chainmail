@@ -117,6 +117,23 @@ func TestOpenRecreates(t *testing.T) {
 			},
 		},
 		{
+			name:   "corruption marker on an intact file",
+			reason: "corrupt",
+			spoil: func(t *testing.T, path string) {
+				s, err := Open(t.Context(), path, OpenOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				putMarker(t, s)
+				if err := s.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path+".corrupt", nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
 			name:   "foreign tables at version 0",
 			reason: "unknown_tables",
 			spoil: func(t *testing.T, path string) {
@@ -159,6 +176,9 @@ func TestOpenRecreates(t *testing.T) {
 			}
 			if !strings.Contains(logs.String(), "recreating cache.db") || !strings.Contains(logs.String(), "reason="+tt.reason) {
 				t.Errorf("log = %q, want a recreate warning with reason=%s", logs.String(), tt.reason)
+			}
+			if _, err := os.Stat(path + ".corrupt"); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("corruption marker after recreate: %v, want none", err)
 			}
 			putMarker(t, s)
 		})
@@ -212,5 +232,196 @@ func TestSizeBytesGrows(t *testing.T) {
 	}
 	if after < before+500_000 {
 		t.Errorf("SizeBytes after a 600 kB row = %d, want at least %d", after, before+500_000)
+	}
+}
+
+// notADBError returns the error SQLite gives when a file is not a database
+// (SQLITE_NOTADB), which classify turns into ErrCorrupt.
+func notADBError(t *testing.T) error {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "junk.db")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("not a database "), 300), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }() // a close error changes nothing here
+	var version int
+	err = conn.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version)
+	if !errors.Is(classify(err), ErrCorrupt) {
+		t.Fatalf("reading a junk file: %v, want a corrupt-classified error", err)
+	}
+	return err
+}
+
+// diskFullError returns a real SQLITE_FULL error, made by capping
+// max_page_count below what an insert needs.
+func diskFullError(t *testing.T) error {
+	t.Helper()
+	conn, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "full.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }() // a close error changes nothing here
+	conn.SetMaxOpenConns(1)             // max_page_count is per connection
+	ctx := t.Context()
+	for _, q := range []string{"CREATE TABLE t (x BLOB)", "PRAGMA max_page_count = 2"} {
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	_, err = conn.ExecContext(ctx, "INSERT INTO t VALUES (zeroblob(100000))")
+	if !errors.Is(classify(err), ErrDiskFull) {
+		t.Fatalf("insert past max_page_count: %v, want a full-classified error", err)
+	}
+	return err
+}
+
+func TestOpenErrKeepsClassification(t *testing.T) {
+	t.Parallel()
+	err := openErr("reading user_version", diskFullError(t))
+	if !errors.Is(err, ErrDiskFull) {
+		t.Errorf("openErr(full) = %v, want ErrDiskFull", err)
+	}
+	if _, ok := errors.AsType[*recreateError](err); ok {
+		t.Errorf("openErr(full) = %v, want no recreate", err)
+	}
+	if !strings.Contains(err.Error(), "reading user_version") {
+		t.Errorf("openErr(full) = %q, want the operation named", err)
+	}
+	if re, ok := errors.AsType[*recreateError](openErr("reading the schema", notADBError(t))); !ok || re.reason != "corrupt" {
+		t.Errorf("openErr(not a database) = %v, want a corrupt recreate", re)
+	}
+}
+
+func TestFailMarksCorruption(t *testing.T) {
+	t.Parallel()
+	t.Run("corrupt", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "cache.db")
+		s := &Store{path: path, logger: slog.New(slog.DiscardHandler)}
+		if err := s.fail("reading", notADBError(t)); !errors.Is(err, ErrCorrupt) {
+			t.Errorf("fail = %v, want ErrCorrupt", err)
+		}
+		if _, err := os.Stat(path + ".corrupt"); err != nil {
+			t.Errorf("marker: %v, want it created", err)
+		}
+	})
+	t.Run("full", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "cache.db")
+		s := &Store{path: path, logger: slog.New(slog.DiscardHandler)}
+		if err := s.fail("writing", diskFullError(t)); !errors.Is(err, ErrDiskFull) {
+			t.Errorf("fail = %v, want ErrDiskFull", err)
+		}
+		if _, err := os.Stat(path + ".corrupt"); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("marker: %v, want none for a full disk", err)
+		}
+	})
+	t.Run("marker not writable", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "cache.db")
+		if err := os.Mkdir(path+".corrupt", 0o700); err != nil {
+			t.Fatal(err)
+		}
+		var logs bytes.Buffer
+		s := &Store{path: path, logger: slog.New(slog.NewTextHandler(&logs, nil))}
+		if err := s.fail("reading", notADBError(t)); !errors.Is(err, ErrCorrupt) {
+			t.Errorf("fail = %v, want ErrCorrupt", err)
+		}
+		if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "cannot mark cache.db corrupt") {
+			t.Errorf("log = %q, want a warning that the marker failed", logs.String())
+		}
+	})
+}
+
+// TestCorruptPageMarksAndRecreates damages a table page after Open has
+// accepted the file. It overwrites the whole root page of ref_recovery, a
+// page in the middle of the file, and keeps the 100-byte header and page 1
+// intact, so Open still sees a valid user_version. The root page is used
+// because every scan of the table reads it, so SQLite reliably reports
+// SQLITE_CORRUPT (an invalid b-tree page type) on the first query.
+func TestCorruptPageMarksAndRecreates(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "cache.db")
+	s, err := Open(ctx, path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 400)
+		INSERT INTO ref_recovery SELECT 'acme', 'INBOX', 1, i, '<' || i || hex(zeroblob(100)) || '>', 0 FROM n`); err != nil {
+		t.Fatal(err)
+	}
+	var root, pageSize, pageCount int64
+	if err := s.db.QueryRowContext(ctx, "SELECT rootpage FROM sqlite_master WHERE name = 'ref_recovery'").Scan(&root); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT page_size, page_count FROM pragma_page_size(), pragma_page_count()").Scan(&pageSize, &pageCount); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if root <= 1 || root >= pageCount {
+		t.Fatalf("ref_recovery root page %d of %d, want a middle page", root, pageCount)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageType := make([]byte, 1)
+	if _, err := f.ReadAt(pageType, (root-1)*pageSize); err != nil {
+		t.Fatal(err)
+	}
+	if pageType[0] != 0x05 {
+		t.Fatalf("root page type = %#x, want 0x05 (interior), so the table spans several pages", pageType[0])
+	}
+	if _, err := f.WriteAt(bytes.Repeat([]byte{0xff}, int(pageSize)), (root-1)*pageSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = Open(ctx, path, OpenOptions{})
+	if err != nil {
+		t.Fatalf("reopen of a file with a damaged data page: %v, want it accepted", err)
+	}
+	if err := s.PruneRecovery(ctx, t0); !errors.Is(err, ErrCorrupt) {
+		t.Errorf("PruneRecovery = %v, want ErrCorrupt", err)
+	}
+	if _, err := os.Stat(path + ".corrupt"); err != nil {
+		t.Errorf("marker after a corrupt error: %v, want it created", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	s, err = Open(ctx, path, OpenOptions{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	if err != nil {
+		t.Fatalf("Open after the marker: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() }) // a close error at test end changes nothing
+	if !strings.Contains(logs.String(), "recreating cache.db") || !strings.Contains(logs.String(), "reason=corrupt") {
+		t.Errorf("log = %q, want a recreate warning with reason=corrupt", logs.String())
+	}
+	if n := countRows(t, s, "SELECT count(*) FROM ref_recovery"); n != 0 {
+		t.Errorf("ref_recovery has %d rows after recreate, want 0", n)
+	}
+	if _, err := os.Stat(path + ".corrupt"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("marker after recreate: %v, want it removed", err)
+	}
+	putMarker(t, s)
+	if err := s.PruneRecovery(ctx, t0); err != nil {
+		t.Errorf("PruneRecovery after recreate: %v", err)
 	}
 }

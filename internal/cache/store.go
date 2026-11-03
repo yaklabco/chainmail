@@ -40,6 +40,7 @@ type OpenOptions struct {
 // are open, and none holds a transaction across network IO.
 type Store struct {
 	db     *sql.DB
+	path   string // the database file, for the corruption marker
 	now    func() time.Time
 	logger *slog.Logger
 }
@@ -56,7 +57,10 @@ func (e *recreateError) Error() string {
 
 // Open opens or creates the cache at path. A file with another
 // user_version, or one SQLite reports as corrupt or not a database, is
-// closed, deleted with its -wal and -shm files, and created again.
+// closed, deleted with its -wal and -shm files, and created again. So is a
+// file with a corruption marker (path + ".corrupt"), which a Store leaves
+// when an operation finds corruption that Open's checks cannot see; Open
+// removes the marker once the new file exists.
 func Open(ctx context.Context, path string, opts OpenOptions) (*Store, error) {
 	// path goes into a file: URI, where these characters change its meaning.
 	if strings.ContainsAny(path, "?#%") {
@@ -68,7 +72,16 @@ func Open(ctx context.Context, path string, opts OpenOptions) (*Store, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
-	conn, err := openFile(ctx, path)
+	marked, err := hasMarker(path)
+	if err != nil {
+		return nil, err
+	}
+	var conn *sql.DB
+	if marked {
+		err = &recreateError{reason: "corrupt"}
+	} else {
+		conn, err = openFile(ctx, path)
+	}
 	if re, ok := errors.AsType[*recreateError](err); ok {
 		opts.Logger.Warn("recreating cache.db", "path", path, "reason", re.reason)
 		if err := removeDB(path); err != nil {
@@ -79,7 +92,26 @@ func Open(ctx context.Context, path string, opts OpenOptions) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: conn, now: opts.Now, logger: opts.Logger}, nil
+	if marked {
+		if err := os.Remove(markerPath(path)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			_ = conn.Close() // the marker error is the one to report
+			return nil, fmt.Errorf("removing the corruption marker: %w", err)
+		}
+	}
+	return &Store{db: conn, path: path, now: opts.Now, logger: opts.Logger}, nil
+}
+
+// hasMarker reports whether a Store left the corruption marker for path.
+func hasMarker(path string) (bool, error) {
+	_, err := os.Stat(markerPath(path))
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		return false, fmt.Errorf("checking the corruption marker: %w", err)
+	}
 }
 
 // Close closes the database.
@@ -107,10 +139,7 @@ func openFile(ctx context.Context, path string) (*sql.DB, error) {
 func prepare(ctx context.Context, conn *sql.DB) error {
 	var version int
 	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-		if errors.Is(classify(err), ErrCorrupt) {
-			return &recreateError{reason: "corrupt"}
-		}
-		return fmt.Errorf("reading user_version: %w", err)
+		return openErr("reading user_version", err)
 	}
 	if version == SchemaVersion {
 		return nil
@@ -120,15 +149,23 @@ func prepare(ctx context.Context, conn *sql.DB) error {
 	}
 	var objects int
 	if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master").Scan(&objects); err != nil {
-		if errors.Is(classify(err), ErrCorrupt) {
-			return &recreateError{reason: "corrupt"}
-		}
-		return fmt.Errorf("reading the schema: %w", err)
+		return openErr("reading the schema", err)
 	}
 	if objects != 0 {
 		return &recreateError{reason: "unknown_tables"}
 	}
 	return create(ctx, conn)
+}
+
+// openErr turns an error from checking an existing file into a
+// *recreateError when SQLite reports the file corrupt, and otherwise names
+// op and keeps the classification, so ErrDiskFull survives.
+func openErr(op string, err error) error {
+	err = classify(err)
+	if errors.Is(err, ErrCorrupt) {
+		return &recreateError{reason: "corrupt"}
+	}
+	return fmt.Errorf("%s: %w", op, err)
 }
 
 // create sets auto_vacuum and creates the schema in an empty file.
@@ -177,14 +214,33 @@ func (s *Store) SizeBytes(ctx context.Context) (int64, error) {
 	err := s.db.QueryRowContext(ctx,
 		"SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()").Scan(&n)
 	if err != nil {
-		return 0, fail("reading the cache size", err)
+		return 0, s.fail("reading the cache size", err)
 	}
 	return n, nil
 }
 
-// fail names the operation that failed and classifies err.
-func fail(op string, err error) error {
-	return fmt.Errorf("%s: %w", op, classify(err))
+// fail names the operation that failed and classifies err. Every Store
+// method's database error goes through it, so when err is ErrCorrupt it
+// also leaves the marker that makes the next Open recreate the file.
+func (s *Store) fail(op string, err error) error {
+	err = classify(err)
+	if errors.Is(err, ErrCorrupt) {
+		s.markCorrupt()
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
+// markerPath is the corruption marker next to the database at path.
+func markerPath(path string) string {
+	return path + ".corrupt"
+}
+
+// markCorrupt creates the corruption marker. Failing to create it only
+// costs the recreate on the next Open, so it is logged and otherwise ignored.
+func (s *Store) markCorrupt() {
+	if err := os.WriteFile(markerPath(s.path), nil, 0o600); err != nil {
+		s.logger.Warn("cannot mark cache.db corrupt", "path", s.path, "err", err)
+	}
 }
 
 // inTx runs fn in one transaction and commits it. Errors name op and carry
@@ -192,14 +248,14 @@ func fail(op string, err error) error {
 func (s *Store) inTx(ctx context.Context, op string, fn func(tx *sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fail(op, err)
+		return s.fail(op, err)
 	}
 	defer func() { _ = tx.Rollback() }() // a no-op after Commit; an earlier error is the one to report
 	if err := fn(tx); err != nil {
-		return fail(op, err)
+		return s.fail(op, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fail(op, err)
+		return s.fail(op, err)
 	}
 	return nil
 }

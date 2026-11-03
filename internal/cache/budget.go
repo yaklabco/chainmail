@@ -34,7 +34,7 @@ func (s *Store) AddBudget(ctx context.Context, account, day string, bytes int64)
 		 RETURNING bytes`,
 		account, day, bytes).Scan(&total)
 	if err != nil {
-		return 0, fail("adding to the budget", err)
+		return 0, s.fail("adding to the budget", err)
 	}
 	return total, nil
 }
@@ -50,7 +50,7 @@ func (s *Store) Budget(ctx context.Context, account, day string) (int64, error) 
 		return 0, nil
 	}
 	if err != nil {
-		return 0, fail("reading the budget", err)
+		return 0, s.fail("reading the budget", err)
 	}
 	return total, nil
 }

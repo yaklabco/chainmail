@@ -56,7 +56,7 @@ func (s *Store) Progress(ctx context.Context, account, folder string) (Progress,
 		return Progress{}, false, nil
 	}
 	if err != nil {
-		return Progress{}, false, fail("reading progress", err)
+		return Progress{}, false, s.fail("reading progress", err)
 	}
 	return p.progress(), true, nil
 }
@@ -66,19 +66,19 @@ func (s *Store) AllProgress(ctx context.Context, account string) ([]Progress, er
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT "+progressColumns+" FROM folders WHERE account = ? ORDER BY folder", account)
 	if err != nil {
-		return nil, fail("listing progress", err)
+		return nil, s.fail("listing progress", err)
 	}
 	defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
 	var out []Progress
 	for rows.Next() {
 		var p progressScan
 		if err := rows.Scan(p.dest()...); err != nil {
-			return nil, fail("listing progress", err)
+			return nil, s.fail("listing progress", err)
 		}
 		out = append(out, p.progress())
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fail("listing progress", err)
+		return nil, s.fail("listing progress", err)
 	}
 	return out, nil
 }
@@ -94,7 +94,7 @@ func (s *Store) PutProgress(ctx context.Context, p Progress) error {
 		p.Account, p.Folder, int64(p.UIDValidity), int64(p.BaselineUIDNext), int64(p.BackfillLowUID),
 		boolInt(p.BackfillDone), boolInt(p.WindowDone), nullUnix(p.LastAppliedAt))
 	if err != nil {
-		return fail("writing progress", err)
+		return s.fail("writing progress", err)
 	}
 	return nil
 }

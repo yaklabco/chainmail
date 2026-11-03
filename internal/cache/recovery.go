@@ -19,7 +19,7 @@ func (s *Store) MessageIDOf(ctx context.Context, r ref.Ref) (string, bool, error
 			continue
 		}
 		if err != nil {
-			return "", false, fail("reading a Message-ID", err)
+			return "", false, s.fail("reading a Message-ID", err)
 		}
 		if id != "" {
 			return id, true, nil
@@ -39,7 +39,7 @@ func (s *Store) FindByMessageID(ctx context.Context, account, messageID string) 
 		 WHERE account = ? AND message_id = ? ORDER BY folder, uid`,
 		account, messageID)
 	if err != nil {
-		return nil, fail("finding a Message-ID", err)
+		return nil, s.fail("finding a Message-ID", err)
 	}
 	return refs, nil
 }
@@ -47,7 +47,7 @@ func (s *Store) FindByMessageID(ctx context.Context, account, messageID string) 
 // PruneRecovery deletes ref_recovery rows removed before before.
 func (s *Store) PruneRecovery(ctx context.Context, before time.Time) error {
 	if _, err := s.db.ExecContext(ctx, "DELETE FROM ref_recovery WHERE removed_at < ?", before.Unix()); err != nil {
-		return fail("pruning recovery rows", err)
+		return s.fail("pruning recovery rows", err)
 	}
 	return nil
 }

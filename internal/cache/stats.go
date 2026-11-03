@@ -34,7 +34,7 @@ func (s *Store) Stats(ctx context.Context, account string, windowStart time.Time
 		 GROUP BY m.folder ORDER BY m.folder`,
 		ws, ws, finalAttempts, account)
 	if err != nil {
-		return nil, fail("reading stats", err)
+		return nil, s.fail("reading stats", err)
 	}
 	defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
 	var out []FolderStats
@@ -44,17 +44,17 @@ func (s *Store) Stats(ctx context.Context, account string, windowStart time.Time
 			headers, bodies, windowMsgs, windowBodies, fx int64
 		)
 		if err := rows.Scan(&st.Folder, &headers, &bodies, &st.BodyBytes, &windowMsgs, &windowBodies, &fx); err != nil {
-			return nil, fail("reading stats", err)
+			return nil, s.fail("reading stats", err)
 		}
 		st.Headers, st.Bodies = uint64(headers), uint64(bodies)
 		st.WindowMessages, st.WindowBodies, st.BodyFailures = uint64(windowMsgs), uint64(windowBodies), uint64(fx)
 		out = append(out, st)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fail("reading stats", err)
+		return nil, s.fail("reading stats", err)
 	}
 	if err := rows.Close(); err != nil {
-		return nil, fail("reading stats", err)
+		return nil, s.fail("reading stats", err)
 	}
 	progress, err := s.AllProgress(ctx, account)
 	if err != nil {

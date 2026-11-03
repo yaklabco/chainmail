@@ -74,7 +74,7 @@ func (s *Store) Body(ctx context.Context, r ref.Ref) (Body, bool, error) {
 		return Body{}, false, nil
 	}
 	if err != nil {
-		return Body{}, false, fail("reading a body", err)
+		return Body{}, false, s.fail("reading a body", err)
 	}
 	return Body{Raw: raw, TextClipped: clipped == 1}, true, nil
 }
@@ -85,7 +85,7 @@ func (s *Store) MarkRead(ctx context.Context, r ref.Ref) error {
 	args := append([]any{s.now().Unix()}, refArgs(r)...)
 	if _, err := s.db.ExecContext(ctx,
 		"UPDATE bodies SET last_read_at = ? WHERE msg = (SELECT id FROM messages WHERE "+msgKey+")", args...); err != nil {
-		return fail("marking a body read", err)
+		return s.fail("marking a body read", err)
 	}
 	return nil
 }
@@ -138,7 +138,7 @@ func (s *Store) BodylessSince(ctx context.Context, account, folder string, since
 		 LIMIT ?`,
 		account, folder, since.Unix(), maxAttempts, retryAfter.Unix(), limit)
 	if err != nil {
-		return nil, fail("listing bodyless messages", err)
+		return nil, s.fail("listing bodyless messages", err)
 	}
 	return refs, nil
 }

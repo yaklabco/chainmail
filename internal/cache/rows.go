@@ -335,11 +335,11 @@ func (s *Store) SetFlags(ctx context.Context, r ref.Ref, flags, labels []string)
 	res, err := s.db.ExecContext(ctx,
 		"UPDATE messages SET flags_json = ?, labels_json = ?, flags_norm = ?, labels_norm = ? WHERE "+msgKey, args...)
 	if err != nil {
-		return false, fail("setting flags", err)
+		return false, s.fail("setting flags", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, fail("setting flags", err)
+		return false, s.fail("setting flags", err)
 	}
 	return n > 0, nil
 }
@@ -483,7 +483,7 @@ func (s *Store) queryRows(ctx context.Context, query string, args ...any) ([]Row
 func (s *Store) Row(ctx context.Context, r ref.Ref) (Row, bool, error) {
 	_, row, ok, err := loadRow(ctx, s.db, r)
 	if err != nil {
-		return Row{}, false, fail("reading a row", err)
+		return Row{}, false, s.fail("reading a row", err)
 	}
 	return row, ok, nil
 }
@@ -508,7 +508,7 @@ func (s *Store) Rows(ctx context.Context, src mailstore.Source, account string, 
 			" FROM messages m WHERE m.account = ? AND m.folder = ? AND m.uidvalidity = ? AND m.uid IN ("+
 			placeholders(len(chunk))+")", args...)
 		if err != nil {
-			return nil, fail("reading rows", err)
+			return nil, s.fail("reading rows", err)
 		}
 		for _, r := range rows {
 			byUID[r.UID] = r
@@ -533,7 +533,7 @@ func (s *Store) ThreadRows(ctx context.Context, account, threadID string) ([]Row
 		" FROM messages m WHERE m.account = ? AND m.thread_id = ? ORDER BY m.date, m.internal_date, m.folder, m.uid",
 		account, threadID)
 	if err != nil {
-		return nil, fail("reading a thread", err)
+		return nil, s.fail("reading a thread", err)
 	}
 	return rows, nil
 }
