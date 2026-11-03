@@ -200,6 +200,9 @@ func searchTable(w io.Writer, loc *time.Location, r *chainmailv1.SearchResponse)
 	if err := partialLines(w, r.GetPartial()); err != nil {
 		return err
 	}
+	if err := sourceLine(w, r.GetAccountCounts()); err != nil {
+		return err
+	}
 	if next := r.GetNextCursor(); next != "" {
 		return writeString(w, "more: --cursor "+next+"\n")
 	}
@@ -216,7 +219,31 @@ func countTable(w io.Writer, r *chainmailv1.SearchResponse) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	return partialLines(w, r.GetPartial())
+	if err := partialLines(w, r.GetPartial()); err != nil {
+		return err
+	}
+	return sourceLine(w, r.GetAccountCounts())
+}
+
+// sourceLine names what answered each account, the cache or its mail
+// server, and why a forced cache answer is incomplete. It writes nothing
+// when no account says, as a daemon without a cache answers.
+func sourceLine(w io.Writer, counts []*chainmailv1.AccountCount) error {
+	parts := make([]string, 0, len(counts))
+	for _, c := range counts {
+		if c.GetSource() == "" {
+			continue
+		}
+		part := termText(c.GetAccount()) + " " + termText(c.GetSource())
+		if reason := c.GetIncompleteReason(); !c.GetComplete() && reason != "" {
+			part += " (incomplete: " + termText(reason) + ")"
+		}
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return writeString(w, "source: "+strings.Join(parts, ", ")+"\n")
 }
 
 // messagesText prints get's items in order. A failed item prints its error
