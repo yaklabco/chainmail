@@ -31,16 +31,8 @@ func (s *Store) Search(ctx context.Context, req mailstore.SearchRequest) ([]mail
 	}
 	names := slices.Sorted(maps.Keys(req.Bounds))
 	if req.Bounds == nil {
-		folders, err := s.folderList(ctx, false)
-		if err != nil {
-			return nil, err
-		}
-		if s.gmail() {
-			names, err = gmailSources(folders, req.In)
-		} else {
-			names, err = standardSources(folders, req.In)
-		}
-		if err != nil {
+		var err error
+		if names, err = s.SearchFolders(ctx, req.In); err != nil {
 			return nil, err
 		}
 	}
