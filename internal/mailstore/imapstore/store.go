@@ -271,12 +271,32 @@ func (s *Store) ConnPeak() int { return s.pool.connPeak() }
 func (s *Store) PoolSize() int { return s.pool.size() }
 
 // borrow takes a connection from the pool, preferring one with folder open,
-// read-write when writable. Every borrow is paired with a release.
+// read-write when writable. On a background context
+// (mailstore.IsBackground) it never waits: it takes an idle connection, or
+// dials one while the pool has room, only when no foreground call is
+// waiting, and otherwise fails at once with mailstore.ErrBusy. Every borrow
+// is paired with a release.
 func (s *Store) borrow(ctx context.Context, folder string, writable bool) (*conn, error) {
-	c, err := s.pool.get(ctx, folder, writable)
+	return s.borrowAs(ctx, folder, writable, mailstore.IsBackground(ctx))
+}
+
+// borrowAs is borrow, for background work when background is set, whatever
+// ctx says. A background dial the server refuses for being over its
+// connection limit shrinks the pool as any refusal does (dial), and is
+// ErrBusy to the caller: the account is not down, it has no connection to
+// spare.
+func (s *Store) borrowAs(ctx context.Context, folder string, writable, background bool) (*conn, error) {
+	get := s.pool.get
+	if background {
+		get = s.pool.tryGet
+	}
+	c, err := get(ctx, folder, writable)
 	if err != nil {
-		if errors.Is(err, errPoolClosed) {
+		switch {
+		case errors.Is(err, errPoolClosed):
 			return nil, fmt.Errorf("%w: %w", mailstore.ErrUnavailable, err)
+		case background && errors.Is(err, mailstore.ErrConnLimit):
+			return nil, mailstore.ErrBusy
 		}
 		return nil, err
 	}
@@ -442,11 +462,16 @@ const timeoutRetries = 1
 
 // retry runs try again after a dropped connection, up to Retries times with
 // backoff, then reports the account unavailable. A timed-out command is
-// retried at most timeoutRetries times. Every other outcome is final.
+// retried at most timeoutRetries times. Every other outcome is final,
+// mailstore.ErrBusy included: background work tries again on its own
+// schedule.
 func (s *Store) retry(ctx context.Context, try func() error) error {
 	timeouts := 0
 	for attempt := 0; ; attempt++ {
 		err := try()
+		if errors.Is(err, mailstore.ErrBusy) {
+			return err
+		}
 		if err == nil || !errors.Is(err, errConnLost) {
 			return s.serverError(err)
 		}
