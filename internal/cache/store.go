@@ -221,3 +221,19 @@ func boolInt(b bool) int {
 func placeholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?, ", n), ", ")
 }
+
+// nullUnix stores t as Unix seconds, or NULL when t is zero.
+func nullUnix(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t.Unix()
+}
+
+// fromNullUnix reads a nullable Unix-seconds column; NULL is the zero time.
+func fromNullUnix(n sql.NullInt64) time.Time {
+	if !n.Valid {
+		return time.Time{}
+	}
+	return fromUnix(n.Int64)
+}
