@@ -43,6 +43,9 @@ type Store struct {
 	path   string // the database file, for the corruption marker
 	now    func() time.Time
 	logger *slog.Logger
+	// evict is the size cap state shared by the prefetchers, the read path
+	// and the evictor (evict.go).
+	evict evictState
 }
 
 // recreateError says why Open deletes the file: "corrupt", "version" or
