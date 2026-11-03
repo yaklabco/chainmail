@@ -239,7 +239,8 @@ func (s *Server) startCacheAccounts(ctx context.Context, accts []config.Resolved
 // supervisor, the worker takes the account entry's read lock through
 // acquire, one batch at a time, so a probe's replace gets through between
 // batches. The entry is taken once, here, for the reason
-// supervisorOptions gives.
+// supervisorOptions gives. Its errors reach noteCacheErr, so a full disk any
+// worker or read meets turns the cache off at once.
 func (s *Server) cacheAccountOptions(acct config.ResolvedAccount) cache.AccountOptions {
 	e := s.stores.entry(acct)
 	cfg := s.opts.Config
@@ -263,8 +264,9 @@ func (s *Server) cacheAccountOptions(acct config.ResolvedAccount) cache.AccountO
 			}
 			return ms, release, nil
 		},
-		Clock:  s.cacheClock,
-		Logger: s.opts.Logger,
+		Clock:   s.cacheClock,
+		Logger:  s.opts.Logger,
+		OnError: s.noteCacheErr,
 	}
 }
 

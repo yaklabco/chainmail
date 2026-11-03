@@ -717,3 +717,28 @@ func TestCacheStatusReadFails(t *testing.T) {
 		t.Error("a status read that failed without a full disk turned the cache off")
 	}
 }
+
+// TestCacheWorkerErrorsTurnTheCacheOff checks that a cache worker's
+// OnError is the daemon's noteCacheErr: a full disk a worker meets turns
+// the cache off at once, and other errors leave it on.
+func TestCacheWorkerErrorsTurnTheCacheOff(t *testing.T) {
+	t.Parallel()
+	s, _ := newCacheServer(t, cacheConfig)
+	s.cacheAccounts = map[string]*cache.Account{"host": new(cache.Account)}
+	acct, err := s.opts.Config.Account("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	onError := s.cacheAccountOptions(acct).OnError
+	if onError == nil {
+		t.Fatal("the cache worker has no OnError")
+	}
+	onError(errors.New("SQLITE_BUSY"))
+	if s.cacheDown.Load() {
+		t.Fatal("an error other than a full disk turned the cache off")
+	}
+	onError(fmt.Errorf("storing headers: %w", cache.ErrDiskFull))
+	if !s.cacheDown.Load() || s.cacheAccount("host") != nil {
+		t.Error("a worker's full disk did not turn the cache off")
+	}
+}
