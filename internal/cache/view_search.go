@@ -20,7 +20,8 @@ import (
 // query the cache can never answer completely (Plan.ServerOnly) matches
 // nothing in every folder, so a forced cache search is incomplete but never
 // passes a partial list off as the answer. The daemon routes automatic
-// searches here only when neither can happen.
+// searches here only when neither can happen. A failed read of cache.db
+// is ErrRead.
 func (v *View) Search(ctx context.Context, req mailstore.SearchRequest) ([]mailstore.SourceResult, error) {
 	opts := v.a.o
 	plan, err := Compile(req.Query, req.In, opts.Account.Provider.Gmail, opts.Clock.Now())
@@ -35,7 +36,7 @@ func (v *View) Search(ctx context.Context, req mailstore.SearchRequest) ([]mails
 	for _, folder := range folders {
 		p, held, err := opts.Store.Progress(ctx, opts.Account.Name, folder)
 		if err != nil {
-			return nil, err
+			return nil, readErr(err)
 		}
 		bound, bounded := req.Bounds[folder]
 		if !held {
@@ -56,7 +57,7 @@ func (v *View) Search(ctx context.Context, req mailstore.SearchRequest) ([]mails
 		default:
 			uids, count, err := opts.Store.SearchUIDs(ctx, opts.Account.Name, res.Source, plan.Where, bound.Below, req.CountOnly)
 			if err != nil {
-				return nil, err
+				return nil, readErr(err)
 			}
 			res.UIDs, res.Count = uids, count
 		}
@@ -87,6 +88,7 @@ func (v *View) searchScope(ctx context.Context, req mailstore.SearchRequest) ([]
 // without one get theirs from a single server FetchSummaries for those
 // UIDs only. When that call fails, those rows come back with no snippet
 // and the failure is logged, unless ctx has ended.
+// A failed read of cache.db is ErrRead.
 func (v *View) FetchSummaries(ctx context.Context, src mailstore.Source, uids []uint32, opts mailstore.SummaryOptions) ([]mailstore.Summary, error) {
 	if len(uids) == 0 {
 		return nil, nil
@@ -95,7 +97,7 @@ func (v *View) FetchSummaries(ctx context.Context, src mailstore.Source, uids []
 	p, held, err := store.Progress(ctx, account, src.Folder)
 	switch {
 	case err != nil:
-		return nil, err
+		return nil, readErr(err)
 	case !held:
 		return nil, fmt.Errorf("%w: the cache does not hold the folder", mailstore.ErrNotFound)
 	case p.UIDValidity != src.UIDValidity:
@@ -103,7 +105,7 @@ func (v *View) FetchSummaries(ctx context.Context, src mailstore.Source, uids []
 	}
 	rows, err := store.Rows(ctx, src, account, uids)
 	if err != nil {
-		return nil, err
+		return nil, readErr(err)
 	}
 	out := make([]mailstore.Summary, len(rows))
 	for i, r := range rows {
@@ -118,7 +120,7 @@ func (v *View) FetchSummaries(ctx context.Context, src mailstore.Source, uids []
 	for i := range out {
 		b, held, err := store.Body(ctx, out[i].Ref)
 		if err != nil {
-			return nil, err
+			return nil, readErr(err)
 		}
 		if snippet, ok := cachedSnippet(b, held); ok {
 			out[i].Preview = &snippet

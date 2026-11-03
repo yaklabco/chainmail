@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -59,6 +61,8 @@ type routeFixture struct {
 	accounts map[string]*cache.Account
 	// settled are the accounts settle has run.
 	settled map[string]bool
+	// cachePath is store's file, for tests that damage it.
+	cachePath string
 }
 
 func newRouteFixture(t *testing.T) *routeFixture {
@@ -71,12 +75,13 @@ func newRouteFixture(t *testing.T) *routeFixture {
 		NewStore: func(a config.ResolvedAccount) mailstore.Store { return fakes[a.Name] },
 		Now:      routeClock{}.Now,
 	})
-	cs, err := cache.Open(t.Context(), filepath.Join(t.TempDir(), "cache.db"), cache.OpenOptions{Now: routeClock{}.Now})
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cs, err := cache.Open(t.Context(), cachePath, cache.OpenOptions{Now: routeClock{}.Now})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cs.Close() })
-	f := &routeFixture{s: s, m: &messageService{s: s}, stateDB: stateDB, store: cs, fakes: fakes, accounts: map[string]*cache.Account{}, settled: map[string]bool{}}
+	f := &routeFixture{s: s, m: &messageService{s: s}, stateDB: stateDB, store: cs, fakes: fakes, accounts: map[string]*cache.Account{}, settled: map[string]bool{}, cachePath: cachePath}
 	for name, fk := range fakes {
 		acct, err := s.opts.Config.Account(name)
 		if err != nil {
@@ -331,9 +336,6 @@ func TestSearcherRoutes(t *testing.T) {
 		spoil   func(*testing.T, *routeFixture)
 		want    string
 		route   routeInfo
-		// syncAge is how long before routeNow the oldest folder searched last
-		// synced, which a complete cache answer reports as synced_at.
-		syncAge time.Duration
 	}{
 		{name: "fresh header query", query: "from:acme", want: "view", route: complete},
 		{name: "text with a bound in the window", query: "invoice newer_than:30d", want: "view", route: complete},
@@ -343,13 +345,18 @@ func TestSearcherRoutes(t *testing.T) {
 		{name: "forced window not done", query: "invoice newer_than:30d", source: "cache", spoil: windowOpen, want: "view", route: incomplete("text_outside_window")},
 		{name: "stale polled folder", query: "from:acme", spoil: staleArchive, want: "server", route: server},
 		{name: "forced stale", query: "from:acme", source: "cache", spoil: staleArchive, want: "view", route: incomplete("stale")},
-		{name: "watched folder at any age", query: "from:acme", spoil: oldInbox, want: "view", route: complete, syncAge: 24 * time.Hour},
+		// The fixture's Account starts at routeNow, so a watched folder last
+		// synced a day earlier was synced by a previous run: stale until this
+		// run's first pass (cache.TestFreshness covers any age within a run).
+		{name: "watched folder synced before this run", query: "from:acme", spoil: oldInbox, want: "server", route: server},
+		{name: "forced watched folder synced before this run", query: "from:acme", source: "cache", spoil: oldInbox, want: "view", route: incomplete("stale")},
 		{name: "backfilling", query: "from:acme", spoil: backfilling, want: "server", route: server},
 		{name: "forced backfilling", query: "from:acme", source: "cache", spoil: backfilling, want: "view", route: incomplete("backfilling")},
 		{name: "folder not synced", query: "from:acme", spoil: unsynced, want: "server", route: server},
 		{name: "forced folder not synced", query: "from:acme", source: "cache", spoil: unsynced, want: "view", route: incomplete("folder_not_synced")},
 		{name: "no cache", query: "from:acme", noCache: true, want: "server", route: server},
 		{name: "forced no cache", query: "from:acme", source: "cache", noCache: true, want: "none", route: incomplete("cache_disabled")},
+		{name: "forced unsupported term without a cache", query: `label:\Seen`, source: "cache", noCache: true, want: "refusal", route: server},
 		{name: "forced server", query: "from:acme", source: "server", want: "server", route: server},
 		{name: "explicit auto", query: "from:acme", source: "auto", want: "view", route: complete},
 		{name: "has:attachment fresh", query: "has:attachment", want: "view", route: complete},
@@ -362,6 +369,13 @@ func TestSearcherRoutes(t *testing.T) {
 		{name: "forced unsupported term stale", query: `label:\Seen`, source: "cache", spoil: staleArchive, want: "refusal", route: server},
 		{name: "forced unsupported term backfilling", query: `label:\Seen`, source: "cache", spoil: backfilling, want: "refusal", route: server},
 		{name: "forced unsupported term not synced", query: `label:\Seen`, source: "cache", spoil: unsynced, want: "refusal", route: server},
+		// The unsupported term keeps its server route when another term gives
+		// the plan a reason (text_outside_window here), fresh or not.
+		{name: "unsupported term under OR with text", query: `label:\Seen OR invoice`, want: "refusal", route: server},
+		{name: "forced unsupported term under OR with text fresh", query: `label:\Seen OR invoice`, source: "cache", want: "refusal", route: server},
+		{name: "forced unsupported term under OR with text stale", query: `label:\Seen OR invoice`, source: "cache", spoil: staleArchive, want: "refusal", route: server},
+		{name: "forced unsupported term under OR with text not synced", query: `label:\Seen OR invoice`, source: "cache", spoil: unsynced, want: "refusal", route: server},
+		{name: "forced unsupported term with bounded text", query: `label:\Seen invoice newer_than:30d`, source: "cache", want: "refusal", route: server},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -383,8 +397,9 @@ func TestSearcherRoutes(t *testing.T) {
 			if got := routeKind(src); got != tt.want {
 				t.Errorf("routed to %s, want %s", got, tt.want)
 			}
-			if tt.route.Complete && tt.route.Source == cache.SourceCache && !route.SyncedAt.Equal(routeNow.Add(-tt.syncAge)) {
-				t.Errorf("synced_at = %v, want %v", route.SyncedAt, routeNow.Add(-tt.syncAge))
+			// Every folder of a complete cache answer was synced at routeNow.
+			if tt.route.Complete && tt.route.Source == cache.SourceCache && !route.SyncedAt.Equal(routeNow) {
+				t.Errorf("synced_at = %v, want %v", route.SyncedAt, routeNow)
 			}
 			route.SyncedAt = time.Time{}
 			if route != tt.route {
@@ -692,5 +707,316 @@ func TestSearchCacheOnlyOperatorsOnStandardAccounts(t *testing.T) {
 	hint := api.Detail(toConnectError(err)).GetHint()
 	if apiReason(err) != api.ReasonInvalidArgument || !strings.Contains(hint, "chainmail cache status") {
 		t.Errorf("without a cache: %v (hint %q), want INVALID_ARGUMENT pointing at cache status", err, hint)
+	}
+}
+
+// TestSearchForcedUnsupportedIsRefused checks integration note 15 through
+// the whole search: a term the cache cannot evaluate sends the account to
+// the server even when the cache is forced and another term gives the plan
+// a reason, so the server route's refusal reaches the caller instead of an
+// empty incomplete answer.
+func TestSearchForcedUnsupportedIsRefused(t *testing.T) {
+	t.Parallel()
+	for _, q := range []string{`label:\Seen OR invoice`, `label:\Seen`, `label:\Seen invoice newer_than:30d`} {
+		f := newRouteFixture(t)
+		seedRouteMail(f)
+		f.warm(t, "host")
+		f.install(t, "host")
+		resp, _, err := f.m.search(t.Context(), &chainmailv1.SearchRequest{QueryString: q, Accounts: []string{"host"}, Source: cache.SourceCache})
+		if apiReason(err) != api.ReasonInvalidArgument {
+			t.Errorf("%s forced to the cache: response %v, err %v; want the server route's INVALID_ARGUMENT refusal", q, resp, err)
+		}
+	}
+}
+
+// TestSearchRefusalNamesTheCause checks that the refusal of has:,
+// filename: and label: on an account other than Google says why the cache
+// could not answer: only a cache that is catching up is worth waiting for,
+// a value the cache never searches and text without a bound inside the
+// window are not, and every hint names chainmail cache status (integration
+// note 16).
+func TestSearchRefusalNamesTheCause(t *testing.T) {
+	t.Parallel()
+	staleArchive := func(t *testing.T, f *routeFixture) { f.ageSync(t, "host", "Archive", time.Hour) }
+	backfilling := func(t *testing.T, f *routeFixture) {
+		f.editProgress(t, "host", "Archive", func(p *cache.Progress) { p.BackfillDone = false })
+	}
+	windowOpen := func(t *testing.T, f *routeFixture) {
+		f.editProgress(t, "host", "Archive", func(p *cache.Progress) { p.WindowDone = false })
+	}
+	const wait = "once"
+	tests := []struct {
+		name    string
+		query   string
+		source  string
+		noCache bool
+		spoil   func(*testing.T, *routeFixture)
+		// hint must hold want, and holds wait only when waiting helps.
+		want     string
+		waitHelp bool
+	}{
+		{name: "unsupported value", query: `label:\Seen`, want: "system flag"},
+		{name: "unsupported value with text", query: `label:\Seen OR invoice`, want: "system flag"},
+		{name: "unsupported value on a stale cache", query: `label:\Seen`, spoil: staleArchive, want: "system flag"},
+		{name: "unsupported value without a cache", query: `label:\Seen`, noCache: true, want: "system flag"},
+		{name: "unsupported value forced to the server", query: `label:\Seen`, source: cache.SourceServer, want: "system flag"},
+		{name: "text without a bound", query: "has:attachment invoice", want: "newer_than:"},
+		{name: "text under OR", query: "has:attachment (invoice OR from:acme)", want: "newer_than:"},
+		{name: "text bounded outside the window", query: "has:attachment invoice newer_than:3650d", want: "newer_than:"},
+		{name: "text without a bound on a stale cache", query: "has:attachment invoice", spoil: staleArchive, want: "newer_than:"},
+		{name: "stale", query: "has:attachment", spoil: staleArchive, want: "fresh", waitHelp: true},
+		{name: "backfilling", query: "filename:pdf", spoil: backfilling, want: "backfill", waitHelp: true},
+		{name: "window bodies still downloading", query: "has:attachment invoice newer_than:30d", spoil: windowOpen, want: "bodies", waitHelp: true},
+		{name: "no cache", query: "has:attachment", noCache: true, want: "not running"},
+		{name: "forced to the server", query: "has:attachment", source: cache.SourceServer, want: "source"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newRouteFixture(t)
+			seedRouteMail(f)
+			f.warm(t, "host")
+			if !tt.noCache {
+				f.install(t, "host")
+			}
+			if tt.spoil != nil {
+				tt.spoil(t, f)
+			}
+			_, _, err := f.m.search(t.Context(), &chainmailv1.SearchRequest{QueryString: tt.query, Accounts: []string{"host"}, Source: tt.source})
+			if apiReason(err) != api.ReasonInvalidArgument {
+				t.Fatalf("err = %v, want an INVALID_ARGUMENT refusal", err)
+			}
+			hint := api.Detail(toConnectError(err)).GetHint()
+			text := err.Error() + " " + hint
+			if !strings.Contains(text, tt.want) || !strings.Contains(hint, "chainmail cache status") {
+				t.Errorf("refusal %q (hint %q), want it to name %q and chainmail cache status", err, hint, tt.want)
+			}
+			if strings.Contains(text, wait) != tt.waitHelp {
+				t.Errorf("refusal %q (hint %q): says to wait %v, want %v", err, hint, !tt.waitHelp, tt.waitHelp)
+			}
+		})
+	}
+}
+
+// TestSearchCompileErrorLogsNoQuery checks that a query the cache refuses
+// to compile, a user error the server path refuses alike, is not logged at
+// warn and its text, which quotes the query, is not logged at all.
+func TestSearchCompileErrorLogsNoQuery(t *testing.T) {
+	t.Parallel()
+	f := newRouteFixture(t)
+	seedRouteMail(f)
+	f.warm(t, "host")
+	f.install(t, "host")
+	var buf syncBuffer
+	f.s.opts.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	p, err := f.m.plan(&chainmailv1.SearchRequest{QueryString: "before:1969-12-31", Accounts: []string{"host"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, _ := f.m.searcher(t.Context(), p.accounts[0], p, p.source)
+	if got := routeKind(src); got != "server" {
+		t.Errorf("routed to %s, want server", got)
+	}
+	logged := buf.String()
+	if strings.Contains(logged, "level=WARN") || strings.Contains(logged, "1969") {
+		t.Errorf("log = %q, want no warning and no query text", logged)
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe for a logger and a test to share.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// damage runs stmt against the fixture's cache.db on a connection of its
+// own, as a damaged index would leave it.
+func (f *routeFixture) damage(t *testing.T, stmt string) {
+	t.Helper()
+	conn, err := sql.Open("sqlite", "file:"+f.cachePath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }() // read back nothing; a close error changes nothing
+	if _, err := conn.ExecContext(t.Context(), stmt); err != nil {
+		t.Fatalf("%s: %v", stmt, err)
+	}
+}
+
+// TestSearchFallsBackOnCacheReadFailure checks that an automatic search
+// whose cache fails a read after routing (the FTS index for SearchUIDs,
+// the bodies for snippets) answers that account from the server instead,
+// as if the router had chosen it: the server's rows, cursor and source.
+func TestSearchFallsBackOnCacheReadFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		damage string
+		req    *chainmailv1.SearchRequest
+	}{
+		{name: "search", damage: "DROP TABLE messages_fts", req: &chainmailv1.SearchRequest{QueryString: "invoice newer_than:30d", Accounts: []string{"host"}}},
+		{name: "count", damage: "DROP TABLE messages_fts", req: &chainmailv1.SearchRequest{QueryString: "invoice newer_than:30d", Accounts: []string{"host"}, CountOnly: true}},
+		{name: "summaries", damage: "DROP TABLE bodies", req: &chainmailv1.SearchRequest{QueryString: "from:acme", Accounts: []string{"host"}, Snippets: true}},
+		{name: "every account", damage: "DROP TABLE bodies", req: &chainmailv1.SearchRequest{Snippets: true, Limit: 3}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newRouteFixture(t)
+			seedRouteMail(f)
+			f.warm(t, "host")
+			f.warm(t, "gmail")
+			f.install(t, "host", "gmail")
+			if c := f.search(t, tt.req); c.GetSource() != cache.SourceCache {
+				t.Fatalf("before the damage: source %q, want cache", c.GetSource())
+			}
+			f.damage(t, tt.damage)
+			got, entry, err := f.m.search(t.Context(), tt.req)
+			if err != nil {
+				t.Fatalf("search after the damage: %v", err)
+			}
+			s := proto.Clone(tt.req).(*chainmailv1.SearchRequest)
+			s.Source = cache.SourceServer
+			want := f.search(t, s)
+			if !sameRows(got.GetRows(), want.GetRows()) || got.GetCount() != want.GetCount() || got.GetNextCursor() != want.GetNextCursor() {
+				t.Errorf("rows %v count %d cursor %q, want the server's %v, %d, %q", rowSubjects(got.GetRows()), got.GetCount(), got.GetNextCursor(),
+					rowSubjects(want.GetRows()), want.GetCount(), want.GetNextCursor())
+			}
+			if len(got.GetPartial()) != 0 || got.GetSource() != cache.SourceServer {
+				t.Errorf("partial %v, source %q; want none, server", got.GetPartial(), got.GetSource())
+			}
+			for _, ac := range got.GetAccountCounts() {
+				if ac.GetSource() != cache.SourceServer || !ac.GetComplete() {
+					t.Errorf("account count %v, want complete from the server", ac)
+				}
+			}
+			if last := entry.Targets[len(entry.Targets)-1]; last != "source=server" {
+				t.Errorf("audit targets = %v, want source=server", entry.Targets)
+			}
+		})
+	}
+}
+
+// TestSearchFallbackKeepsCursorBounds checks that a page continuing a
+// cursor falls back to the server below where the cache's page left off.
+func TestSearchFallbackKeepsCursorBounds(t *testing.T) {
+	t.Parallel()
+	f := newRouteFixture(t)
+	seedRouteMail(f)
+	f.warm(t, "host")
+	f.install(t, "host")
+	req := &chainmailv1.SearchRequest{QueryString: "invoice newer_than:30d", Accounts: []string{"host"}, Limit: 1}
+	page1 := f.search(t, req)
+	if page1.GetSource() != cache.SourceCache || page1.GetNextCursor() == "" {
+		t.Fatalf("page 1: source %q, cursor %q; want the cache and more", page1.GetSource(), page1.GetNextCursor())
+	}
+	f.damage(t, "DROP TABLE messages_fts")
+	got := rowSubjects(page1.GetRows())
+	req.Cursor = page1.GetNextCursor()
+	for req.Cursor != "" {
+		resp := f.search(t, req)
+		if resp.GetSource() != cache.SourceServer {
+			t.Errorf("page after the damage: source %q, want server", resp.GetSource())
+		}
+		got = append(got, rowSubjects(resp.GetRows())...)
+		req.Cursor = resp.GetNextCursor()
+	}
+	if want := []string{"invoice 42", "invoice 41"}; !slices.Equal(got, want) {
+		t.Errorf("rows across the pages = %v, want %v", got, want)
+	}
+}
+
+// TestSearchCacheReadFailureForcedOrRefused checks the other two ends of a
+// cache read failure: a forced cache still returns the error, and an
+// automatic search of has: on an account other than Google falls back to
+// the server route's refusal, which says the cache failed.
+func TestSearchCacheReadFailureForcedOrRefused(t *testing.T) {
+	t.Parallel()
+	f := newRouteFixture(t)
+	seedRouteMail(f)
+	f.warm(t, "host")
+	f.install(t, "host")
+	f.damage(t, "DROP TABLE messages_fts")
+	_, _, err := f.m.search(t.Context(), &chainmailv1.SearchRequest{QueryString: "invoice newer_than:30d", Accounts: []string{"host"}, Source: cache.SourceCache})
+	if apiReason(err) != api.ReasonInternal {
+		t.Errorf("forced cache: err %v, want INTERNAL", err)
+	}
+	_, _, err = f.m.search(t.Context(), &chainmailv1.SearchRequest{QueryString: "has:attachment invoice newer_than:30d", Accounts: []string{"host"}})
+	hint := api.Detail(toConnectError(err)).GetHint()
+	if apiReason(err) != api.ReasonInvalidArgument || !strings.Contains(err.Error(), "failed") || !strings.Contains(hint, "chainmail cache status") {
+		t.Errorf("automatic has: after a cache failure: %v (hint %q), want the refusal saying the cache failed", err, hint)
+	}
+}
+
+// startWatch starts each supervisor before the cache Accounts, so a
+// supervisor's first pass can stamp a folder before NewAccount runs. The
+// run's start, which startWatch takes before any supervisor, reaches every
+// Account, so that pass counts as this run's and the folder is fresh.
+func TestCacheAccountsCountPassesFromTheRunStart(t *testing.T) {
+	t.Parallel()
+	runStart := routeNow
+	fk := fake.New("host", false)
+	fk.SetNow(routeClock{}.Now)
+	// The daemon's clock reads two seconds after the run start, when
+	// startCacheAccounts creates the Accounts.
+	s, stateDB := newCacheServerOptions(t, routeConfig, Options{
+		NewStore: func(config.ResolvedAccount) mailstore.Store { return fk },
+		Now:      func() time.Time { return runStart.Add(2 * time.Second) },
+	})
+	f := &routeFixture{s: s, stateDB: stateDB}
+	// This run's first pass synced INBOX a second after the run start.
+	f.putSync(t, watch.FolderRow{
+		Account: "host", Folder: "INBOX", UIDValidity: 1, UIDNext: 1,
+		Mode: watch.ModeIdle, State: watch.StateWatching, LastSyncAt: runStart.Add(time.Second),
+	})
+	if err := s.cache.PutProgress(t.Context(), cache.Progress{
+		Account: "host", Folder: "INBOX", UIDValidity: 1, BaselineUIDNext: 1,
+		BackfillLowUID: 1, BackfillDone: true, WindowDone: true, LastAppliedAt: runStart,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	acct, err := s.opts.Config.Account("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	s.startCacheAccounts(ctx, []config.ResolvedAccount{acct}, &wg, runStart)
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+	a := s.cacheAccounts["host"]
+	if a == nil {
+		t.Fatal("startCacheAccounts started no cache worker for host")
+	}
+	// Freshness is stale until the builder opens its group, which against
+	// an empty log it does at once.
+	deadline := time.Now().Add(routeSettleWait)
+	for {
+		ok, reason, _, err := a.Freshness(t.Context(), []string{"INBOX"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("INBOX synced after the run start is %q after %v, want fresh", reason, routeSettleWait)
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }

@@ -14,6 +14,9 @@ const (
 	ReasonBackfilling     = "backfilling"
 	ReasonStale           = "stale"
 	ReasonFolderNotSynced = "folder_not_synced"
+	// ReasonTextOutsideWindow: the query has text the cache holds bodies
+	// for only inside the prefetch window, and nothing keeps it there.
+	ReasonTextOutsideWindow = "text_outside_window"
 )
 
 // Freshness reports whether every folder is fresh (spec 6.1 check 1), the
@@ -22,11 +25,12 @@ const (
 //
 // A folder is fresh when it has a sync_folders row with a UIDVALIDITY
 // (else folder_not_synced), is watching at any age or polling with a pass
-// within twice sync.poll (else stale), and has finished its backfill under
-// that UIDVALIDITY (else backfilling), checked in that order and in folder
-// order. The account is then stale while the builder has an event of the
-// account older than fresh_lag, or a trimmed gap, still to apply, or has
-// not opened its group.
+// within twice sync.poll, and has been synced by a pass since the run
+// started, AccountOptions.Started (else stale), and has finished its
+// backfill under that UIDVALIDITY (else backfilling), checked in that
+// order and in folder order. The account is then stale while the builder
+// has an event of the account older than fresh_lag, or a trimmed gap,
+// still to apply, or has not opened its group.
 func (a *Account) Freshness(ctx context.Context, folders []string) (ok bool, reason string, syncedAt time.Time, err error) {
 	rows, err := a.syncRows(ctx)
 	if err != nil {
@@ -73,13 +77,19 @@ func (a *Account) Freshness(ctx context.Context, folders []string) (ok bool, rea
 
 // syncFresh reports whether SP6 keeps the folder current: watching at any
 // age, or polling with a successful pass within twice sync.poll
-// (amendment 8).
+// (amendment 8), and in either state synced by a pass of this run. The
+// state survives a restart, but the mail that arrived while the daemon was
+// down reaches the log only through this run's first pass, which stamps
+// last_sync_at.
 func (a *Account) syncFresh(r watch.FolderRow, now time.Time) bool {
+	if r.LastSyncAt.IsZero() || r.LastSyncAt.Before(a.started) {
+		return false
+	}
 	switch r.State {
 	case watch.StateWatching:
 		return true
 	case watch.StatePolling:
-		return !r.LastSyncAt.IsZero() && now.Sub(r.LastSyncAt) <= 2*a.o.Account.SyncPoll
+		return now.Sub(r.LastSyncAt) <= 2*a.o.Account.SyncPoll
 	default:
 		return false
 	}
@@ -123,12 +133,20 @@ func (a *Account) lagging(ctx context.Context, cutoff time.Time) (bool, error) {
 	}
 }
 
+// InWindow reports whether since, a query's top-level lower date bound,
+// is inside the prefetch window, so the cache can hold every body text
+// after it needs once the window is fetched. A zero since (no bound) or an
+// empty window never is.
+func (a *Account) InWindow(since time.Time) bool {
+	window := a.settings().PrefetchBodies
+	return !since.IsZero() && window > 0 && !since.Before(a.clock.Now().Add(-window))
+}
+
 // WindowCovers reports whether since is inside the prefetch window and
 // every folder has window_done. A zero since (no lower date bound) or an
 // empty window never covers.
 func (a *Account) WindowCovers(ctx context.Context, folders []string, since time.Time) (bool, error) {
-	window := a.settings().PrefetchBodies
-	if since.IsZero() || window <= 0 || since.Before(a.clock.Now().Add(-window)) {
+	if !a.InWindow(since) {
 		return false, nil
 	}
 	progress, err := a.progressMap(ctx)

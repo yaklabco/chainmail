@@ -342,3 +342,24 @@ func TestBuilderRecoversAGroupPastTheTail(t *testing.T) {
 		t.Error("the rebuild kept a row of the lost log")
 	}
 }
+
+// A builder commit that leaves the file over max_size wakes the evictor,
+// as a body write does, so header growth never waits for the hourly sweep.
+func TestBuilderHeaderGrowthKicksTheEvictor(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	r.pass("INBOX")
+	r.start()
+	r.waitBackfilled("INBOX")
+	r.waitApplied()
+	r.maxSize.Store(1)
+	if n := len(r.store.evict.kickChan()); n != 0 {
+		t.Fatalf("kicks queued before new mail = %d, want 0", n)
+	}
+	r.add("INBOX", "one")
+	r.waitApplied()
+	if n := len(r.store.evict.kickChan()); n != 1 {
+		t.Errorf("kicks queued after a header commit over the cap = %d, want 1", n)
+	}
+}

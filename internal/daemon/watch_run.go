@@ -63,6 +63,10 @@ func (s *Server) startWatch(ctx context.Context) {
 		return
 	}
 	ctx, set.cancel = context.WithCancel(ctx)
+	// The run starts before any supervisor does, so a first pass that
+	// lands before startCacheAccounts creates the cache Accounts still
+	// counts as this run's for their freshness.
+	runStart := s.cacheClock.Now()
 	settings := s.opts.Config.WatchSettings()
 	for _, acct := range accts {
 		sup := watch.NewSupervisor(s.supervisorOptions(acct, settings))
@@ -70,7 +74,7 @@ func (s *Server) startWatch(ctx context.Context) {
 		set.wg.Go(func() { sup.Run(ctx) })
 	}
 	s.opts.Logger.Info("watching accounts", "accounts", set.accounts)
-	s.startCacheAccounts(ctx, accts, &set.wg)
+	s.startCacheAccounts(ctx, accts, &set.wg, runStart)
 }
 
 // stopWatch cancels the supervisors and the cache workers and waits for

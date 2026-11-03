@@ -63,7 +63,8 @@ func (e *recreateError) Error() string {
 // closed, deleted with its -wal and -shm files, and created again. So is a
 // file with a corruption marker (path + ".corrupt"), which a Store leaves
 // when an operation finds corruption that Open's checks cannot see; Open
-// removes the marker once the new file exists.
+// removes the marker once the new file exists. cache.db and its -wal and
+// -shm files are mode 0600 whatever the umask (makePrivate).
 func Open(ctx context.Context, path string, opts OpenOptions) (*Store, error) {
 	// path goes into a file: URI, where these characters change its meaning.
 	if strings.ContainsAny(path, "?#%") {
@@ -122,8 +123,50 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// openFile opens path with one connection and prepares its schema.
+// privateMode is the mode of cache.db and the files beside it: they hold
+// mail, so only the daemon's user may read them.
+const privateMode fs.FileMode = 0o600
+
+// makePrivate creates cache.db with privateMode when it is absent, before
+// SQLite opens it, and sets privateMode on cache.db, its -wal and -shm
+// files and the corruption marker when any of them is wider. SQLite
+// creates its -wal and -shm files with the database file's mode, so new
+// ones are private too. The directory's mode is left as it is: an
+// existing directory is the operator's choice.
+func makePrivate(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, privateMode)
+	switch {
+	case err == nil:
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("creating %s: %w", path, err)
+		}
+	case !errors.Is(err, fs.ErrExist):
+		return fmt.Errorf("creating %s: %w", path, err)
+	}
+	for _, p := range []string{path, path + "-wal", path + "-shm", markerPath(path)} {
+		info, err := os.Stat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("checking the mode of %s: %w", p, err)
+		}
+		if info.Mode().Perm()&^privateMode == 0 {
+			continue
+		}
+		if err := os.Chmod(p, privateMode); err != nil {
+			return fmt.Errorf("making %s private: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// openFile makes path private, opens it with one connection and prepares
+// its schema.
 func openFile(ctx context.Context, path string) (*sql.DB, error) {
+	if err := makePrivate(path); err != nil {
+		return nil, err
+	}
 	params := url.Values{"_pragma": {"busy_timeout(5000)", "journal_mode(WAL)", "foreign_keys(1)"}}
 	conn, err := sql.Open("sqlite", "file:"+path+"?"+params.Encode())
 	if err != nil {
@@ -241,7 +284,7 @@ func markerPath(path string) string {
 // markCorrupt creates the corruption marker. Failing to create it only
 // costs the recreate on the next Open, so it is logged and otherwise ignored.
 func (s *Store) markCorrupt() {
-	if err := os.WriteFile(markerPath(s.path), nil, 0o600); err != nil {
+	if err := os.WriteFile(markerPath(s.path), nil, privateMode); err != nil {
 		s.logger.Warn("cannot mark cache.db corrupt", "path", s.path, "err", err)
 	}
 }

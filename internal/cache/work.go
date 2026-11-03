@@ -98,22 +98,37 @@ func (a *Account) waitReady(ctx context.Context) error {
 	}
 }
 
+// headerAllowance is how many headers the day's remaining download budget
+// holds when used of limit bytes are spent, never negative. Background work
+// proceeds only while it is at least one: the backfill's admission and
+// Status's budget_exhausted both use it.
+func headerAllowance(used, limit int64) int64 {
+	return max(0, (limit-used)/headerBudgetBytes)
+}
+
 // waitAllowance blocks as waitReady does, and also while the day's
-// remaining download budget holds less than one header, until 00:00 UTC.
-// It returns how many headers the remaining budget holds, at least one,
-// which bounds the next background batch.
+// remaining download budget holds less than one header, or while the
+// server throttles the account, until 00:00 UTC. It returns how many
+// headers the remaining budget holds, at least one, which bounds the next
+// background batch.
 func (a *Account) waitAllowance(ctx context.Context) (int, error) {
 	logged := false
 	for {
 		if err := a.waitReady(ctx); err != nil {
 			return 0, err
 		}
+		if d := a.throttled.wait(a.clock.Now()); d > 0 {
+			if !a.sleep(ctx, d) {
+				return 0, ctx.Err()
+			}
+			continue
+		}
 		used, err := a.o.Store.Budget(ctx, a.name, a.day())
 		if err != nil {
 			return 0, err
 		}
 		limit := a.settings().DailyDownload
-		if n := (limit - used) / headerBudgetBytes; n >= 1 {
+		if n := headerAllowance(used, limit); n >= 1 {
 			return int(min(n, math.MaxInt32)), nil
 		}
 		if !logged {
@@ -126,6 +141,19 @@ func (a *Account) waitAllowance(ctx context.Context) (int, error) {
 		}
 	}
 }
+
+// noteThrottle records that the server refused a backfill or prefetch
+// fetch for a quota or bandwidth limit: the backfill and the prefetcher
+// wait until 00:00 UTC, as for a spent budget. It logs when that starts a
+// pause.
+func (a *Account) noteThrottle(ctx context.Context) {
+	if a.throttled.set(a.clock.Now()) {
+		a.logger.InfoContext(ctx, logThrottled)
+	}
+}
+
+// logThrottled is the info log line of a throttle that starts a pause.
+const logThrottled = "the mail server throttled background downloads; cache background work resumes at 00:00 UTC"
 
 // withMail runs f with a store Mail hands out and a background context,
 // so the store never waits for a connection a foreground request needs,
@@ -242,10 +270,12 @@ func (a *Account) track(ctx context.Context) error {
 }
 
 // fail records a failed step's reason code and logs it, at warn once the
-// step has failed repeatedly or when the cache's disk is full.
+// step has failed repeatedly or when the cache's disk is full, and hands
+// err to OnError.
 func (a *Account) fail(ctx context.Context, msg string, err error, repeated bool) {
 	reason := reasonCode(err)
 	a.setError(reason)
+	a.noteErr(err)
 	if repeated || errors.Is(err, ErrDiskFull) {
 		a.logger.WarnContext(ctx, msg, "reason", reason)
 		return

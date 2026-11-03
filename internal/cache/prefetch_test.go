@@ -59,9 +59,16 @@ func newPrefetchRig(t *testing.T) *prefetchRig {
 // its header row as the backfill would, and returns its ref.
 func (r *prefetchRig) add(age time.Duration, subject string) ref.Ref {
 	r.t.Helper()
+	return r.addSized(age, subject, 100)
+}
+
+// addSized is add with the header row's message size, the size the
+// prefetcher admits a body by.
+func (r *prefetchRig) addSized(age time.Duration, subject string, size int64) ref.Ref {
+	r.t.Helper()
 	at := r.clk.Now().Add(-age)
 	got := r.fk.Add(fake.Message{Folder: "INBOX", Date: at, InternalDate: at, Subject: subject, Body: "text of " + subject})
-	row := Row{Account: got.Account, Folder: got.Folder, UIDValidity: got.UIDValidity, UID: got.UID, InternalDate: at, Date: at, Size: 100, Subject: subject}
+	row := Row{Account: got.Account, Folder: got.Folder, UIDValidity: got.UIDValidity, UID: got.UID, InternalDate: at, Date: at, Size: size, Subject: subject}
 	if err := r.st.PutRows(r.t.Context(), []Row{row}); err != nil {
 		r.t.Fatal(err)
 	}
@@ -105,8 +112,9 @@ func (r *prefetchRig) step(want time.Duration) {
 	}
 }
 
-// Bodies inside the window, its start included, are fetched in one
-// background batch; older ones are not.
+// Bodies inside the window, its start included, are fetched in one step,
+// one background download each so the budget is checked before each;
+// older ones are not.
 func TestPrefetchWindow(t *testing.T) {
 	t.Parallel()
 	r := newPrefetchRig(t)
@@ -118,8 +126,8 @@ func TestPrefetchWindow(t *testing.T) {
 	if !r.has(inside) || !r.has(edge) || r.has(outside) {
 		t.Errorf("bodies cached: inside %v, edge %v, outside %v; want true, true, false", r.has(inside), r.has(edge), r.has(outside))
 	}
-	if n := r.fk.BackgroundCalls("FetchMessages"); n != 1 || r.fetches() != 1 {
-		t.Errorf("FetchMessages calls = %d, background %d; want 1 background call", r.fetches(), n)
+	if n := r.fk.BackgroundCalls("FetchMessages"); n != 2 || r.fetches() != 2 {
+		t.Errorf("FetchMessages calls = %d, background %d; want 2 background calls, one per body", r.fetches(), n)
 	}
 }
 
@@ -423,7 +431,7 @@ func (b batchTweak) FetchMessages(ctx context.Context, refs []ref.Ref) []mailsto
 }
 
 // Every body received from the server is charged len(raw), whether it
-// then parses and stores or not, and a batch that ends early, or a batch
+// then parses and stores or not, and a step that ends early, or a download
 // answer the prefetcher rejects, still charges the bodies received. A
 // result carrying only an error costs nothing.
 func TestPrefetchBudgetChargesEveryBodyReceived(t *testing.T) {
@@ -478,9 +486,11 @@ func TestPrefetchBudgetChargesEveryBodyReceived(t *testing.T) {
 			want: retryFloor,
 		},
 		{
+			// Each download asks for one body, so a second answer is the
+			// wrong number. Both bodies received are charged.
 			name: "wrong number of results",
 			rig: func(*prefetchRig, ref.Ref) tweak {
-				return func(_ []ref.Ref, out []mailstore.MessageResult) []mailstore.MessageResult { return out[:2] }
+				return func(_ []ref.Ref, out []mailstore.MessageResult) []mailstore.MessageResult { return append(out, out...) }
 			},
 			want: retryFloor,
 		},
@@ -643,7 +653,9 @@ func TestCompleteWindowLosesToAnEviction(t *testing.T) {
 	if err != nil || len(left) != 0 {
 		t.Fatalf("window check = %v, %v; want nothing left", left, err)
 	}
-	if _, _, err := r.st.dropBodies(ctx, []evictVictim{{msg: r.msgID(m), size: 1, account: "acme", folder: "INBOX", inWindow: true}}); err != nil {
+	if _, _, err := r.st.dropBodies(ctx, []evictVictim{{
+		msg: r.msgID(m), size: 1, account: "acme", folder: "INBOX", uidValidity: m.UIDValidity, uid: m.UID, winStart: since.Unix(), inWindow: true,
+	}}); err != nil {
 		t.Fatal(err)
 	}
 	set, err := r.st.CompleteWindow(ctx, "acme", "INBOX", since, maxBodyAttempts)

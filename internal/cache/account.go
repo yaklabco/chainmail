@@ -50,6 +50,15 @@ type AccountOptions struct {
 	// Logger receives progress and failures as fixed reason codes, never
 	// message content or server text. Nil discards.
 	Logger *slog.Logger
+	// OnError, when set, receives the error of every failed worker step and
+	// every cache.db failure the prefetcher and the read path log, as
+	// EvictorOptions.OnError does, so the daemon can turn the cache off on
+	// a full disk at once. Nil drops them after logging.
+	OnError func(err error)
+	// Started is when the daemon began this run, taken before any
+	// supervisor starts. A folder is fresh only once a pass at or after it
+	// has synced the folder. Zero means NewAccount's time on Clock.
+	Started time.Time
 }
 
 // Account keeps one mail account's part of the cache. Its builder applies
@@ -81,12 +90,25 @@ type Account struct {
 	// again when a change hit one of its UIDs: the header it fetched may
 	// predate the change. Guarded by wmu.
 	inflight *inflightBatch
+	// readsMu guards reads, the guards of the read path's downloads now
+	// running with wmu released. noteChange marks each flags or expunged
+	// change the builder applies in every one, and the read path writes
+	// a download back only for messages its guard saw no change of.
+	readsMu sync.Mutex
+	reads   map[*readGuard]struct{}
 
 	// applied is the builder's acknowledged event ID, -1 until the builder
 	// has opened its group.
 	applied atomic.Int64
-	// overCap is set by the evictor while headers alone exceed MaxSize.
-	overCap atomic.Bool
+	// started is the run's start, AccountOptions.Started or else when
+	// NewAccount ran, on the account's clock. A folder is fresh only once
+	// a pass of this run has synced it: a sync row from a previous run
+	// says nothing of the mail that arrived while the daemon was down.
+	started time.Time
+
+	// throttled is the pause the server's quota or bandwidth refusal of a
+	// backfill or prefetch fetch starts, until 00:00 UTC.
+	throttled throttle
 
 	// errMu guards lastErr, the reason code of the latest failed step. The
 	// worker that failed clears it once it succeeds again.
@@ -157,6 +179,10 @@ func NewAccount(o AccountOptions) *Account {
 	// carry the same defaults.
 	a.o.Clock, a.o.Logger = a.clock, a.logger
 	a.applied.Store(-1)
+	a.started = o.Started
+	if a.started.IsZero() {
+		a.started = a.clock.Now()
+	}
 	return a
 }
 
@@ -264,6 +290,13 @@ func reasonCode(err error) string {
 	}
 }
 
+// noteErr hands err to OnError, when set.
+func (a *Account) noteErr(err error) {
+	if err != nil && a.o.OnError != nil {
+		a.o.OnError(err)
+	}
+}
+
 func (a *Account) setError(reason string) {
 	a.errMu.Lock()
 	defer a.errMu.Unlock()
@@ -280,7 +313,8 @@ func (a *Account) lastError() string {
 
 // runPrefetch runs the account's body prefetcher until ctx ends. It shares
 // the account's options, including the clock and logger NewAccount
-// defaulted, and pauses as the other workers do (integration note 12).
+// defaulted, and its throttle, and pauses as the other workers do
+// (integration note 12).
 func (a *Account) runPrefetch(ctx context.Context) {
 	o := a.o
 	newPrefetcher(prefetchOptions{
@@ -296,9 +330,11 @@ func (a *Account) runPrefetch(ctx context.Context) {
 			}
 			return ms, release, nil
 		},
-		Wake:   a.prefetchWake,
-		Clock:  o.Clock,
-		Logger: o.Logger,
+		Wake:     a.prefetchWake,
+		Throttle: &a.throttled,
+		Clock:    o.Clock,
+		Logger:   o.Logger,
+		OnError:  o.OnError,
 	}).run(ctx)
 }
 

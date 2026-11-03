@@ -212,8 +212,10 @@ func folderCacheProto(f cache.FolderStatus) *chainmailv1.FolderCacheStatus {
 // startCacheAccounts starts a cache worker for each of accts with the
 // cache enabled, on wg, and records them in cacheAccounts. startWatch calls
 // it with the supervisors' context and WaitGroup, so the workers stop with
-// the supervisors, before drain closes the stores. It does no IO.
-func (s *Server) startCacheAccounts(ctx context.Context, accts []config.ResolvedAccount, wg *sync.WaitGroup) {
+// the supervisors, before drain closes the stores, and with runStart, the
+// time it took before starting any supervisor, so every Account counts
+// a pass from that time on as this run's. It does no IO.
+func (s *Server) startCacheAccounts(ctx context.Context, accts []config.ResolvedAccount, wg *sync.WaitGroup, runStart time.Time) {
 	if s.cache == nil {
 		return
 	}
@@ -224,7 +226,9 @@ func (s *Server) startCacheAccounts(ctx context.Context, accts []config.Resolved
 		if !cfg.CacheSettings(acct.Name).Enabled {
 			continue
 		}
-		ca := cache.NewAccount(s.cacheAccountOptions(acct))
+		o := s.cacheAccountOptions(acct)
+		o.Started = runStart
+		ca := cache.NewAccount(o)
 		workers[acct.Name] = ca
 		names = append(names, acct.Name)
 		wg.Go(func() { ca.Run(ctx) })
@@ -239,7 +243,8 @@ func (s *Server) startCacheAccounts(ctx context.Context, accts []config.Resolved
 // supervisor, the worker takes the account entry's read lock through
 // acquire, one batch at a time, so a probe's replace gets through between
 // batches. The entry is taken once, here, for the reason
-// supervisorOptions gives.
+// supervisorOptions gives. Its errors reach noteCacheErr, so a full disk any
+// worker or read meets turns the cache off at once.
 func (s *Server) cacheAccountOptions(acct config.ResolvedAccount) cache.AccountOptions {
 	e := s.stores.entry(acct)
 	cfg := s.opts.Config
@@ -263,8 +268,9 @@ func (s *Server) cacheAccountOptions(acct config.ResolvedAccount) cache.AccountO
 			}
 			return ms, release, nil
 		},
-		Clock:  s.cacheClock,
-		Logger: s.opts.Logger,
+		Clock:   s.cacheClock,
+		Logger:  s.opts.Logger,
+		OnError: s.noteCacheErr,
 	}
 }
 

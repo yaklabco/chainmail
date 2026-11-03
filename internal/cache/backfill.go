@@ -36,13 +36,19 @@ func (w *walk) matches(p Progress) bool {
 // baseline, one batch at a time, until ctx ends. It pauses backfill_pause
 // between batches, waits for a poke when no folder needs work (or a folder
 // changed UIDVALIDITY under its walk, until the builder resets it), and
-// backs off 1s doubling to 5m after a failure.
+// backs off 1s doubling to 5m after a failure. A fetch the server refuses
+// for a quota or bandwidth limit pauses the account until 00:00 UTC.
 func (a *Account) runBackfill(ctx context.Context) {
 	var w *walk
 	failures := 0
 	for ctx.Err() == nil {
 		next, more, err := a.backfillStep(ctx, w)
 		w = next
+		if errors.Is(err, mailstore.ErrThrottled) && ctx.Err() == nil {
+			// Not a failure: the next step's admission waits for 00:00 UTC.
+			a.noteThrottle(ctx)
+			continue
+		}
 		if err != nil && !errors.Is(err, mailstore.ErrStaleRef) {
 			if ctx.Err() != nil {
 				return
@@ -145,10 +151,12 @@ func (a *Account) fetchBatch(ctx context.Context, w *walk) ([]uint32, []Row, err
 }
 
 // commitBatch stores a fetched batch, which fetchHeaders has already
-// counted against the budget, and records the walk's new low UID, marking
-// the folder done when the walk has no UIDs left, which wakes the
-// prefetcher for its window. A batch fetched before a
-// drop, or before the builder recorded a new walk of the folder, is
+// counted against the budget, waking the evictor when the file is then
+// over max_size, and records the walk's new low UID, marking the folder
+// done when the walk has no UIDs left, which wakes the prefetcher for its
+// window. It writes only the backfill's own progress columns, so a
+// window_done clear made meanwhile without wmu stands. A batch fetched
+// before a drop, or before the builder recorded a new walk of the folder, is
 // discarded with its walk. A batch with a UID whose flags or
 // expunge the builder applied during the fetch is not written: it returns
 // w unchanged, so the next step fetches the batch again.
@@ -173,13 +181,14 @@ func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows
 		if err := a.o.Store.PutRows(ctx, rows); err != nil {
 			return w, false, err
 		}
+		a.noteWrite(ctx)
 	}
 	rest := w.uids[len(batch):]
 	if len(batch) > 0 {
 		p.BackfillLowUID = batch[len(batch)-1]
 	}
 	p.BackfillDone = len(rest) == 0
-	if err := a.o.Store.PutProgress(ctx, p); err != nil {
+	if err := a.o.Store.SetBackfill(ctx, a.name, w.folder, p.BackfillLowUID, p.BackfillDone); err != nil {
 		return w, false, err
 	}
 	w.uids, w.low = rest, p.BackfillLowUID

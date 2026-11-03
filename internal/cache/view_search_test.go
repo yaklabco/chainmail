@@ -613,3 +613,27 @@ func TestViewFetchSummariesKeepsCachedRowsWhenTheServerFails(t *testing.T) {
 		}
 	}
 }
+
+// TestViewSearchReadFailureIsErrRead checks that a failed read of cache.db
+// on the search path, in Search or FetchSummaries, is ErrRead, which the
+// daemon answers from the server on the automatic route.
+func TestViewSearchReadFailureIsErrRead(t *testing.T) {
+	t.Parallel()
+	f := newSearchFixture(t, false)
+	seedSearchMail(f.server.Store, false)
+	f.warm(t)
+	results, err := f.view.Search(t.Context(), searchRequest(t, "", false))
+	if err != nil || len(results) == 0 {
+		t.Fatalf("Search before the failure: %v, %v", results, err)
+	}
+	src := results[0].Source
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.view.Search(t.Context(), searchRequest(t, "", false)); !errors.Is(err, cache.ErrRead) {
+		t.Errorf("Search on a failing cache: err %v, want ErrRead", err)
+	}
+	if _, err := f.view.FetchSummaries(t.Context(), src, []uint32{1}, mailstore.SummaryOptions{}); !errors.Is(err, cache.ErrRead) {
+		t.Errorf("FetchSummaries on a failing cache: err %v, want ErrRead", err)
+	}
+}

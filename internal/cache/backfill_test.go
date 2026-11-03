@@ -570,3 +570,19 @@ func TestBackfillRefetchesABatchChangedDuringItsFetch(t *testing.T) {
 		t.Errorf("budget used = %d, want %d for both fetches", got, want)
 	}
 }
+
+// A backfill batch that leaves the file over max_size wakes the evictor,
+// as a body write does.
+func TestBackfillHeaderGrowthKicksTheEvictor(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	fs.Add(acctMsg("INBOX", "one"))
+	r.pass("INBOX")
+	r.maxSize.Store(1)
+	r.start()
+	r.waitBackfilled("INBOX")
+	if n := len(r.store.evict.kickChan()); n != 1 {
+		t.Errorf("kicks queued after a backfill batch over the cap = %d, want 1", n)
+	}
+}

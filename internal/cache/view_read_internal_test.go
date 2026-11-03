@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -341,5 +342,192 @@ func TestViewKeepReadGivesUpWaitingForTheWriteLock(t *testing.T) {
 	}
 	if logs := k.logs.String(); !strings.Contains(logs, "waiting to store a read failed") {
 		t.Errorf("logs lack the give-up:\n%s", logs)
+	}
+}
+
+// cacheKeepRow caches the keepRig message's row, with its body when
+// withBody is set, as the server has it now.
+func cacheKeepRow(t *testing.T, k *keepRig, withBody bool) {
+	t.Helper()
+	ctx := t.Context()
+	res := k.fk.FetchMessages(ctx, []ref.Ref{k.r})[0]
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if err := k.st.PutRows(ctx, []Row{messageRow(res.Message)}); err != nil {
+		t.Fatal(err)
+	}
+	if !withBody {
+		return
+	}
+	if _, err := k.st.PutBody(ctx, k.r, Body{Raw: res.Message.Raw}, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// builderEvent applies one flags or expunged event of the keepRig message
+// through the builder, as its group would deliver it.
+func builderEvent(ctx context.Context, k *keepRig, kind watch.Kind, flags []string) error {
+	return k.a.apply(ctx, []watch.Event{{Kind: kind, Account: "acme", Folder: "INBOX", Ref: k.r.String(), Flags: flags}})
+}
+
+// TestViewReadDoesNotUndoABuilderChange checks that a read the server
+// answered is not written over a change the builder applied to the message
+// while it was downloaded: an expunged message's row is not made again, and
+// a flags change stands, though the body of a message still cached is kept.
+// The download is charged either way.
+func TestViewReadDoesNotUndoABuilderChange(t *testing.T) {
+	t.Parallel()
+	answered := []string{`\Answered`}
+	tests := []struct {
+		name    string
+		cached  bool
+		kind    watch.Kind
+		wantRow bool
+	}{
+		{name: "an expunge of a cached row", cached: true, kind: watch.KindExpunged},
+		{name: "an expunge of an uncached message", kind: watch.KindExpunged},
+		{name: "a flags change of a cached row", cached: true, kind: watch.KindFlags, wantRow: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			k := newKeepRig(t)
+			if tt.cached {
+				cacheKeepRow(t, k, false)
+			}
+			applied := 0
+			k.a.beforeKeepWrite = func() {
+				applied++
+				if err := builderEvent(ctx, k, tt.kind, answered); err != nil {
+					t.Error(err)
+				}
+			}
+			got, _ := k.a.View(k.fk).FetchMessagesFrom(ctx, []ref.Ref{k.r})
+			if got[0].Err != nil {
+				t.Fatal(got[0].Err)
+			}
+			if applied != 1 {
+				t.Fatalf("builder changes applied = %d, want 1", applied)
+			}
+			row, ok, err := k.st.Row(ctx, k.r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok != tt.wantRow {
+				t.Fatalf("row cached = %t, want %t", ok, tt.wantRow)
+			}
+			if tt.wantRow && !slices.Equal(row.Flags, answered) {
+				t.Errorf("cached flags = %v, want the builder's %v", row.Flags, answered)
+			}
+			if _, ok, err := k.st.Body(ctx, k.r); err != nil || ok != tt.wantRow {
+				t.Errorf("body cached = %t, %v, want %t", ok, err, tt.wantRow)
+			}
+			day := t10Start.UTC().Format("2006-01-02")
+			if spent, err := k.st.Budget(ctx, "acme", day); err != nil || spent != int64(len(got[0].Message.Raw)) {
+				t.Errorf("budget = %d, %v, want the download's %d", spent, err, len(got[0].Message.Raw))
+			}
+		})
+	}
+}
+
+// hookServer is the fake server, except that FetchSummaries runs after
+// once it has answered, before the caller sees the answer.
+type hookServer struct {
+	*fake.Store
+	after func()
+}
+
+func (s hookServer) FetchSummaries(ctx context.Context, src mailstore.Source, uids []uint32, opts mailstore.SummaryOptions) ([]mailstore.Summary, error) {
+	out, err := s.Store.FetchSummaries(ctx, src, uids, opts)
+	if s.after != nil {
+		s.after()
+	}
+	return out, err
+}
+
+// staleKeepRig is a keepRig whose message is cached with its body in a
+// folder that is not fresh, so a read refreshes its flags from the server,
+// which has flagged it.
+func staleKeepRig(t *testing.T) *keepRig {
+	t.Helper()
+	k := newKeepRig(t)
+	cacheKeepRow(t, k, true)
+	if err := k.st.SetBackfill(t.Context(), "acme", "INBOX", 1, false); err != nil {
+		t.Fatal(err)
+	}
+	k.fk.ExternalFlags("INBOX", k.r.UID, []string{`\Flagged`}, nil)
+	return k
+}
+
+// TestViewFlagRefreshDoesNotUndoABuilderChange checks that flags fetched
+// from the server for a hit in a folder that is not fresh are not written
+// over a flags change the builder applied while they were fetched.
+func TestViewFlagRefreshDoesNotUndoABuilderChange(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	k := staleKeepRig(t)
+	answered := []string{`\Answered`}
+	server := hookServer{Store: k.fk, after: func() {
+		if err := builderEvent(ctx, k, watch.KindFlags, answered); err != nil {
+			t.Error(err)
+		}
+	}}
+	got, sources := k.a.View(server).FetchMessagesFrom(ctx, []ref.Ref{k.r})
+	if got[0].Err != nil {
+		t.Fatal(got[0].Err)
+	}
+	if sources[0] != SourceCache {
+		t.Errorf("source = %q, want %q", sources[0], SourceCache)
+	}
+	row, ok, err := k.st.Row(ctx, k.r)
+	if err != nil || !ok {
+		t.Fatalf("row: %v, %t", err, ok)
+	}
+	if !slices.Equal(row.Flags, answered) {
+		t.Errorf("cached flags = %v, want the builder's %v", row.Flags, answered)
+	}
+}
+
+// TestViewFlagRefreshWritesUnderTheWriteLock checks that a flag refresh
+// writes only under the account's write lock: while another writer holds
+// it, the read still answers with the server's flags once its bounded
+// wait ends, leaves the cached flags alone, and leaves the lock with its
+// holder.
+func TestViewFlagRefreshWritesUnderTheWriteLock(t *testing.T) {
+	t.Parallel()
+	k := staleKeepRig(t)
+	k.a.keepTimeout = 20 * time.Millisecond
+	k.a.lock()
+	done := make(chan mailstore.MessageResult, 1)
+	go func() {
+		got, _ := k.a.View(k.fk).FetchMessagesFrom(t.Context(), []ref.Ref{k.r})
+		done <- got[0]
+	}()
+	var got mailstore.MessageResult
+	select {
+	case got = <-done:
+	case <-time.After(lockGuard):
+		k.a.unlock()
+		<-done
+		t.Fatal("the flag refresh kept waiting for the held write lock")
+	}
+	if len(k.a.wmu) != 1 {
+		t.Error("the held write lock was released")
+	}
+	k.a.unlock()
+	if got.Err != nil {
+		t.Fatal(got.Err)
+	}
+	if !slices.Contains(got.Message.Summary.Flags, `\Flagged`) {
+		t.Errorf("flags = %v, want the server's", got.Message.Summary.Flags)
+	}
+	row, ok, err := k.st.Row(t.Context(), k.r)
+	if err != nil || !ok {
+		t.Fatalf("row: %v, %t", err, ok)
+	}
+	if slices.Contains(row.Flags, `\Flagged`) {
+		t.Errorf("cached flags = %v, written without the write lock", row.Flags)
 	}
 }

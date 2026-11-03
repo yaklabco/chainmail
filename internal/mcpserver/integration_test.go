@@ -282,24 +282,30 @@ type eventsPage struct {
 }
 
 // waitInboxWatched polls GetWatchStatus until dove's INBOX is watched, so
-// mail appended afterwards is new rather than part of the baseline.
+// mail appended afterwards is new rather than part of the baseline. Every
+// call and pause runs under the 30-second deadline, so a stalled call
+// cannot hold the wait past it.
 func waitInboxWatched(t *testing.T, h *daemontest.Harness) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	var last []*chainmailv1.FolderSyncStatus
 	for {
-		resp, err := h.Client.Watch.GetWatchStatus(t.Context(), connect.NewRequest(&chainmailv1.GetWatchStatusRequest{}))
+		resp, err := h.Client.Watch.GetWatchStatus(ctx, connect.NewRequest(&chainmailv1.GetWatchStatusRequest{}))
 		if err != nil {
-			t.Fatalf("GetWatchStatus: %v", err)
+			t.Fatalf("GetWatchStatus: %v (last folders %v)", err, last)
 		}
-		for _, f := range resp.Msg.GetFolders() {
+		last = resp.Msg.GetFolders()
+		for _, f := range last {
 			if f.GetAccount() == "dove" && f.GetFolder() == "INBOX" && f.GetState() == "watching" {
 				return
 			}
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("dove/INBOX not watching within 30s: %v", resp.Msg.GetFolders())
+		select {
+		case <-ctx.Done():
+			t.Fatalf("dove/INBOX not watching within 30s: %v", last)
+		case <-time.After(50 * time.Millisecond):
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
 }
 

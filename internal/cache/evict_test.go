@@ -427,3 +427,110 @@ func TestEvictorSweep(t *testing.T) {
 		t.Errorf("OnError calls = %d, want 1", len(reported))
 	}
 }
+
+// An eviction victim whose row was deleted after the victim query, and
+// whose integer id a newer message then reused, is left alone: its body and
+// its folder's window_done stay, for retention and for the cap alike. The
+// victim's identity is checked inside the deleting transaction.
+func TestEvictDoesNotFollowAReusedRowID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		victims func(ctx context.Context, st *Store) ([]evictVictim, error)
+	}{
+		{name: "retention", victims: func(ctx context.Context, st *Store) ([]evictVictim, error) {
+			return st.retentionVictims(ctx, "acme", t10Start.Add(-30*oneDay).Unix(), t10Start.Add(-7*oneDay).Unix())
+		}},
+		{name: "cap", victims: func(ctx context.Context, st *Store) ([]evictVictim, error) {
+			return st.capVictims(ctx, map[string]int64{"acme": t10Start.Add(-30 * oneDay).Unix()}, 1)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clk := newPrefetchClock(t10Start)
+			st := openEvictStore(t, clk.Now)
+			ctx := t.Context()
+			old := seedEvict(t, st, clk, evictSeed{account: "acme", uid: 1, arrived: t10Start.Add(-400 * oneDay), raw: evictTextRaw("oldword")})[0]
+			victims, err := tt.victims(ctx, st)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(victims) != 1 {
+				t.Fatalf("victims = %+v, want the old INBOX body", victims)
+			}
+			if err := st.DeleteRow(ctx, old); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.PutProgress(ctx, Progress{
+				Account: "acme", Folder: "Archive", UIDValidity: 7, BaselineUIDNext: 10,
+				BackfillLowUID: 1, BackfillDone: true, WindowDone: true, LastAppliedAt: t10Start,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			fresh := seedEvict(t, st, clk, evictSeed{account: "acme", folder: "Archive", uid: 9, arrived: t10Start.Add(-oneDay), raw: evictTextRaw("newword")})[0]
+			id, _, ok, err := loadRow(ctx, st.db, fresh)
+			if err != nil || !ok {
+				t.Fatalf("loading the new row: %v, %t", err, ok)
+			}
+			if id != victims[0].msg {
+				t.Fatalf("the new row's id = %d, want the reused %d", id, victims[0].msg)
+			}
+			n, freed, err := st.dropBodies(ctx, victims)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n != 0 || freed != 0 {
+				t.Errorf("dropBodies = %d bodies, %d bytes, want none", n, freed)
+			}
+			if !hasBody(t, st, fresh) {
+				t.Error("the Archive body under the reused id was evicted")
+			}
+			p, _, err := st.Progress(ctx, "acme", "Archive")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !p.WindowDone {
+				t.Error("Archive's window_done was cleared")
+			}
+			if st.evict.hold.Load() {
+				t.Error("the prefetch hold was set")
+			}
+		})
+	}
+}
+
+// A window body evicted under the cap clears the window_done of the folder
+// its row is in when it is deleted, which the deleting transaction reads
+// from the row itself.
+func TestEvictClearsTheWindowOfTheRowAsDeleted(t *testing.T) {
+	t.Parallel()
+	clk := newPrefetchClock(t10Start)
+	st := openEvictStore(t, clk.Now)
+	ctx := t.Context()
+	if err := st.PutProgress(ctx, Progress{
+		Account: "acme", Folder: "Archive", UIDValidity: 7, BaselineUIDNext: 10,
+		BackfillLowUID: 1, BackfillDone: true, WindowDone: true, LastAppliedAt: t10Start,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := seedEvict(t, st, clk, evictSeed{account: "acme", folder: "Archive", uid: 9, arrived: t10Start.Add(-oneDay), raw: evictTextRaw("newword")})[0]
+	victims, err := st.capVictims(ctx, map[string]int64{"acme": t10Start.Add(-30 * oneDay).Unix()}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _, err := st.dropBodies(ctx, victims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || hasBody(t, st, r) {
+		t.Fatalf("dropBodies = %d, body cached %t, want the window body gone", n, hasBody(t, st, r))
+	}
+	p, _, err := st.Progress(ctx, "acme", "Archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.WindowDone {
+		t.Error("Archive's window_done stayed set after losing a window body")
+	}
+}

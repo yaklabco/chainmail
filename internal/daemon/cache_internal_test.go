@@ -129,6 +129,48 @@ func TestOpenCache(t *testing.T) {
 	}
 }
 
+// An existing cache_dir keeps its mode, but cache.db in it is 0600 even
+// when the directory and an earlier cache.db were readable by others.
+func TestOpenCachePrivateInExistingDirectory(t *testing.T) {
+	t.Parallel()
+	for _, existing := range []bool{false, true} {
+		t.Run("existing cache.db "+strconv.FormatBool(existing), func(t *testing.T) {
+			t.Parallel()
+			dir := filepath.Join(t.TempDir(), "cache")
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			db := filepath.Join(dir, cacheFile)
+			if existing {
+				if err := os.WriteFile(db, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(db, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s, _ := newTestServerOptions(t, cacheConfig, Options{CacheDir: dir})
+			s.openCache(t.Context())
+			t.Cleanup(s.closeCache)
+			if s.cache == nil {
+				t.Fatalf("cache.db did not open: %v", s.cacheErr)
+			}
+			for path, want := range map[string]fs.FileMode{dir: 0o755, db: 0o600} {
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := info.Mode().Perm(); got != want {
+					t.Errorf("%s mode = %o, want %o", filepath.Base(path), got, want)
+				}
+			}
+		})
+	}
+}
+
 // newCacheServer builds a never-served Server with cache.db open in a
 // directory of its own, as Serve opens it.
 func newCacheServer(t *testing.T, configTOML string) (*Server, *sql.DB) {
@@ -715,5 +757,30 @@ func TestCacheStatusReadFails(t *testing.T) {
 	}
 	if s.cacheDown.Load() {
 		t.Error("a status read that failed without a full disk turned the cache off")
+	}
+}
+
+// TestCacheWorkerErrorsTurnTheCacheOff checks that a cache worker's
+// OnError is the daemon's noteCacheErr: a full disk a worker meets turns
+// the cache off at once, and other errors leave it on.
+func TestCacheWorkerErrorsTurnTheCacheOff(t *testing.T) {
+	t.Parallel()
+	s, _ := newCacheServer(t, cacheConfig)
+	s.cacheAccounts = map[string]*cache.Account{"host": new(cache.Account)}
+	acct, err := s.opts.Config.Account("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	onError := s.cacheAccountOptions(acct).OnError
+	if onError == nil {
+		t.Fatal("the cache worker has no OnError")
+	}
+	onError(errors.New("SQLITE_BUSY"))
+	if s.cacheDown.Load() {
+		t.Fatal("an error other than a full disk turned the cache off")
+	}
+	onError(fmt.Errorf("storing headers: %w", cache.ErrDiskFull))
+	if !s.cacheDown.Load() || s.cacheAccount("host") != nil {
+		t.Error("a worker's full disk did not turn the cache off")
 	}
 }

@@ -283,27 +283,46 @@ func storedBodyText(ctx context.Context, tx *sql.Tx, id int64) (string, error) {
 // PutRows upserts rows in one transaction and writes their FTS header terms.
 // An upsert of an existing key keeps its body and body FTS terms.
 func (s *Store) PutRows(ctx context.Context, rows []Row) error {
+	_, err := s.putRows(ctx, rows, time.Time{})
+	return err
+}
+
+// PutNewRows upserts rows as PutRows does and, in the same transaction,
+// clears window_done on each folder that got a row with internal_date at
+// or after windowStart and no body: the folder's prefetch window lacks
+// that body until the prefetcher stores it. It reports whether any such
+// row was written. A zero windowStart (no prefetch window) clears nothing.
+func (s *Store) PutNewRows(ctx context.Context, rows []Row, windowStart time.Time) (bool, error) {
+	return s.putRows(ctx, rows, windowStart)
+}
+
+// putRows is PutRows and PutNewRows.
+func (s *Store) putRows(ctx context.Context, rows []Row, windowStart time.Time) (bool, error) {
 	if len(rows) == 0 {
-		return nil
+		return false, nil
 	}
 	now := s.now().Unix()
 	args := make([][]any, len(rows))
 	for i, r := range rows {
 		if r.Account == "" || r.Folder == "" || r.UIDValidity == 0 || r.UID == 0 {
-			return fmt.Errorf("putting rows: row %d lacks its account, folder, UIDVALIDITY or UID", i)
+			return false, fmt.Errorf("putting rows: row %d lacks its account, folder, UIDVALIDITY or UID", i)
 		}
 		a, err := rowArgs(r, now)
 		if err != nil {
-			return fmt.Errorf("putting rows: %w", err)
+			return false, fmt.Errorf("putting rows: %w", err)
 		}
 		args[i] = a
 	}
-	return s.inTx(ctx, "putting rows", func(tx *sql.Tx) error {
+	uncovered := false
+	err := s.inTx(ctx, "putting rows", func(tx *sql.Tx) error {
 		upsert, err := tx.PrepareContext(ctx, upsertRow)
 		if err != nil {
 			return err
 		}
 		defer func() { _ = upsert.Close() }() // closing a prepared statement only frees it
+		// open holds the account and folder of each row inside the window
+		// with no body.
+		open := map[[2]string]bool{}
 		for i, r := range rows {
 			var id int64
 			if err := upsert.QueryRowContext(ctx, args[i]...).Scan(&id); err != nil {
@@ -316,9 +335,29 @@ func (s *Store) PutRows(ctx context.Context, rows []Row) error {
 			if err := writeFTS(ctx, tx, id, r, body); err != nil {
 				return err
 			}
+			if windowStart.IsZero() || r.InternalDate.Before(windowStart) {
+				continue
+			}
+			var has bool
+			if err := tx.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM bodies WHERE msg = ?)", id).Scan(&has); err != nil {
+				return fmt.Errorf("checking the body of %s UID %d: %w", r.Folder, r.UID, err)
+			}
+			if !has {
+				open[[2]string{r.Account, r.Folder}] = true
+			}
 		}
+		for k := range open {
+			if _, err := tx.ExecContext(ctx, "UPDATE folders SET window_done = 0 WHERE account = ? AND folder = ?", k[0], k[1]); err != nil {
+				return fmt.Errorf("clearing window_done of %s: %w", k[1], err)
+			}
+		}
+		uncovered = len(open) > 0
 		return nil
 	})
+	if err != nil {
+		return false, err
+	}
+	return uncovered, nil
 }
 
 // SetFlags updates a cached row's flags and labels; false when no row.
