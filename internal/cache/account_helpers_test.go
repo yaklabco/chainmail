@@ -178,10 +178,14 @@ func (m *acctOrderMail) folders() []string {
 
 // acctSettings are the cache settings every rig starts with: the config
 // defaults, except that backfill_pause is 0 so batches need no clock
-// advance.
+// advance, and prefetch_bodies is 0 (bodies only on read) so the body
+// prefetcher Run starts stays idle. It neither fetches bodies, which
+// would charge the download budget, nor waits on any timer but its idle
+// minute, which builder and backfill tests never expect. A test that
+// needs the window sets it with setSettings, as TestWindowCovers does.
 func acctSettings() config.CacheSettings {
 	return config.CacheSettings{
-		Enabled: true, PrefetchBodies: 90 * 24 * time.Hour, ReadRetention: 30 * 24 * time.Hour,
+		Enabled: true, PrefetchBodies: 0, ReadRetention: 30 * 24 * time.Hour,
 		DailyDownload: 1 << 30, BackfillBatch: 250, BackfillPause: 0, FreshLag: 30 * time.Second,
 	}
 }
