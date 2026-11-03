@@ -72,9 +72,12 @@ type SupervisorOptions struct {
 
 // Supervisor watches and syncs one account: one watcher loop per watched
 // folder, each on its own connection, and one poller for the synced folders
-// that are not watched. Spec section 5 describes its failure handling. Auth
-// parks the whole account: every loop stops, every known folder's row says
-// auth_required, and one account-wide status event carries the hint.
+// that are not watched. On a SyncAuto account the poller's folders are the
+// ones a default search covers, less the watched ones, resolved when each
+// session starts and every expunge_sweep. Spec section 5 describes its
+// failure handling. Auth parks the whole account: every loop stops, every
+// known folder's row says auth_required, and one account-wide status event
+// carries the hint.
 type Supervisor struct {
 	o          SupervisorOptions
 	clock      Clock
@@ -89,11 +92,14 @@ type Supervisor struct {
 	writeStatus   func(ctx context.Context, account, folder string, mode Mode, state Status, lastError string) error
 	publishEvents func(ctx context.Context, events ...Event) error
 
-	// mu guards statuses: the row last written and the status last
-	// published per folder, keyed by name, "" for the account-wide status.
-	// Its folders other than "" are the ones a parking records.
+	// mu guards statuses and auto. statuses holds the row last written and
+	// the status last published per folder, keyed by name, "" for the
+	// account-wide status; its folders other than "" are the ones a parking
+	// records. auto is a SyncAuto account's polled set as last resolved,
+	// which the next session's poller starts from.
 	mu       sync.Mutex
 	statuses map[string]folderStatus
+	auto     []string
 }
 
 // NewSupervisor returns a supervisor for o.Account. A nil Clock, Jitter,
@@ -103,6 +109,7 @@ func NewSupervisor(o SupervisorOptions) *Supervisor {
 	s := &Supervisor{
 		o: o, clock: o.Clock, jitter: o.Jitter, logger: o.Logger,
 		settings: o.Settings, syncPoll: o.Account.SyncPoll, statuses: map[string]folderStatus{},
+		auto: polledFolders(o.Account),
 	}
 	if s.clock == nil {
 		s.clock = realClock
@@ -210,8 +217,14 @@ func (s *Supervisor) active(ctx context.Context) (park bool, hint string) {
 		for _, folder := range s.o.Account.Watch {
 			loops.Go(func() { s.watchLoop(actx, p, folder) })
 		}
-		if polled := polledFolders(s.o.Account); len(polled) > 0 {
-			loops.Go(func() { s.pollLoop(actx, p, polled) })
+		folders := polledFolders(s.o.Account)
+		if s.o.Account.SyncAuto {
+			// The poller resolves the set again before its first poll; it
+			// starts from the last set when that fails.
+			folders = s.autoSet()
+		}
+		if len(folders) > 0 || s.o.Account.SyncAuto {
+			loops.Go(func() { s.pollLoop(actx, p, folders) })
 		}
 	}
 	done := make(chan struct{})
@@ -405,18 +418,29 @@ type polled struct {
 }
 
 // pollLoop polls folders until ctx ends, each every sync.poll, starting at
-// once so they catch up from their checkpoints. A folder's failure stays
-// its own: a missing folder retries every sync.poll and an outage with
-// backoff capped at sync.poll. An auth failure parks the account through p.
+// once so they catch up from their checkpoints. On a SyncAuto account it
+// first resolves the polled set again, and again every expunge_sweep
+// (refreshAuto), so folders is only where it starts. A folder's failure
+// stays its own: a missing folder retries every sync.poll and an outage
+// with backoff capped at sync.poll. An auth failure parks the account
+// through p.
 func (s *Supervisor) pollLoop(ctx context.Context, p *parker, folders []string) {
 	sched := make([]*polled, 0, len(folders))
 	for _, f := range folders {
 		sched = append(sched, &polled{folder: f})
 	}
+	var listedAt time.Time // when refreshAuto last ran; zero runs it at once
 	for {
 		if need, hint := s.o.AuthRequired(s.o.Account.Name); need {
 			p.park(hint)
 			return
+		}
+		if s.o.Account.SyncAuto && !s.clock.Now().Before(listedAt.Add(s.settings.ExpungeSweep)) {
+			listedAt = s.clock.Now()
+			sched = s.refreshAuto(ctx, sched)
+			if ctx.Err() != nil {
+				return
+			}
 		}
 		for _, pf := range sched {
 			// Each folder reads the clock for itself, so one that took
@@ -438,13 +462,7 @@ func (s *Supervisor) pollLoop(ctx context.Context, p *parker, folders []string) 
 				return
 			}
 		}
-		next := sched[0].next
-		for _, pf := range sched[1:] {
-			if pf.next.Before(next) {
-				next = pf.next
-			}
-		}
-		if !s.sleep(ctx, next.Sub(s.clock.Now())) {
+		if !s.sleep(ctx, s.nextPoll(sched, listedAt).Sub(s.clock.Now())) {
 			return
 		}
 	}
