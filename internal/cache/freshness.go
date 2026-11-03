@@ -25,7 +25,8 @@ const (
 // within twice sync.poll (else stale), and has finished its backfill under
 // that UIDVALIDITY (else backfilling), checked in that order and in folder
 // order. The account is then stale while the builder has an event of the
-// account older than fresh_lag still to apply, or has not opened its group.
+// account older than fresh_lag, or a trimmed gap, still to apply, or has
+// not opened its group.
 func (a *Account) Freshness(ctx context.Context, folders []string) (ok bool, reason string, syncedAt time.Time, err error) {
 	rows, err := a.syncRows(ctx)
 	if err != nil {
@@ -85,17 +86,37 @@ func (a *Account) syncFresh(r watch.FolderRow, now time.Time) bool {
 }
 
 // lagging reports whether the builder has not opened its group yet, or has
-// an event of the account older than cutoff still to apply.
+// an event of the account still to apply that is older than cutoff or is a
+// trimmed gap. A trimmed gap means events were lost, so it is stale at once,
+// though Read stamps it with the current time. A Read examines at most 5000
+// events, so an empty page short of the tail reads on from its Next; a ctx
+// that ends while it does reports stale.
 func (a *Account) lagging(ctx context.Context, cutoff time.Time) (bool, error) {
 	applied := a.applied.Load()
 	if applied < 0 {
 		return true, nil
 	}
-	page, err := a.o.Log.Read(ctx, watch.Query{After: applied, Filter: watch.Filter{Accounts: []string{a.name}}, Limit: 1})
+	tail, err := a.o.Log.Tail(ctx)
 	if err != nil {
 		return false, err
 	}
-	return len(page.Events) > 0 && page.Events[0].At.Before(cutoff), nil
+	for after := applied; ; {
+		page, err := a.o.Log.Read(ctx, watch.Query{After: after, Filter: watch.Filter{Accounts: []string{a.name}}, Limit: 1})
+		if err != nil {
+			if ctx.Err() != nil {
+				return true, nil
+			}
+			return false, err
+		}
+		if len(page.Events) > 0 {
+			e := page.Events[0]
+			return (e.Kind == watch.KindGap && e.Reason == watch.GapTrimmed) || e.At.Before(cutoff), nil
+		}
+		if page.Next >= tail || page.Next <= after {
+			return false, nil
+		}
+		after = page.Next
+	}
 }
 
 // WindowCovers reports whether since is inside the prefetch window and

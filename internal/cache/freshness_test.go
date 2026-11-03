@@ -206,3 +206,61 @@ func TestWindowCovers(t *testing.T) {
 		})
 	}
 }
+
+// freshRig is a rig whose INBOX is watching with its backfill done, and
+// whose builder has applied the log up to its current tail, so only the
+// events published after it decide Freshness.
+func freshRig(t *testing.T) *acctRig {
+	t.Helper()
+	r := newAcctRig(t, fake.New("acme", false), acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	r.putFolder(watch.FolderRow{Account: "acme", Folder: "INBOX", UIDValidity: 7, UIDNext: 10, Mode: watch.ModeIdle, State: watch.StateWatching, LastSyncAt: acctStart})
+	if err := r.store.PutProgress(t.Context(), Progress{Account: "acme", Folder: "INBOX", UIDValidity: 7, BaselineUIDNext: 10, BackfillLowUID: 1, BackfillDone: true}); err != nil {
+		t.Fatal(err)
+	}
+	r.a.applied.Store(r.tail())
+	return r
+}
+
+// freshEvent is a new event of account in INBOX at at.
+func freshEvent(account string, at time.Time) watch.Event {
+	return watch.Event{At: at, Kind: watch.KindNew, Account: account, Folder: "INBOX", Ref: "cm1:lag", Message: &watch.Message{Subject: "lag"}}
+}
+
+// A trimmed gap still to apply means the builder lost events, so the
+// account is stale at once, though Read stamps the gap with the current
+// time.
+func TestFreshnessStaleWithATrimmedGapPending(t *testing.T) {
+	t.Parallel()
+	r := freshRig(t)
+	r.publish(freshEvent("acme", acctStart), freshEvent("acme", acctStart), freshEvent("acme", acctStart))
+	if _, err := r.log.Trim(t.Context(), 168*time.Hour, 1); err != nil {
+		t.Fatal(err)
+	}
+	ok, reason, _, err := r.a.Freshness(t.Context(), []string{"INBOX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok || reason != ReasonStale {
+		t.Errorf("Freshness = %v, %q; want false, %q with a trimmed gap pending", ok, reason, ReasonStale)
+	}
+}
+
+// An old event of the account behind more than one Read's scan of other
+// accounts' events still makes the account stale.
+func TestFreshnessFindsALagBehindOtherAccounts(t *testing.T) {
+	t.Parallel()
+	r := freshRig(t)
+	others := make([]watch.Event, 5001)
+	for i := range others {
+		others[i] = freshEvent("other", acctStart)
+	}
+	r.publish(others...)
+	r.publish(freshEvent("acme", acctStart.Add(-time.Hour)))
+	ok, reason, _, err := r.a.Freshness(t.Context(), []string{"INBOX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok || reason != ReasonStale {
+		t.Errorf("Freshness = %v, %q; want false, %q with an old event past one scan", ok, reason, ReasonStale)
+	}
+}
