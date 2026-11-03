@@ -13,6 +13,7 @@ import (
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/gen/chainmail/v1/chainmailv1connect"
 	"github.com/jamesainslie/chainmail/internal/api"
+	"github.com/jamesainslie/chainmail/internal/audit"
 	"github.com/jamesainslie/chainmail/internal/cache"
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
@@ -251,4 +252,69 @@ func (s *Server) cacheAccountOptions(acct config.ResolvedAccount) cache.AccountO
 		},
 		Logger: s.opts.Logger,
 	}
+}
+
+// allFolders is the audit target of a rebuild of every folder.
+const allFolders = "folder=(all)"
+
+// errCacheOff refuses a cache action on an account that has no cache worker.
+var errCacheOff = &argError{
+	msg:  "the account's cache is not running",
+	hint: "the cache needs [cache] enabled and sync on the account; run: chainmail cache status",
+}
+
+// RebuildCache implements chainmailv1connect.CacheServiceHandler. It drops
+// the cached rows of one folder, or of every folder the account's cache
+// tracks, and the backfill fills them again. It records cache.rebuild with
+// the folder, or folder=(all), and how many folders it dropped.
+func (c *cacheService) RebuildCache(ctx context.Context, req *connect.Request[chainmailv1.RebuildCacheRequest]) (*connect.Response[chainmailv1.RebuildCacheResponse], error) {
+	caller, err := callerOf(ctx, req.Header())
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := withDeadline(ctx, callTimeout)
+	defer cancel()
+	account, rebuildErr := accountTarget(req.Msg.GetAccount())
+	folder := req.Msg.GetFolder()
+	target := allFolders
+	if folder != "" {
+		target = folderTarget(folder)
+	}
+	var folders []string
+	if rebuildErr == nil {
+		folders, rebuildErr = c.s.rebuildCache(ctx, account, folder)
+	}
+	entry := audit.Entry{Account: account, Action: "cache.rebuild", Targets: []string{target, tally("rebuilt", len(folders))}}
+	if err := c.s.record(ctx, caller, entry, rebuildErr); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&chainmailv1.RebuildCacheResponse{Folders: folders}), nil
+}
+
+// rebuildCache rebuilds folder, or every tracked folder when it is "", of
+// account's cache. A folder the cache does not track is the worker's
+// *mailstore.FolderNotFoundError, NOT_FOUND.
+func (s *Server) rebuildCache(ctx context.Context, account, folder string) ([]string, error) {
+	acct, err := s.opts.Config.Account(account)
+	if err != nil {
+		return nil, err
+	}
+	ca := s.cacheAccounts[acct.Name]
+	if ca == nil {
+		return nil, errCacheOff
+	}
+	if folder != "" {
+		if err := checkName("folder", folder); err != nil {
+			return nil, err
+		}
+	}
+	folders, err := ca.Rebuild(ctx, folder)
+	if _, ok := errors.AsType[*mailstore.FolderNotFoundError](err); ok {
+		return nil, err
+	}
+	if err != nil {
+		return nil, s.cacheFailure(err)
+	}
+	s.opts.Logger.Info("cache rebuild", "account", acct.Name, "folders", len(folders))
+	return folders, nil
 }

@@ -1,6 +1,7 @@
 package daemon_test
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -171,5 +172,53 @@ func TestCacheStatusFollowsTheWorkers(t *testing.T) {
 	}
 	if rows := cacheAudit(t, h); len(rows) != 0 {
 		t.Errorf("cache audit rows = %+v, want none", rows)
+	}
+}
+
+// RebuildCache drops one folder or every tracked folder and the workers
+// fill it again; a folder the cache does not track is NOT_FOUND, an account
+// without a cache worker INVALID_ARGUMENT, and every call is audited.
+func TestRebuildCache(t *testing.T) {
+	t.Parallel()
+	h, _ := startTwoMessages(t)
+	rebuild := func(account, folder string) ([]string, error) {
+		resp, err := h.Client.Cache.RebuildCache(t.Context(), connect.NewRequest(&chainmailv1.RebuildCacheRequest{Account: account, Folder: folder}))
+		if err != nil {
+			return nil, err
+		}
+		return resp.Msg.GetFolders(), nil
+	}
+
+	got, err := rebuild("host", "INBOX")
+	if err != nil || !slices.Equal(got, []string{"INBOX"}) {
+		t.Fatalf("rebuild INBOX = %v, %v; want [INBOX]", got, err)
+	}
+	awaitCacheFolder(t, h, "host", "INBOX", cached(2))
+
+	if _, err := rebuild("host", "Nope"); reasonOf(err) != api.ReasonNotFound {
+		t.Errorf("rebuild of an untracked folder: %v, want NOT_FOUND", err)
+	}
+	if _, err := rebuild("off", ""); reasonOf(err) != api.ReasonInvalidArgument {
+		t.Errorf("rebuild of an account without a cache: %v, want INVALID_ARGUMENT", err)
+	}
+	if _, err := rebuild("nope", ""); reasonOf(err) != api.ReasonNotFound {
+		t.Errorf("rebuild of an unknown account: %v, want NOT_FOUND", err)
+	}
+
+	all, err := rebuild("host", "")
+	if err != nil || !slices.Contains(all, "INBOX") {
+		t.Fatalf("rebuild of every folder = %v, %v; want INBOX among them", all, err)
+	}
+	awaitCacheFolder(t, h, "host", "INBOX", cached(2))
+
+	want := []daemontest.AuditRow{
+		{Client: "test", Account: "host", Action: "cache.rebuild", Targets: `["folder=INBOX","rebuilt=1"]`, Result: "ok"},
+		{Client: "test", Account: "host", Action: "cache.rebuild", Targets: `["folder=Nope","rebuilt=0"]`, Result: "error", Reason: api.ReasonNotFound},
+		{Client: "test", Account: "off", Action: "cache.rebuild", Targets: `["folder=(all)","rebuilt=0"]`, Result: "error", Reason: api.ReasonInvalidArgument},
+		{Client: "test", Account: "nope", Action: "cache.rebuild", Targets: `["folder=(all)","rebuilt=0"]`, Result: "error", Reason: api.ReasonNotFound},
+		{Client: "test", Account: "host", Action: "cache.rebuild", Targets: fmt.Sprintf(`["folder=(all)","rebuilt=%d"]`, len(all)), Result: "ok"},
+	}
+	if got := cacheAudit(t, h); !slices.Equal(got, want) {
+		t.Errorf("audit rows =\n%+v\nwant\n%+v", got, want)
 	}
 }
