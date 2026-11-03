@@ -48,16 +48,22 @@ auth = "password"
 
 // searchServer wraps a fake store and records the UIDs of every
 // FetchSummaries call, to show which rows the view asked the server for.
+// While fail is set, FetchSummaries returns it after recording the call.
 type searchServer struct {
 	*fake.Store
 	mu    sync.Mutex
 	asked [][]uint32
+	fail  error
 }
 
 func (s *searchServer) FetchSummaries(ctx context.Context, src mailstore.Source, uids []uint32, opts mailstore.SummaryOptions) ([]mailstore.Summary, error) {
 	s.mu.Lock()
 	s.asked = append(s.asked, slices.Clone(uids))
+	fail := s.fail
 	s.mu.Unlock()
+	if fail != nil {
+		return nil, fail
+	}
 	return s.Store.FetchSummaries(ctx, src, uids, opts)
 }
 
@@ -65,6 +71,12 @@ func (s *searchServer) summaryCalls() [][]uint32 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.asked)
+}
+
+func (s *searchServer) failSummaries(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fail = err
 }
 
 // searchFixture is one account's cache, built by hand as a finished
@@ -552,6 +564,50 @@ func TestViewFetchSummariesRepeatedMissingUID(t *testing.T) {
 		t.Fatalf("%d rows, want %d", len(got), len(want))
 	}
 	for i := range want {
+		if g, w := snippetText(got[i]), snippetText(want[i]); g != w || g == "" {
+			t.Errorf("row %d snippet = %q, want %q", i, g, w)
+		}
+	}
+}
+
+// TestViewFetchSummariesKeepsCachedRowsWhenTheServerFails checks that a
+// failed server snippet fill does not discard the page: every row comes
+// back, rows with a cached body keep their snippets, and the rows the
+// server could not fill have none.
+func TestViewFetchSummariesKeepsCachedRowsWhenTheServerFails(t *testing.T) {
+	t.Parallel()
+	f := newSearchFixture(t, false)
+	seedSearchMail(f.server.Store, false)
+	f.warm(t)
+	late := f.server.Add(fake.Message{Folder: "INBOX", Date: searchDaysAgo(0), Subject: "late", Body: "arrived after the prefetch"})
+	f.cacheFolder(t, mailstore.Source{Folder: "INBOX", UIDValidity: late.UIDValidity}, []uint32{late.UID}, false)
+	results, err := f.server.Search(t.Context(), mailstore.SearchRequest{In: "inbox"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := results[0]
+	want, err := f.server.FetchSummaries(t.Context(), inbox.Source, inbox.UIDs, mailstore.SummaryOptions{Snippets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.server.failSummaries(mailstore.ErrUnavailable)
+	got, err := f.view.FetchSummaries(t.Context(), inbox.Source, inbox.UIDs, mailstore.SummaryOptions{Snippets: true})
+	if err != nil {
+		t.Fatalf("FetchSummaries: %v, want the cached rows", err)
+	}
+	if len(got) != len(want) || len(got) < 2 {
+		t.Fatalf("%d rows, want %d (at least 2)", len(got), len(want))
+	}
+	for i := range want {
+		if d := diffSummary(got[i], want[i]); d != "" {
+			t.Errorf("row %d: %s", i, d)
+		}
+		if got[i].Ref.UID == late.UID {
+			if got[i].Preview != nil || got[i].Sample != nil {
+				t.Errorf("row %d (no cached body): preview %v, sample %v, want neither", i, got[i].Preview, got[i].Sample)
+			}
+			continue
+		}
 		if g, w := snippetText(got[i]), snippetText(want[i]); g != w || g == "" {
 			t.Errorf("row %d snippet = %q, want %q", i, g, w)
 		}

@@ -85,7 +85,8 @@ func (v *View) searchScope(ctx context.Context, req mailstore.SearchRequest) ([]
 // UIDVALIDITY. With snippets, each row whose body is cached gets its
 // snippet from it, as the rendered text's first characters; the rows
 // without one get theirs from a single server FetchSummaries for those
-// UIDs only.
+// UIDs only. When that call fails, those rows come back with no snippet
+// and the failure is logged, unless ctx has ended.
 func (v *View) FetchSummaries(ctx context.Context, src mailstore.Source, uids []uint32, opts mailstore.SummaryOptions) ([]mailstore.Summary, error) {
 	if len(uids) == 0 {
 		return nil, nil
@@ -134,7 +135,12 @@ func (v *View) FetchSummaries(ctx context.Context, src mailstore.Source, uids []
 	}
 	sums, err := v.server.FetchSummaries(ctx, src, missing, mailstore.SummaryOptions{Snippets: true})
 	if err != nil {
-		return nil, err
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		// The cached rows still answer the page; only these snippets are lost.
+		v.a.o.Logger.WarnContext(ctx, "the server could not fill the snippets the cache lacks; those rows have none", "folder", src.Folder, "rows", len(missing), "reason", reasonCode(err))
+		return out, nil
 	}
 	for _, s := range sums {
 		for _, i := range at[s.Ref.UID] {
