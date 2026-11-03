@@ -24,6 +24,10 @@ type Plan struct {
 // child, or an unknown node kind.
 var errMalformedQuery = errors.New("malformed query tree")
 
+// planFolderNotSynced is the reason of a plan that searches a folder the
+// cache never holds. It is an incomplete_reason value of the search API.
+const planFolderNotSynced = "folder_not_synced"
+
 // likeEscape follows every LIKE: likeEscaper marks %, _ and \ in the value
 // with a backslash, so they match themselves.
 const likeEscape = ` ESCAPE '\'`
@@ -47,16 +51,62 @@ var normColumns = map[query.Field]string{
 // path's dialect uses, so both pick the same day.
 func Compile(n *query.Node, in string, gmail bool, now time.Time) (Plan, error) {
 	c := &compiler{gmail: gmail, now: now}
-	var p Plan
+	var (
+		conds     []string
+		args      []any
+		notSynced bool
+	)
+	if gmail {
+		sql, a, synced := gmailIn(in)
+		notSynced = !synced
+		if sql != "" {
+			conds, args = append(conds, sql), append(args, a...)
+		}
+	}
 	if n != nil {
-		sql, args, err := c.node(n)
+		sql, a, err := c.node(n)
 		if err != nil {
 			return Plan{}, err
 		}
-		p.Where = Where{SQL: sql, Args: args}
+		conds, args = append(conds, sql), append(args, a...)
 	}
-	p.ServerOnly = c.unsupported
+	p := Plan{Where: Where{SQL: strings.Join(conds, " AND "), Args: args}}
+	switch {
+	case notSynced:
+		p.ServerOnly, p.Reason = true, planFolderNotSynced
+	case c.unsupported:
+		p.ServerOnly = true
+	}
 	return p, nil
+}
+
+// gmailIn compiles the in: value of a Google account, where every message
+// lives once in All Mail and in: names a label, as compileGmail sends it
+// to X-GM-RAW. synced is false for trash, spam, junk and anywhere, whose
+// folders lie outside All Mail: the cache holds none of their messages.
+func gmailIn(in string) (sql string, args []any, synced bool) {
+	switch strings.ToLower(in) {
+	case "":
+		return "", nil, true
+	case "trash", "spam", "junk", "anywhere":
+		return "", nil, false
+	case "inbox":
+		sql, args = likeElement("m.labels_norm", `\Inbox`)
+	case "archive":
+		sql, args = likeElement("m.labels_norm", `\Inbox`)
+		sql = "NOT (" + sql + ")"
+	case "sent":
+		sql, args = likeElement("m.labels_norm", `\Sent`)
+	case "drafts":
+		sql, args = likeElement("m.labels_norm", `\Draft`)
+	case "starred":
+		sql, args = likeElement("m.flags_norm", `\Flagged`)
+	case "important":
+		sql, args = likeElement("m.labels_norm", `\Important`)
+	default:
+		sql, args = likeElement("m.labels_norm", in)
+	}
+	return sql, args, true
 }
 
 // compiler holds what compiling one tree needs and learns.

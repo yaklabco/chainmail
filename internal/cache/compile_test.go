@@ -286,3 +286,59 @@ func TestCompileNil(t *testing.T) {
 		}
 	}
 }
+
+// TestCompileGmail checks in:, label: and is: on a Google account, where
+// every message lives once in All Mail and in: names a label, and that
+// in:trash, in:spam, in:junk and in:anywhere, whose folders the cache does
+// not hold, are server-only.
+func TestCompileGmail(t *testing.T) {
+	t.Parallel()
+	s := openCompileStore(t)
+	runCompileCases(t, s, true, []compileCase{
+		{"", []uint32{15, 14, 13, 12, 11}},
+		{"in:inbox", []uint32{15, 11}},
+		{"in:INBOX", []uint32{15, 11}},
+		{"in:archive", []uint32{14, 13, 12}},
+		{"in:sent", []uint32{13}},
+		{"in:drafts", []uint32{14}},
+		{"in:starred", []uint32{12}},
+		{"in:important", []uint32{11}},
+		{"in:receipts", []uint32{12}},
+		{"in:Receipts", []uint32{12}},
+		{"in:work/clients", []uint32{15}},
+		{"label:receipts", []uint32{12}},
+		{"label:work", nil},
+		{"label:work/clients", []uint32{15}},
+		{`label:\Inbox`, []uint32{15, 11}},
+		{"is:unread", []uint32{15, 14, 12}},
+		{"is:starred", []uint32{12}},
+		{"in:inbox is:unread", []uint32{15}},
+		{"in:archive label:receipts", []uint32{12}},
+	})
+
+	// is:important passes no validation, but a direct caller gets the label.
+	got, p := compileSearchTree(t, s, true, query.Term(query.FieldIs, "important"), "")
+	if !slices.Equal(got, []uint32{11}) || p.ServerOnly {
+		t.Errorf("is:important on Google = %v, ServerOnly %v; want [11], false", got, p.ServerOnly)
+	}
+	_, p = compileSearchTree(t, s, false, query.Term(query.FieldIs, "important"), "")
+	if !p.ServerOnly {
+		t.Error("is:important off Google is not ServerOnly")
+	}
+
+	for _, in := range []string{"trash", "spam", "junk", "anywhere", "Trash"} {
+		got, p := compileSearch(t, s, true, "in:"+in)
+		if !slices.Equal(got, []uint32{15, 14, 13, 12, 11}) {
+			t.Errorf("in:%s = %v, want every All Mail row", in, got)
+		}
+		if !p.ServerOnly || p.Reason != "folder_not_synced" {
+			t.Errorf("in:%s: ServerOnly %v, Reason %q; want true, folder_not_synced", in, p.ServerOnly, p.Reason)
+		}
+	}
+
+	// Off Google in: is ignored here: SearchFolders picks the folders.
+	got, p = compileSearch(t, s, false, "in:trash")
+	if !slices.Equal(got, []uint32{5, 4, 3, 2, 1}) || p.ServerOnly {
+		t.Errorf("in:trash off Google = %v, ServerOnly %v; want every row, false", got, p.ServerOnly)
+	}
+}
