@@ -9,6 +9,8 @@ import (
 	"github.com/spf13/pflag"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/query"
 	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
 )
 
@@ -64,6 +66,11 @@ func TestCompleteSearchTerms(t *testing.T) {
 		{toComplete: "in:Arc", want: []string{"in:Archive"}},
 		{toComplete: "in:in", want: []string{"in:inbox"}},
 		{toComplete: "label:[Gm", want: []string{}},
+		// in: and account: choose where to search and cannot be negated.
+		{toComplete: "-i", want: []string{"-is:"}},
+		{toComplete: "-a", want: []string{"-after:"}},
+		{toComplete: "-in:in", want: []string{}},
+		{toComplete: "-account:", want: []string{}},
 	}
 	for _, tt := range tests {
 		args := []string{"search", "invoice", tt.toComplete}
@@ -85,6 +92,105 @@ func TestCompleteSearchTerms(t *testing.T) {
 	}
 }
 
+func TestCompleteSearchLabelsOnGoogleAccountsOnly(t *testing.T) {
+	t.Parallel()
+	m := startCLIMail(t)
+	m.gmail.AddFolder("Receipts", mailstore.RoleNone)
+	m.host.AddFolder("Projects", mailstore.RoleNone)
+	cands, _ := completeArgs(t, sockEnv(m.socket), "search", "label:")
+	if got, want := values(cands), []string{"label:Receipts"}; !slices.Equal(got, want) {
+		t.Errorf("label: %q, want %q", got, want)
+	}
+	cands, _ = completeArgs(t, sockEnv(m.socket), "search", "in:Pro")
+	if got, want := values(cands), []string{"in:Projects"}; !slices.Equal(got, want) {
+		t.Errorf("in:Pro %q, want %q", got, want)
+	}
+}
+
+// TestCompleteSearchTermsRoundTrip parses every completed in: and label:
+// term and checks it names exactly the folder it was completed from, so a
+// folder name the query language reads as syntax is never offered.
+func TestCompleteSearchTermsRoundTrip(t *testing.T) {
+	t.Parallel()
+	m := startCLIMail(t)
+	names := []string{
+		"Receipts", "Work:2024", "Ünïcode", "-dash", "a\\b",
+		"Receipts OR subject:secret", "(paren", "close)", `quo"te`, "nb\u00a0sp", "ideo\u3000sp", " Lead", "Trail ",
+	}
+	for _, n := range names {
+		m.gmail.AddFolder(n, mailstore.RoleNone)
+	}
+	safe := []string{"Receipts", "Work:2024", "Ünïcode", "-dash", "a\\b"}
+	for _, op := range []string{"in", "label"} {
+		cands, _ := completeArgs(t, sockEnv(m.socket), "search", op+":")
+		var offered []string
+		for _, term := range values(cands) {
+			n, err := query.Parse(term)
+			if err != nil {
+				t.Errorf("%s does not parse: %v", term, err)
+				continue
+			}
+			if n.Op != query.OpTerm || string(n.Field) != op {
+				t.Errorf("%s parses as %s, want one %s: term", term, n, op)
+				continue
+			}
+			if want := strings.TrimPrefix(term, op+":"); n.Value != want {
+				t.Errorf("%s names %q, want %q", term, n.Value, want)
+			}
+			offered = append(offered, n.Value)
+		}
+		for _, s := range safe {
+			if !slices.Contains(offered, s) {
+				t.Errorf("%s: offered %q, want it to include %q", op, offered, s)
+			}
+		}
+		// Every other value is a role or a stock folder: none is a name
+		// from the list cleaned or cut short.
+		stock := append([]string{"INBOX", "Sent", "Drafts", "Archive", "Trash", "Junk"}, inRoles...)
+		for _, n := range offered {
+			if !slices.Contains(safe, n) && !slices.Contains(stock, n) && !strings.HasPrefix(n, "[Gmail]/") {
+				t.Errorf("%s: offered %q, which is not a folder a query can name bare", op, n)
+			}
+		}
+	}
+}
+
+// completionGaps lists the commands under root with no argument
+// completion and the value flags with no completion function, nil ones
+// included.
+func completionGaps(root *cobra.Command) []string {
+	var gaps []string
+	walk(root, func(c *cobra.Command) {
+		if c.Name() == "help" {
+			return
+		}
+		if c.ValidArgsFunction == nil {
+			gaps = append(gaps, c.CommandPath()+": no completion for its arguments")
+		}
+		c.LocalFlags().VisitAll(func(f *pflag.Flag) {
+			if f.Name == "help" || f.Value.Type() == "bool" {
+				return
+			}
+			if fn, ok := c.GetFlagCompletionFunc(f.Name); !ok || fn == nil {
+				gaps = append(gaps, c.CommandPath()+" --"+f.Name+": no completion")
+			}
+		})
+	})
+	return gaps
+}
+
+func TestCompletionGapsCatchesANilFlagHandler(t *testing.T) {
+	t.Parallel()
+	c := &cobra.Command{Use: "throwaway", ValidArgsFunction: noComplete}
+	c.Flags().String("name", "", "")
+	if err := c.RegisterFlagCompletionFunc("name", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := completionGaps(c), []string{"throwaway --name: no completion"}; !slices.Equal(got, want) {
+		t.Errorf("gaps %q, want %q", got, want)
+	}
+}
+
 // TestEveryArgumentAndFlagCompletes is the coverage gate: every command,
 // positional argument and flag in the tree has a completion, or is marked
 // free text with noComplete. Bool flags take no value.
@@ -93,24 +199,11 @@ func TestEveryArgumentAndFlagCompletes(t *testing.T) {
 	env := Env{Getenv: func(string) string { return "" }}
 	root := newRoot(t.Context(), env)
 	paths := map[string]bool{}
-	walk(root, func(c *cobra.Command) {
-		paths[c.CommandPath()] = true
-		if c.Name() == "help" {
-			return
-		}
-		if c.ValidArgsFunction == nil {
-			t.Errorf("%s: no completion for its arguments", c.CommandPath())
-		}
-		c.LocalFlags().VisitAll(func(f *pflag.Flag) {
-			if f.Name == "help" || f.Value.Type() == "bool" {
-				return
-			}
-			if _, ok := c.GetFlagCompletionFunc(f.Name); !ok {
-				t.Errorf("%s --%s: no completion", c.CommandPath(), f.Name)
-			}
-		})
-	})
-	cp := &completer{ctx: t.Context(), env: env, g: &globals{}}
+	walk(root, func(c *cobra.Command) { paths[c.CommandPath()] = true })
+	for _, gap := range completionGaps(root) {
+		t.Error(gap)
+	}
+	cp := &completer{env: env, g: &globals{}}
 	for path := range cp.specs() {
 		if !paths[path] {
 			t.Errorf("specs has %q, which is not a command", path)

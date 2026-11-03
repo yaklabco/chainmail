@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"connectrpc.com/connect"
-	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
@@ -46,35 +45,57 @@ func refAccounts(args []string) []string {
 	return out
 }
 
-// flagAccount returns the --account flag's value as a one-account list,
-// or nil when it is not set.
-func flagAccount(cmd *cobra.Command, _ []string) []string {
+// accountSelector picks the accounts a folder completion covers from the
+// command and its arguments: none means every account. It returns false
+// when there is nothing to look up, such as no Google account for labels.
+type accountSelector func(*cobra.Command, []string) ([]string, bool)
+
+// flagAccount selects the --account flag's value, or every account when
+// it is not set.
+func flagAccount(cmd *cobra.Command, _ []string) ([]string, bool) {
 	if a, err := cmd.Flags().GetString("account"); err == nil && a != "" {
-		return []string{a}
+		return []string{a}, true
 	}
-	return nil
+	return nil, true
 }
 
-// argAccounts is refAccounts as an accountsOf function.
-func argAccounts(_ *cobra.Command, args []string) []string { return refAccounts(args) }
+// argAccounts selects the accounts of the refs among the arguments, or
+// every account when there are none.
+func argAccounts(_ *cobra.Command, args []string) ([]string, bool) { return refAccounts(args), true }
 
-// anyAccount names no account, so a folder completion covers them all.
-func anyAccount(*cobra.Command, []string) []string { return nil }
+// anyAccount selects every account.
+func anyAccount(*cobra.Command, []string) ([]string, bool) { return nil, true }
 
-// folders completes folder names on the accounts accountsOf names (every
-// account when it names none) that keep accepts (nil for all), as up to
-// maxArgs positional arguments or a flag value when maxArgs is 0. A name
-// on several accounts is offered once, its description listing them.
-func (cp *completer) folders(accountsOf func(*cobra.Command, []string) []string, keep func(*chainmailv1.Folder) bool, maxArgs int, noSpace bool) cobra.CompletionFunc {
+// folderSpec is how one argument or flag completes folder names.
+type folderSpec struct {
+	// accounts picks the accounts whose folders are offered.
+	accounts accountSelector
+	// keep accepts the folders to offer; nil offers all.
+	keep func(*chainmailv1.Folder) bool
+	// maxArgs is how many positional arguments take a folder, or 0 for a
+	// flag value.
+	maxArgs int
+	// noSpace leaves the cursor after the name, for a new folder's name
+	// that the user goes on typing.
+	noSpace bool
+}
+
+// folders completes folder names as spec says. A name on several accounts
+// is offered once, its description listing them.
+func (cp *completer) folders(spec folderSpec) cobra.CompletionFunc {
 	return func(cmd *cobra.Command, args []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
 		directive := cobra.ShellCompDirectiveNoFileComp
-		if noSpace {
+		if spec.noSpace {
 			directive |= cobra.ShellCompDirectiveNoSpace
 		}
-		if maxArgs > 0 && len(args) >= maxArgs {
+		if spec.maxArgs > 0 && len(args) >= spec.maxArgs {
 			return nil, directive
 		}
-		lists, ok := cp.listFolders(cmd, accountsOf(cmd, args))
+		accounts, ok := spec.accounts(cmd, args)
+		if !ok {
+			return nil, directive
+		}
+		lists, ok := cp.listFolders(cmd, accounts)
 		if !ok {
 			return nil, directive
 		}
@@ -83,7 +104,7 @@ func (cp *completer) folders(accountsOf func(*cobra.Command, []string) []string,
 		for _, af := range lists {
 			for _, f := range af.GetFolders() {
 				name := f.GetName()
-				if !safeValue(name) || !strings.HasPrefix(name, toComplete) || (keep != nil && !keep(f)) {
+				if !safeValue(name) || !strings.HasPrefix(name, toComplete) || (spec.keep != nil && !spec.keep(f)) {
 					continue
 				}
 				if _, seen := where[name]; !seen {
@@ -112,16 +133,13 @@ func labelFolder(f *chainmailv1.Folder) bool {
 	return (role == "" || role == "none") && !strings.HasPrefix(f.GetName(), "[Gmail]/")
 }
 
-// noAccount is an account name no daemon has, so a folder lookup for it
-// offers nothing.
-const noAccount = "\x00"
-
-// googleAccounts returns the Google accounts among the typed refs' accounts,
-// or every Google account when no ref is typed.
-func (cp *completer) googleAccounts(cmd *cobra.Command, args []string) []string {
+// googleAccounts selects the Google accounts among the typed refs'
+// accounts, or every Google account when no ref is typed. It selects
+// nothing when the daemon cannot list accounts or none of them is Google.
+func (cp *completer) googleAccounts(cmd *cobra.Command, args []string) ([]string, bool) {
 	list, ok := cp.listAccounts(cmd)
 	if !ok {
-		return []string{noAccount}
+		return nil, false
 	}
 	typed := refAccounts(args)
 	var out []string
@@ -131,10 +149,7 @@ func (cp *completer) googleAccounts(cmd *cobra.Command, args []string) []string 
 			out = append(out, a.GetName())
 		}
 	}
-	if len(out) == 0 {
-		return []string{noAccount}
-	}
-	return out
+	return out, len(out) > 0
 }
 
 // sender describes a row by its first sender.
@@ -181,11 +196,11 @@ func (cp *completer) refs(query string, maxArgs int, who func(*chainmailv1.Messa
 	}
 }
 
-// parts completes the attachment part numbers of the message args[0] names.
-func (cp *completer) parts(cmd *cobra.Command, args []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
+// parts completes the attachment part numbers of the message ref names.
+func (cp *completer) parts(cmd *cobra.Command, ref, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
 	var atts []*chainmailv1.Attachment
 	ok := cp.call(cmd, func(ctx context.Context, c *client.Client) error {
-		resp, err := c.Message.Get(ctx, connect.NewRequest(&chainmailv1.GetRequest{Refs: args[:1]}))
+		resp, err := c.Message.Get(ctx, connect.NewRequest(&chainmailv1.GetRequest{Refs: []string{ref}}))
 		if err != nil {
 			return err
 		}
@@ -202,7 +217,7 @@ func (cp *completer) parts(cmd *cobra.Command, args []string, toComplete string)
 		if !safeValue(a.GetPart()) || !strings.HasPrefix(a.GetPart(), toComplete) {
 			continue
 		}
-		desc := fmt.Sprintf("%s (%s, %s)", a.GetFilename().GetUntrusted(), a.GetContentType(), humanize.IBytes(uint64(max(a.GetSize(), 0))))
+		desc := fmt.Sprintf("%s (%s, %d bytes)", a.GetFilename().GetUntrusted(), a.GetContentType(), a.GetSize())
 		out = append(out, cobra.CompletionWithDesc(a.GetPart(), completionText(desc)))
 	}
 	return out, cobra.ShellCompDirectiveNoFileComp
@@ -215,7 +230,7 @@ func (cp *completer) refThenPart(inbox cobra.CompletionFunc) cobra.CompletionFun
 		case 0:
 			return inbox(cmd, args, toComplete)
 		case 1:
-			return cp.parts(cmd, args, toComplete)
+			return cp.parts(cmd, args[0], toComplete)
 		default:
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}

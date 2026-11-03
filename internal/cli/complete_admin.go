@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -14,6 +15,7 @@ import (
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/client"
 	"github.com/jamesainslie/chainmail/internal/provider"
+	"github.com/jamesainslie/chainmail/internal/query"
 )
 
 // auditActionRows is how many of the newest audit rows audit --action
@@ -156,8 +158,13 @@ var searchOperators = []cobra.Completion{
 // inRoles are the in: values that name a role on every account.
 var inRoles = []string{"inbox", "sent", "drafts", "archive", "trash", "spam", "junk", "anywhere"}
 
+// scopeOperators choose where a search runs, so the query validator
+// refuses them negated.
+var scopeOperators = []string{string(query.FieldIn), string(query.FieldAccount)}
+
 // searchTerms completes one search term: an operator, or after one the
-// values it takes. A leading - (negation) is kept.
+// values it takes. A leading - (negation) is kept, and offers no operator
+// that cannot be negated.
 func (cp *completer) searchTerms(cmd *cobra.Command, _ []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
 	neg := ""
 	if strings.HasPrefix(toComplete, "-") {
@@ -165,11 +172,17 @@ func (cp *completer) searchTerms(cmd *cobra.Command, _ []string, toComplete stri
 	}
 	op, value, hasOp := strings.Cut(toComplete, ":")
 	if !hasOp {
-		ops := withPrefix(searchOperators, toComplete)
-		for i, o := range ops {
-			ops[i] = neg + o
+		var ops []cobra.Completion
+		for _, o := range withPrefix(searchOperators, toComplete) {
+			name, _, _ := strings.Cut(o, ":")
+			if neg == "" || !slices.Contains(scopeOperators, name) {
+				ops = append(ops, neg+o)
+			}
 		}
 		return ops, cobra.ShellCompDirectiveNoFileComp | cobra.ShellCompDirectiveNoSpace
+	}
+	if neg != "" && slices.Contains(scopeOperators, op) {
+		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 	var vals []string
 	switch op {
@@ -180,15 +193,14 @@ func (cp *completer) searchTerms(cmd *cobra.Command, _ []string, toComplete stri
 	case "account":
 		list, _ := cp.listAccounts(cmd)
 		for _, a := range list {
-			if safeValue(a.GetName()) {
+			if querySafe(a.GetName()) {
 				vals = append(vals, a.GetName())
 			}
 		}
-	case "in", "label":
-		if op == "in" {
-			vals = append(vals, inRoles...)
-		}
-		vals = append(vals, cp.searchFolders(cmd, op == "label")...)
+	case "in":
+		vals = append(slices.Clone(inRoles), cp.searchFolders(cmd, anyAccount, nil)...)
+	case "label":
+		vals = cp.searchFolders(cmd, cp.googleAccounts, labelFolder)
 	}
 	slices.Sort(vals)
 	var out []cobra.Completion
@@ -200,16 +212,28 @@ func (cp *completer) searchTerms(cmd *cobra.Command, _ []string, toComplete stri
 	return out, cobra.ShellCompDirectiveNoFileComp
 }
 
-// searchFolders returns the folder names on every account that a query
-// can name without quoting: every folder for in:, only Gmail's own labels
-// for label:.
-func (cp *completer) searchFolders(cmd *cobra.Command, labels bool) []string {
-	lists, _ := cp.listFolders(cmd, nil)
+// querySafe says the query language reads op:s as op with exactly the
+// value s, with no quoting: s holds no whitespace, parenthesis or quote,
+// which its lexer treats as syntax, and is a safe candidate.
+func querySafe(s string) bool {
+	return safeValue(s) && !strings.ContainsFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || r == '(' || r == ')' || r == '"'
+	})
+}
+
+// searchFolders returns the names of the folders on the accounts selects
+// that keep accepts (nil for all) and a query can name without quoting.
+func (cp *completer) searchFolders(cmd *cobra.Command, selects accountSelector, keep func(*chainmailv1.Folder) bool) []string {
+	accounts, ok := selects(cmd, nil)
+	if !ok {
+		return nil
+	}
+	// A failed lookup leaves lists empty, which offers no folder.
+	lists, _ := cp.listFolders(cmd, accounts)
 	var names []string
 	for _, af := range lists {
 		for _, f := range af.GetFolders() {
-			name := f.GetName()
-			if safeValue(name) && !strings.ContainsAny(name, " \"") && (!labels || labelFolder(f)) {
+			if name := f.GetName(); querySafe(name) && (keep == nil || keep(f)) {
 				names = append(names, name)
 			}
 		}

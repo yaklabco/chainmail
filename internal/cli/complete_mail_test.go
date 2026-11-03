@@ -113,6 +113,29 @@ func TestCompleteFolders(t *testing.T) {
 	}
 }
 
+func TestCompleteFoldersSkipTrimmedNames(t *testing.T) {
+	t.Parallel()
+	m := startCLIMail(t)
+	m.gmail.AddFolder(" Reports", mailstore.RoleNone)
+	m.gmail.AddFolder("Reports\u00a0", mailstore.RoleNone)
+	m.gmail.AddFolder("Receipts", mailstore.RoleNone)
+	for _, args := range [][]string{
+		{"label", m.lunch.String(), "--add", ""},
+		{"move", m.lunch.String(), "--to", ""},
+	} {
+		cands, _ := completeArgs(t, sockEnv(m.socket), args...)
+		got := values(cands)
+		if !slices.Contains(got, "Receipts") {
+			t.Errorf("%q: %q lacks Receipts", args, got)
+		}
+		for _, v := range got {
+			if strings.TrimSpace(v) != v || strings.Contains(v, "Reports") {
+				t.Errorf("%q: offered %q, which cobra trims into another name", args, v)
+			}
+		}
+	}
+}
+
 func TestCompleteLabels(t *testing.T) {
 	t.Parallel()
 	m := startCLIMail(t)

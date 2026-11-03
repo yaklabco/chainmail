@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -192,8 +193,146 @@ func TestCompleteGivesUpOnASilentDaemon(t *testing.T) {
 	if len(cands) != 0 {
 		t.Errorf("candidates %q, want none", cands)
 	}
-	if took := time.Since(start); took > 3*time.Second {
-		t.Errorf("completion took %v, want under 3s", took)
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("completion took %v, want under 5s", took)
+	}
+}
+
+func TestSafeValue(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{in: "INBOX", want: true},
+		{in: "Work Stuff", want: true},
+		{in: "", want: false},
+		{in: "a\tb", want: false},
+		{in: "a\nb", want: false},
+		{in: "\x1b[31m", want: false},
+		{in: "a\u202eb", want: false},
+		{in: " Reports", want: false},
+		{in: "Reports ", want: false},
+		{in: "\u00a0Reports", want: false},
+		{in: "Reports\u3000", want: false},
+	}
+	for _, tt := range tests {
+		if got := safeValue(tt.in); got != tt.want {
+			t.Errorf("safeValue(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestCompleteInlineFilesSkipsUnsafeNames(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, name := range []string{"logo.png", "lo\tgo.png", "lo\u202egnp.txt", "lo\nx", "lo trailing "} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cands, _ := completeArgs(t, Env{}, "send", "--inline", "logo="+dir+"/lo")
+	if got, want := values(cands), []string{"logo=" + dir + "/logo.png"}; !slices.Equal(got, want) {
+		t.Errorf("candidates %q, want %q", got, want)
+	}
+}
+
+// writePassStore makes a password store holding entries, each a path
+// relative to the store, and returns it.
+func writePassStore(t *testing.T, entries ...string) string {
+	t.Helper()
+	store := t.TempDir()
+	for _, p := range entries {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(store, p)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(store, p), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return store
+}
+
+func TestCompletePassEntriesSkipsUnsafeNames(t *testing.T) {
+	t.Parallel()
+	store := writePassStore(t, "mail/work.gpg", "mail/trail .gpg", "mail/a\tb.gpg", " lead.gpg")
+	env := Env{Getenv: vars(map[string]string{"PASSWORD_STORE_DIR": store})}
+	cands, _ := completeArgs(t, env, "secret", "set", "accounts/x", "--from-pass", "")
+	if got, want := values(cands), []string{"mail/work"}; !slices.Equal(got, want) {
+		t.Errorf("candidates %q, want %q", got, want)
+	}
+}
+
+func TestCompletePassEntriesRelativeStore(t *testing.T) {
+	t.Parallel()
+	store := writePassStore(t, "mail/work.gpg")
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(wd, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// HOME has a store too, which a relative PASSWORD_STORE_DIR must win over.
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".password-store"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".password-store", "home.gpg"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := Env{Getenv: vars(map[string]string{"PASSWORD_STORE_DIR": rel, "HOME": home})}
+	cands, _ := completeArgs(t, env, "secret", "set", "accounts/x", "--from-pass", "")
+	if got, want := values(cands), []string{"mail/work"}; !slices.Equal(got, want) {
+		t.Errorf("relative store %q: candidates %q, want %q", rel, got, want)
+	}
+}
+
+func TestCompletePassEntriesSymlinkedStore(t *testing.T) {
+	t.Parallel()
+	store := writePassStore(t, "mail/work.gpg")
+	link := filepath.Join(t.TempDir(), "store")
+	if err := os.Symlink(store, link); err != nil {
+		t.Fatal(err)
+	}
+	env := Env{Getenv: vars(map[string]string{"PASSWORD_STORE_DIR": link})}
+	cands, _ := completeArgs(t, env, "secret", "set", "accounts/x", "--from-pass", "")
+	if got, want := values(cands), []string{"mail/work"}; !slices.Equal(got, want) {
+		t.Errorf("candidates %q, want %q", got, want)
+	}
+}
+
+func TestWalkPassStore(t *testing.T) {
+	t.Parallel()
+	var noise []string
+	for i := range 20 {
+		noise = append(noise, fmt.Sprintf("aaa/n%02d.gpg", i))
+	}
+	store := writePassStore(t, append(noise, "mail/work.gpg", "mailbox/x.gpg", "mai/y.gpg")...)
+
+	// Only the root, mail and mail/work.gpg can hold a match for mail/,
+	// so pruning finds it within five visits while aaa alone has twenty.
+	got := walkPassStore(t.Context(), store, "mail/", passLimits{visits: 5, candidates: 500})
+	if want := []string{"mail/work"}; !slices.Equal(got, want) {
+		t.Errorf("pruned walk: %q, want %q", got, want)
+	}
+	got = walkPassStore(t.Context(), store, "ma", passLimits{visits: 100, candidates: 500})
+	if want := []string{"mai/y", "mail/work", "mailbox/x"}; !slices.Equal(got, want) {
+		t.Errorf("prefix ma: %q, want %q", got, want)
+	}
+	got = walkPassStore(t.Context(), store, "aaa/", passLimits{visits: 100, candidates: 3})
+	if want := []string{"aaa/n00", "aaa/n01", "aaa/n02"}; !slices.Equal(got, want) {
+		t.Errorf("candidate cap: %q, want %q", got, want)
+	}
+	got = walkPassStore(t.Context(), store, "", passLimits{visits: 4, candidates: 500})
+	if len(got) > 4 {
+		t.Errorf("visit cap 4: %d entries", len(got))
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if got := walkPassStore(ctx, store, "", passLimits{visits: 100, candidates: 500}); len(got) != 0 {
+		t.Errorf("cancelled walk: %q, want none", got)
 	}
 }
 

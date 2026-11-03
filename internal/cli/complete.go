@@ -33,24 +33,26 @@ const completionDescWidth = 60
 // there. A lookup that fails offers nothing and says why only in
 // BASH_COMP_DEBUG_FILE.
 type completer struct {
-	// ctx is the context given to Execute. Completion functions have
-	// cobra's fixed signature, so it is carried here instead of passed down.
-	ctx context.Context
+	// ctx is unused and goes once root.go stops setting it: completions
+	// take Execute's context from cmd.Context(), which cobra sets on the
+	// command it completes.
+	ctx context.Context //nolint:unused // removed with root.go's completer literal
 	env Env
 	g   *globals
 }
 
 // call runs fn against the daemon under completionTimeout, with the socket
 // cmd's flags, the environment and cli.toml name. It returns false when the
-// daemon could not answer.
+// daemon could not answer. cobra gives the command it completes Execute's
+// context, so cmd.Context() carries cancellation.
 //
-//nolint:contextcheck // cp.ctx is Execute's context; cobra's CompletionFunc signature has no room to pass it.
+//nolint:contextcheck // ctx is cmd.Context(), which cobra (completions.go) sets to Execute's context before any completion function runs; contextcheck cannot see that.
 func (cp *completer) call(cmd *cobra.Command, fn func(context.Context, *client.Client) error) bool {
 	if err := cp.g.resolve(cp.env, cmd); err != nil {
 		cobra.CompDebugln("chainmail: "+err.Error(), false)
 		return false
 	}
-	ctx, cancel := context.WithTimeout(cp.ctx, completionTimeout)
+	ctx, cancel := context.WithTimeout(cmd.Context(), completionTimeout)
 	defer cancel()
 	c := cp.g.client(cp.env)
 	defer c.Close()
@@ -77,9 +79,10 @@ func completionText(s string) string {
 
 // safeValue says s can be offered as a candidate as it is. A value that
 // needed cleaning would not name the same thing once cleaned, so it is
-// left out instead.
+// left out instead. That includes leading or trailing whitespace, which
+// cobra trims from each candidate line.
 func safeValue(s string) bool {
-	return s != "" && !strings.ContainsFunc(s, func(r rune) bool {
+	return s != "" && strings.TrimFunc(s, unicode.IsSpace) == s && !strings.ContainsFunc(s, func(r rune) bool {
 		return unicode.IsControl(r) || unicode.Is(unicode.Cf, r)
 	})
 }
@@ -159,44 +162,96 @@ func inlineFiles(_ *cobra.Command, _ []string, toComplete string) ([]cobra.Compl
 		if e.IsDir() {
 			v += "/"
 		}
-		out = append(out, v)
+		if safeValue(e.Name()) && safeValue(v) {
+			out = append(out, v)
+		}
 	}
 	return out, directive
 }
 
+// passLimits bounds one walk of the password store.
+type passLimits struct {
+	// visits is the most files and directories the walk looks at.
+	visits int
+	// candidates is the most entries it returns.
+	candidates int
+}
+
+// passCompletionLimits keeps a huge password store from stalling the shell.
+var passCompletionLimits = passLimits{visits: 10000, candidates: 500}
+
 // passEntries completes --from-pass with the entries of the password
-// store: $PASSWORD_STORE_DIR, else ~/.password-store.
-func (cp *completer) passEntries(_ *cobra.Command, _ []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
+// store: $PASSWORD_STORE_DIR when set, relative or not, else
+// $HOME/.password-store, as checkPassEntry and pass itself decide.
+func (cp *completer) passEntries(cmd *cobra.Command, _ []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
 	store := cp.env.Getenv("PASSWORD_STORE_DIR")
-	if !filepath.IsAbs(store) {
+	if store == "" {
 		home := cp.env.Getenv("HOME")
-		if !filepath.IsAbs(home) {
+		if home == "" {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
 		store = filepath.Join(home, ".password-store")
 	}
-	var out []cobra.Completion
-	_ = filepath.WalkDir(store, func(path string, d fs.DirEntry, err error) error {
-		switch {
-		case err != nil:
+	return walkPassStore(cmd.Context(), store, toComplete, passCompletionLimits), cobra.ShellCompDirectiveNoFileComp
+}
+
+// walkPassStore returns the sorted entries of the password store at store
+// that start with toComplete, within lim. It follows a symlinked store but
+// no symlink inside it, and descends only into directories that can hold
+// a match. It stops early when ctx is done.
+func walkPassStore(ctx context.Context, store, toComplete string, lim passLimits) []string {
+	root, err := filepath.EvalSymlinks(store)
+	if err != nil {
+		cobra.CompDebugln("chainmail: password store: "+err.Error(), false)
+		return nil
+	}
+	var out []string
+	visits := 0
+	// WalkDir's own error is only ever the SkipAll or a callback error,
+	// and the callback returns none: what it found is in out.
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return filepath.SkipAll
+		}
+		if visits++; visits > lim.visits {
+			cobra.CompDebugln(fmt.Sprintf("chainmail: password store: stopped after %d files", lim.visits), false)
+			return filepath.SkipAll
+		}
+		if err != nil {
 			// WalkDir reports errors only for the store itself or a
 			// directory it could not read: skip it, so an unreadable
 			// corner of the store offers nothing.
 			return filepath.SkipDir
-		case d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != store:
-			return filepath.SkipDir
-		case d.IsDir() || !strings.HasSuffix(d.Name(), ".gpg"):
+		}
+		if path == root {
 			return nil
 		}
-		rel, _ := filepath.Rel(store, path)
-		entry := strings.TrimSuffix(filepath.ToSlash(rel), ".gpg")
-		if safeValue(entry) && strings.HasPrefix(entry, toComplete) {
-			out = append(out, entry)
+		// path is under root, which WalkDir walked to reach it, so Rel
+		// cannot fail.
+		rel, _ := filepath.Rel(root, path)
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			// Only a directory on the way to toComplete, or under it,
+			// can hold a matching entry.
+			canMatch := strings.HasPrefix(toComplete, rel+"/") || strings.HasPrefix(rel, toComplete)
+			if strings.HasPrefix(d.Name(), ".") || !canMatch {
+				return filepath.SkipDir
+			}
+			return nil
 		}
+		entry, isEntry := strings.CutSuffix(rel, ".gpg")
+		if !isEntry || !safeValue(entry) || !strings.HasPrefix(entry, toComplete) {
+			return nil
+		}
+		if len(out) == lim.candidates {
+			cobra.CompDebugln(fmt.Sprintf("chainmail: password store: stopped at %d entries", lim.candidates), false)
+			return filepath.SkipAll
+		}
+		out = append(out, entry)
 		return nil
 	})
 	slices.Sort(out)
-	return out, cobra.ShellCompDirectiveNoFileComp
+	return out
 }
 
 // listAccounts asks the daemon for its accounts.
@@ -265,8 +320,8 @@ func recipientFlagSpecs() map[string]cobra.CompletionFunc {
 	return map[string]cobra.CompletionFunc{"to": noComplete, "cc": noComplete, "bcc": noComplete}
 }
 
-// with merges maps of flag completions; later maps win.
-func with(sets ...map[string]cobra.CompletionFunc) map[string]cobra.CompletionFunc {
+// mergeFlagCompletions merges maps of flag completions; later maps win.
+func mergeFlagCompletions(sets ...map[string]cobra.CompletionFunc) map[string]cobra.CompletionFunc {
 	out := map[string]cobra.CompletionFunc{}
 	for _, s := range sets {
 		maps.Copy(out, s)
@@ -278,13 +333,14 @@ func with(sets ...map[string]cobra.CompletionFunc) map[string]cobra.CompletionFu
 // a command, positional argument or flag missing from it.
 func (cp *completer) specs() map[string]compSpec {
 	allAccounts := cp.accounts(nil, 0)
-	compose := with(contentFlagSpecs(), recipientFlagSpecs(), map[string]cobra.CompletionFunc{"subject": noComplete})
+	compose := mergeFlagCompletions(contentFlagSpecs(), recipientFlagSpecs(), map[string]cobra.CompletionFunc{"subject": noComplete})
 	inboxRefs := cp.refs("in:inbox", unbounded, sender)
 	oneInboxRef := cp.refs("in:inbox", 1, sender)
 	oneDraft := cp.refs("in:drafts", 1, recipient)
-	refFolders := cp.folders(argAccounts, nil, 0, false)
-	labels := cp.folders(cp.googleAccounts, labelFolder, 0, false)
-	answer := with(contentFlagSpecs(), recipientFlagSpecs(), map[string]cobra.CompletionFunc{"idempotency-key": noComplete})
+	refFolders := cp.folders(folderSpec{accounts: argAccounts})
+	labels := cp.folders(folderSpec{accounts: cp.googleAccounts, keep: labelFolder})
+	existingFolder := cp.folders(folderSpec{accounts: flagAccount, maxArgs: 1})
+	answer := mergeFlagCompletions(contentFlagSpecs(), recipientFlagSpecs(), map[string]cobra.CompletionFunc{"idempotency-key": noComplete})
 	return map[string]compSpec{
 		"chainmail": {args: noComplete, flags: map[string]cobra.CompletionFunc{
 			"socket": files,
@@ -307,8 +363,8 @@ func (cp *completer) specs() map[string]compSpec {
 		"chainmail mcp":            {args: noComplete},
 		"chainmail daemon":         {args: noComplete, flags: map[string]cobra.CompletionFunc{"config": files, "state-dir": dirs, "vault-key-file": files}},
 		"chainmail draft":          {args: noComplete},
-		"chainmail draft create":   {args: noComplete, flags: with(compose, map[string]cobra.CompletionFunc{"account": allAccounts})},
-		"chainmail send":           {args: noComplete, flags: with(compose, map[string]cobra.CompletionFunc{"account": allAccounts, "idempotency-key": noComplete})},
+		"chainmail draft create":   {args: noComplete, flags: mergeFlagCompletions(compose, map[string]cobra.CompletionFunc{"account": allAccounts})},
+		"chainmail send":           {args: noComplete, flags: mergeFlagCompletions(compose, map[string]cobra.CompletionFunc{"account": allAccounts, "idempotency-key": noComplete})},
 		"chainmail send-raw":       {args: fixed(cobra.CompletionWithDesc("-", "read the message from stdin")), flags: map[string]cobra.CompletionFunc{"account": allAccounts, "file": files, "idempotency-key": noComplete}},
 		"chainmail folders":        {args: noComplete, flags: map[string]cobra.CompletionFunc{"account": allAccounts}},
 		"chainmail secret":         {args: noComplete},
@@ -316,7 +372,7 @@ func (cp *completer) specs() map[string]compSpec {
 		"chainmail watch status":   {args: noComplete},
 		"chainmail watch": {args: noComplete, flags: map[string]cobra.CompletionFunc{
 			"account": allAccounts, "kind": commaList(watchKinds...), "since": noComplete,
-			"in":    cp.folders(anyAccount, nil, 0, false),
+			"in":    cp.folders(folderSpec{accounts: anyAccount}),
 			"group": cp.groups(0),
 		}},
 		"chainmail watch groups delete": {args: cp.groups(1)},
@@ -350,9 +406,9 @@ func (cp *completer) specs() map[string]compSpec {
 		"chainmail draft delete":  {args: oneDraft},
 		"chainmail draft update":  {args: oneDraft, flags: compose},
 		"chainmail folder":        {args: noComplete, flags: map[string]cobra.CompletionFunc{"account": allAccounts}},
-		"chainmail folder create": {args: cp.folders(flagAccount, nil, 1, true)},
-		"chainmail folder delete": {args: cp.folders(flagAccount, nil, 1, false)},
-		"chainmail folder rename": {args: cp.folders(flagAccount, nil, 1, false)},
+		"chainmail folder create": {args: cp.folders(folderSpec{accounts: flagAccount, maxArgs: 1, noSpace: true})},
+		"chainmail folder delete": {args: existingFolder},
+		"chainmail folder rename": {args: existingFolder},
 	}
 }
 
