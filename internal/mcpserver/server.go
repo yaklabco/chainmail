@@ -104,6 +104,7 @@ func New(opts Options) *Server {
 	s.registerComposeTools()
 	s.registerOrganizeTools()
 	s.registerWatchTools()
+	s.registerCacheTools()
 	return s
 }
 
