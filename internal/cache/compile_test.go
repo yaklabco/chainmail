@@ -519,3 +519,106 @@ func TestCompileBadValues(t *testing.T) {
 		}
 	}
 }
+
+// TestCompileText checks bare words and phrases as FTS5 token matches over
+// subject, names, addresses and the cached body, case and accents folded,
+// with AND, OR and NOT, and mixed with header terms. Header terms of a row
+// without a body stay searchable.
+func TestCompileText(t *testing.T) {
+	t.Parallel()
+	s := openCompileStore(t)
+	tests := []compileCase{
+		{"newer_than:400d invoice", []uint32{4, 1}},
+		{"newer_than:400d INVOICE", []uint32{4, 1}},
+		{"newer_than:400d cafe", []uint32{2}},
+		{"newer_than:400d café", []uint32{2}},
+		{`newer_than:400d "q3 report"`, []uint32{4}},
+		{`newer_than:400d "report q3"`, nil},
+		{"newer_than:400d acme", []uint32{4, 2, 1}},
+		{"newer_than:400d percent", []uint32{3}},
+		{"newer_than:400d invoice OR noon", []uint32{4, 2, 1}},
+		{"newer_than:400d noon OR friday", []uint32{2, 1}},
+		{"newer_than:400d invoice friday", []uint32{1}},
+		{"newer_than:400d invoice -friday", []uint32{4}},
+		{"newer_than:400d -invoice", []uint32{3, 2}},
+		{"newer_than:400d -(noon OR friday)", []uint32{4, 3}},
+		{"newer_than:400d (invoice OR from:dee)", []uint32{4, 2, 1}},
+	}
+	for _, tt := range tests {
+		got, p := compileSearch(t, s, false, tt.query)
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("%q = %v, want %v\nwhere %+v", tt.query, got, tt.want, p.Where)
+		}
+	}
+
+	// Without a date bound the plan is server-only, but a forced search
+	// still runs and finds header terms on rows of any age.
+	for _, tt := range []compileCase{
+		{"gina", []uint32{5}},
+		{"invoice OR from:gina", []uint32{5, 4, 1}},
+		// A term with no tokens matches nothing, without an FTS5 error.
+		{"!!!", nil},
+	} {
+		got, p := compileSearch(t, s, false, tt.query)
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("%q = %v, want %v\nwhere %+v", tt.query, got, tt.want, p.Where)
+		}
+	}
+	got, _ := compileSearchTree(t, s, false, query.Term(query.FieldText, `say "hi"`), "")
+	if len(got) != 0 {
+		t.Errorf(`text say "hi" = %v, want none`, got)
+	}
+}
+
+// TestCompileFTSExpression pins how text reaches FTS5: text alone at the
+// top, or beside other terms under the top-level AND, becomes Where.FTS;
+// text under OR or NOT next to other terms becomes an inline FTS subquery.
+// Every ? in the SQL has its argument.
+func TestCompileFTSExpression(t *testing.T) {
+	t.Parallel()
+	const ftsSubquery = "m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"
+	tests := []struct {
+		name  string
+		query string
+		tree  *query.Node // used instead of query when set
+		fts   string
+		// sqlHas is part of Where.SQL; "" means Where.SQL must be empty.
+		sqlHas string
+	}{
+		{name: "one word", query: "invoice", fts: `"invoice"`},
+		{name: "phrase", query: `"q3 report"`, fts: `"q3 report"`},
+		{name: "quote inside", tree: query.Term(query.FieldText, `say "hi"`), fts: `"say ""hi"""`},
+		{name: "and", query: "a b", fts: `("a" AND "b")`},
+		{name: "and not", query: "a -b -c", fts: `(("a" NOT "b") NOT "c")`},
+		{name: "or", query: "a OR b", fts: `("a" OR "b")`},
+		{name: "nested or", query: "a (b OR c)", fts: `("a" AND ("b" OR "c"))`},
+		{name: "beside a bound", query: "newer_than:7d invoice", fts: `"invoice"`, sqlHas: "m.internal_date >= ?"},
+		{name: "beside a header term", query: "from:x a", fts: `"a"`, sqlHas: "m.from_norm LIKE ?"},
+		{name: "negated alone", query: "-a", sqlHas: "NOT (" + ftsSubquery + ")"},
+		{name: "or with a header term", query: "from:x OR a", sqlHas: ftsSubquery},
+		{name: "not under or", query: "a (b OR -c)", fts: `"a"`, sqlHas: "NOT (" + ftsSubquery + ")"},
+	}
+	for _, tt := range tests {
+		n := tt.tree
+		if n == nil {
+			var err error
+			if n, err = query.Parse(tt.query); err != nil {
+				t.Fatalf("%s: Parse: %v", tt.name, err)
+			}
+		}
+		p, err := cache.Compile(n, "", false, compileNow)
+		if err != nil {
+			t.Errorf("%s: Compile: %v", tt.name, err)
+			continue
+		}
+		if p.Where.FTS != tt.fts {
+			t.Errorf("%s: FTS = %q, want %q", tt.name, p.Where.FTS, tt.fts)
+		}
+		if tt.sqlHas == "" && p.Where.SQL != "" || !strings.Contains(p.Where.SQL, tt.sqlHas) {
+			t.Errorf("%s: SQL = %q, want it to contain %q", tt.name, p.Where.SQL, tt.sqlHas)
+		}
+		if got, want := strings.Count(p.Where.SQL, "?"), len(p.Where.Args); got != want {
+			t.Errorf("%s: %d placeholders, %d args", tt.name, got, want)
+		}
+	}
+}

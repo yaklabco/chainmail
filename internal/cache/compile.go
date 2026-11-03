@@ -44,6 +44,10 @@ const likeEscape = ` ESCAPE '\'`
 
 var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
+// ftsMatch selects the messages whose FTS row matches the argument, an
+// FTS5 query from ftsExpr.
+const ftsMatch = "m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"
+
 // normColumns are the lower-cased, newline-joined columns the substring
 // operators match.
 var normColumns = map[query.Field]string{
@@ -73,15 +77,19 @@ func Compile(n *query.Node, in string, gmail bool, now time.Time) (Plan, error) 
 			conds, args = append(conds, sql), append(args, a...)
 		}
 	}
+	var fts string
 	if n != nil {
-		sql, a, err := c.node(n)
+		sql, a, expr, err := c.root(n)
 		if err != nil {
 			return Plan{}, err
 		}
-		conds, args = append(conds, sql), append(args, a...)
+		if sql != "" {
+			conds, args = append(conds, sql), append(args, a...)
+		}
+		fts = expr
 	}
 	p := Plan{
-		Where: Where{SQL: strings.Join(conds, " AND "), Args: args},
+		Where: Where{SQL: strings.Join(conds, " AND "), Args: args, FTS: fts},
 		Since: lowerBound(n, now),
 	}
 	switch {
@@ -136,6 +144,9 @@ func (c *compiler) node(n *query.Node) (string, []any, error) {
 	if n == nil {
 		return "", nil, errMalformedQuery
 	}
+	if expr, ok := ftsExpr(n); ok {
+		return ftsMatch, []any{expr}, nil
+	}
 	switch n.Op {
 	case query.OpTerm:
 		return c.term(n)
@@ -175,6 +186,128 @@ func (c *compiler) join(nodes []*query.Node, sep string) (string, []any, error) 
 		args = append(args, a...)
 	}
 	return "(" + strings.Join(parts, sep) + ")", args, nil
+}
+
+// root compiles the whole tree. Text alone, or the text terms (and NOTs
+// of text) directly under the top-level AND when at least one is positive,
+// become the FTS5 query of Where.FTS, which SearchUIDs joins once. The
+// rest becomes SQL, where any other text is an inline FTS subquery.
+func (c *compiler) root(n *query.Node) (sql string, args []any, fts string, err error) {
+	if expr, ok := ftsExpr(n); ok {
+		return "", nil, expr, nil
+	}
+	if n.Op == query.OpAnd {
+		var text, rest []*query.Node
+		for _, ch := range n.Children {
+			if ftsTextual(ch) {
+				text = append(text, ch)
+			} else {
+				rest = append(rest, ch)
+			}
+		}
+		if expr, ok := ftsExpr(&query.Node{Op: query.OpAnd, Children: text}); ok {
+			sql, args, err = c.all(rest)
+			return sql, args, expr, err
+		}
+	}
+	sql, args, err = c.node(n)
+	return sql, args, "", err
+}
+
+// all compiles nodes joined by AND. None is "", which matches everything.
+func (c *compiler) all(nodes []*query.Node) (string, []any, error) {
+	switch len(nodes) {
+	case 0:
+		return "", nil, nil
+	case 1:
+		return c.node(nodes[0])
+	default:
+		return c.join(nodes, " AND ")
+	}
+}
+
+// ftsExpr returns n as an FTS5 query when n is made of text terms alone,
+// joined by AND and OR, with NOT only beside a positive term under an AND,
+// since FTS5's NOT is binary. Each term becomes one quoted FTS5 string, so
+// a phrase matches its tokens in order and nothing in a value reads as
+// FTS5 syntax. Compound results are parenthesized.
+func ftsExpr(n *query.Node) (string, bool) {
+	if n == nil {
+		return "", false
+	}
+	switch n.Op {
+	case query.OpTerm:
+		if n.Field != query.FieldText {
+			return "", false
+		}
+		return ftsString(n.Value), true
+	case query.OpOr:
+		if len(n.Children) == 0 {
+			return "", false
+		}
+		parts := make([]string, 0, len(n.Children))
+		for _, ch := range n.Children {
+			e, ok := ftsExpr(ch)
+			if !ok {
+				return "", false
+			}
+			parts = append(parts, e)
+		}
+		if len(parts) == 1 {
+			return parts[0], true
+		}
+		return "(" + strings.Join(parts, " OR ") + ")", true
+	case query.OpAnd:
+		var pos, neg []string
+		for _, ch := range n.Children {
+			if e, ok := ftsExpr(ch); ok {
+				pos = append(pos, e)
+				continue
+			}
+			if e, ok := ftsNegated(ch); ok {
+				neg = append(neg, e)
+				continue
+			}
+			return "", false
+		}
+		if len(pos) == 0 {
+			return "", false
+		}
+		expr := pos[0]
+		if len(pos) > 1 {
+			expr = "(" + strings.Join(pos, " AND ") + ")"
+		}
+		for _, e := range neg {
+			expr = "(" + expr + " NOT " + e + ")"
+		}
+		return expr, true
+	default:
+		return "", false
+	}
+}
+
+// ftsNegated returns the FTS5 query of n's child when n is a NOT of text
+// alone.
+func ftsNegated(n *query.Node) (string, bool) {
+	if n == nil || n.Op != query.OpNot || len(n.Children) != 1 {
+		return "", false
+	}
+	return ftsExpr(n.Children[0])
+}
+
+// ftsTextual reports whether n can join the top-level FTS5 query: text
+// alone, or a NOT of text alone.
+func ftsTextual(n *query.Node) bool {
+	if _, ok := ftsExpr(n); ok {
+		return true
+	}
+	_, ok := ftsNegated(n)
+	return ok
+}
+
+// ftsString quotes v as one FTS5 string, doubling any quote inside it.
+func ftsString(v string) string {
+	return `"` + strings.ReplaceAll(v, `"`, `""`) + `"`
 }
 
 // term compiles one operator term.
