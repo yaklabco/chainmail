@@ -95,7 +95,7 @@ func TestDownloadAttachmentDirRules(t *testing.T) {
 	for _, dir := range []string{"relative/dir", filepath.Join(e.dir, "missing")} {
 		wantError(t, e.call(t, "download_attachment", map[string]any{"ref": testRef, "part": "2", "dir": dir}), api.ReasonInvalidArgument)
 	}
-	other := t.TempDir()
+	other := realTempDir(t)
 	res := e.call(t, "download_attachment", map[string]any{"ref": testRef, "part": "2", "dir": other})
 	wantOK(t, res)
 	var out attachmentFileOut
