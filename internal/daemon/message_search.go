@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -230,7 +231,9 @@ func (rp resumePoint) narrow(r mailstore.SourceResult) (mailstore.SourceResult, 
 // sourceState follows one source through a search: its matches, the rows
 // fetched for them, and how many the page used.
 type sourceState struct {
-	account   string
+	account string
+	// from is where the account's page runs, which fetches the rows.
+	from      searchSource
 	src       mailstore.Source
 	uids      []uint32 // every match below the bound, highest first
 	requested int      // how many UIDs summaries were asked for
@@ -252,12 +255,116 @@ type mergedRow struct {
 }
 
 // accountSearch is one account's part of a page: where it runs, what
-// answered, and what its Search returned.
+// answered, what its Search returned, and what that adds to the page.
 type accountSearch struct {
 	src     searchSource
 	route   routeInfo
 	results []mailstore.SourceResult
 	err     error
+	// part is what collect makes of the rest.
+	part accountPart
+}
+
+// accountPart is what one account's Search adds to a page.
+type accountPart struct {
+	// partial and failures are the account's failed Search or folders.
+	partial  []*chainmailv1.PartialSource
+	failures []error
+	// states are its answered sources, count their matches.
+	states []*sourceState
+	count  uint64
+	// carried are its cursor sources a failure, or an incomplete cache
+	// answer, kept this page from reaching.
+	carried []ref.CursorSource
+}
+
+// searchAccount runs a's Search where the router sends it. On the
+// automatic route, a cache that fails a read sends a to the server
+// instead, as if the router had chosen it.
+func (m *messageService) searchAccount(ctx context.Context, a config.ResolvedAccount, p *searchPlan, countOnly bool) accountSearch {
+	// Sources are picked afresh on every page, never taken from the cursor,
+	// which resumeAt and narrow then apply to them, and so is whether the
+	// cache or the server answers them.
+	src, route := m.searcher(ctx, a, p, p.source)
+	o := runSearch(ctx, p, countOnly, src, route)
+	if m.cacheFailed(ctx, a, p, o.route, o.err) {
+		src, route = m.serverFallback(a, p)
+		o = runSearch(ctx, p, countOnly, src, route)
+	}
+	return o
+}
+
+// runSearch runs an account's Search on src.
+func runSearch(ctx context.Context, p *searchPlan, countOnly bool, src searchSource, route routeInfo) accountSearch {
+	res, err := src.Search(ctx, mailstore.SearchRequest{Query: p.tree, In: p.in, CountOnly: countOnly})
+	return accountSearch{src: src, route: route, results: res, err: err}
+}
+
+// serverFallback is where a's page runs after its cache failed a read.
+func (m *messageService) serverFallback(a config.ResolvedAccount, p *searchPlan) (searchSource, routeInfo) {
+	return m.serverRoute(a, p, missFailed)
+}
+
+// cacheFailed reports whether err is a cache read failure on a's automatic
+// route to the cache, which the server then answers. It logs a fixed code
+// and tells the daemon, which turns the cache off on a full disk. A forced
+// cache keeps its error, and an ended call is no failure of the cache.
+func (m *messageService) cacheFailed(ctx context.Context, a config.ResolvedAccount, p *searchPlan, route routeInfo, err error) bool {
+	if p.source != sourceAuto || route.Source != cache.SourceCache || !errors.Is(err, cache.ErrRead) || ctx.Err() != nil {
+		return false
+	}
+	m.s.noteCacheErr(err)
+	m.s.opts.Logger.Warn("the cache failed a search read; the server answers the account", "account", a.Name, "reason", cacheFaultCode(err))
+	return true
+}
+
+// collect turns o's Search into what it adds to the page: its states,
+// count, failures and carried cursor sources. A changed UIDVALIDITY under
+// a cursor fails the whole call.
+func (p *searchPlan) collect(account string, o *accountSearch) (accountPart, error) {
+	var part accountPart
+	switch {
+	case o.err != nil:
+		// The whole account failed: its cursor sources carry over as they were.
+		part.partial = append(part.partial, partialSource(account, "", o.err))
+		part.failures = append(part.failures, o.err)
+		part.carried = append(part.carried, p.cursorSources(account)...)
+	case p.continuing() && !o.route.Complete:
+		part.carried = append(part.carried, p.uncovered(account, o.results)...)
+	}
+	for _, r := range o.results {
+		rp, ok := p.resumeAt(account, r.Source.Folder)
+		if !ok {
+			continue
+		}
+		if r.Err == nil && p.continuing() {
+			var err error
+			if r, err = rp.narrow(r); err != nil {
+				return part, err
+			}
+		}
+		if r.Err != nil {
+			part.partial = append(part.partial, partialSource(account, r.Source.Folder, r.Err))
+			part.failures = append(part.failures, r.Err)
+			if p.continuing() {
+				part.carried = append(part.carried, rp.cursorSource(account, r.Source.Folder))
+			}
+			continue
+		}
+		part.count += uint64(r.Count)
+		part.states = append(part.states, &sourceState{account: account, from: o.src, src: r.Source, uids: r.UIDs, prevBelow: rp.bound.Below})
+	}
+	return part, nil
+}
+
+// checkOutcome refuses a cursor naming a folder o's complete answer lacks.
+func (p *searchPlan) checkOutcome(account string, o *accountSearch) error {
+	// An incomplete cache answer may leave out folders the cache does not
+	// hold; collect carries their cursor sources instead.
+	if p.continuing() && o.err == nil && o.route.Complete {
+		return p.checkSources(account, o.results)
+	}
+	return nil
 }
 
 func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequest) (*chainmailv1.SearchResponse, audit.Entry, error) {
@@ -272,26 +379,29 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 	outcomes := make([]accountSearch, len(p.accounts))
 	var wg sync.WaitGroup
 	for i, a := range p.accounts {
-		wg.Go(func() {
-			// Sources are picked afresh on every page, never taken from the
-			// cursor, which resumeAt and narrow then apply to them, and so is
-			// whether the cache or the server answers them.
-			src, route := m.searcher(ctx, a, p, p.source)
-			res, err := src.Search(ctx, mailstore.SearchRequest{Query: p.tree, In: p.in, CountOnly: req.GetCountOnly()})
-			outcomes[i] = accountSearch{src: src, route: route, results: res, err: err}
-		})
+		wg.Go(func() { outcomes[i] = m.searchAccount(ctx, a, p, req.GetCountOnly()) })
 	}
 	wg.Wait()
-	if p.continuing() {
-		for i, a := range p.accounts {
-			// An incomplete cache answer may leave out folders the cache does
-			// not hold; the loop below carries their cursor sources instead.
-			if outcomes[i].err != nil || !outcomes[i].route.Complete {
-				continue
-			}
-			if err := p.checkSources(a.Name, outcomes[i].results); err != nil {
-				return nil, entry, err
-			}
+	for i, a := range p.accounts {
+		if err := p.checkOutcome(a.Name, &outcomes[i]); err != nil {
+			return nil, entry, err
+		}
+	}
+	for i, a := range p.accounts {
+		part, err := p.collect(a.Name, &outcomes[i])
+		if err != nil {
+			return nil, entry, err
+		}
+		outcomes[i].part = part
+	}
+	if !req.GetCountOnly() {
+		var all []*sourceState
+		for i := range outcomes {
+			all = append(all, outcomes[i].part.states...)
+		}
+		m.fetchRows(ctx, p, all, req.GetSnippets())
+		if err := m.refetchFailedCaches(ctx, p, outcomes, req.GetSnippets()); err != nil {
+			return nil, entry, err
 		}
 	}
 
@@ -302,41 +412,11 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 	// were, so a later page retries them, and that page's plan and
 	// checkSources check them again.
 	var carried []ref.CursorSource
-	counts := map[string]uint64{}
-	sources := map[string]searchSource{}
-	for i, a := range p.accounts {
-		o := outcomes[i]
-		if o.err != nil {
-			resp.Partial = append(resp.Partial, partialSource(a.Name, "", o.err))
-			failures = append(failures, o.err)
-			carried = append(carried, p.cursorSources(a.Name)...)
-			continue
-		}
-		sources[a.Name] = o.src
-		if p.continuing() && !o.route.Complete {
-			carried = append(carried, p.uncovered(a.Name, o.results)...)
-		}
-		for _, r := range o.results {
-			rp, ok := p.resumeAt(a.Name, r.Source.Folder)
-			if !ok {
-				continue
-			}
-			if r.Err == nil && p.continuing() {
-				if r, err = rp.narrow(r); err != nil {
-					return nil, entry, err
-				}
-			}
-			if r.Err != nil {
-				resp.Partial = append(resp.Partial, partialSource(a.Name, r.Source.Folder, r.Err))
-				failures = append(failures, r.Err)
-				if p.continuing() {
-					carried = append(carried, rp.cursorSource(a.Name, r.Source.Folder))
-				}
-				continue
-			}
-			counts[a.Name] += uint64(r.Count)
-			states = append(states, &sourceState{account: a.Name, src: r.Source, uids: r.UIDs, prevBelow: rp.bound.Below})
-		}
+	for _, o := range outcomes {
+		resp.Partial = append(resp.Partial, o.part.partial...)
+		failures = append(failures, o.part.failures...)
+		states = append(states, o.part.states...)
+		carried = append(carried, o.part.carried...)
 	}
 	if len(states) == 0 && len(failures) > 0 {
 		return nil, entry, mostSevere(failures)
@@ -350,12 +430,11 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 		answered = append(answered, o.route.Source)
 		// An incomplete account is listed even with nothing counted, so its
 		// reason reaches the caller.
-		n, ok := counts[a.Name]
-		if !ok && o.route.Complete {
+		if len(o.part.states) == 0 && o.route.Complete {
 			continue
 		}
-		resp.AccountCounts = append(resp.AccountCounts, accountCount(a.Name, n, o.route))
-		resp.Count += n
+		resp.AccountCounts = append(resp.AccountCounts, accountCount(a.Name, o.part.count, o.route))
+		resp.Count += o.part.count
 	}
 	resp.Source = cache.CombineSource(answered...)
 	if req.GetCountOnly() {
@@ -363,7 +442,6 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 		return resp, entry, nil
 	}
 
-	m.fetchRows(ctx, p, sources, states, req.GetSnippets())
 	ok := 0
 	for _, st := range states {
 		if st.err != nil {
@@ -388,9 +466,53 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 	return resp, entry, nil
 }
 
+// refetchFailedCaches searches again, on the server, each account whose
+// automatic cache route failed reading summaries, as if the router had
+// chosen the server: its Search, cursor checks and rows replace the
+// cache's in outcomes.
+func (m *messageService) refetchFailedCaches(ctx context.Context, p *searchPlan, outcomes []accountSearch, snippets bool) error {
+	var redo []int
+	for i, a := range p.accounts {
+		o := &outcomes[i]
+		for _, st := range o.part.states {
+			if m.cacheFailed(ctx, a, p, o.route, st.err) {
+				redo = append(redo, i)
+				break
+			}
+		}
+	}
+	if len(redo) == 0 {
+		return nil
+	}
+	var wg sync.WaitGroup
+	for _, i := range redo {
+		a := p.accounts[i]
+		wg.Go(func() {
+			src, route := m.serverFallback(a, p)
+			outcomes[i] = runSearch(ctx, p, false, src, route)
+		})
+	}
+	wg.Wait()
+	var all []*sourceState
+	for _, i := range redo {
+		a := p.accounts[i]
+		if err := p.checkOutcome(a.Name, &outcomes[i]); err != nil {
+			return err
+		}
+		part, err := p.collect(a.Name, &outcomes[i])
+		if err != nil {
+			return err
+		}
+		outcomes[i].part = part
+		all = append(all, outcomes[i].part.states...)
+	}
+	m.fetchRows(ctx, p, all, snippets)
+	return nil
+}
+
 // fetchRows fetches summaries for up to limit UIDs of each source, in
 // parallel, from where its account's page runs.
-func (m *messageService) fetchRows(ctx context.Context, p *searchPlan, sources map[string]searchSource, states []*sourceState, snippets bool) {
+func (m *messageService) fetchRows(ctx context.Context, p *searchPlan, states []*sourceState, snippets bool) {
 	var wg sync.WaitGroup
 	for _, st := range states {
 		take := st.uids[:min(len(st.uids), p.limit)]
@@ -398,9 +520,8 @@ func (m *messageService) fetchRows(ctx context.Context, p *searchPlan, sources m
 		if len(take) == 0 {
 			continue
 		}
-		src := sources[st.account]
 		wg.Go(func() {
-			st.rows, st.err = src.FetchSummaries(ctx, st.src, take, mailstore.SummaryOptions{Snippets: snippets})
+			st.rows, st.err = st.from.FetchSummaries(ctx, st.src, take, mailstore.SummaryOptions{Snippets: snippets})
 		})
 	}
 	wg.Wait()
