@@ -21,10 +21,11 @@ func fangOptions() []fang.Option {
 
 // styledError shows err to a person: the reason as the header, then the
 // message and the hint. classify decides all three, as it does for JSON
-// errors, so both modes report the same failure.
+// errors, so both modes report the same failure. All three can carry text
+// from the daemon, so each is cleaned for the terminal.
 func styledError(w io.Writer, styles fang.Styles, err error) {
 	c := classify(err)
-	_, _ = fmt.Fprintln(w, styles.ErrorHeader.SetString(c.reason).String())
+	_, _ = fmt.Fprintln(w, styles.ErrorHeader.SetString(termText(c.reason)).String())
 	_, _ = fmt.Fprintln(w, styles.ErrorText.Render(termText(c.message)))
 	if c.hint != "" {
 		_, _ = fmt.Fprintln(w)

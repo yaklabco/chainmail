@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/fang"
 	"github.com/spf13/cobra"
 
 	"github.com/jamesainslie/chainmail/internal/api"
@@ -106,5 +107,49 @@ func TestEveryTopLevelCommandHasAGroup(t *testing.T) {
 		if c.GroupID == "" {
 			t.Errorf("%s has no group: add it to groupOf", c.Name())
 		}
+	}
+}
+
+func TestStyledErrorCleansEveryField(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	styledError(&buf, fang.Styles{}, &exitError{
+		reason: "INTERNAL\x1b[2J",
+		msg:    "bad\x1b]0;title\x07 news‮",
+		hint:   "try\x1b[31m again⁦",
+	})
+	if strings.ContainsAny(buf.String(), "\x1b\x07‮⁦") {
+		t.Errorf("styled error kept a control or bidi character: %q", buf.String())
+	}
+	for _, want := range []string{"internal", "bad", "news", "try", "again"} {
+		if !strings.Contains(flat(buf.String()), want) {
+			t.Errorf("styled error %q lost %q", buf.String(), want)
+		}
+	}
+}
+
+func TestTerminalParityAfterOutput(t *testing.T) {
+	t.Parallel()
+	m := startCLIMail(t)
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "daemon unreachable", args: []string{"--socket", "/nonexistent/none.sock", "admin", "status"}},
+		{name: "every item failed after output", args: []string{"--socket", m.socket, "--output", "json", "get", staleRef}},
+		{name: "partial batch", args: []string{"--socket", m.socket, "--output", "json", "get", m.invoice.String(), staleRef}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			plain := runCLI(t, Env{}, tt.args...)
+			styled := runCLI(t, Env{StderrTerminal: true}, tt.args...)
+			if plain.code != styled.code || plain.stdout != styled.stdout {
+				t.Errorf("plain exit %d stdout %q; terminal exit %d stdout %q", plain.code, plain.stdout, styled.code, styled.stdout)
+			}
+			if plain.code != 0 && styled.stderr == "" {
+				t.Errorf("terminal mode printed no error")
+			}
+		})
 	}
 }
