@@ -22,11 +22,7 @@ const draftCreateHelp = `Save a new message to the account's Drafts folder witho
 
 It takes send's account, recipient, subject, body and attachment options
 (not --draft, --dry-run or --idempotency-key); --account is required. The
-ref it prints is what draft update, draft send and draft delete take.
-
-Examples:
-  chainmail draft create --account work --to ann@example.com --subject "Q3" --body-file q3.md
-  chainmail draft send "$(chainmail draft create --account work --to ann@example.com --subject Hi --body Hi --output json | jq -r .draft.ref)"`
+ref it prints is what draft update, draft send and draft delete take.`
 
 const draftUpdateHelp = `Replace a draft with a new version: the new version is saved and the old
 one deleted. The new version has a new ref, which is printed; the old ref
@@ -35,19 +31,13 @@ is gone.
 It takes send's recipient, subject, body and attachment options, without
 --account (the draft's account is used) and without --draft, --dry-run or
 --idempotency-key. The whole message is replaced, so give every recipient, the
-subject and the body again. A reply saved as a draft stays a reply.
-
-Example:
-  chainmail draft update cm1:work:Drafts:7:12 --to ann@example.com --subject "Q3" --body-file q3.md`
+subject and the body again. A reply saved as a draft stays a reply.`
 
 const draftSendHelp = `Send a draft, then remove it from Drafts.
 
 Running the same command again within 7 days reports the first send
 instead of sending twice: without --idempotency-key, the key is derived
-from the draft's ref.
-
-Example:
-  chainmail draft send cm1:work:Drafts:7:12`
+from the draft's ref.`
 
 // messageFlags are the flags of a whole new message: the account,
 // recipients, subject and content. send, draft create and draft update

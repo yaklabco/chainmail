@@ -122,6 +122,7 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 		c.GroupID = groupOf[c.Name()]
 	}
 	root.SetHelpCommandGroupID("admin")
+	applyHelp(root)
 	return root
 }
 
@@ -156,6 +157,9 @@ func walk(cmd *cobra.Command, fn func(*cobra.Command)) {
 	}
 }
 
+// groupAnnotation marks a command that only holds subcommands.
+const groupAnnotation = "chainmail.group"
+
 // newGroup returns a command that only holds subcommands. It runs only when
 // no subcommand matched. Setting Args stops cobra reporting unknown commands
 // itself, or printing help and exiting 0 for them, and RunE makes the group
@@ -163,9 +167,10 @@ func walk(cmd *cobra.Command, fn func(*cobra.Command)) {
 // usage errors.
 func newGroup(use, short string) *cobra.Command {
 	return &cobra.Command{
-		Use:   use,
-		Short: short,
-		Args:  cobra.ArbitraryArgs,
+		Use:         use,
+		Short:       short,
+		Annotations: map[string]string{groupAnnotation: "true"},
+		Args:        cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return usageError{err: errors.New("no command given"), hint: helpHint(cmd)}
