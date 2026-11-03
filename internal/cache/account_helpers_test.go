@@ -130,10 +130,12 @@ func (s acctSource) Sync(ctx context.Context, req mailstore.SyncRequest) (mailst
 }
 
 // acctBusyMail is a MailStore whose background header fetches fail with
-// mailstore.ErrBusy while busy is set, as a full pool makes them. It counts
-// the fetches it refused and any made on a foreground context.
+// mailstore.ErrBusy while busy is set, as a full pool makes them, only
+// those of folder when it is set. It counts the fetches it refused and any
+// made on a foreground context.
 type acctBusyMail struct {
 	*fake.Store
+	folder     string
 	busy       atomic.Bool
 	refused    atomic.Int64
 	foreground atomic.Int64
@@ -144,7 +146,7 @@ var _ MailStore = (*acctBusyMail)(nil)
 func (m *acctBusyMail) FetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32) ([]mailstore.Header, error) {
 	if !mailstore.IsBackground(ctx) {
 		m.foreground.Add(1)
-	} else if m.busy.Load() {
+	} else if m.busy.Load() && (m.folder == "" || m.folder == src.Folder) {
 		m.refused.Add(1)
 		return nil, mailstore.ErrBusy
 	}

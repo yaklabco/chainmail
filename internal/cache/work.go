@@ -154,17 +154,27 @@ func (a *Account) retryBusy(ctx context.Context, f func() error) error {
 func (a *Account) fetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32) ([]Row, error) {
 	var rows []Row
 	err := a.retryBusy(ctx, func() error {
-		return a.withMail(ctx, func(bg context.Context, st MailStore) error {
-			hs, err := st.FetchHeaders(bg, src, uids)
-			if err != nil {
-				return err
-			}
-			rows = make([]Row, len(hs))
-			for i, h := range hs {
-				rows[i] = RowFromHeader(h)
-			}
-			return nil
-		})
+		var err error
+		rows, err = a.fetchHeadersOnce(ctx, src, uids)
+		return err
+	})
+	return rows, err
+}
+
+// fetchHeadersOnce is one attempt of fetchHeaders, with no retry: it fails
+// with mailstore.ErrBusy when the pool is busy.
+func (a *Account) fetchHeadersOnce(ctx context.Context, src mailstore.Source, uids []uint32) ([]Row, error) {
+	var rows []Row
+	err := a.withMail(ctx, func(bg context.Context, st MailStore) error {
+		hs, err := st.FetchHeaders(bg, src, uids)
+		if err != nil {
+			return err
+		}
+		rows = make([]Row, len(hs))
+		for i, h := range hs {
+			rows[i] = RowFromHeader(h)
+		}
+		return nil
 	})
 	if err != nil || len(rows) == 0 {
 		return rows, err

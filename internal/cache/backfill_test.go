@@ -220,6 +220,51 @@ func TestBackfillBatchFitsTheRemainingBudget(t *testing.T) {
 	}
 }
 
+// The backfill checks the remaining budget again before every fetch
+// attempt, each retry after ErrBusy included: when the builder spends the
+// rest of the day's budget while a backfill fetch waits out a busy pool,
+// the retry fetches nothing and waits for 00:00 UTC instead.
+func TestBackfillRechecksTheBudgetBeforeABusyRetry(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	busy := &acctBusyMail{Store: fs, folder: "Archive"}
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX", "Archive"}))
+	r.mail = busy
+	for _, n := range []string{"a1", "a2", "a3"} {
+		fs.Add(acctMsg("Archive", n))
+	}
+	r.pass("INBOX")
+	r.pass("Archive")
+	r.setSettings(func(s *config.CacheSettings) { s.DailyDownload = 3 * headerBudgetBytes })
+	busy.busy.Store(true)
+	r.clock.Advance(14 * time.Hour) // 23:00 UTC
+	r.start()
+	r.clock.expectAfter(t, busyRetryFloor) // the backfill's Archive fetch was refused
+	r.waitBackfilled("INBOX")
+
+	// The builder spends the whole budget on new INBOX mail.
+	r.add("INBOX", "i1", "i2", "i3")
+	r.waitApplied()
+	if got, want := r.budget("2026-11-02"), int64(3*headerBudgetBytes); got != want {
+		t.Fatalf("budget after the builder = %d, want %d", got, want)
+	}
+
+	busy.busy.Store(false)
+	r.clock.Advance(busyRetryFloor)
+	r.clock.expectAfter(t, time.Hour-busyRetryFloor) // until 00:00 UTC
+	if n := r.count("Archive", 1); n != 0 {
+		t.Errorf("%d Archive rows fetched past a spent budget, want 0", n)
+	}
+	if got, want := r.budget("2026-11-02"), int64(3*headerBudgetBytes); got != want {
+		t.Errorf("budget used = %d, want %d", got, want)
+	}
+	r.clock.Advance(time.Hour)
+	r.waitBackfilled("Archive")
+	if got, want := r.budget("2026-11-03"), int64(3*headerBudgetBytes); got != want {
+		t.Errorf("next day's budget = %d, want %d", got, want)
+	}
+}
+
 // Both workers pause while a folder of the account is auth_required,
 // checking again every second, and resume once it is not.
 func TestWorkersPauseWhileAuthRequired(t *testing.T) {

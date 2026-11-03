@@ -98,8 +98,8 @@ func (a *Account) backfillStep(ctx context.Context, w *walk) (*walk, bool, error
 		return nil, false, err
 	}
 	defer a.endInflight()
-	allowance, err := a.waitAllowance(ctx)
-	if err != nil {
+	// Nothing is listed while not even one header fits the budget.
+	if _, err := a.waitAllowance(ctx); err != nil {
 		return w, false, err
 	}
 	if w == nil || w.folder != p.Folder || w.uidValidity != p.UIDValidity || w.epoch != epoch || !w.matches(p) {
@@ -109,15 +109,39 @@ func (a *Account) backfillStep(ctx context.Context, w *walk) (*walk, bool, error
 		}
 		w = &walk{folder: p.Folder, uidValidity: p.UIDValidity, epoch: epoch, baseline: p.BaselineUIDNext, low: p.BackfillLowUID, uids: uids}
 	}
-	batch := w.uids[:min(len(w.uids), max(1, a.settings().BackfillBatch), allowance)]
-	var rows []Row
-	if len(batch) > 0 {
-		src := mailstore.Source{Folder: w.folder, UIDValidity: w.uidValidity}
-		if rows, err = a.fetchHeaders(ctx, src, batch); err != nil {
-			return w, false, err
-		}
+	batch, rows, err := a.fetchBatch(ctx, w)
+	if err != nil {
+		return w, false, err
 	}
 	return a.commitBatch(ctx, w, batch, rows)
+}
+
+// fetchBatch fetches the walk's next batch and returns it with its rows.
+// Before every attempt, each retry after mailstore.ErrBusy included, it
+// waits until the day's remaining budget holds at least one header (until
+// 00:00 UTC when it does not) and sizes the batch to the headers it holds,
+// capped by backfill_batch. Budget the builder spends while the walk is
+// listed or a busy pool is waited out is so never overrun. A walk with no
+// UIDs left fetches nothing.
+func (a *Account) fetchBatch(ctx context.Context, w *walk) ([]uint32, []Row, error) {
+	if len(w.uids) == 0 {
+		return nil, nil, nil
+	}
+	src := mailstore.Source{Folder: w.folder, UIDValidity: w.uidValidity}
+	for {
+		allowance, err := a.waitAllowance(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		batch := w.uids[:min(len(w.uids), max(1, a.settings().BackfillBatch), allowance)]
+		rows, err := a.fetchHeadersOnce(ctx, src, batch)
+		if !errors.Is(err, mailstore.ErrBusy) {
+			return batch, rows, err
+		}
+		if !a.sleep(ctx, max(a.settings().BackfillPause, busyRetryFloor)) {
+			return nil, nil, ctx.Err()
+		}
+	}
 }
 
 // commitBatch stores a fetched batch, which fetchHeaders has already
