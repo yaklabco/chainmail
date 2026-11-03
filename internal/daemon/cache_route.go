@@ -134,31 +134,39 @@ func (m *messageService) serverRoute(acct config.ResolvedAccount, p *searchPlan)
 	return m.store(acct), route
 }
 
-// cacheCanAnswer runs spec 6.1's checks for acct: every folder in the
-// search's scope is fresh, and the cache can answer the whole query. It
-// returns the first failing reason and the oldest last sync of the folders.
-// reason is "" with ok false only when the query does not compile for the
-// cache, or holds a term the cache cannot evaluate (a ServerOnly plan with
-// no reason): the view could not run it either, so the server answers
-// whatever source asked for, and its own answer or refusal reaches the
-// caller.
+// cacheCanAnswer runs spec 6.1's checks for acct: the cache can evaluate
+// the query, every folder in the search's scope is fresh, and the cache
+// holds what the query needs. It returns the first failing reason and the
+// oldest last sync of the folders. reason is "" with ok false only when
+// the query does not compile for the cache, or holds a term the cache
+// cannot evaluate (a ServerOnly plan with no reason). Both are checked
+// before scope and freshness: the view could not run such a query at any
+// freshness, so the server answers whatever source asked for, and its own
+// answer or refusal reaches the caller (integration note 15).
 func (m *messageService) cacheCanAnswer(ctx context.Context, ca *cache.Account, server mailstore.Store, acct config.ResolvedAccount, p *searchPlan) (bool, string, time.Time) {
+	log := m.s.opts.Logger
 	plan, err := cache.Compile(p.tree, p.in, acct.Provider.Gmail, m.s.cacheClock.Now())
 	if err != nil {
-		m.s.opts.Logger.Warn("a search did not compile for the cache; the server answers it", "account", acct.Name)
+		log.Warn("a search did not compile for the cache; the server answers it", "account", acct.Name, "err", err)
+		return false, "", time.Time{}
+	}
+	if plan.ServerOnly && plan.Reason == "" {
 		return false, "", time.Time{}
 	}
 	scoper, ok := server.(mailstore.Scoper)
 	if !ok {
+		log.Debug("the account's mail store cannot list a search's folders; the cache cannot answer it", "account", acct.Name)
 		return false, reasonFolderNotSynced, time.Time{}
 	}
 	folders, err := scoper.SearchFolders(ctx, p.in)
 	if err != nil {
+		log.Warn("listing a search's folders for the cache failed", "account", acct.Name, "reason", apiReason(err))
 		return false, reasonFolderNotSynced, time.Time{}
 	}
 	fresh, reason, syncedAt, err := ca.Freshness(ctx, folders)
 	switch {
 	case err != nil:
+		log.Warn("reading the cache's freshness for a search failed", "account", acct.Name, "err", err)
 		return false, reasonStale, time.Time{}
 	case !fresh && reason == "":
 		return false, reasonStale, syncedAt
@@ -168,6 +176,9 @@ func (m *messageService) cacheCanAnswer(ctx context.Context, ca *cache.Account, 
 		return false, plan.Reason, syncedAt
 	case plan.NeedsBodies:
 		covers, err := ca.WindowCovers(ctx, folders, plan.Since)
+		if err != nil {
+			log.Warn("reading the cache's body window for a search failed", "account", acct.Name, "err", err)
+		}
 		if err != nil || !covers {
 			return false, reasonTextOutsideWindow, syncedAt
 		}

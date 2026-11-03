@@ -355,6 +355,13 @@ func TestSearcherRoutes(t *testing.T) {
 		{name: "has:attachment fresh", query: "has:attachment", want: "view", route: complete},
 		{name: "has:attachment stale", query: "has:attachment", spoil: staleArchive, want: "refusal", route: server},
 		{name: "label: without a cache", query: "label:todo", noCache: true, want: "refusal", route: server},
+		// A plan the cache cannot evaluate (label:\Seen off Google) goes to
+		// the server even when source is cache, whatever the freshness
+		// (integration note 15), so its refusal reaches the caller.
+		{name: "forced unsupported term fresh", query: `label:\Seen`, source: "cache", want: "refusal", route: server},
+		{name: "forced unsupported term stale", query: `label:\Seen`, source: "cache", spoil: staleArchive, want: "refusal", route: server},
+		{name: "forced unsupported term backfilling", query: `label:\Seen`, source: "cache", spoil: backfilling, want: "refusal", route: server},
+		{name: "forced unsupported term not synced", query: `label:\Seen`, source: "cache", spoil: unsynced, want: "refusal", route: server},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
