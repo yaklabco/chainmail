@@ -160,6 +160,10 @@ type Server struct {
 	cache *cache.Store
 	// cacheErr is why cache.db did not open, or nil.
 	cacheErr error
+	// cacheAccounts are the cache workers of the watched accounts with the
+	// cache enabled, by account. startWatch fills it before any handler
+	// runs, and it never changes after.
+	cacheAccounts map[string]*cache.Account
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -223,6 +227,7 @@ func New(opts Options) (*Server, error) {
 	mux.Handle(composePath, withReadAbort(composeHandler))
 	mux.Handle(chainmailv1connect.NewOrganizeServiceHandler(&organizeService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewWatchServiceHandler(&watchService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
+	mux.Handle(chainmailv1connect.NewCacheServiceHandler(&cacheService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)

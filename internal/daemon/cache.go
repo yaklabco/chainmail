@@ -1,11 +1,19 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 
+	"connectrpc.com/connect"
+
+	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	"github.com/jamesainslie/chainmail/gen/chainmail/v1/chainmailv1connect"
+	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/cache"
+	"github.com/jamesainslie/chainmail/internal/config"
 )
 
 // cacheFile is the cache database's name in Options.CacheDir.
@@ -62,4 +70,125 @@ func (s *Server) firstCacheAccount() (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// cacheService implements chainmailv1connect.CacheServiceHandler.
+type cacheService struct {
+	// UnimplementedCacheServiceHandler answers RebuildCache and EvictCache
+	// until their cycles replace it.
+	chainmailv1connect.UnimplementedCacheServiceHandler
+	s *Server
+}
+
+var _ chainmailv1connect.CacheServiceHandler = (*cacheService)(nil)
+
+// GetCacheStatus implements chainmailv1connect.CacheServiceHandler. It
+// reports the cache of every account, or of those named, and the file's
+// size against max_size. Like GetWatchStatus it is read-only, returns no
+// message content and is deliberately not audited.
+func (c *cacheService) GetCacheStatus(ctx context.Context, req *connect.Request[chainmailv1.GetCacheStatusRequest]) (*connect.Response[chainmailv1.GetCacheStatusResponse], error) {
+	accts, err := c.s.resolveAccounts(req.Msg.GetAccounts())
+	if err != nil {
+		return nil, toConnectError(err)
+	}
+	ctx, cancel := withDeadline(ctx, callTimeout)
+	defer cancel()
+	resp := &chainmailv1.GetCacheStatusResponse{
+		MaxSizeBytes: c.s.opts.Config.CacheMaxSize(),
+		Accounts:     c.s.cacheStatuses(ctx, accts, true),
+	}
+	if c.s.cache != nil {
+		size, err := c.s.cache.SizeBytes(ctx)
+		if err != nil {
+			return nil, toConnectError(c.s.cacheFailure(err))
+		}
+		resp.SizeBytes = size
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// cacheFailure logs a cache error the daemon cannot recover from in the
+// call, and returns it with fixed client text.
+func (s *Server) cacheFailure(err error) error {
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		s.opts.Logger.Error("cache call failed", "err", err)
+	}
+	return &fixedTextError{msg: "the cache failed", err: err}
+}
+
+// cacheStatuses is cacheStatus for each of accts, in their order.
+func (s *Server) cacheStatuses(ctx context.Context, accts []config.ResolvedAccount, withFolders bool) []*chainmailv1.AccountCacheStatus {
+	out := make([]*chainmailv1.AccountCacheStatus, 0, len(accts))
+	for _, acct := range accts {
+		out = append(out, s.cacheStatus(ctx, acct, withFolders))
+	}
+	return out
+}
+
+// cacheStatus reports one account's cache. It never fails: a status the
+// worker cannot read is state error with an INTERNAL reason, and the
+// cause goes to the log.
+func (s *Server) cacheStatus(ctx context.Context, acct config.ResolvedAccount, withFolders bool) *chainmailv1.AccountCacheStatus {
+	set := s.opts.Config.CacheSettings(acct.Name)
+	out := &chainmailv1.AccountCacheStatus{Account: acct.Name, State: cache.StateDisabled, BudgetBytes: set.DailyDownload}
+	ca := s.cacheAccounts[acct.Name]
+	switch {
+	case !set.Enabled || s.opts.DisableCache:
+		return out
+	case s.cacheErr != nil:
+		out.Enabled, out.State, out.LastError = true, cache.StateError, api.ReasonInternal
+		return out
+	case ca == nil:
+		// Not synced, or watching is off: the cache needs the event log.
+		return out
+	}
+	st, err := ca.Status(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.opts.Logger.Warn("reading an account's cache status", "account", acct.Name, "err", err)
+		}
+		out.Enabled, out.State, out.LastError = true, cache.StateError, api.ReasonInternal
+		return out
+	}
+	out = accountCacheProto(st, withFolders)
+	if s.cache.OverCap() && (out.State == cache.StateReady || out.State == cache.StatePrefetching) {
+		out.State = cache.StateOverCap
+	}
+	return out
+}
+
+// accountCacheProto builds the API form of a worker's status, with its
+// folders when withFolders is set.
+func accountCacheProto(st cache.AccountStatus, withFolders bool) *chainmailv1.AccountCacheStatus {
+	out := &chainmailv1.AccountCacheStatus{
+		Account: st.Account, Enabled: st.Enabled, State: st.State,
+		BudgetUsedBytes: st.BudgetUsed, BudgetBytes: st.BudgetBytes, LastError: st.LastError,
+	}
+	if withFolders {
+		out.Folders = make([]*chainmailv1.FolderCacheStatus, 0, len(st.Folders))
+		for _, f := range st.Folders {
+			out.Folders = append(out.Folders, folderCacheProto(f))
+		}
+	}
+	return out
+}
+
+// folderCacheProto builds the API form of one folder's cache status.
+// FolderStatus embeds Progress and FolderStats, which both name the folder.
+func folderCacheProto(f cache.FolderStatus) *chainmailv1.FolderCacheStatus {
+	return &chainmailv1.FolderCacheStatus{
+		Folder:         cmp.Or(f.Progress.Folder, f.FolderStats.Folder),
+		State:          f.State,
+		Headers:        f.Headers,
+		BackfillDone:   f.BackfillDone,
+		BaselineUid:    f.BaselineUIDNext,
+		BackfillLowUid: f.BackfillLowUID,
+		Bodies:         f.Bodies,
+		BodyBytes:      f.BodyBytes,
+		WindowMessages: f.WindowMessages,
+		WindowBodies:   f.WindowBodies,
+		WindowDone:     f.WindowDone,
+		BodyFailures:   f.BodyFailures,
+		LastAppliedAt:  timestamp(f.LastAppliedAt),
+	}
 }

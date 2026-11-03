@@ -10,7 +10,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
 )
 
-// TestWriteServicesAreRegistered checks that the daemon serves the compose, organize and watch services and ProbeLimits.
+// TestWriteServicesAreRegistered checks that the daemon serves the compose, organize, watch and cache services and ProbeLimits.
 // An unregistered route answers HTTP 404, which Connect reports in the
 // error text, so any answer but that one means the route exists, whether or
 // not the handler is implemented yet.
@@ -32,6 +32,10 @@ func TestWriteServicesAreRegistered(t *testing.T) {
 		},
 		"WatchService.GetWatchStatus": func() error {
 			_, err := h.Client.Watch.GetWatchStatus(t.Context(), connect.NewRequest(&chainmailv1.GetWatchStatusRequest{}))
+			return err
+		},
+		"CacheService.GetCacheStatus": func() error {
+			_, err := h.Client.Cache.GetCacheStatus(t.Context(), connect.NewRequest(&chainmailv1.GetCacheStatusRequest{}))
 			return err
 		},
 	}
