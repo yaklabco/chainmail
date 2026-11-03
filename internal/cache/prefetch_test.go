@@ -2,13 +2,20 @@ package cache
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/db"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
 	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/jamesainslie/chainmail/internal/watch"
 )
 
 // prefetchRig runs one prefetcher for account acme against a fake store
@@ -184,5 +191,263 @@ func TestPrefetchWindowDone(t *testing.T) {
 	}
 	if r.fetches() != 3 {
 		t.Errorf("FetchMessages calls = %d, want 3", r.fetches())
+	}
+}
+
+// offered reports whether x is due for a fetch now: no body, and no
+// failure waiting out its retry gap or final.
+func (r *prefetchRig) offered(x ref.Ref) bool {
+	r.t.Helper()
+	now := r.clk.Now()
+	refs, err := r.st.BodylessSince(r.t.Context(), "acme", "INBOX", now.Add(-r.set.PrefetchBodies), maxBodyAttempts, now.Add(-bodyRetryGap), 1000)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return slices.ContainsFunc(refs, func(o ref.Ref) bool { return o.UID == x.UID })
+}
+
+// finalFailures is INBOX's count of final body failures.
+func (r *prefetchRig) finalFailures() uint64 {
+	r.t.Helper()
+	stats, err := r.st.Stats(r.t.Context(), "acme", r.clk.Now().Add(-r.set.PrefetchBodies))
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	for _, s := range stats {
+		if s.Folder == "INBOX" {
+			return s.BodyFailures
+		}
+	}
+	return 0
+}
+
+// rawBreaker hands out the fake's messages, with raw bytes the renderer
+// cannot parse (a header line without a colon) for the UIDs in broken.
+type rawBreaker struct {
+	*fake.Store
+	broken map[uint32]bool
+}
+
+func (b rawBreaker) FetchMessages(ctx context.Context, refs []ref.Ref) []mailstore.MessageResult {
+	out := b.Store.FetchMessages(ctx, refs)
+	for i, x := range refs {
+		if b.broken[x.UID] && out[i].Message != nil {
+			msg := *out[i].Message
+			msg.Raw = []byte("Subject: hi\r\nno colon here\r\n\r\nbody\r\n")
+			out[i].Message = &msg
+		}
+	}
+	return out
+}
+
+func TestBodyFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "busy pool", err: mailstore.ErrBusy, want: ""},
+		{name: "server unavailable", err: fmt.Errorf("%w: reset", mailstore.ErrUnavailable), want: ""},
+		{name: "connection limit", err: fmt.Errorf("%w: %w", mailstore.ErrUnavailable, mailstore.ErrConnLimit), want: ""},
+		{name: "auth required", err: &auth.RequiredError{Account: "acme", Hint: "run: chainmail auth login acme"}, want: ""},
+		{name: "auth rejected", err: fmt.Errorf("login: %w", auth.ErrRejected), want: ""},
+		{name: "canceled", err: context.Canceled, want: ""},
+		{name: "deadline", err: fmt.Errorf("fetch: %w", context.DeadlineExceeded), want: ""},
+		{name: "stale ref", err: fmt.Errorf("%w: message is gone", mailstore.ErrStaleRef), want: failGone},
+		{name: "not found", err: mailstore.ErrNotFound, want: failGone},
+		{name: "anything else", err: errors.New("BAD unexpected answer"), want: failFetch},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := bodyFailure(tt.err); got != tt.want {
+				t.Errorf("bodyFailure(%v) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// A body that keeps failing is retried 8 hours after each attempt and is
+// final after the third, which then counts as done for window_done.
+func TestPrefetchFailuresGoFinal(t *testing.T) {
+	t.Parallel()
+	r := newPrefetchRig(t)
+	m := r.add(oneDay, "failing")
+	r.track(true)
+	r.fk.Fail("FetchMessages", errors.New("BAD unexpected answer"))
+	for attempt := 1; attempt <= maxBodyAttempts; attempt++ {
+		r.step(0)
+		if r.fetches() != attempt {
+			t.Fatalf("attempt %d: FetchMessages calls = %d", attempt, r.fetches())
+		}
+		if r.offered(m) {
+			t.Fatalf("attempt %d: offered again before the retry gap", attempt)
+		}
+		if attempt < maxBodyAttempts {
+			r.step(prefetchIdle)
+			if r.fetches() != attempt || r.windowDone() {
+				t.Fatalf("attempt %d: within the gap, calls = %d, window_done = %v; want no fetch, not done", attempt, r.fetches(), r.windowDone())
+			}
+		}
+		// The retry is due once the last attempt is strictly older than the gap.
+		r.clk.Advance(bodyRetryGap + time.Second)
+	}
+	r.step(prefetchIdle)
+	if r.fetches() != maxBodyAttempts {
+		t.Errorf("FetchMessages calls after the final failure = %d, want %d", r.fetches(), maxBodyAttempts)
+	}
+	if !r.windowDone() || r.finalFailures() != 1 {
+		t.Errorf("window_done = %v, final failures = %d; want true, 1", r.windowDone(), r.finalFailures())
+	}
+}
+
+// A message gone from the server and a body the renderer cannot parse are
+// recorded as failures; the rest of the batch is still stored.
+func TestPrefetchGoneAndUnparsable(t *testing.T) {
+	t.Parallel()
+	r := newPrefetchRig(t)
+	gone := r.add(3*oneDay, "gone")
+	broken := r.add(2*oneDay, "broken")
+	good := r.add(oneDay, "good")
+	r.track(true)
+	r.fk.ExternalExpunge("INBOX", gone.UID)
+	r.mail = rawBreaker{Store: r.fk, broken: map[uint32]bool{broken.UID: true}}
+	r.step(0)
+	if !r.has(good) || r.has(gone) || r.has(broken) {
+		t.Errorf("bodies cached: good %v, gone %v, broken %v; want true, false, false", r.has(good), r.has(gone), r.has(broken))
+	}
+	if r.offered(gone) || r.offered(broken) {
+		t.Error("a failed message is offered again before its retry gap")
+	}
+}
+
+// Errors about the connection or the account record nothing and end the
+// batch with the retry wait; the message is fetched once they pass.
+func TestPrefetchTransientErrorsRecordNothing(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		fail func(*prefetchRig)
+		heal func(*prefetchRig)
+	}{
+		{
+			name: "server unavailable",
+			fail: func(r *prefetchRig) { r.fk.Fail("FetchMessages", fmt.Errorf("%w: reset", mailstore.ErrUnavailable)) },
+			heal: func(r *prefetchRig) { r.fk.Fail("FetchMessages", nil) },
+		},
+		{
+			name: "busy pool",
+			fail: func(r *prefetchRig) { r.fk.SetBusy(true) },
+			heal: func(r *prefetchRig) { r.fk.SetBusy(false) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newPrefetchRig(t)
+			m := r.add(oneDay, "waiting")
+			r.track(true)
+			tt.fail(r)
+			r.step(retryFloor)
+			if r.has(m) || !r.offered(m) {
+				t.Errorf("after the error: body cached = %v, offered = %v; want false, true", r.has(m), r.offered(m))
+			}
+			tt.heal(r)
+			r.step(0)
+			if !r.has(m) {
+				t.Error("body not fetched once the error passed")
+			}
+			if n := r.fk.BackgroundCalls("FetchMessages"); n != 2 {
+				t.Errorf("background FetchMessages calls = %d, want 2", n)
+			}
+		})
+	}
+}
+
+// With the day's budget spent nothing is fetched until 00:00 UTC; a batch
+// adds len(raw) of each body to the day it ran on.
+func TestPrefetchBudget(t *testing.T) {
+	t.Parallel()
+	r := newPrefetchRig(t)
+	a := r.add(oneDay, "a")
+	b := r.add(2*oneDay, "b")
+	r.track(true)
+	ctx := t.Context()
+	if _, err := r.st.AddBudget(ctx, "acme", "2026-11-03", r.set.DailyDownload); err != nil {
+		t.Fatal(err)
+	}
+	r.step(14 * time.Hour)
+	if r.fetches() != 0 {
+		t.Fatalf("FetchMessages calls with the budget spent = %d, want 0", r.fetches())
+	}
+	r.clk.Set(time.Date(2026, 11, 4, 0, 0, 1, 0, time.UTC))
+	r.step(0)
+	var want int64
+	for _, x := range []ref.Ref{a, b} {
+		body, ok, err := r.st.Body(ctx, x)
+		if err != nil || !ok {
+			t.Fatalf("Body(%v) = %v, %v", x, ok, err)
+		}
+		want += int64(len(body.Raw))
+	}
+	got, err := r.st.Budget(ctx, "acme", "2026-11-04")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("budget used on 2026-11-04 = %d, want %d", got, want)
+	}
+}
+
+// The prefetcher pauses the whole account while one of its folders is
+// auth_required or reconnecting, skips a folder in error alone, and ignores
+// another account's trouble (integration note 12).
+func TestPrefetchPausesOnWatchTrouble(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		account string
+		folder  string
+		state   watch.Status
+		// wait is what the step returns; fetched whether INBOX's body came.
+		wait    time.Duration
+		fetched bool
+	}{
+		{account: "acme", folder: "INBOX", state: watch.StateAuthRequired, wait: retryFloor},
+		{account: "acme", folder: "Archive", state: watch.StateAuthRequired, wait: retryFloor},
+		{account: "acme", folder: "INBOX", state: watch.StateReconnecting, wait: retryFloor},
+		{account: "acme", folder: "INBOX", state: watch.StateError, wait: prefetchIdle},
+		{account: "acme", folder: "Archive", state: watch.StateError, wait: 0, fetched: true},
+		{account: "acme", folder: "INBOX", state: watch.StateWatching, wait: 0, fetched: true},
+		{account: "acme", folder: "INBOX", state: watch.StatePolling, wait: 0, fetched: true},
+		{account: "other", folder: "INBOX", state: watch.StateAuthRequired, wait: 0, fetched: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.account+" "+tt.folder+" "+string(tt.state), func(t *testing.T) {
+			t.Parallel()
+			r := newPrefetchRig(t)
+			stateDB, err := db.OpenState(t.Context(), filepath.Join(t.TempDir(), "state.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = stateDB.Close() })
+			state := watch.NewState(stateDB)
+			if err := state.SetStatus(t.Context(), tt.account, tt.folder, watch.ModeIdle, tt.state, ""); err != nil {
+				t.Fatal(err)
+			}
+			r.p.o.State = state
+			m := r.add(oneDay, "m")
+			r.track(true)
+			r.step(tt.wait)
+			if got := r.has(m); got != tt.fetched {
+				t.Errorf("body cached = %v, want %v", got, tt.fetched)
+			}
+			if !tt.fetched && r.fetches() != 0 {
+				t.Errorf("FetchMessages calls = %d, want 0", r.fetches())
+			}
+			if !tt.fetched && r.windowDone() {
+				t.Error("window_done set for a folder that was not prefetched")
+			}
+		})
 	}
 }

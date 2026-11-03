@@ -90,14 +90,31 @@ func (p *prefetcher) run(ctx context.Context) {
 // step does one unit of prefetch work and returns how long to wait before
 // the next: it fetches one batch for the first folder with work, keeping
 // each folder's window_done true exactly when its window has no body left
-// to fetch (a final failure counts as done).
+// to fetch (a final failure counts as done). A folder in watch error is
+// skipped and its window_done left alone.
 func (p *prefetcher) step(ctx context.Context) time.Duration {
 	set := p.o.Settings()
 	retry := max(set.BackfillPause, retryFloor)
 	if !set.Enabled || set.PrefetchBodies <= 0 {
 		return prefetchIdle
 	}
+	paused, failing, err := p.watchTrouble(ctx)
+	if err != nil || paused {
+		if err != nil {
+			p.warn(ctx, "reading the watch state for the cache prefetcher", err)
+		}
+		return retry
+	}
 	now := p.o.Clock.Now()
+	day := utcDay(now)
+	used, err := p.o.Store.Budget(ctx, p.o.Account, day)
+	if err != nil {
+		p.warn(ctx, "reading the download budget", err)
+		return retry
+	}
+	if used >= set.DailyDownload {
+		return untilUTCMidnight(now)
+	}
 	progress, err := p.o.Store.AllProgress(ctx, p.o.Account)
 	if err != nil {
 		p.warn(ctx, "reading cache progress", err)
@@ -105,7 +122,7 @@ func (p *prefetcher) step(ctx context.Context) time.Duration {
 	}
 	since := now.Add(-set.PrefetchBodies)
 	for _, pr := range progress {
-		if !pr.BackfillDone {
+		if !pr.BackfillDone || failing[pr.Folder] {
 			continue
 		}
 		refs, err := p.o.Store.BodylessSince(ctx, p.o.Account, pr.Folder, since, maxBodyAttempts, now.Add(-bodyRetryGap), prefetchBatch)
@@ -126,7 +143,7 @@ func (p *prefetcher) step(ctx context.Context) time.Duration {
 				return retry
 			}
 		}
-		return p.fetch(ctx, refs, utcDay(now), set)
+		return p.fetch(ctx, refs, day, set)
 	}
 	return prefetchIdle
 }
@@ -260,4 +277,33 @@ func bodyFailure(err error) string {
 	default:
 		return failFetch
 	}
+}
+
+// watchTrouble reads the account's watch states. paused is set while one
+// of its folders is auth_required or reconnecting, which the cache workers
+// wait out for the whole account; failing names the folders in error, which
+// are skipped alone (integration note 12).
+func (p *prefetcher) watchTrouble(ctx context.Context) (paused bool, failing map[string]bool, err error) {
+	if p.o.State == nil {
+		return false, nil, nil
+	}
+	rows, err := p.o.State.Folders(ctx)
+	if err != nil {
+		return false, nil, err
+	}
+	for _, r := range rows {
+		if r.Account != p.o.Account {
+			continue
+		}
+		switch r.State {
+		case watch.StateAuthRequired, watch.StateReconnecting:
+			paused = true
+		case watch.StateError:
+			if failing == nil {
+				failing = map[string]bool{}
+			}
+			failing[r.Folder] = true
+		}
+	}
+	return paused, failing, nil
 }
