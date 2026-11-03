@@ -1036,3 +1036,35 @@ func TestParseRefusesEmptyNamedTables(t *testing.T) {
 		})
 	}
 }
+
+// Inputs viper alone accepted but the old strict decoder refused. The
+// go-toml gate in Parse must keep refusing them.
+func TestParseGateRefusesWhatViperWouldAccept(t *testing.T) {
+	t.Parallel()
+	base := "[accounts.host]\nprovider = \"hostinger\"\naddress = \"me@example.com\"\n"
+	tests := []struct {
+		name, config string
+		unknown      bool
+	}{
+		{name: "empty unknown table", config: base + "[policy.typo]\n", unknown: true},
+		{name: "empty unknown inline table", config: base + "typo = {}\n", unknown: true},
+		{name: "table for an int", config: base + "[policy]\nmax_recipients = {}\n"},
+		{name: "table for a list", config: base + "watch = {}\n"},
+		{name: "table for a bool", config: base + "[accounts.host.sync]\nenabled = {}\n"},
+		{name: "datetime for policy", config: "policy = 1979-05-27T07:32:00Z\n" + base},
+		{name: "datetime for daemon", config: "daemon = 1979-05-27T07:32:00Z\n" + base},
+		{name: "datetime for an account", config: "[accounts]\nhost = 1979-05-27T07:32:00Z\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(tt.config))
+			if err == nil {
+				t.Fatalf("Parse accepted:\n%s", tt.config)
+			}
+			if tt.unknown && !errors.Is(err, ErrUnknownKey) {
+				t.Errorf("err = %v, want ErrUnknownKey", err)
+			}
+		})
+	}
+}

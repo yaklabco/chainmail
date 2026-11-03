@@ -246,6 +246,9 @@ func Load(path string) (*Config, error) {
 // type, applies defaults and validates the result. Nothing outside data is
 // read: no environment variable can set or change a key.
 func Parse(data []byte) (*Config, error) {
+	if err := strictGate(data); err != nil {
+		return nil, fmt.Errorf("parsing: %w", err)
+	}
 	tree, err := checkKeys(data)
 	if err != nil {
 		return nil, fmt.Errorf("parsing: %w", err)
@@ -270,6 +273,27 @@ func Parse(data []byte) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// strictGate decodes data with go-toml's strict decoder, the one chainmail
+// always used, and refuses what it refuses: unknown keys, as ErrUnknownKey,
+// and values of the wrong type. Viper alone cannot hold that line. It drops
+// empty tables, so [policy.typo] and max_recipients = {} would vanish
+// instead of failing, and mapstructure decodes a datetime into a struct as
+// an empty one. The gate's own result is discarded; viper does the load.
+func strictGate(data []byte) error {
+	var cfg Config
+	err := toml.NewDecoder(bytes.NewReader(data)).DisallowUnknownFields().Decode(&cfg)
+	var strict *toml.StrictMissingError
+	if errors.As(err, &strict) {
+		keys := make([]string, 0, len(strict.Errors))
+		for _, e := range strict.Errors {
+			keys = append(keys, strings.Join(e.Key(), "."))
+		}
+		slices.Sort(keys)
+		return fmt.Errorf("%w: %s", ErrUnknownKey, strings.Join(keys, ", "))
+	}
+	return err
 }
 
 // strictDecoding makes viper decode as go-toml's strict decoder did: by
