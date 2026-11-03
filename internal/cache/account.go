@@ -91,6 +91,10 @@ type Account struct {
 	// was down.
 	started time.Time
 
+	// throttled is the pause the server's quota or bandwidth refusal of a
+	// backfill or prefetch fetch starts, until 00:00 UTC.
+	throttled throttle
+
 	// errMu guards lastErr, the reason code of the latest failed step. The
 	// worker that failed clears it once it succeeds again.
 	errMu   sync.Mutex
@@ -284,7 +288,8 @@ func (a *Account) lastError() string {
 
 // runPrefetch runs the account's body prefetcher until ctx ends. It shares
 // the account's options, including the clock and logger NewAccount
-// defaulted, and pauses as the other workers do (integration note 12).
+// defaulted, and its throttle, and pauses as the other workers do
+// (integration note 12).
 func (a *Account) runPrefetch(ctx context.Context) {
 	o := a.o
 	newPrefetcher(prefetchOptions{
@@ -300,9 +305,10 @@ func (a *Account) runPrefetch(ctx context.Context) {
 			}
 			return ms, release, nil
 		},
-		Wake:   a.prefetchWake,
-		Clock:  o.Clock,
-		Logger: o.Logger,
+		Wake:     a.prefetchWake,
+		Throttle: &a.throttled,
+		Clock:    o.Clock,
+		Logger:   o.Logger,
 	}).run(ctx)
 }
 

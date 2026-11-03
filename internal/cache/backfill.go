@@ -36,13 +36,19 @@ func (w *walk) matches(p Progress) bool {
 // baseline, one batch at a time, until ctx ends. It pauses backfill_pause
 // between batches, waits for a poke when no folder needs work (or a folder
 // changed UIDVALIDITY under its walk, until the builder resets it), and
-// backs off 1s doubling to 5m after a failure.
+// backs off 1s doubling to 5m after a failure. A fetch the server refuses
+// for a quota or bandwidth limit pauses the account until 00:00 UTC.
 func (a *Account) runBackfill(ctx context.Context) {
 	var w *walk
 	failures := 0
 	for ctx.Err() == nil {
 		next, more, err := a.backfillStep(ctx, w)
 		w = next
+		if errors.Is(err, mailstore.ErrThrottled) && ctx.Err() == nil {
+			// Not a failure: the next step's admission waits for 00:00 UTC.
+			a.noteThrottle(ctx)
+			continue
+		}
 		if err != nil && !errors.Is(err, mailstore.ErrStaleRef) {
 			if ctx.Err() != nil {
 				return

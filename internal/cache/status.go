@@ -24,7 +24,8 @@ type AccountStatus struct {
 	Enabled bool
 	// State is the most pressing of: disabled, error (the latest failure
 	// was a cache fault), paused, budget_exhausted (less than one header of
-	// the day's budget left, so background work waits for 00:00 UTC),
+	// the day's budget left, or the server throttling the account, so
+	// background work waits for 00:00 UTC),
 	// backfilling, prefetching, ready. over_cap is file-wide: the daemon
 	// applies the Store's OverCap over ready and prefetching.
 	State       string
@@ -104,7 +105,7 @@ func (a *Account) Status(ctx context.Context) (AccountStatus, error) {
 		st.State = StateError
 	case paused:
 		st.State = StatePaused
-	case headerAllowance(st.BudgetUsed, s.DailyDownload) < 1:
+	case headerAllowance(st.BudgetUsed, s.DailyDownload) < 1, a.throttled.wait(a.clock.Now()) > 0:
 		st.State = StateBudgetExhausted
 	case backfilling:
 		st.State = StateBackfilling

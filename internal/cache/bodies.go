@@ -124,11 +124,32 @@ func (s *Store) RecordBodyFailure(ctx context.Context, r ref.Ref, reason string)
 // after since that have no body and fewer than maxAttempts failures (whose
 // last attempt is older than retryAfter), newest first, at most limit.
 func (s *Store) BodylessSince(ctx context.Context, account, folder string, since time.Time, maxAttempts int, retryAfter time.Time, limit int) ([]ref.Ref, error) {
+	qs, err := s.bodylessQueue(ctx, account, folder, since, maxAttempts, retryAfter, limit)
+	if err != nil || qs == nil {
+		return nil, err
+	}
+	refs := make([]ref.Ref, len(qs))
+	for i, q := range qs {
+		refs[i] = q.ref
+	}
+	return refs, nil
+}
+
+// queued is a message whose body the prefetcher may fetch, with the size
+// the server reported for the whole message: no download of its body is
+// larger, so the prefetcher admits it against the budget by that size.
+type queued struct {
+	ref  ref.Ref
+	size int64
+}
+
+// bodylessQueue is BodylessSince with each message's size.
+func (s *Store) bodylessQueue(ctx context.Context, account, folder string, since time.Time, maxAttempts int, retryAfter time.Time, limit int) ([]queued, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
-	refs, err := s.queryRefs(ctx,
-		`SELECT m.account, m.folder, m.uidvalidity, m.uid, m.gmail_msgid
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT m.account, m.folder, m.uidvalidity, m.uid, m.gmail_msgid, m.size
 		 FROM messages m
 		 LEFT JOIN bodies b ON b.msg = m.id
 		 LEFT JOIN body_failures f ON f.msg = m.id
@@ -140,7 +161,23 @@ func (s *Store) BodylessSince(ctx context.Context, account, folder string, since
 	if err != nil {
 		return nil, s.fail("listing bodyless messages", err)
 	}
-	return refs, nil
+	defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
+	var out []queued
+	for rows.Next() {
+		var (
+			q                      queued
+			uidValidity, uid, gmid int64
+		)
+		if err := rows.Scan(&q.ref.Account, &q.ref.Folder, &uidValidity, &uid, &gmid, &q.size); err != nil {
+			return nil, s.fail("listing bodyless messages", err)
+		}
+		q.ref.UIDValidity, q.ref.UID, q.ref.GmailMsgID = uint32(uidValidity), uint32(uid), uint64(gmid)
+		out = append(out, q)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, s.fail("listing bodyless messages", err)
+	}
+	return out, nil
 }
 
 // queryRefs runs a SELECT of account, folder, uidvalidity, uid and

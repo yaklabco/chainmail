@@ -73,6 +73,15 @@ func TestStatusStates(t *testing.T) {
 				r.t.Fatal(err)
 			}
 		}, want: StateReady},
+		{name: "throttled by the server", setup: func(r *acctRig) {
+			acctReadyFolder(r, "INBOX", true)
+			r.a.throttled.set(r.clock.Now())
+		}, want: StateBudgetExhausted},
+		{name: "a throttle that has passed", setup: func(r *acctRig) {
+			acctReadyFolder(r, "INBOX", true)
+			r.a.throttled.set(r.clock.Now())
+			r.clock.Advance(untilUTCMidnight(r.clock.Now()))
+		}, want: StateReady},
 		{name: "backfilling", setup: func(r *acctRig) {
 			r.putFolder(watch.FolderRow{Account: "acme", Folder: "INBOX", UIDValidity: 7, UIDNext: 10, Mode: watch.ModeIdle, State: watch.StateWatching})
 		}, want: StateBackfilling},
