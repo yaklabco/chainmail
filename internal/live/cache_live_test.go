@@ -3,6 +3,7 @@
 package live
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -98,14 +99,22 @@ func TestCacheMatchesServer(t *testing.T) {
 
 // waitCacheReady polls GetCacheStatus until every account's cache is ready
 // or disabled, or cacheReadyDeadline passes, logging progress, and returns
-// the last status of each account.
+// the last status of each account. Every status call runs under the wait's
+// deadline, so a stalled call cannot eat the time kept for the queries: one
+// cut short by the deadline ends the wait with the last status, or fails
+// the test when no call has answered yet.
 func waitCacheReady(t *testing.T, c *client.Client, names []string) map[string]*chainmailv1.AccountCacheStatus {
 	t.Helper()
 	deadline, ok := t.Deadline()
-	until := cacheReadyDeadline(time.Now(), deadline, ok)
+	ctx, cancel := context.WithDeadline(t.Context(), cacheReadyDeadline(time.Now(), deadline, ok))
+	defer cancel()
+	var last map[string]*chainmailv1.AccountCacheStatus
 	for {
-		resp, err := c.Cache.GetCacheStatus(t.Context(), connect.NewRequest(&chainmailv1.GetCacheStatusRequest{Accounts: names}))
+		resp, err := c.Cache.GetCacheStatus(ctx, connect.NewRequest(&chainmailv1.GetCacheStatusRequest{Accounts: names}))
 		if err != nil {
+			if last != nil && ctx.Err() != nil && t.Context().Err() == nil {
+				return last
+			}
 			t.Fatalf("GetCacheStatus: %v (%s)", err, hint(err))
 		}
 		byName := make(map[string]*chainmailv1.AccountCacheStatus, len(names))
@@ -127,14 +136,17 @@ func waitCacheReady(t *testing.T, c *client.Client, names []string) map[string]*
 			}
 		}
 		t.Logf("cache.db %d of %d bytes", resp.Msg.GetSizeBytes(), resp.Msg.GetMaxSizeBytes())
-		left := time.Until(until)
-		if pending == 0 || left <= 0 {
+		last = byName
+		if pending == 0 {
 			return byName
 		}
 		select {
-		case <-t.Context().Done():
-			t.Fatalf("waiting for the caches: %v", t.Context().Err())
-		case <-time.After(min(cachePollEvery, left)):
+		case <-ctx.Done():
+			if err := t.Context().Err(); err != nil {
+				t.Fatalf("waiting for the caches: %v", err)
+			}
+			return byName
+		case <-time.After(cachePollEvery):
 		}
 	}
 }
