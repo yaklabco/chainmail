@@ -33,10 +33,6 @@ const completionDescWidth = 60
 // there. A lookup that fails offers nothing and says why only in
 // BASH_COMP_DEBUG_FILE.
 type completer struct {
-	// ctx is unused and goes once root.go stops setting it: completions
-	// take Execute's context from cmd.Context(), which cobra sets on the
-	// command it completes.
-	ctx context.Context //nolint:unused // removed with root.go's completer literal
 	env Env
 	g   *globals
 }

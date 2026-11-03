@@ -168,7 +168,7 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 	}
 	root.SetHelpCommandGroupID("admin")
 	applyHelp(root)
-	cp := &completer{ctx: ctx, env: env, g: g}
+	cp := &completer{env: env, g: g}
 	if err := applyCompletions(root, cp.specs()); err != nil {
 		// Every name in specs is a flag defined in this package, so this is
 		// a programming error the completion tests catch first.
