@@ -692,3 +692,28 @@ func TestCacheStatusOverCap(t *testing.T) {
 		})
 	}
 }
+
+// A status the worker cannot read is state error with an INTERNAL reason.
+// A failure other than a full disk, here a closed cache.db, leaves the
+// cache on. A full disk on a status read is not tested: Status only
+// SELECTs, and making a SELECT return SQLITE_FULL from a real Store needs
+// a full temporary file system or a hook the Store does not have.
+func TestCacheStatusReadFails(t *testing.T) {
+	t.Parallel()
+	s, _ := newCacheServer(t, cacheConfig)
+	acct, err := s.opts.Config.Account("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.cacheAccounts = map[string]*cache.Account{"host": cache.NewAccount(s.cacheAccountOptions(acct))}
+	if err := s.cache.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want := &chainmailv1.AccountCacheStatus{Account: "host", Enabled: true, State: "error", LastError: api.ReasonInternal, BudgetBytes: 1 << 30}
+	if got := s.cacheStatus(t.Context(), acct, true); !proto.Equal(got, want) {
+		t.Errorf("status of a closed cache.db = %v, want %v", got, want)
+	}
+	if s.cacheDown.Load() {
+		t.Error("a status read that failed without a full disk turned the cache off")
+	}
+}
