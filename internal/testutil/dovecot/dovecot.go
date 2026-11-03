@@ -397,6 +397,17 @@ func (s *Server) Append(user, folder, raw string, date time.Time, flags ...imap.
 	return uid, err
 }
 
+// AppendFlags is Append with the flags as strings, for tests outside the
+// IMAP packages, which do not import go-imap. Keywords such as "projectx"
+// are flags too.
+func (s *Server) AppendFlags(user, folder, raw string, date time.Time, flags []string) (imap.UID, error) {
+	fl := make([]imap.Flag, len(flags))
+	for i, f := range flags {
+		fl[i] = imap.Flag(f)
+	}
+	return s.Append(user, folder, raw, date, fl...)
+}
+
 // Flags reads a message's flags without changing them.
 func (s *Server) Flags(user, folder string, uid imap.UID) ([]imap.Flag, error) {
 	var flags []imap.Flag

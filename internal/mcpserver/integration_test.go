@@ -4,11 +4,13 @@ package mcpserver_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -375,5 +377,177 @@ func TestMCPReadEventsAgainstDovecot(t *testing.T) {
 	}
 	if reads < 3 {
 		t.Errorf("%d watch.read audit rows, want at least 3", reads)
+	}
+}
+
+// mcpCacheConfig is one account on Dovecot with the cache on and the
+// default sync set, tuned to be ready in seconds as in the daemon's cache
+// test. The SMTP endpoint is never dialled.
+const mcpCacheConfig = `
+[accounts.dove]
+provider = "custom"
+address = %[1]q
+imap = { host = "127.0.0.1", port = %[2]d, security = "tls" }
+smtp = { host = "127.0.0.1", port = 1, security = "starttls" }
+sync = { poll = "30s" }
+
+[cache]
+prefetch_bodies = "30d"
+backfill_batch = 10
+backfill_pause = "0s"
+`
+
+// mcpCacheFolders are the folders the cache tracks on Dovecot: every folder
+// a default search covers.
+var mcpCacheFolders = []string{"Archive", "Drafts", "INBOX", "Sent"}
+
+// waitDoveCache polls GetCacheStatus until dove's cache is ready with
+// mcpCacheFolders backfilled and their windows fetched.
+func waitDoveCache(t *testing.T, h *daemontest.Harness) {
+	t.Helper()
+	deadline := time.Now().Add(90 * time.Second)
+	// Every call ends by the deadline, so a stalled one fails the wait in
+	// time, with the last status seen.
+	ctx, cancel := context.WithDeadline(t.Context(), deadline)
+	defer cancel()
+	var last *chainmailv1.GetCacheStatusResponse
+	for {
+		resp, err := h.Client.Cache.GetCacheStatus(ctx, connect.NewRequest(&chainmailv1.GetCacheStatusRequest{Accounts: []string{"dove"}}))
+		if err != nil {
+			if ctx.Err() != nil {
+				t.Fatalf("the cache of dove is not ready within 90s: GetCacheStatus: %v; last status %v", err, last)
+			}
+			t.Fatalf("GetCacheStatus: %v", err)
+		}
+		last = resp.Msg
+		for _, a := range resp.Msg.GetAccounts() {
+			if a.GetAccount() != "dove" || a.GetState() != "ready" {
+				continue
+			}
+			var names []string
+			done := true
+			for _, f := range a.GetFolders() {
+				names = append(names, f.GetFolder())
+				done = done && f.GetBackfillDone() && f.GetWindowDone()
+			}
+			slices.Sort(names)
+			if done && slices.Equal(names, mcpCacheFolders) {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the cache of dove is not ready within 90s: %v", resp.Msg)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// mcpSearchOut is search's structured output, as far as the cache test
+// reads it.
+type mcpSearchOut struct {
+	Rows []struct {
+		Ref string `json:"ref"`
+	} `json:"rows"`
+	Source        string `json:"source"`
+	AccountCounts []struct {
+		Account          string `json:"account"`
+		Source           string `json:"source"`
+		Complete         bool   `json:"complete"`
+		IncompleteReason string `json:"incomplete_reason"`
+	} `json:"account_counts"`
+}
+
+// TestMCPCacheAgainstDovecot runs the built binary as chainmail mcp against
+// a daemon whose cache holds a Dovecot mailbox. search answers from the
+// cache by itself and says so, source picks the server, an unknown source
+// is an error, get_message reads from the cache, and cache_status reports
+// the account ready. Search rows are audited with the source, cache_status
+// is not audited.
+func TestMCPCacheAgainstDovecot(t *testing.T) {
+	bin := buildChainmail(t)
+	dove := startDovecot(t)
+	const user = "cache@example.test"
+	if _, err := dove.Append(user, "INBOX", invoice, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h := daemontest.Start(t, fmt.Sprintf(mcpCacheConfig, user, dove.Endpoint.Port), daemontest.Options{
+		RootCAs: dove.CA.Pool, Watch: true, Cache: true,
+		Secrets: map[string]string{"accounts/dove": dovecot.Password},
+	})
+	waitDoveCache(t, h)
+	s := connectMCP(t, bin, h.Socket)
+
+	// 1. With no source the cache answers, completely.
+	var found mcpSearchOut
+	s.call("search", map[string]any{"query": "subject:Invoice"}, &found)
+	if found.Source != "cache" || len(found.Rows) != 1 || len(found.AccountCounts) != 1 {
+		t.Fatalf("search = %+v, want one row from the cache", found)
+	}
+	if ac := found.AccountCounts[0]; ac.Account != "dove" || ac.Source != "cache" || !ac.Complete || ac.IncompleteReason != "" {
+		t.Errorf("account count = %+v, want dove, cache, complete", ac)
+	}
+
+	// 2. source picks the server, with the same row.
+	var fromServer mcpSearchOut
+	s.call("search", map[string]any{"query": "subject:Invoice", "source": "server"}, &fromServer)
+	if fromServer.Source != "server" || len(fromServer.Rows) != 1 || fromServer.Rows[0].Ref != found.Rows[0].Ref {
+		t.Errorf("search with source server = %+v, want the same row from the server", fromServer)
+	}
+
+	// 3. An unknown source is refused.
+	res, err := s.cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "search", Arguments: map[string]any{"query": "subject:Invoice", "source": "nearby"}})
+	if err != nil {
+		t.Fatalf("search with source nearby: %v", err)
+	}
+	if !res.IsError {
+		t.Errorf("search with source nearby succeeded: %s", textOf(res))
+	}
+
+	// 4. get_message reads the prefetched message from the cache.
+	var got struct {
+		Messages []struct {
+			Source string                     `json:"source"`
+			Body   struct{ Untrusted string } `json:"body"`
+		} `json:"messages"`
+	}
+	s.call("get_message", map[string]any{"refs": []string{found.Rows[0].Ref}}, &got)
+	if len(got.Messages) != 1 || got.Messages[0].Source != "cache" || !strings.Contains(got.Messages[0].Body.Untrusted, "invoice 42") {
+		t.Errorf("get_message = %+v, want the invoice from the cache", got)
+	}
+
+	// 5. cache_status reports the account ready.
+	var status struct {
+		Accounts []struct {
+			Account string `json:"account"`
+			Enabled bool   `json:"enabled"`
+			State   string `json:"state"`
+		} `json:"accounts"`
+	}
+	s.call("cache_status", map[string]any{}, &status)
+	if len(status.Accounts) != 1 || status.Accounts[0].Account != "dove" || !status.Accounts[0].Enabled || status.Accounts[0].State != "ready" {
+		t.Errorf("cache_status = %+v, want dove enabled and ready", status)
+	}
+
+	// 6. The audit log names the source of each search, holds no subject,
+	// and has no row for cache_status.
+	sources := map[string]int{}
+	for _, r := range h.AuditRows(t) {
+		if strings.Contains(fmt.Sprintf("%+v", r), "Invoice") {
+			t.Errorf("audit row %+v holds message content", r)
+		}
+		if strings.HasPrefix(r.Action, "cache.") {
+			t.Errorf("audit row %+v: cache_status is not audited", r)
+		}
+		if r.Action != "search" || r.Client != "mcp" {
+			continue
+		}
+		for _, source := range []string{"cache", "server"} {
+			if strings.Contains(r.Targets, "source="+source) {
+				sources[source]++
+			}
+		}
+	}
+	if sources["cache"] < 1 || sources["server"] < 1 {
+		t.Errorf("search audit rows by source = %v, want at least one each from cache and server", sources)
 	}
 }
