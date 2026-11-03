@@ -97,8 +97,17 @@ func TestSearchAnswersFromTheWarmCache(t *testing.T) {
 		}
 		return out
 	}
-	for _, q := range []string{"from:acme", "invoice newer_than:30d", "in:inbox"} {
+	// Each query matches one message per account: host's INBOX invoice and
+	// Gmail's reminder, so an empty page from both sources cannot pass.
+	for _, tt := range []struct {
+		q    string
+		rows int
+	}{{"from:acme", 2}, {"invoice newer_than:30d", 2}, {"in:inbox", 2}} {
+		q := tt.q
 		c, s := search(q, ""), search(q, "server")
+		if n := len(c.GetRows()); n != tt.rows {
+			t.Errorf("%q: %d rows from the cache, want %d", q, n, tt.rows)
+		}
 		if c.GetSource() != "cache" {
 			t.Errorf("%q: source %q, want cache", q, c.GetSource())
 		}
