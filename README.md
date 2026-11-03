@@ -268,7 +268,7 @@ prefetch_bodies = "30d"          # any [cache] key but max_size and dir, for one
 | `cache.prefetch_bodies` | no | `90d` | The body window: bodies of messages that arrived within it are fetched ahead and kept. `0d` fetches bodies only when read. Days as `<n>d`, or a Go duration, between `0d` and `3650d`. |
 | `cache.read_retention` | no | `30d` | How long a body outside the window is kept after a `get` or `thread` read it. Between `0d` and `3650d`. |
 | `cache.max_size` | no | `2GiB` | The most space `cache.db` may take, headers and index included. A number of bytes, optionally followed by `B`, `KiB`, `MiB`, `GiB` or `TiB`, between `64MiB` and `1TiB`. Global only. |
-| `cache.daily_download` | no | `1GiB` | The most the backfill and the body prefetch download per account per UTC day, counting each body's size and 2 KiB per header. A `get` of a message the cache lacks counts too. A size as for `max_size`, between `16MiB` and `100GiB`. |
+| `cache.daily_download` | no | `1GiB` | The daily download allowance the backfill and the body prefetch keep to, per account per UTC day (within about one batch), counting each body's size and 2 KiB per header. A `get` of a message the cache lacks counts too. A size as for `max_size`, between `16MiB` and `100GiB`. |
 | `cache.backfill_batch` | no | `250` | Headers fetched per backfill batch, 10 to 1000. |
 | `cache.backfill_pause` | no | `250ms` | Pause between backfill batches, between `0s` and `60s`. |
 | `cache.fresh_lag` | no | `30s` | How far the cache may trail the account's mail events and still answer searches. Between `1s` and `10m`. |
