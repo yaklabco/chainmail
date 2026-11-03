@@ -23,8 +23,14 @@ var examples = map[string]string{
 	"chainmail audit": `  chainmail audit
   chainmail audit --since 2h --action send
   chainmail audit --account work --limit 20`,
-	"chainmail auth login": `  chainmail auth login gmail`,
-	"chainmail copy":       `  chainmail copy cm1:work:INBOX:7:42 --to Receipts`,
+	"chainmail auth login":  `  chainmail auth login gmail`,
+	"chainmail cache evict": `  chainmail cache evict`,
+	"chainmail cache rebuild": `  # rebuild every account whose cache is enabled
+  chainmail cache rebuild
+  chainmail cache rebuild --account work --folder INBOX`,
+	"chainmail cache status": `  chainmail cache status
+  chainmail cache status --account work --account gmail --output json`,
+	"chainmail copy": `  chainmail copy cm1:work:INBOX:7:42 --to Receipts`,
 	"chainmail daemon": `  # production runs under systemd; a development daemon runs as you
   chainmail daemon --dev --config ./config.toml --state-dir ./state --vault-key-file ./vault-key`,
 	"chainmail draft create": `  chainmail draft create --account work --to alice@example.com --subject "Notes" --body-file notes.md
