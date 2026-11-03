@@ -755,24 +755,29 @@ func checkRecovery(t *testing.T, h *daemontest.Harness, dove *dovecot.Server, re
 		if len(items) != 1 {
 			t.Fatalf("Get of the old ref: %d items, want 1", len(items))
 		}
+		var waiting string
 		if m := items[0].GetMessage(); m != nil {
 			got := parseRef(t, m.GetRef())
-			if got == old {
-				// The cache still holds the folder under the old
-				// UIDVALIDITY: the gap has not reached it yet.
-				time.Sleep(50 * time.Millisecond)
-				continue
+			if got != old {
+				if got.Folder != "INBOX" || got.UID != old.UID || got.UIDValidity != old.UIDValidity+1000 || m.GetSubject().GetUntrusted() != "Lunch" {
+					t.Fatalf("recovered %s (%q), want UID %d of INBOX under UIDVALIDITY %d", m.GetRef(), m.GetSubject().GetUntrusted(), old.UID, old.UIDValidity+1000)
+				}
+				break
 			}
-			if got.Folder != "INBOX" || got.UID != old.UID || got.UIDValidity != old.UIDValidity+1000 || m.GetSubject().GetUntrusted() != "Lunch" {
-				t.Fatalf("recovered %s (%q), want UID %d of INBOX under UIDVALIDITY %d", m.GetRef(), m.GetSubject().GetUntrusted(), old.UID, old.UIDValidity+1000)
+			// The cache still holds the folder under the old
+			// UIDVALIDITY: the gap has not reached it yet.
+			waiting = "the cache still answers the old ref " + refs["lunch"] + "; the UIDVALIDITY change never reached it"
+		} else {
+			reason := items[0].GetError().GetReason()
+			if reason != api.ReasonStaleRef && reason != api.ReasonServerUnavailable {
+				t.Fatalf("Get of the old ref: %s, want STALE_REF until the message is found by its Message-ID", reason)
 			}
-			break
+			waiting = "the old ref was not recovered by Message-ID (last answer " + reason + ")"
 		}
-		if reason := items[0].GetError().GetReason(); reason != api.ReasonStaleRef && reason != api.ReasonServerUnavailable {
-			t.Fatalf("Get of the old ref: %s, want STALE_REF until the message is found by its Message-ID", reason)
-		}
+		// Every iteration, the old answer as much as STALE_REF, stops at
+		// the deadline, so a cache that never sees the gap fails here.
 		if time.Now().After(deadline) {
-			t.Fatalf("the old ref was not recovered by Message-ID within %v", cacheRecoverWithin)
+			t.Fatalf("after %v: %s", cacheRecoverWithin, waiting)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
