@@ -644,9 +644,12 @@ func TestViewThread(t *testing.T) {
 				t.Fatal(err)
 			}
 			threads := f.fk.Calls("Thread")
-			got, source, err := f.view.ThreadFrom(t.Context(), seed)
+			got, used, source, err := f.view.ThreadFrom(t.Context(), seed)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if used != seed {
+				t.Errorf("seed used = %s, want %s", used, seed)
 			}
 			if source != tt.source {
 				t.Errorf("source = %q, want %q", source, tt.source)
@@ -679,9 +682,12 @@ func TestViewThreadRecoversAStaleSeed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, _, err := f.view.ThreadFrom(t.Context(), old)
+	got, used, _, err := f.view.ThreadFrom(t.Context(), old)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if used != found[0] {
+		t.Errorf("seed used = %s, want the recovered %s", used, found[0])
 	}
 	if !slices.Equal(sortedRefs(got), sortedRefs(want)) {
 		t.Errorf("members = %v, want %v", sortedRefs(got), sortedRefs(want))
@@ -713,7 +719,7 @@ func TestViewThreadMatchesTheServerRule(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, source, err := f.view.ThreadFrom(t.Context(), refs[seed])
+		got, _, source, err := f.view.ThreadFrom(t.Context(), refs[seed])
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -724,7 +730,7 @@ func TestViewThreadMatchesTheServerRule(t *testing.T) {
 			t.Errorf("seed %q: members = %v, want %v", seed, sortedRefs(got), sortedRefs(want))
 		}
 	}
-	plan, _, err := f.view.ThreadFrom(t.Context(), refs["plan"])
+	plan, _, _, err := f.view.ThreadFrom(t.Context(), refs["plan"])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -832,7 +838,7 @@ func TestViewReadLogsFailuresBeforeFallingBack(t *testing.T) {
 			name:  "freshness of a thread's folders",
 			fault: func(_ *testing.T, f *readFixture) { _ = f.stateDB.Close() },
 			read: func(t *testing.T, f *readFixture, refs map[string]ref.Ref) {
-				if _, _, err := f.view.ThreadFrom(t.Context(), refs["plan"]); err != nil {
+				if _, _, _, err := f.view.ThreadFrom(t.Context(), refs["plan"]); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -844,7 +850,7 @@ func TestViewReadLogsFailuresBeforeFallingBack(t *testing.T) {
 				f.fk.Fail("SearchFolders", errors.New(serverText))
 			},
 			read: func(t *testing.T, f *readFixture, refs map[string]ref.Ref) {
-				if _, _, err := f.view.ThreadFrom(t.Context(), refs["plan"]); err != nil {
+				if _, _, _, err := f.view.ThreadFrom(t.Context(), refs["plan"]); err != nil {
 					t.Fatal(err)
 				}
 			},

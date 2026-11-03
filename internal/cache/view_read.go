@@ -323,25 +323,28 @@ func (v *View) recoverRef(ctx context.Context, r ref.Ref) (ref.Ref, bool) {
 }
 
 // Thread implements mailstore.Store's Thread through the cache, as
-// ThreadFrom does, without saying where it came from.
+// ThreadFrom does, without saying which seed it used or where it came
+// from.
 func (v *View) Thread(ctx context.Context, r ref.Ref) ([]ref.Ref, error) {
-	refs, _, err := v.ThreadFrom(ctx, r)
+	refs, _, _, err := v.ThreadFrom(ctx, r)
 	return refs, err
 }
 
 // ThreadFrom returns the thread r belongs to, as the server's Thread
-// would, and SourceCache or SourceServer for where its membership came
-// from. The cache answers when it holds r's row and every folder a default
-// search covers is fresh (cachedThread). Otherwise the server answers, and
-// on an account other than Google a seed it calls stale is recovered by
-// Message-ID once and its thread returned.
-func (v *View) ThreadFrom(ctx context.Context, r ref.Ref) ([]ref.Ref, string, error) {
+// would, the seed it threaded, and SourceCache or SourceServer for where
+// its membership came from. The cache answers when it holds r's row and
+// every folder a default search covers is fresh (cachedThread). Otherwise
+// the server answers, and on an account other than Google a seed it calls
+// stale is recovered by Message-ID once and its thread returned. The seed
+// is then the recovered ref, else r, so the caller can tell which member
+// is the seed.
+func (v *View) ThreadFrom(ctx context.Context, r ref.Ref) (refs []ref.Ref, seed ref.Ref, source string, err error) {
 	return v.thread(ctx, r, true)
 }
 
-func (v *View) thread(ctx context.Context, r ref.Ref, recovering bool) ([]ref.Ref, string, error) {
+func (v *View) thread(ctx context.Context, r ref.Ref, recovering bool) ([]ref.Ref, ref.Ref, string, error) {
 	if refs, ok := v.cachedThread(ctx, r); ok {
-		return refs, SourceCache, nil
+		return refs, r, SourceCache, nil
 	}
 	refs, err := v.server.Thread(ctx, r)
 	if err != nil && recovering && errors.Is(err, mailstore.ErrStaleRef) {
@@ -349,7 +352,7 @@ func (v *View) thread(ctx context.Context, r ref.Ref, recovering bool) ([]ref.Re
 			return v.thread(ctx, moved, false)
 		}
 	}
-	return refs, SourceServer, err
+	return refs, r, SourceServer, err
 }
 
 // cachedThread answers Thread from the cache when it holds r's row and

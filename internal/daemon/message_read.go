@@ -209,7 +209,7 @@ func (m *messageService) get(ctx context.Context, req *chainmailv1.GetRequest) (
 	if len(refs) == 0 || len(refs) > maxGetRefs {
 		return nil, entry, &argError{msg: fmt.Sprintf("get takes 1 to %d refs, got %d", maxGetRefs, len(refs)), hint: "split the refs into batches of 50"}
 	}
-	resp := &chainmailv1.GetResponse{Source: sourceServer, FetchedAt: timestamppb.New(m.s.opts.Now()), Items: make([]*chainmailv1.GetItem, len(refs))}
+	resp := &chainmailv1.GetResponse{FetchedAt: timestamppb.New(m.s.opts.Now()), Items: make([]*chainmailv1.GetItem, len(refs))}
 	parsed := make([]ref.Ref, len(refs))
 	byAccount := map[string][]int{}
 	accts := map[string]config.ResolvedAccount{}
@@ -338,12 +338,16 @@ func (m *messageService) GetThread(ctx context.Context, req *connect.Request[cha
 }
 
 func (m *messageService) thread(ctx context.Context, req *chainmailv1.GetThreadRequest, entry *audit.Entry) (*chainmailv1.GetThreadResponse, error) {
-	seed, acct, err := m.parseTarget(req.GetRef(), entry)
+	requested, acct, err := m.parseTarget(req.GetRef(), entry)
 	if err != nil {
 		return nil, err
 	}
 	rd := m.reader(acct)
-	refs, membership, err := rd.ThreadFrom(ctx, seed)
+	// seed is the ref the thread was found from: requested, or where a
+	// stale requested ref was recovered to. It picks the thread ID and
+	// decides whether a vanished member fails the call; the audit keeps
+	// requested.
+	refs, seed, membership, err := rd.ThreadFrom(ctx, requested)
 	if err != nil {
 		return nil, err
 	}
@@ -385,7 +389,7 @@ func (m *messageService) thread(ctx context.Context, req *chainmailv1.GetThreadR
 		}
 		return a.msg.Summary.InternalDate.Compare(b.msg.Summary.InternalDate)
 	})
-	resp := &chainmailv1.GetThreadResponse{Source: sourceServer, FetchedAt: timestamppb.New(m.s.opts.Now())}
+	resp := &chainmailv1.GetThreadResponse{FetchedAt: timestamppb.New(m.s.opts.Now())}
 	rendered := make([]*chainmailv1.Message, 0, len(members))
 	for _, mb := range members {
 		if sameMessage(mb.msg.Summary.Ref, seed) || resp.ThreadId == "" {

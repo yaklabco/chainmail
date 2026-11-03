@@ -12,10 +12,11 @@ import (
 // messageReader reads messages and threads for one account and says where
 // each answer came from, cache.SourceCache or cache.SourceServer. An
 // account with a cache reads through its view, which answers from the
-// cache when it can; the rest read from the server.
+// cache when it can; the rest read from the server. ThreadFrom also
+// returns the seed it threaded: r, or the ref a stale r was recovered to.
 type messageReader interface {
 	FetchMessagesFrom(ctx context.Context, refs []ref.Ref) ([]mailstore.MessageResult, []string)
-	ThreadFrom(ctx context.Context, r ref.Ref) ([]ref.Ref, string, error)
+	ThreadFrom(ctx context.Context, r ref.Ref) (refs []ref.Ref, seed ref.Ref, source string, err error)
 }
 
 var (
@@ -47,7 +48,7 @@ func (r serverReader) FetchMessagesFrom(ctx context.Context, refs []ref.Ref) ([]
 	return res, sources
 }
 
-func (r serverReader) ThreadFrom(ctx context.Context, seed ref.Ref) ([]ref.Ref, string, error) {
+func (r serverReader) ThreadFrom(ctx context.Context, seed ref.Ref) ([]ref.Ref, ref.Ref, string, error) {
 	refs, err := r.st.Thread(ctx, seed)
-	return refs, cache.SourceServer, err
+	return refs, seed, cache.SourceServer, err
 }

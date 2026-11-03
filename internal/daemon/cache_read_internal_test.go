@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/audit"
 	"github.com/jamesainslie/chainmail/internal/cache"
 	"github.com/jamesainslie/chainmail/internal/config"
@@ -311,6 +312,9 @@ func TestGetFromCacheMatchesServer(t *testing.T) {
 			t.Fatal(err)
 		}
 		got, want := withoutSource(cached.GetItems()), withoutSource(server.GetItems())
+		if len(got) != len(want) {
+			t.Fatalf("full=%t: %d cached items, %d from the server", full, len(got), len(want))
+		}
 		for i := range want {
 			if !proto.Equal(got[i], want[i]) {
 				t.Errorf("full=%t item %d:\ncache  %v\nserver %v", full, i, got[i], want[i])
@@ -373,8 +377,12 @@ func TestGetMissIsCachedForTheNextGet(t *testing.T) {
 		if got := resp.GetItems()[0].GetMessage().GetSource(); got != want {
 			t.Errorf("get %d source = %q, want %q", i+1, got, want)
 		}
-		if n := host.Calls("FetchMessages") - fetches; (n == 1) != (want == cache.SourceServer) {
-			t.Errorf("get %d made %d FetchMessages calls", i+1, n)
+		wantFetches := 0
+		if want == cache.SourceServer {
+			wantFetches = 1
+		}
+		if n := host.Calls("FetchMessages") - fetches; n != wantFetches {
+			t.Errorf("get %d made %d FetchMessages calls, want %d", i+1, n, wantFetches)
 		}
 	}
 }
@@ -387,29 +395,39 @@ func TestGetRecoversAStaleRefByMessageID(t *testing.T) {
 	refs := seedGetMail(f)
 	f.warm(t, "host")
 	f.install("host")
-	host := f.fakes["host"]
 	old := refs["with pdf"]
-	host.NewUIDValidity("INBOX")
-	if err := f.store.DropFolder(t.Context(), "host", "INBOX", true); err != nil {
-		t.Fatal(err)
-	}
-	res, err := host.Search(t.Context(), mailstore.SearchRequest{In: "INBOX"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.cacheFolder(t, "host", res[0].Source, res[0].UIDs, false)
-	found, err := host.FindByMessageID(t.Context(), "INBOX", "a@x")
-	if err != nil || len(found) != 1 {
-		t.Fatalf("server lookup: %v, %v", found, err)
-	}
+	moved := f.renumber(t, "host", "INBOX", "a@x")
 	resp, _, err := f.m.get(t.Context(), &chainmailv1.GetRequest{Refs: []string{old.String()}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	it := resp.GetItems()[0]
-	if it.GetRef() != old.String() || it.GetMessage().GetRef() != found[0].String() || it.GetMessage().GetSubject().GetUntrusted() != "with pdf" {
-		t.Errorf("item = ref %q, message ref %q, error %v; want %q recovered to %q", it.GetRef(), it.GetMessage().GetRef(), it.GetError(), old, found[0])
+	if it.GetRef() != old.String() || it.GetMessage().GetRef() != moved.String() || it.GetMessage().GetSubject().GetUntrusted() != "with pdf" {
+		t.Errorf("item = ref %q, message ref %q, error %v; want %q recovered to %q", it.GetRef(), it.GetMessage().GetRef(), it.GetError(), old, moved)
 	}
+}
+
+// renumber gives folder of account a new UIDVALIDITY on the server, as a
+// server rebuild does, and has the cache drop the folder, keeping its
+// Message-IDs for recovery, then cache its rows under the new UIDVALIDITY
+// without bodies. It returns the new ref of the message with messageID.
+func (f *getFixture) renumber(t *testing.T, account, folder, messageID string) ref.Ref {
+	t.Helper()
+	fk := f.fakes[account]
+	fk.NewUIDValidity(folder)
+	if err := f.store.DropFolder(t.Context(), account, folder, true); err != nil {
+		t.Fatal(err)
+	}
+	res, err := fk.Search(t.Context(), mailstore.SearchRequest{In: folder})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.cacheFolder(t, account, res[0].Source, res[0].UIDs, false)
+	found, err := fk.FindByMessageID(t.Context(), folder, messageID)
+	if err != nil || len(found) != 1 {
+		t.Fatalf("server lookup of %s: %v, %v", messageID, found, err)
+	}
+	return found[0]
 }
 
 // withoutSources returns copies of msgs with their source cleared.
@@ -481,6 +499,9 @@ func TestGetThreadMixesSourcesWhenTheScopeIsStale(t *testing.T) {
 	if host.Calls("Thread")-threads != 1 {
 		t.Errorf("membership did not come from the server")
 	}
+	if len(resp.GetMessages()) != 3 {
+		t.Errorf("thread has %d messages, want 3", len(resp.GetMessages()))
+	}
 	for _, msg := range resp.GetMessages() {
 		if msg.GetSource() != cache.SourceCache {
 			t.Errorf("%s source = %q, want cache", msg.GetSubject().GetUntrusted(), msg.GetSource())
@@ -488,5 +509,97 @@ func TestGetThreadMixesSourcesWhenTheScopeIsStale(t *testing.T) {
 	}
 	if resp.GetSource() != cache.SourceMixed {
 		t.Errorf("source = %q, want mixed", resp.GetSource())
+	}
+	if want := []string{refs["plan"].String(), "messages=3", "source=mixed"}; !slices.Equal(entry.Targets, want) {
+		t.Errorf("audit targets = %v, want %v", entry.Targets, want)
+	}
+}
+
+// TestGetThreadTakesItsIDFromTheRecoveredSeed checks that a thread whose
+// stale seed is recovered by Message-ID (integration note 18) takes its
+// thread_id from the recovered seed, not from its oldest member: aside is
+// older than plan and in plan's thread, but its own References start with
+// other@x, so its thread ID differs. The audit still names the ref asked
+// for.
+func TestGetThreadTakesItsIDFromTheRecoveredSeed(t *testing.T) {
+	t.Parallel()
+	f := newGetFixture(t)
+	refs := seedGetMail(f)
+	host := f.fakes["host"]
+	host.Add(fake.Message{Folder: "Archive", Date: getDaysAgo(40), Subject: "aside", MessageID: "as@x", References: []string{"other@x", "p@x"}, Body: "aside"})
+	f.warm(t, "host")
+	f.install("host")
+	old := refs["plan"]
+	moved := f.renumber(t, "host", "INBOX", "p@x")
+	seed := host.FetchMessages(t.Context(), []ref.Ref{moved})[0]
+	if seed.Err != nil {
+		t.Fatal(seed.Err)
+	}
+	var entry audit.Entry
+	resp, err := f.m.thread(t.Context(), &chainmailv1.GetThreadRequest{Ref: old.String()}, &entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subjects := make([]string, len(resp.GetMessages()))
+	for i, msg := range resp.GetMessages() {
+		subjects[i] = msg.GetSubject().GetUntrusted()
+	}
+	if want := []string{"aside", "plan", "re: plan", "re: re: plan"}; !slices.Equal(subjects, want) {
+		t.Fatalf("members = %v, want %v", subjects, want)
+	}
+	if aside := resp.GetMessages()[0].GetThreadId(); aside == seed.Message.Summary.ThreadID {
+		t.Fatalf("aside's thread ID %q is the seed's, so the test proves nothing", aside)
+	}
+	if resp.GetThreadId() != seed.Message.Summary.ThreadID {
+		t.Errorf("thread_id = %q, want the recovered seed's %q", resp.GetThreadId(), seed.Message.Summary.ThreadID)
+	}
+	if len(entry.Targets) == 0 || entry.Targets[0] != old.String() {
+		t.Errorf("audit targets = %v, want the requested %s first", entry.Targets, old)
+	}
+}
+
+// TestGetThreadFailsWhenTheRecoveredSeedVanishes checks that a recovered
+// seed that is gone by the time its thread's messages are read fails the
+// call with STALE_REF, as a seed that was never recovered does, instead of
+// being left out as an ordinary member. The cache still lists the seed:
+// it has not heard of the expunge.
+func TestGetThreadFailsWhenTheRecoveredSeedVanishes(t *testing.T) {
+	t.Parallel()
+	f := newGetFixture(t)
+	refs := seedGetMail(f)
+	f.warm(t, "host")
+	f.install("host")
+	moved := f.renumber(t, "host", "INBOX", "p@x")
+	f.fakes["host"].ExternalExpunge("INBOX", moved.UID)
+	var entry audit.Entry
+	resp, err := f.m.thread(t.Context(), &chainmailv1.GetThreadRequest{Ref: refs["plan"].String()}, &entry)
+	if got := apiReason(err); got != api.ReasonStaleRef {
+		t.Errorf("thread = %d messages, error %v (reason %q), want STALE_REF", len(resp.GetMessages()), err, got)
+	}
+}
+
+// TestGetReadsTheServerWhileTheCacheIsDown checks that an account whose
+// cache is down reads from the server even for a cached message.
+func TestGetReadsTheServerWhileTheCacheIsDown(t *testing.T) {
+	t.Parallel()
+	f := newGetFixture(t)
+	refs := seedGetMail(f)
+	f.warm(t, "host")
+	f.install("host")
+	f.s.cacheDown.Store(true)
+	host := f.fakes["host"]
+	fetches := host.Calls("FetchMessages")
+	resp, entry, err := f.m.get(t.Context(), &chainmailv1.GetRequest{Refs: getRefs(refs, "plan")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := host.Calls("FetchMessages") - fetches; n != 1 {
+		t.Errorf("FetchMessages calls = %d, want 1", n)
+	}
+	if s := resp.GetItems()[0].GetMessage().GetSource(); s != cache.SourceServer || resp.GetSource() != cache.SourceServer {
+		t.Errorf("sources = %q and %q, want server", s, resp.GetSource())
+	}
+	if last := entry.Targets[len(entry.Targets)-1]; last != "source=server" {
+		t.Errorf("audit targets = %v", entry.Targets)
 	}
 }
