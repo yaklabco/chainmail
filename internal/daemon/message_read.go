@@ -299,7 +299,7 @@ func capItems(resp *chainmailv1.GetResponse) {
 	}
 	items := resp.Items
 	resp.Items = nil
-	k := fitPrefix(proto.Size(resp), kept, dropped, maxResponseBytes)
+	k := fitPrefix(sizeWithSource(resp, &resp.Source), kept, dropped, maxResponseBytes)
 	for i := k; i < len(items); i++ {
 		if items[i].GetMessage() != nil {
 			items[i] = tooLarge(items[i])
@@ -431,7 +431,7 @@ func capThread(resp *chainmailv1.GetThreadResponse, msgs []*chainmailv1.Message,
 	}
 	// Both are counted in the base, so a cut response still fits.
 	resp.Truncated, resp.OmittedRefs = true, unreadable
-	k := fitPrefix(proto.Size(resp), kept, dropped, maxResponseBytes)
+	k := fitPrefix(sizeWithSource(resp, &resp.Source), kept, dropped, maxResponseBytes)
 	resp.Messages, resp.OmittedRefs = msgs[:k], nil
 	for _, pm := range msgs[k:] {
 		resp.OmittedRefs = append(resp.OmittedRefs, pm.GetRef())
@@ -543,4 +543,18 @@ func pump(r io.Reader, send func([]byte) error) (int, error) {
 			return total, fmt.Errorf("%w: the stream broke after %d bytes", mailstore.ErrUnavailable, total)
 		}
 	}
+}
+
+// longestSource is the longest value a get or thread response's source
+// takes. The source is set once the response is capped, so the caps count
+// this many bytes for it.
+const longestSource = cache.SourceServer
+
+// sizeWithSource is the encoded size of resp with *source set to
+// longestSource, leaving *source as it was.
+func sizeWithSource(resp proto.Message, source *string) int {
+	was := *source
+	*source = longestSource
+	defer func() { *source = was }()
+	return proto.Size(resp)
 }
