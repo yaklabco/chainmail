@@ -113,8 +113,8 @@ const (
 	workRetryMax  = 5 * time.Minute
 )
 
-// systemClock is watch.Clock over package time, which a nil
-// AccountOptions.Clock means.
+// systemClock is watch.Clock over package time, for options that leave
+// Clock nil (AccountOptions, prefetchOptions, EvictorOptions).
 type systemClock struct{}
 
 func (systemClock) Now() time.Time { return time.Now() }

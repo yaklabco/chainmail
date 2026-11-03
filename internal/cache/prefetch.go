@@ -67,7 +67,7 @@ type prefetcher struct {
 
 func newPrefetcher(o prefetchOptions) *prefetcher {
 	if o.Clock == nil {
-		o.Clock = sysClock{}
+		o.Clock = systemClock{}
 	}
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)

@@ -420,7 +420,7 @@ type Evictor struct {
 // NewEvictor returns an Evictor. Run starts its loop; Sweep runs one sweep.
 func NewEvictor(o EvictorOptions) *Evictor {
 	if o.Clock == nil {
-		o.Clock = sysClock{}
+		o.Clock = systemClock{}
 	}
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
