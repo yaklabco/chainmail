@@ -50,13 +50,15 @@ func (v *View) read(ctx context.Context, refs []ref.Ref, recovering bool) ([]mai
 	for j, i := range misses {
 		missed[j] = refs[i]
 	}
+	guard := v.a.guardReads()
+	defer v.a.endGuard(guard)
 	epoch := v.a.writeEpoch()
 	for j, res := range v.server.FetchMessages(ctx, missed) {
 		i := misses[j]
 		out[i], sources[i] = res, SourceServer
 		switch {
 		case res.Err == nil:
-			v.keepRead(ctx, epoch, res.Message)
+			v.keepRead(ctx, epoch, guard, res.Message)
 		case recovering && errors.Is(res.Err, mailstore.ErrStaleRef):
 			moved, ok := v.recoverRef(ctx, refs[i])
 			if !ok {
@@ -154,14 +156,18 @@ func (v *View) readFresh(ctx context.Context, folder string) bool {
 }
 
 // refreshFlags replaces the flags and labels of hits, all in src, with the
-// server's, from one FetchSummaries, and writes them to their rows. It
-// returns the hits the server answered for and the indices of the rest,
-// which the caller reads as misses: gone, moved, or unreadable now.
+// server's, from one FetchSummaries, and writes them to their rows
+// (storeFlags). It returns the hits the server answered for and the indices
+// of the rest, which the caller reads as misses: gone, moved, or unreadable
+// now.
 func (v *View) refreshFlags(ctx context.Context, src mailstore.Source, hits []readHit) (kept []readHit, missed []int) {
 	uids := make([]uint32, len(hits))
 	for j, h := range hits {
 		uids[j] = h.msg.Summary.Ref.UID
 	}
+	guard := v.a.guardReads()
+	defer v.a.endGuard(guard)
+	epoch := v.a.writeEpoch()
 	sums, err := v.server.FetchSummaries(ctx, src, uids, mailstore.SummaryOptions{})
 	if err != nil {
 		for _, h := range hits {
@@ -180,12 +186,43 @@ func (v *View) refreshFlags(ctx context.Context, src mailstore.Source, hits []re
 			continue
 		}
 		h.msg.Summary.Flags, h.msg.Summary.Labels = s.Flags, s.Labels
-		if _, err := v.a.o.Store.SetFlags(ctx, h.msg.Summary.Ref, s.Flags, s.Labels); err != nil {
-			v.logReadError("updating cached flags failed", err)
-		}
 		kept = append(kept, h)
 	}
+	v.storeFlags(ctx, epoch, guard, kept)
 	return kept, missed
+}
+
+// storeFlags writes the server's flags and labels of hits, fetched under
+// the account's write epoch epoch while guard ran, to their rows. It
+// writes under wmu, as the builder does, and nothing when a folder drop or
+// rebuild ran since epoch; a row whose message the builder changed since
+// guard started keeps the builder's flags, which are no older than the
+// fetched ones. It runs on ctx without its cancellation, bounded by
+// keepTimeout, as keepRead does, and when that ends before wmu is free it
+// logs that and writes nothing.
+func (v *View) storeFlags(ctx context.Context, epoch uint64, guard *readGuard, hits []readHit) {
+	if len(hits) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), v.a.keepTimeout)
+	defer cancel()
+	if err := v.a.lockContext(ctx); err != nil {
+		v.logReadError("waiting to store refreshed flags failed", err)
+		return
+	}
+	defer v.a.unlock()
+	if v.a.epoch.Load() != epoch {
+		return
+	}
+	for _, h := range hits {
+		sum := h.msg.Summary
+		if v.a.changedSince(guard, sum.Ref) {
+			continue
+		}
+		if _, err := v.a.o.Store.SetFlags(ctx, sum.Ref, sum.Flags, sum.Labels); err != nil {
+			v.logReadError("updating cached flags failed", err)
+		}
+	}
 }
 
 // keepReadTimeout bounds keepRead's bookkeeping, which runs detached from
@@ -194,14 +231,15 @@ func (v *View) refreshFlags(ctx context.Context, src mailstore.Source, hits []re
 const keepReadTimeout = 5 * time.Second
 
 // keepRead does the bookkeeping of a message of the view's account read
-// from the server, fetched under the account's write epoch epoch. It first
-// counts len(Raw) against the account's budget for the UTC day, as every
-// foreground download counts whether or not the cache keeps it (spec 4.4).
-// Then storeRead keeps the row and body, marked read, and when it stored a
-// new body the file's size is checked, which wakes the evictor when it is
-// over max_size. It runs on ctx without its cancellation, bounded by
-// keepReadTimeout. A message of another account is left alone.
-func (v *View) keepRead(ctx context.Context, epoch uint64, msg *mailstore.Message) {
+// from the server, fetched under the account's write epoch epoch while
+// guard ran. It first counts len(Raw) against the account's budget for the
+// UTC day, as every foreground download counts whether or not the cache
+// keeps it (spec 4.4). Then storeRead keeps the row and body, marked read,
+// and when it stored a new body the file's size is checked, which wakes
+// the evictor when it is over max_size. It runs on ctx without its
+// cancellation, bounded by keepReadTimeout. A message of another account is
+// left alone.
+func (v *View) keepRead(ctx context.Context, epoch uint64, guard *readGuard, msg *mailstore.Message) {
 	store, account := v.a.o.Store, v.a.o.Account.Name
 	if msg.Summary.Ref.Account != account {
 		return
@@ -215,7 +253,7 @@ func (v *View) keepRead(ctx context.Context, epoch uint64, msg *mailstore.Messag
 	if v.a.beforeKeepWrite != nil {
 		v.a.beforeKeepWrite()
 	}
-	if !v.storeRead(ctx, epoch, msg) {
+	if !v.storeRead(ctx, epoch, guard, msg) {
 		return
 	}
 	if err := store.noteWrite(ctx, v.a.o.MaxSize()); err != nil {
@@ -227,13 +265,16 @@ func (v *View) keepRead(ctx context.Context, epoch uint64, msg *mailstore.Messag
 // message's UIDVALIDITY and lacks the row, and its body, marked read. It
 // writes under wmu, as the builder and backfill do, and only when no folder
 // drop or rebuild ran since epoch and the folder's progress still admits the
-// message, so a read never writes into a newer generation of the cache. When
-// ctx ends before wmu is free it logs that and stores nothing; keepRead has
-// already charged the download.
+// message, so a read never writes into a newer generation of the cache. A
+// row the cache lacks is not made when the builder changed the message
+// since guard started: an expunge must not be undone by a download that
+// predates it. A body is stored only on a row the cache holds, and never
+// changes for a UID. When ctx ends before wmu is free it logs that and
+// stores nothing; keepRead has already charged the download.
 // Folders the cache does not track, such as Trash or a Google label folder
 // other than All Mail, are never stored. It reports whether it stored a new
 // body.
-func (v *View) storeRead(ctx context.Context, epoch uint64, msg *mailstore.Message) bool {
+func (v *View) storeRead(ctx context.Context, epoch uint64, guard *readGuard, msg *mailstore.Message) bool {
 	store, account := v.a.o.Store, v.a.o.Account.Name
 	r := msg.Summary.Ref
 	if err := v.a.lockContext(ctx); err != nil {
@@ -258,6 +299,9 @@ func (v *View) storeRead(ctx context.Context, epoch uint64, msg *mailstore.Messa
 		return false
 	}
 	if !have {
+		if v.a.changedSince(guard, r) {
+			return false
+		}
 		if err := store.PutRows(ctx, []Row{messageRow(msg)}); err != nil {
 			v.logReadError("storing a read row failed", err)
 			return false

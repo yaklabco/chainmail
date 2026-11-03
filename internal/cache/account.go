@@ -81,6 +81,12 @@ type Account struct {
 	// again when a change hit one of its UIDs: the header it fetched may
 	// predate the change. Guarded by wmu.
 	inflight *inflightBatch
+	// readsMu guards reads, the guards of the read path's downloads now
+	// running with wmu released. noteChange marks each flags or expunged
+	// change the builder applies in every one, and the read path writes
+	// a download back only for messages its guard saw no change of.
+	readsMu sync.Mutex
+	reads   map[*readGuard]struct{}
 
 	// applied is the builder's acknowledged event ID, -1 until the builder
 	// has opened its group.

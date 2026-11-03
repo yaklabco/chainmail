@@ -264,7 +264,8 @@ func (a *Account) fetchNew(ctx context.Context, fetch map[string][]uint32, progr
 // Every write is idempotent, so a failure part way is safe to retry. A
 // closing gap is applied last. Each change is noted in the backfill's
 // in-flight batch, so a header fetched before it is fetched again instead
-// of written. A new row inside the prefetch window without a body clears
+// of written, and in every read guard, so a download that predates it is
+// not written over it. A new row inside the prefetch window without a body clears
 // its folder's window_done in the same transaction (spec 4.1) and wakes
 // the prefetcher, so a text search never answers complete without that
 // body. Stored rows wake the evictor when the file is over max_size.
@@ -285,7 +286,7 @@ func (a *Account) commitSegment(ctx context.Context, epoch uint64, plan segmentP
 		a.noteWrite(ctx)
 	}
 	for _, c := range plan.changes {
-		a.inflight.note(c.ref)
+		a.noteChange(c.ref)
 		var err error
 		if c.kind == watch.KindFlags {
 			_, err = a.o.Store.SetFlags(ctx, c.ref, c.flags, c.labels)
