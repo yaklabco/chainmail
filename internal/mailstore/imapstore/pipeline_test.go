@@ -57,6 +57,9 @@ type scriptServer struct {
 	refuse, refusal string
 	// refuseText, when set, refuses the body FETCH of this one UID with NO.
 	refuseText int
+	// refuseTextWith, when set, is the refusal refuseText sends instead of
+	// NO [SERVERBUG].
+	refuseTextWith string
 	// encoding is every message's Content-Transfer-Encoding, 7bit if unset,
 	// and text, when set, is every message's body instead of scriptBody.
 	encoding, text string
@@ -289,7 +292,11 @@ func (srv *scriptServer) answer(cmd string) (data, done string) {
 		return "", tag + " BAD unexpected FETCH\r\n"
 	}
 	if uid == srv.refuseText {
-		return "", tag + " NO [SERVERBUG] cannot read this message\r\n"
+		refusal := srv.refuseTextWith
+		if refusal == "" {
+			refusal = "NO [SERVERBUG] cannot read this message"
+		}
+		return "", tag + " " + refusal + "\r\n"
 	}
 	body := srv.bodyOf(uid)
 	if sec[1] == "" {

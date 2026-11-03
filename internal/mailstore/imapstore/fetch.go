@@ -230,6 +230,11 @@ func (s *Store) fetchGroup(ctx context.Context, c *conn, folder string, refs []r
 			if p.fetched {
 				var refusal *imap.Error
 				switch err := errs[i]; {
+				case s.throttled(err) != nil:
+					// A quota or bandwidth limit is about the account,
+					// not this message.
+					set(p, nil, s.throttled(err))
+					continue
 				case errors.As(err, &refusal):
 					// The server refused this one message, so it alone
 					// fails, as unreadable rather than unavailable: the

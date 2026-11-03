@@ -462,15 +462,21 @@ const timeoutRetries = 1
 
 // retry runs try again after a dropped connection, up to Retries times with
 // backoff, then reports the account unavailable. A timed-out command is
-// retried at most timeoutRetries times. Every other outcome is final,
-// mailstore.ErrBusy included: background work tries again on its own
-// schedule.
+// retried at most timeoutRetries times, and a connection the server closed
+// for a quota or bandwidth limit not at all (mailstore.ErrThrottled). Every
+// other outcome is final, mailstore.ErrBusy included: background work tries
+// again on its own schedule.
 func (s *Store) retry(ctx context.Context, try func() error) error {
 	timeouts := 0
 	for attempt := 0; ; attempt++ {
 		err := try()
 		if errors.Is(err, mailstore.ErrBusy) {
 			return err
+		}
+		// A server that hung up for a quota or bandwidth limit would only
+		// refuse a fresh connection again.
+		if t := s.throttled(err); t != nil {
+			return t
 		}
 		if err == nil || !errors.Is(err, errConnLost) {
 			return s.serverError(err)
@@ -587,9 +593,44 @@ func (s *Store) readIn(ctx context.Context, c *conn, folder string, read func() 
 	return err
 }
 
+// gmailThrottleText is the lower-cased text Gmail sends, with or without a
+// response code, when an account has used up its IMAP command or download
+// allowance.
+const gmailThrottleText = "exceeded command or bandwidth limits"
+
+// isThrottled reports whether err holds a server reply refusing for a quota
+// or bandwidth limit: code OVERQUOTA or LIMIT, or Gmail's bandwidth text.
+// The reply may be a NO, a BAD or a BYE.
+func isThrottled(err error) bool {
+	var e *imap.Error
+	if !errors.As(err, &e) {
+		return false
+	}
+	if e.Code == imap.ResponseCodeOverQuota || e.Code == imap.ResponseCodeLimit {
+		return true
+	}
+	return strings.Contains(strings.ToLower(e.Text), gmailThrottleText)
+}
+
+// throttled returns mailstore.ErrThrottled for the account when err is a
+// throttling reply, and nil otherwise. A connection limit at login and a
+// login refusal keep their own meaning, whatever their code or text. The
+// error never carries the server's reply or its text.
+func (s *Store) throttled(err error) error {
+	if !isThrottled(err) || errors.Is(err, mailstore.ErrConnLimit) ||
+		errors.Is(err, auth.ErrRejected) || errors.Is(err, auth.ErrAuthRequired) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", mailstore.ErrThrottled, s.acct.Name)
+}
+
 // serverError marks a refusal from the server (NO or BAD) as unavailable,
-// unless it already means something more specific.
+// or as throttled when it refuses for a quota or bandwidth limit, unless
+// it already means something more specific.
 func (s *Store) serverError(err error) error {
+	if t := s.throttled(err); t != nil {
+		return t
+	}
 	var imapErr *imap.Error
 	if err == nil || !errors.As(err, &imapErr) || errors.Is(err, auth.ErrRejected) || errors.Is(err, auth.ErrAuthRequired) ||
 		errors.Is(err, mailstore.ErrUnavailable) || errors.Is(err, mailstore.ErrNotFound) || errors.Is(err, mailstore.ErrStaleRef) {

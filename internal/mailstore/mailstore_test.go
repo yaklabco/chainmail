@@ -69,3 +69,16 @@ func TestFolderNotFoundError(t *testing.T) {
 		t.Errorf("Error() = %q, want %q", got, want)
 	}
 }
+
+// ErrThrottled is also ErrUnavailable, so a caller that knows only
+// ErrUnavailable handles a throttled server as an unavailable one.
+func TestErrThrottledIsUnavailable(t *testing.T) {
+	t.Parallel()
+	err := fmt.Errorf("fetching: %w", ErrThrottled)
+	if !errors.Is(err, ErrThrottled) || !errors.Is(err, ErrUnavailable) {
+		t.Errorf("errors.Is(%v): ErrThrottled %t, ErrUnavailable %t; want both", err, errors.Is(err, ErrThrottled), errors.Is(err, ErrUnavailable))
+	}
+	if errors.Is(ErrUnavailable, ErrThrottled) || errors.Is(ErrConnLimit, ErrThrottled) {
+		t.Error("ErrUnavailable or ErrConnLimit counts as ErrThrottled")
+	}
+}
