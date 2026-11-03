@@ -116,3 +116,13 @@ func (a *Account) rebuildLocked(ctx context.Context, folder string) ([]string, e
 	a.logger.InfoContext(ctx, "cache rebuilt; backfill starts again", "folders", len(folders))
 	return folders, nil
 }
+
+// Rebuild drops the folder (every tracked folder when folder is "") and
+// resets its progress so backfill restarts. It returns the folders reset.
+// A folder the cache does not track is a *mailstore.FolderNotFoundError,
+// which matches mailstore.ErrNotFound.
+func (a *Account) Rebuild(ctx context.Context, folder string) ([]string, error) {
+	a.wmu.Lock()
+	defer a.wmu.Unlock()
+	return a.rebuildLocked(ctx, folder)
+}
