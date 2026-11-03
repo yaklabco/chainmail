@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"unicode/utf8"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/render"
 )
 
 // Search answers a search as the server's Search would, from the cache:
@@ -75,4 +77,91 @@ func (v *View) searchScope(ctx context.Context, req mailstore.SearchRequest) ([]
 		return nil, fmt.Errorf("%w: the account's store cannot say which folders a search covers", mailstore.ErrUnsupported)
 	}
 	return sc.SearchFolders(ctx, req.In)
+}
+
+// FetchSummaries returns the cached rows of uids in src as the server's
+// FetchSummaries would: in the order of uids, leaving out UIDs the cache
+// lacks, ErrStaleRef when the cache holds the folder under another
+// UIDVALIDITY. With snippets, each row whose body is cached gets its
+// snippet from it, as the rendered text's first characters; the rows
+// without one get theirs from a single server FetchSummaries for those
+// UIDs only.
+func (v *View) FetchSummaries(ctx context.Context, src mailstore.Source, uids []uint32, opts mailstore.SummaryOptions) ([]mailstore.Summary, error) {
+	if len(uids) == 0 {
+		return nil, nil
+	}
+	store, account := v.a.o.Store, v.a.o.Account.Name
+	p, held, err := store.Progress(ctx, account, src.Folder)
+	switch {
+	case err != nil:
+		return nil, err
+	case !held:
+		return nil, fmt.Errorf("%w: the cache does not hold the folder", mailstore.ErrNotFound)
+	case p.UIDValidity != src.UIDValidity:
+		return nil, fmt.Errorf("%w: the folder changed; search again", mailstore.ErrStaleRef)
+	}
+	rows, err := store.Rows(ctx, src, account, uids)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]mailstore.Summary, len(rows))
+	for i, r := range rows {
+		out[i] = r.Summary()
+	}
+	if !opts.Snippets {
+		return out, nil
+	}
+	var missing []uint32
+	at := map[uint32]int{}
+	for i := range out {
+		b, held, err := store.Body(ctx, out[i].Ref)
+		if err != nil {
+			return nil, err
+		}
+		if snippet, ok := cachedSnippet(b, held); ok {
+			out[i].Preview = &snippet
+			continue
+		}
+		missing = append(missing, out[i].Ref.UID)
+		at[out[i].Ref.UID] = i
+	}
+	if len(missing) == 0 {
+		return out, nil
+	}
+	sums, err := v.server.FetchSummaries(ctx, src, missing, mailstore.SummaryOptions{Snippets: true})
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range sums {
+		if i, ok := at[s.Ref.UID]; ok {
+			out[i].Preview, out[i].Sample = s.Preview, s.Sample
+		}
+	}
+	return out, nil
+}
+
+// cachedSnippet is the snippet of a cached body b, held when the cache has
+// one: the start of the text render.Render gives with Full, at most as many
+// bytes as a server's text sample and cut on a character boundary. It is
+// left unclipped, since the daemon's snippetOf clips a PREVIEW once; a
+// preview clipped here would lose a space at the cut that the server's
+// snippet keeps. ok is false when no body is held or it does not render;
+// the server then supplies the snippet.
+func cachedSnippet(b Body, held bool) (string, bool) {
+	if !held {
+		return "", false
+	}
+	body, err := render.Render(b.Raw, render.Options{Full: true})
+	if err != nil {
+		return "", false
+	}
+	text := body.Text
+	if len(text) > mailstore.SampleBytes {
+		cut := mailstore.SampleBytes
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		text = text[:cut]
+	}
+	return text, true
 }

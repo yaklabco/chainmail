@@ -18,6 +18,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
 	"github.com/jamesainslie/chainmail/internal/query"
 	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/jamesainslie/chainmail/internal/render"
 	"github.com/jamesainslie/chainmail/internal/watch"
 )
 
@@ -417,5 +418,112 @@ func TestViewSearchServerOnlyMatchesNothing(t *testing.T) {
 				t.Errorf("%q: %s = %v (count %d, err %v), want no matches", tt.query, r.Source.Folder, r.UIDs, r.Count, r.Err)
 			}
 		}
+	}
+}
+
+// diffSummary says how got differs from want, leaving out Preview and
+// Sample, or returns "" when they match.
+func diffSummary(got, want mailstore.Summary) string {
+	switch {
+	case got.Ref != want.Ref:
+		return fmt.Sprintf("ref %v, want %v", got.Ref, want.Ref)
+	case !got.Date.Equal(want.Date) || !got.InternalDate.Equal(want.InternalDate):
+		return fmt.Sprintf("dates %v/%v, want %v/%v", got.Date, got.InternalDate, want.Date, want.InternalDate)
+	case !slices.Equal(got.From, want.From) || !slices.Equal(got.To, want.To):
+		return fmt.Sprintf("from/to %v/%v, want %v/%v", got.From, got.To, want.From, want.To)
+	case got.Subject != want.Subject || got.Size != want.Size || got.HasAttachment != want.HasAttachment || got.ThreadID != want.ThreadID:
+		return fmt.Sprintf("summary %+v, want %+v", got, want)
+	case !slices.Equal(got.Flags, want.Flags) || !slices.Equal(got.Labels, want.Labels):
+		return fmt.Sprintf("flags/labels %v/%v, want %v/%v", got.Flags, got.Labels, want.Flags, want.Labels)
+	}
+	return ""
+}
+
+// snippetText renders a summary's snippet as the daemon's snippetOf does.
+func snippetText(s mailstore.Summary) string {
+	switch {
+	case s.Preview != nil:
+		return render.Clip(*s.Preview)
+	case s.Sample != nil:
+		return render.Snippet(s.Sample.MediaType, s.Sample.Charset, s.Sample.Encoding, s.Sample.Data)
+	default:
+		return ""
+	}
+}
+
+// TestViewFetchSummariesMatchesServer checks rows from the cache against
+// the server's: the same fields, in the order of the UIDs asked for, a UID
+// the folder lacks left out, and a changed UIDVALIDITY stale.
+func TestViewFetchSummariesMatchesServer(t *testing.T) {
+	t.Parallel()
+	for _, gmail := range []bool{false, true} {
+		f := newSearchFixture(t, gmail)
+		seedSearchMail(f.server.Store, gmail)
+		f.warm(t)
+		results, err := f.server.Search(t.Context(), mailstore.SearchRequest{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range results {
+			uids := append(slices.Clone(r.UIDs), 999)
+			want, err := f.server.FetchSummaries(t.Context(), r.Source, uids, mailstore.SummaryOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := f.view.FetchSummaries(t.Context(), r.Source, uids, mailstore.SummaryOptions{})
+			if err != nil {
+				t.Fatalf("gmail=%t %s: %v", gmail, r.Source.Folder, err)
+			}
+			if len(got) != len(want) {
+				t.Fatalf("gmail=%t %s: %d rows, want %d", gmail, r.Source.Folder, len(got), len(want))
+			}
+			for i := range want {
+				if d := diffSummary(got[i], want[i]); d != "" {
+					t.Errorf("gmail=%t %s row %d: %s", gmail, r.Source.Folder, i, d)
+				}
+			}
+			stale := mailstore.Source{Folder: r.Source.Folder, UIDValidity: r.Source.UIDValidity + 1}
+			if _, err := f.view.FetchSummaries(t.Context(), stale, r.UIDs, mailstore.SummaryOptions{}); len(r.UIDs) > 0 && !errors.Is(err, mailstore.ErrStaleRef) {
+				t.Errorf("gmail=%t %s with a changed UIDVALIDITY: %v, want ErrStaleRef", gmail, r.Source.Folder, err)
+			}
+		}
+	}
+}
+
+// TestViewFetchSummariesSnippets checks that snippets come from cached
+// bodies and equal the server's, and that rows without a cached body get
+// theirs from one server call for those rows only.
+func TestViewFetchSummariesSnippets(t *testing.T) {
+	t.Parallel()
+	f := newSearchFixture(t, false)
+	seedSearchMail(f.server.Store, false)
+	f.warm(t)
+	late := f.server.Add(fake.Message{Folder: "INBOX", Date: searchDaysAgo(0), Subject: "late", Body: "arrived after the prefetch"})
+	f.cacheFolder(t, mailstore.Source{Folder: "INBOX", UIDValidity: late.UIDValidity}, []uint32{late.UID}, false)
+	results, err := f.server.Search(t.Context(), mailstore.SearchRequest{In: "inbox"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := results[0]
+	want, err := f.server.FetchSummaries(t.Context(), inbox.Source, inbox.UIDs, mailstore.SummaryOptions{Snippets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(f.server.summaryCalls())
+	got, err := f.view.FetchSummaries(t.Context(), inbox.Source, inbox.UIDs, mailstore.SummaryOptions{Snippets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%d rows, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if g, w := snippetText(got[i]), snippetText(want[i]); g != w {
+			t.Errorf("row %d snippet = %q, want %q", i, g, w)
+		}
+	}
+	calls := f.server.summaryCalls()[before:]
+	if len(calls) != 1 || !slices.Equal(calls[0], []uint32{late.UID}) {
+		t.Errorf("server FetchSummaries calls = %v, want one for UID %d only", calls, late.UID)
 	}
 }
