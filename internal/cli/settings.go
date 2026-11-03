@@ -3,12 +3,14 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"syscall"
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
@@ -26,11 +28,21 @@ type binding struct {
 	envVar string
 }
 
+// The CLI's own settings.
+var (
+	socketBinding = binding{key: "socket", flag: "socket", envVar: "CHAINMAIL_SOCKET"}
+	outputBinding = binding{key: "output", flag: "output", envVar: "CHAINMAIL_OUTPUT"}
+)
+
 // clientBindings are the CLI's own settings. cli.toml may hold these keys only.
-var clientBindings = []binding{
-	{key: "socket", flag: "socket", envVar: "CHAINMAIL_SOCKET"},
-	{key: "output", flag: "output", envVar: "CHAINMAIL_OUTPUT"},
-}
+var clientBindings = []binding{socketBinding, outputBinding}
+
+// fromDefault is the source of a setting nothing set.
+const fromDefault = "the default"
+
+// maxCLIConfig is the largest cli.toml read. The file holds two short
+// strings, so anything near this size is not a settings file.
+const maxCLIConfig = 64 << 10
 
 // daemonBindings are the daemon command's flags. They have no file layer:
 // the daemon's config file is read by internal/config, and nothing in it
@@ -81,7 +93,7 @@ func source(flags *pflag.FlagSet, b binding, env Env, path string, file map[stri
 	case file[b.key] != nil:
 		return path
 	default:
-		return "the default"
+		return fromDefault
 	}
 }
 
@@ -98,20 +110,21 @@ func cliConfigPath(env Env) string {
 }
 
 // readCLIConfig reads cli.toml at path. A missing file holds no settings.
-// A file that does not parse, or holds anything but string socket and
-// output keys, is a usage error naming the path.
+// A file that is not a regular file of at most 64 KiB, does not parse, or
+// holds anything but string socket and output keys, is a usage error
+// naming the path.
 func readCLIConfig(path string) (map[string]any, error) {
 	settings := map[string]any{}
 	if path == "" {
 		return settings, nil
 	}
-	data, err := os.ReadFile(path)
+	data, err := readSmallFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return settings, nil
 	}
 	hint := "fix or remove " + path + "; it takes socket and output"
 	if err != nil {
-		return nil, usageError{err: fmt.Errorf("reading %s: %w", path, err), hint: hint}
+		return nil, usageError{err: err, hint: hint}
 	}
 	// Read as written, not through viper, which drops empty tables and so
 	// would let output = {} or an empty [unexpected] table pass.
@@ -132,6 +145,35 @@ func readCLIConfig(path string) (map[string]any, error) {
 	return settings, nil
 }
 
+// readSmallFile reads the regular file at path, refusing anything else and
+// anything over maxCLIConfig. It opens without blocking, so a FIFO with no
+// writer is refused at once instead of hanging the command.
+func readSmallFile(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }() // read-only; nothing to flush
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxCLIConfig+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	if len(data) > maxCLIConfig {
+		return nil, fmt.Errorf("%s is larger than 64 KiB", path)
+	}
+	return data, nil
+}
+
 // resolve fills g.socket and g.output from cmd's flags, the environment,
 // cli.toml and the defaults, in that order, and checks the output format.
 func (g *globals) resolve(env Env, cmd *cobra.Command) error {
@@ -145,15 +187,15 @@ func (g *globals) resolve(env Env, cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	v.SetDefault("socket", config.DefaultSocket)
+	v.SetDefault(socketBinding.key, config.DefaultSocket)
 	out := "json"
 	if env.StdoutTerminal {
 		out = "table"
 	}
-	v.SetDefault("output", out)
-	g.socket, g.output = v.GetString("socket"), v.GetString("output")
-	from := source(flags, clientBindings[1], env, path, file)
-	g.outputChosen = from != "the default"
+	v.SetDefault(outputBinding.key, out)
+	g.socket, g.output = v.GetString(socketBinding.key), v.GetString(outputBinding.key)
+	from := source(flags, outputBinding, env, path, file)
+	g.outputChosen = from != fromDefault
 	if g.output != "json" && g.output != "table" {
 		return usageError{err: fmt.Errorf("--output must be json or table, got %q from %s", g.output, from), hint: "run: chainmail --help"}
 	}

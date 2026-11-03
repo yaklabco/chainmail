@@ -218,7 +218,7 @@ func newDraftSendCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return writeComposeResult(env, g, explicitJSON(cmd, g), resp.Msg, resp.Msg.GetResult())
+			return writeComposeResult(env, g, g.jsonChosen(), resp.Msg, resp.Msg.GetResult())
 		},
 	}
 	cmd.Flags().StringVar(&key, "idempotency-key", "", "the key that stops a repeat from sending again (default: derived from the ref)")

@@ -37,7 +37,7 @@ func newMCPCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			}
 			logger := slog.New(slog.NewTextHandler(env.Stderr, nil))
 			s := mcpserver.New(mcpserver.Options{
-				Socket:         g.socketPath(env),
+				Socket:         g.socketPath(),
 				Version:        version.Version,
 				AttachmentsDir: dir,
 				Logger:         logger,

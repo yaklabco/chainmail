@@ -43,6 +43,9 @@ type globals struct {
 	// socketFlag is --socket as given, empty when it was not. The daemon
 	// reads only this, so a client's settings never move its socket.
 	socketFlag string
+	// outputFlag is --output as given. resolve reads it through the flag
+	// and sets output, so nothing reads this field.
+	outputFlag string
 	// socket and output are resolved by resolve.
 	socket string
 	output string
@@ -52,26 +55,62 @@ type globals struct {
 }
 
 // socketPath is the daemon socket clients dial.
-func (g *globals) socketPath(Env) string {
+func (g *globals) socketPath() string {
 	if g.socket == "" {
 		return config.DefaultSocket
 	}
 	return g.socket
 }
 
+// jsonChosen says json output was chosen, by --output, CHAINMAIL_OUTPUT
+// or cli.toml, rather than being the default for a non-terminal.
+func (g *globals) jsonChosen() bool {
+	return g.outputChosen && g.output == "json"
+}
+
 // addGlobalFlags registers the flags every command shares.
 func addGlobalFlags(root *cobra.Command, g *globals) {
-	root.PersistentFlags().StringVar(&g.socketFlag, "socket", "", "daemon socket (default $CHAINMAIL_SOCKET, then cli.toml, then "+config.DefaultSocket+")")
-	root.PersistentFlags().StringVar(&g.output, "output", "", "output format: json or table (default $CHAINMAIL_OUTPUT, then cli.toml, then table on a terminal, json otherwise)")
+	root.PersistentFlags().StringVar(&g.socketFlag, socketBinding.flag, "", "daemon socket (default $CHAINMAIL_SOCKET, then cli.toml, then "+config.DefaultSocket+")")
+	root.PersistentFlags().StringVar(&g.outputFlag, outputBinding.flag, "", "output format: json or table (default $CHAINMAIL_OUTPUT, then cli.toml, then table on a terminal, json otherwise)")
 }
 
 // client connects to the daemon. Callers Close it, so idle connections do
 // not hold up a daemon shutting down.
-func (g *globals) client(env Env) *client.Client {
-	return client.New(g.socketPath(env), "cli")
+func (g *globals) client(Env) *client.Client {
+	return client.New(g.socketPath(), "cli")
 }
 
 func (g *globals) table() bool { return g.output == "table" }
+
+// skipSettingsAnnotation marks a command that uses neither client setting,
+// so a bad cli.toml or CHAINMAIL_OUTPUT must not stop it.
+const skipSettingsAnnotation = "chainmail.skipSettings"
+
+// skipsSettings says cmd does not resolve the client settings before it
+// runs. Completion requests resolve them inside each completion function,
+// against the command being completed, and must not fail on a bad
+// cli.toml. cobra makes those request commands itself, so they are
+// matched by path rather than marked.
+func skipsSettings(cmd *cobra.Command) bool {
+	if cmd.Annotations[skipSettingsAnnotation] != "" {
+		return true
+	}
+	root := cmd.Root().Name()
+	switch cmd.CommandPath() {
+	case root + " " + cobra.ShellCompRequestCmd, root + " " + cobra.ShellCompNoDescRequestCmd:
+		return true
+	}
+	return false
+}
+
+// skipSettings marks cmd with skipSettingsAnnotation and returns it.
+func skipSettings(cmd *cobra.Command) *cobra.Command {
+	if cmd.Annotations == nil {
+		cmd.Annotations = map[string]string{}
+	}
+	cmd.Annotations[skipSettingsAnnotation] = "true"
+	return cmd
+}
 
 // newRoot builds the command tree. Commands use ctx, the context given to
 // Execute, rather than cmd.Context(). The two are the same context, but only
@@ -86,14 +125,9 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 	// it does not know, outside the exit contract. newCompletionCmd
 	// replaces it. Its help command is replaced below for the same reason.
 	root.CompletionOptions.DisableDefaultCmd = true
-	root.SetHelpCommand(newHelpCmd())
+	root.SetHelpCommand(skipSettings(newHelpCmd()))
 	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
-		// Completion requests resolve settings inside each completion
-		// function, against the command being completed, and must not fail
-		// on a bad cli.toml.
-		// The daemon uses neither client setting, so a bad cli.toml or
-		// CHAINMAIL_OUTPUT in its environment must not stop it.
-		if cmd.Name() == cobra.ShellCompRequestCmd || cmd.Name() == cobra.ShellCompNoDescRequestCmd || cmd.Name() == "daemon" {
+		if skipsSettings(cmd) {
 			return nil
 		}
 		return g.resolve(env, cmd)
@@ -105,7 +139,8 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 	addGlobalFlags(root, g)
 	root.AddCommand(
 		newVersionCmd(env, g),
-		newDaemonCmd(ctx, env, g),
+		// The daemon reads --socket only as a flag and has no output.
+		skipSettings(newDaemonCmd(ctx, env, g)),
 		newAccountsCmd(ctx, env, g),
 		newSecretCmd(ctx, env, g),
 		newAuthCmd(ctx, env, g),
@@ -123,8 +158,8 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 		newDraftCmd(ctx, env, g),
 		newMCPCmd(ctx, env, g),
 		newWatchCmd(ctx, env, g),
-		newCompletionCmd(),
-		newManCmd(),
+		skipSettings(newCompletionCmd()),
+		skipSettings(newManCmd()),
 	)
 	root.AddCommand(newOrganizeCmds(ctx, env, g)...)
 	root.AddGroup(commandGroups...)
