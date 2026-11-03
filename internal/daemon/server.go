@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
@@ -167,6 +168,18 @@ type Server struct {
 	// cacheEvictor applies body retention and the size cap to the whole
 	// cache file. Nil without a cache.
 	cacheEvictor *cache.Evictor
+	// cacheDown is set while cache.db cannot be written because its disk
+	// is full. Searches and reads then use the mail servers, and status
+	// says error.
+	cacheDown atomic.Bool
+	// cacheProbeAccount is the account whose budget row the write probe
+	// touches: the first with the cache enabled.
+	cacheProbeAccount string
+	// cacheProbe tries one write to cache.db. Internal tests replace it.
+	cacheProbe func(context.Context) error
+	// cacheInterval is how often the cache housekeeping runs. Internal
+	// tests shorten it.
+	cacheInterval time.Duration
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -202,7 +215,9 @@ func New(opts Options) (*Server, error) {
 		watchState:    watch.NewState(opts.StateDB),
 		watchWaitUnit: time.Second,
 		trimInterval:  eventTrimInterval,
+		cacheInterval: cacheHousekeepInterval,
 	}
+	s.cacheProbe = s.probeCache
 	s.lim = newLimitState(opts.StateDB, opts.Now)
 	s.newStore = func(acct config.ResolvedAccount, p storeParams) mailstore.Store {
 		return imapstore.New(acct, s.auth, imapstore.Options{

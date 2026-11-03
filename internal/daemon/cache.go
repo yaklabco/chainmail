@@ -33,7 +33,8 @@ func (s *Server) openCache(ctx context.Context) {
 	if s.opts.DisableCache || s.opts.CacheDir == "" {
 		return
 	}
-	if _, ok := s.firstCacheAccount(); !ok {
+	probe, ok := s.firstCacheAccount()
+	if !ok {
 		s.opts.Logger.Info("the cache is disabled for every account")
 		return
 	}
@@ -47,6 +48,7 @@ func (s *Server) openCache(ctx context.Context) {
 		return
 	}
 	s.cache = st
+	s.cacheProbeAccount = probe
 	cfg := s.opts.Config
 	s.cacheEvictor = cache.NewEvictor(cache.EvictorOptions{
 		Store:     st,
@@ -54,6 +56,7 @@ func (s *Server) openCache(ctx context.Context) {
 		Retention: func(account string) time.Duration { return cfg.CacheSettings(account).ReadRetention },
 		MaxSize:   cfg.CacheMaxSize,
 		Logger:    s.opts.Logger,
+		OnError:   s.noteCacheErr,
 	})
 }
 
@@ -120,6 +123,7 @@ func (c *cacheService) GetCacheStatus(ctx context.Context, req *connect.Request[
 // cacheFailure logs a cache error the daemon cannot recover from in the
 // call, and returns it with fixed client text.
 func (s *Server) cacheFailure(err error) error {
+	s.noteCacheErr(err)
 	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		s.opts.Logger.Error("cache call failed", "err", err)
 	}
@@ -145,7 +149,7 @@ func (s *Server) cacheStatus(ctx context.Context, acct config.ResolvedAccount, w
 	switch {
 	case !set.Enabled || s.opts.DisableCache:
 		return out
-	case s.cacheErr != nil:
+	case s.cacheErr != nil || s.cacheDown.Load():
 		out.Enabled, out.State, out.LastError = true, cache.StateError, api.ReasonInternal
 		return out
 	case ca == nil:
@@ -357,4 +361,92 @@ func (c *cacheService) EvictCache(ctx context.Context, req *connect.Request[chai
 		return nil, err
 	}
 	return connect.NewResponse(&chainmailv1.EvictCacheResponse{BodiesEvicted: res.Bodies, FreedBytes: res.FreedBytes}), nil
+}
+
+const (
+	// cacheHousekeepInterval is how often the write probe and the ref
+	// recovery pruning run.
+	cacheHousekeepInterval = time.Hour
+	// cacheBudgetDay formats a budget day, a UTC date.
+	cacheBudgetDay = time.DateOnly
+)
+
+// cacheAccount returns the account's cache worker, for routing and reads,
+// or nil when the account has none or the cache is down. A nil result
+// means: use the mail server.
+func (s *Server) cacheAccount(name string) *cache.Account {
+	if s.cacheDown.Load() {
+		return nil
+	}
+	return s.cacheAccounts[name]
+}
+
+// noteCacheErr turns the cache off when err says the disk holding cache.db
+// is full. The housekeeping turns it back on once a write succeeds.
+func (s *Server) noteCacheErr(err error) {
+	if errors.Is(err, cache.ErrDiskFull) && s.cacheDown.CompareAndSwap(false, true) {
+		s.opts.Logger.Warn("the disk holding cache.db is full; searches and reads use the mail servers until a write succeeds, retried hourly")
+	}
+}
+
+// probeCache writes to cache.db: it adds 0 bytes to today's budget of the
+// first account with the cache enabled, a row that account has anyway.
+func (s *Server) probeCache(ctx context.Context) error {
+	if s.cache == nil {
+		return nil
+	}
+	_, err := s.cache.AddBudget(ctx, s.cacheProbeAccount, s.opts.Now().UTC().Format(cacheBudgetDay), 0)
+	return err
+}
+
+// runCacheHousekeeping runs cacheHousekeep every cacheInterval until ctx ends.
+func (s *Server) runCacheHousekeeping(ctx context.Context) {
+	tick := time.NewTicker(s.cacheInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			s.cacheHousekeep(ctx)
+		}
+	}
+}
+
+// cacheHousekeep probes a write, turning the cache off on a full disk and
+// back on once a write works, then, with the cache on, prunes the
+// Message-ID recovery rows older than the longest read_retention.
+func (s *Server) cacheHousekeep(ctx context.Context) {
+	err := s.cacheProbe(ctx)
+	switch {
+	case err == nil:
+		if s.cacheDown.CompareAndSwap(true, false) {
+			s.opts.Logger.Info("cache.db accepts writes again; the cache is back on")
+		}
+	case ctx.Err() != nil:
+		return
+	default:
+		s.noteCacheErr(err)
+		if !errors.Is(err, cache.ErrDiskFull) {
+			s.opts.Logger.Warn("the cache write probe failed", "err", err)
+		}
+	}
+	if s.cacheDown.Load() || s.cache == nil {
+		return
+	}
+	if err := s.cache.PruneRecovery(ctx, s.opts.Now().Add(-s.maxReadRetention())); err != nil && ctx.Err() == nil {
+		s.noteCacheErr(err)
+		s.opts.Logger.Warn("pruning cache ref recovery", "err", err)
+	}
+}
+
+// maxReadRetention is the longest read_retention of any account, so no
+// account's recovery rows go before its own retention.
+func (s *Server) maxReadRetention() time.Duration {
+	var longest time.Duration
+	cfg := s.opts.Config
+	for _, name := range cfg.AccountNames() {
+		longest = max(longest, cfg.CacheSettings(name).ReadRetention)
+	}
+	return longest
 }

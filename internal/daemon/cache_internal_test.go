@@ -1,12 +1,16 @@
 package daemon
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -367,5 +371,80 @@ func TestEvictCacheWithoutACache(t *testing.T) {
 	want := [4]string{"cache.evict", `["bodies=0","freed=0"]`, "error", api.ReasonInvalidArgument}
 	if got := lastCacheAudit(t, stateDB); got != want {
 		t.Errorf("audit row = %v, want %v", got, want)
+	}
+}
+
+// A full disk turns the cache off: status says error, and routing gets no
+// worker. The hourly probe turns it back on once a write succeeds. Other
+// cache errors leave it on.
+func TestCacheDiskFull(t *testing.T) {
+	t.Parallel()
+	s, _ := newCacheServer(t, cacheConfig)
+	ctx := t.Context()
+	s.cacheAccounts = map[string]*cache.Account{"host": new(cache.Account)}
+	var probeErr error
+	s.cacheProbe = func(context.Context) error { return probeErr }
+
+	s.noteCacheErr(errors.New("SQLITE_BUSY"))
+	if s.cacheDown.Load() || s.cacheAccount("host") == nil {
+		t.Fatal("an error other than a full disk turned the cache off")
+	}
+
+	probeErr = fmt.Errorf("probe: %w", cache.ErrDiskFull)
+	s.cacheHousekeep(ctx)
+	if !s.cacheDown.Load() || s.cacheAccount("host") != nil {
+		t.Fatal("a full disk did not turn the cache off")
+	}
+	acct, err := s.opts.Config.Account("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &chainmailv1.AccountCacheStatus{Account: "host", Enabled: true, State: "error", LastError: api.ReasonInternal, BudgetBytes: 1 << 30}
+	if got := s.cacheStatus(ctx, acct, true); !proto.Equal(got, want) {
+		t.Errorf("status while the disk is full = %v, want %v", got, want)
+	}
+
+	probeErr = nil
+	s.cacheHousekeep(ctx)
+	if s.cacheDown.Load() || s.cacheAccount("host") == nil {
+		t.Error("the cache stayed off after a write succeeded")
+	}
+}
+
+// The default probe writes to cache.db: it touches the first cache
+// account's budget row for today and adds nothing.
+func TestProbeCacheWrites(t *testing.T) {
+	t.Parallel()
+	s, _ := newCacheServer(t, cacheConfig)
+	if err := s.probeCache(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	used, err := s.cache.Budget(t.Context(), "host", s.opts.Now().UTC().Format(cacheBudgetDay))
+	if err != nil || used != 0 {
+		t.Errorf("host budget after the probe = %d, %v; want 0", used, err)
+	}
+}
+
+// Housekeeping runs every cacheInterval until its context ends.
+func TestCacheHousekeepingRuns(t *testing.T) {
+	t.Parallel()
+	s, _ := newCacheServer(t, cacheConfig)
+	var probes atomic.Int32
+	s.cacheProbe = func(context.Context) error {
+		probes.Add(1)
+		return nil
+	}
+	s.cacheInterval = 5 * time.Millisecond
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	wg.Go(func() { s.runCacheHousekeeping(ctx) })
+	deadline := time.Now().Add(5 * time.Second)
+	for probes.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	wg.Wait()
+	if n := probes.Load(); n < 2 {
+		t.Errorf("probes = %d, want at least 2", n)
 	}
 }
