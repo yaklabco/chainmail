@@ -447,3 +447,124 @@ func TestViewFetchMessagesFlags(t *testing.T) {
 		})
 	}
 }
+
+// TestViewFetchMessagesRecoversByMessageID checks spec 7.3 on an account
+// other than Google: a ref the server calls stale is found again by its
+// Message-ID when exactly one other cached message has it, and returned
+// under its new ref; otherwise the stale error stands.
+func TestViewFetchMessagesRecoversByMessageID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// setup returns the ref to read and the ref it should recover to,
+		// or the zero ref when it must stay stale.
+		setup func(t *testing.T, f *readFixture, refs map[string]ref.Ref) (read, want ref.Ref)
+	}{
+		{
+			name: "folder rebuilt under a new UIDVALIDITY",
+			setup: func(t *testing.T, f *readFixture, refs map[string]ref.Ref) (ref.Ref, ref.Ref) {
+				old := refs["re: re: plan"]
+				f.resetFolder(t, "INBOX")
+				found, err := f.fk.FindByMessageID(t.Context(), "INBOX", "p2@x")
+				if err != nil || len(found) != 1 {
+					t.Fatalf("server lookup: %v, %v", found, err)
+				}
+				return old, found[0]
+			},
+		},
+		{
+			name: "moved while its old row is still cached",
+			setup: func(t *testing.T, f *readFixture, refs map[string]ref.Ref) (ref.Ref, ref.Ref) {
+				old := refs["re: re: plan"]
+				if err := f.store.DropFolder(t.Context(), "host", "INBOX", false); err != nil {
+					t.Fatal(err)
+				}
+				res, err := f.fk.Search(t.Context(), mailstore.SearchRequest{In: "INBOX"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.cacheFolder(t, res[0].Source, res[0].UIDs, false)
+				moved := f.fk.Move(t.Context(), []ref.Ref{old}, "Archive")
+				if moved[0].Err != nil {
+					t.Fatal(moved[0].Err)
+				}
+				f.cacheFolder(t, mailstore.Source{Folder: "Archive", UIDValidity: moved[0].Ref.UIDValidity}, []uint32{moved[0].Ref.UID}, false)
+				return old, moved[0].Ref
+			},
+		},
+		{
+			name: "two copies have the Message-ID",
+			setup: func(t *testing.T, f *readFixture, refs map[string]ref.Ref) (ref.Ref, ref.Ref) {
+				copied := f.fk.Copy(t.Context(), []ref.Ref{refs["re: re: plan"]}, "Archive")
+				if copied[0].Err != nil {
+					t.Fatal(copied[0].Err)
+				}
+				f.cacheFolder(t, mailstore.Source{Folder: "Archive", UIDValidity: copied[0].Ref.UIDValidity}, []uint32{copied[0].Ref.UID}, false)
+				old := refs["re: re: plan"]
+				f.resetFolder(t, "INBOX")
+				return old, ref.Ref{}
+			},
+		},
+		{
+			name: "no Message-ID",
+			setup: func(t *testing.T, f *readFixture, refs map[string]ref.Ref) (ref.Ref, ref.Ref) {
+				old := refs["note"]
+				f.resetFolder(t, "INBOX")
+				return old, ref.Ref{}
+			},
+		},
+		{
+			name: "expunged, so its row is gone without recovery",
+			setup: func(t *testing.T, f *readFixture, refs map[string]ref.Ref) (ref.Ref, ref.Ref) {
+				old := refs["memo"]
+				f.fk.ExternalExpunge("Archive", old.UID)
+				if err := f.store.DeleteRow(t.Context(), old); err != nil {
+					t.Fatal(err)
+				}
+				return old, ref.Ref{}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newReadFixture(t, false)
+			refs := seedReadMail(f.fk, false)
+			f.warm(t)
+			read, want := tt.setup(t, f, refs)
+			got, sources := f.view.FetchMessagesFrom(t.Context(), []ref.Ref{read})
+			if want == (ref.Ref{}) {
+				if !errors.Is(got[0].Err, mailstore.ErrStaleRef) || sources[0] != cache.SourceServer {
+					t.Errorf("err %v, source %q, want ErrStaleRef from the server", got[0].Err, sources[0])
+				}
+				return
+			}
+			if got[0].Err != nil {
+				t.Fatalf("recovery failed: %v", got[0].Err)
+			}
+			if got[0].Message.Summary.Ref != want {
+				t.Errorf("recovered ref = %v, want %v", got[0].Message.Summary.Ref, want)
+			}
+			if got[0].Message.MessageID != "p2@x" {
+				t.Errorf("recovered Message-ID = %q", got[0].Message.MessageID)
+			}
+		})
+	}
+}
+
+// TestViewFetchMessagesLeavesGoogleRecoveryToTheServer checks that a stale
+// ref on a Google account is never looked up by Message-ID: Gmail recovers
+// by X-GM-MSGID in the store, and a ref without one stays stale.
+func TestViewFetchMessagesLeavesGoogleRecoveryToTheServer(t *testing.T) {
+	t.Parallel()
+	f := newReadFixture(t, true)
+	refs := seedReadMail(f.fk, true)
+	f.warm(t)
+	old := refs["re: re: plan"]
+	old.GmailMsgID = 0
+	f.resetFolder(t, "[Gmail]/All Mail")
+	got, _ := f.view.FetchMessagesFrom(t.Context(), []ref.Ref{old})
+	if !errors.Is(got[0].Err, mailstore.ErrStaleRef) {
+		t.Errorf("err = %v, want ErrStaleRef", got[0].Err)
+	}
+}

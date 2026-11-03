@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"slices"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
@@ -26,12 +27,18 @@ func (v *View) FetchMessages(ctx context.Context, refs []ref.Ref) []mailstore.Me
 // FetchSummaries per folder refreshes them, and a ref that call does not
 // answer for is read as a miss. A miss is read from the server and kept
 // (keepRead).
+//
+// On an account other than Google, a miss the server calls stale is
+// looked up by its Message-ID and, when exactly one other cached message
+// has it, read at that message's ref, which the result carries (spec 7.3).
 func (v *View) FetchMessagesFrom(ctx context.Context, refs []ref.Ref) ([]mailstore.MessageResult, []string) {
-	return v.read(ctx, refs)
+	return v.read(ctx, refs, true)
 }
 
-// read is FetchMessagesFrom.
-func (v *View) read(ctx context.Context, refs []ref.Ref) ([]mailstore.MessageResult, []string) {
+// read is FetchMessagesFrom. With recovering set, a miss the server calls
+// stale is looked up by Message-ID (recoverRef) and, when found, read at
+// its new ref, once: that second read does not recover again.
+func (v *View) read(ctx context.Context, refs []ref.Ref, recovering bool) ([]mailstore.MessageResult, []string) {
 	out := make([]mailstore.MessageResult, len(refs))
 	sources := make([]string, len(refs))
 	misses := v.readHits(ctx, refs, out, sources)
@@ -45,8 +52,18 @@ func (v *View) read(ctx context.Context, refs []ref.Ref) ([]mailstore.MessageRes
 	for j, res := range v.server.FetchMessages(ctx, missed) {
 		i := misses[j]
 		out[i], sources[i] = res, SourceServer
-		if res.Err == nil {
+		switch {
+		case res.Err == nil:
 			v.keepRead(ctx, res.Message)
+		case recovering && errors.Is(res.Err, mailstore.ErrStaleRef):
+			moved, ok := v.recoverRef(ctx, refs[i])
+			if !ok {
+				continue
+			}
+			again, from := v.read(ctx, []ref.Ref{moved}, false)
+			if again[0].Err == nil {
+				out[i], sources[i] = again[0], from[0]
+			}
 		}
 	}
 	return out, sources
@@ -225,4 +242,36 @@ func messageRow(msg *mailstore.Message) Row {
 // message content.
 func (v *View) logReadError(msg string, err error) {
 	v.a.o.Logger.Warn(msg, "account", v.a.o.Account.Name, "err", err)
+}
+
+// recoverRef finds where the message r named lives now, on an account
+// other than Google: r's Message-ID, from its cached row or from
+// ref_recovery after a UIDVALIDITY rebuild, matched against the account's
+// cached rows other than r's own. Exactly one match is the answer; none or
+// several are not. Google accounts recover by X-GM-MSGID in the store.
+func (v *View) recoverRef(ctx context.Context, r ref.Ref) (ref.Ref, bool) {
+	store, account := v.a.o.Store, v.a.o.Account
+	if account.Provider.Gmail || r.Account != account.Name {
+		return ref.Ref{}, false
+	}
+	id, ok, err := store.MessageIDOf(ctx, r)
+	if err != nil {
+		v.logReadError("looking up a Message-ID for recovery failed", err)
+		return ref.Ref{}, false
+	}
+	if !ok || id == "" {
+		return ref.Ref{}, false
+	}
+	found, err := store.FindByMessageID(ctx, account.Name, id)
+	if err != nil {
+		v.logReadError("finding a message by Message-ID failed", err)
+		return ref.Ref{}, false
+	}
+	found = slices.DeleteFunc(found, func(c ref.Ref) bool {
+		return c.Folder == r.Folder && c.UIDValidity == r.UIDValidity && c.UID == r.UID
+	})
+	if len(found) != 1 {
+		return ref.Ref{}, false
+	}
+	return found[0], true
 }
