@@ -774,3 +774,35 @@ func TestChecksTable(t *testing.T) {
 		t.Errorf("table =\n%s\nwant\n%s", buf.String(), want)
 	}
 }
+
+// The daemon keeps cache.db in [cache] dir when it is set, else in the
+// state directory.
+func TestDaemonCacheDir(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		extra string
+		want  func(stateDir string) string
+	}{
+		{name: "the state dir by default", want: func(stateDir string) string { return stateDir }},
+		{name: "[cache] dir wins", extra: "\n[cache]\ndir = \"/srv/chainmail-cache\"\n", want: func(string) string { return "/srv/chainmail-cache" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfgPath := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(cfgPath, []byte(twoAccounts+tt.extra), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stateDir := t.TempDir()
+			f := &daemonFlags{configPath: cfgPath, stateDir: stateDir, vaultKey: "/k"}
+			p, err := f.resolve(Env{Getenv: func(string) string { return "" }}, &globals{socket: "/f.sock"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := tt.want(stateDir); p.cacheDir != want {
+				t.Errorf("cache dir = %q, want %q", p.cacheDir, want)
+			}
+		})
+	}
+}

@@ -26,8 +26,9 @@ const (
 	defaultWatchHeartbeat = 30 * time.Second
 	// subscribePage is how many events a Subscribe stream reads at a time.
 	subscribePage = 100
-	// groupHint answers an invalid group name.
-	groupHint = "group names are lowercase letters, digits, dot, dash and underscore"
+	// groupHint answers an invalid group name. Names starting with cache.
+	// are the daemon's own (watch.IsCacheGroup).
+	groupHint = "group names are lowercase letters, digits, dot, dash and underscore, and do not start with cache."
 	// maxReadWaitSeconds is the longest ReadEvents wait.
 	maxReadWaitSeconds = 60
 	// defaultReadLimit is the ReadEvents page size when a request sets none.
@@ -556,6 +557,9 @@ func (w *watchService) ListGroups(ctx context.Context, req *connect.Request[chai
 	if listErr != nil {
 		listErr = w.s.watchLogErr(listErr)
 	}
+	// The cache's groups belong to the daemon: they are left out of the
+	// list and of its audited count.
+	groups = slices.DeleteFunc(groups, func(g watch.GroupInfo) bool { return watch.IsCacheGroup(g.Name) })
 	entry := audit.Entry{Action: "watch.groups.list", Targets: []string{tally("groups", len(groups))}}
 	if err := w.s.record(ctx, c, entry, listErr); err != nil {
 		return nil, err

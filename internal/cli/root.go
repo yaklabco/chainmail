@@ -158,6 +158,7 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 		newDraftCmd(ctx, env, g),
 		newMCPCmd(ctx, env, g),
 		newWatchCmd(ctx, env, g),
+		newCacheCmd(ctx, env, g),
 		skipSettings(newCompletionCmd()),
 		skipSettings(newManCmd()),
 	)
@@ -197,7 +198,7 @@ var groupOf = map[string]string{
 	"label": "organize", "folder": "organize",
 	"watch":    "watch",
 	"accounts": "accounts", "auth": "accounts", "secret": "accounts",
-	"admin": "admin", "audit": "admin", "daemon": "admin", "mcp": "admin", "version": "admin", "completion": "admin",
+	"admin": "admin", "audit": "admin", "cache": "admin", "daemon": "admin", "mcp": "admin", "version": "admin", "completion": "admin",
 }
 
 // walk calls fn for cmd and every command below it, parents first.

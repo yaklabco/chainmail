@@ -402,6 +402,10 @@ func (cp *completer) specs() map[string]compSpec {
 		"chainmail admin status":   {args: noComplete},
 		"chainmail auth":           {args: noComplete},
 		"chainmail auth login":     {args: cp.accounts(oauthAccount, 1)},
+		"chainmail cache":          {args: noComplete},
+		"chainmail cache status":   {args: noComplete, flags: map[string]cobra.CompletionFunc{"account": allAccounts}},
+		"chainmail cache rebuild":  {args: noComplete, flags: map[string]cobra.CompletionFunc{"account": allAccounts, "folder": cp.folders(folderSpec{accounts: flagAccount})}},
+		"chainmail cache evict":    {args: noComplete},
 		"chainmail completion":     {args: fixed("bash", "zsh", "fish", "powershell")},
 		"chainmail man":            {args: noComplete},
 		"chainmail version":        {args: noComplete},
@@ -427,6 +431,11 @@ func (cp *completer) specs() map[string]compSpec {
 		}},
 		"chainmail search": {args: cp.searchTerms, flags: map[string]cobra.CompletionFunc{
 			"account": allAccounts, "cursor": noComplete, "limit": noComplete,
+			"source": fixed(
+				cobra.CompletionWithDesc("auto", "the cache when it is complete and fresh"),
+				cobra.CompletionWithDesc("cache", "the cache, even when incomplete or stale"),
+				cobra.CompletionWithDesc("server", "the mail server, skipping the cache"),
+			),
 		}},
 		"chainmail flags": {args: inboxRefs, flags: map[string]cobra.CompletionFunc{
 			"add": fixed(`\Seen`, `\Flagged`, `\Answered`, `\Draft`), "remove": fixed(`\Seen`, `\Flagged`, `\Answered`, `\Draft`),

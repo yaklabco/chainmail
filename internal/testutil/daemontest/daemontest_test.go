@@ -1,6 +1,10 @@
 package daemontest_test
 
 import (
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -51,5 +55,25 @@ func TestReuseRestartsOnTheSameState(t *testing.T) {
 	}
 	if !sawSet {
 		t.Error("the secret.set audit row written before the restart is gone")
+	}
+}
+
+// With Cache the daemon opens cache.db in its state directory; without it,
+// no cache.db is created.
+func TestCacheOption(t *testing.T) {
+	t.Parallel()
+	for _, on := range []bool{false, true} {
+		h := daemontest.Start(t, hostConfig, daemontest.Options{Cache: on})
+		// A served call proves Serve has opened the cache.
+		if _, err := h.Client.Admin.GetStatus(t.Context(), connect.NewRequest(&chainmailv1.GetStatusRequest{})); err != nil {
+			t.Fatal(err)
+		}
+		_, err := os.Stat(filepath.Join(h.StateDir(), "cache.db"))
+		if exists := err == nil; exists != on {
+			t.Errorf("Cache %v: cache.db exists = %v (%v)", on, exists, err)
+		}
+		if !on && !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("Cache off: stat error = %v, want not exist", err)
+		}
 	}
 }

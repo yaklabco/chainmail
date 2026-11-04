@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net/mail"
 	"os"
 	"regexp"
@@ -44,6 +45,8 @@ type Config struct {
 	Accounts     map[string]Account     `toml:"accounts"`
 	Policy       Policy                 `toml:"policy"`
 	Watch        WatchConfig            `toml:"watch"`
+	// Cache is the [cache] table: the local cache of every account.
+	Cache CacheConfig `toml:"cache"`
 }
 
 // DefaultMaxRecipients is the most recipients a send may have unless
@@ -106,22 +109,31 @@ const (
 	maxMaxMessageSize = 1 << 30
 )
 
-var byteSizeRE = regexp.MustCompile(`^([0-9]{1,12})(B|KiB|MiB)?$`)
+var byteSizeRE = regexp.MustCompile(`^([0-9]{1,12})(B|KiB|MiB|GiB|TiB)?$`)
 
-// ParseByteSize parses a size such as 65536, 512B, 64KiB or 2MiB.
+// ParseByteSize parses a size such as 65536, 512B, 64KiB, 2MiB, 2GiB or
+// 1TiB. A size above math.MaxInt64 bytes is an error.
 func ParseByteSize(s string) (int64, error) {
 	m := byteSizeRE.FindStringSubmatch(s)
 	if m == nil {
-		return 0, fmt.Errorf("size %q: want a number of bytes, optionally followed by B, KiB or MiB", s)
+		return 0, fmt.Errorf("size %q: want a number of bytes, optionally followed by B, KiB, MiB, GiB or TiB", s)
 	}
 	n, _ := strconv.ParseInt(m[1], 10, 64) // at most 12 digits always fits
+	var shift uint
 	switch m[2] {
 	case "KiB":
-		n <<= 10
+		shift = 10
 	case "MiB":
-		n <<= 20
+		shift = 20
+	case "GiB":
+		shift = 30
+	case "TiB":
+		shift = 40
 	}
-	return n, nil
+	if n > math.MaxInt64>>shift {
+		return 0, fmt.Errorf("size %q: too large", s)
+	}
+	return n << shift, nil
 }
 
 // BodyLimitBytes returns body_limit in bytes. Parse has validated it. A Daemon
@@ -168,6 +180,9 @@ type Account struct {
 	Watch *[]string `toml:"watch"`
 	// Sync is the account's sync table.
 	Sync AccountSync `toml:"sync"`
+	// Cache overrides [cache] keys for this account. max_size and dir are
+	// a config error here. Nil means no account table.
+	Cache *CacheConfig `toml:"cache"`
 }
 
 // EndpointOverride replaces a preset's server address.
@@ -203,9 +218,14 @@ type ResolvedAccount struct {
 	// Watch lists the folders watched with IDLE. Nil on Gmail presets,
 	// which watch their \All folder instead.
 	Watch []string
-	// SyncFolders lists every synced folder, Watch first, then the rest of
-	// sync.folders in config order, without duplicates. Nil on Gmail presets.
+	// SyncFolders lists the synced folders the config names: Watch first,
+	// then the rest of sync.folders in config order, without duplicates.
+	// Nil on Gmail presets. With SyncAuto the supervisor adds the folders a
+	// default search covers at run time.
 	SyncFolders []string
+	// SyncAuto is true on non-Google accounts whose sync.folders is unset:
+	// the supervisor then syncs every folder a default search covers.
+	SyncAuto bool
 	// SyncPoll is how often synced folders that are not watched are checked.
 	SyncPoll time.Duration
 	// SyncEnabled is false when sync.enabled is false.
@@ -426,6 +446,7 @@ func (c *Config) Account(name string) (ResolvedAccount, error) {
 	if !p.Gmail {
 		r.Watch = watchList(a.Watch)
 		r.SyncFolders = syncFolders(r.Watch, a.Sync.Folders)
+		r.SyncAuto = a.Sync.Folders == nil
 	}
 	return r, nil
 }
@@ -450,6 +471,7 @@ func (c *Config) applyDefaults() {
 	}
 	c.Policy = c.Policy.WithDefaults()
 	c.Watch.applyDefaults()
+	c.Cache.applyDefaults()
 	for name, a := range c.Accounts {
 		if a.Username == "" {
 			a.Username = a.Address
@@ -492,6 +514,7 @@ func (c *Config) validate() error {
 	}
 	validateSendAllow("policy.send_allow", c.Policy.SendAllow, add)
 	c.Watch.validate(add)
+	c.Cache.validate(add)
 	for _, name := range c.AccountNames() {
 		c.validateAccount(name, add)
 	}
@@ -508,6 +531,7 @@ func (c *Config) validateAccount(name string, add func(string, ...any)) {
 		add("%s: name must be lowercase letters, digits and hyphens", where)
 	}
 	validateSendAllow(where+".policy.send_allow", a.Policy.SendAllow, add)
+	validateAccountCache(where, a.Cache, add)
 	p, ok := provider.Lookup(a.Provider)
 	if !ok {
 		add("%s: unknown provider %q (known: %s)", where, a.Provider, strings.Join(provider.Names(), ", "))

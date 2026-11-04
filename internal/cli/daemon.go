@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -33,6 +34,8 @@ type daemonFlags struct {
 type daemonPlan struct {
 	cfg      *config.Config
 	stateDir string
+	// cacheDir holds cache.db: [cache] dir, or the state directory.
+	cacheDir string
 	vaultKey string
 	socket   string
 	dev      bool
@@ -56,7 +59,7 @@ func newDaemonCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&f.configPath, "config", config.DefaultPath, "config file (default $CHAINMAIL_CONFIG, then /etc/chainmail/config.toml)")
-	cmd.Flags().StringVar(&f.stateDir, "state-dir", productionStateDir, "directory for vault.age and state.db (default $CHAINMAIL_STATE_DIR, then /var/lib/chainmail)")
+	cmd.Flags().StringVar(&f.stateDir, "state-dir", productionStateDir, "directory for vault.age, state.db and, unless [cache] dir is set, cache.db (default $CHAINMAIL_STATE_DIR, then /var/lib/chainmail)")
 	cmd.Flags().StringVar(&f.vaultKey, "vault-key-file", "", "age identity file (default $CHAINMAIL_VAULT_KEY_FILE, then $CREDENTIALS_DIRECTORY/vault-key)")
 	cmd.Flags().BoolVar(&f.dev, "dev", false, "development mode: run as yourself with a non-production state directory (default $CHAINMAIL_DEV)")
 	return cmd
@@ -84,6 +87,7 @@ func (f *daemonFlags) resolve(env Env, g *globals) (daemonPlan, error) {
 		return p, err
 	}
 	p.cfg = cfg
+	p.cacheDir = cmp.Or(cfg.CacheDir(), p.stateDir)
 	// Clients find the socket through --socket, then CHAINMAIL_SOCKET, then
 	// cli.toml. A dev daemon follows --socket, then CHAINMAIL_SOCKET, before
 	// its own default, so one exported variable points both at it. It never
@@ -150,6 +154,7 @@ func runDaemon(ctx context.Context, env Env, p daemonPlan) error {
 		DevMode:    p.dev,
 		Logger:     logger,
 		StateDir:   p.stateDir,
+		CacheDir:   p.cacheDir,
 	})
 	if err != nil {
 		_ = ln.Close() // the New error is the one to report

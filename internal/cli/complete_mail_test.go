@@ -107,6 +107,10 @@ func TestCompleteFolders(t *testing.T) {
 	if got := values(cands); !slices.Equal(got, []string{"Archive"}) || d&cobra.ShellCompDirectiveNoSpace == 0 {
 		t.Errorf("folder create: %q directive %d, want Archive with NoSpace", got, d)
 	}
+	cands, _ = completeArgs(t, env, "cache", "rebuild", "--account", "gmail", "--folder", "")
+	if got := values(cands); slices.Contains(got, "Archive") || !slices.Contains(got, "[Gmail]/Trash") {
+		t.Errorf("cache rebuild --account gmail --folder: %q, want gmail's folders only", got)
+	}
 	cands, _ = completeArgs(t, env, "watch", "--in", "IN")
 	if got := values(cands); !slices.Equal(got, []string{"INBOX"}) {
 		t.Errorf("watch --in IN: %q, want INBOX once", got)

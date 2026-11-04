@@ -19,6 +19,7 @@ import (
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/audit"
+	"github.com/jamesainslie/chainmail/internal/cache"
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/ref"
@@ -208,7 +209,7 @@ func (m *messageService) get(ctx context.Context, req *chainmailv1.GetRequest) (
 	if len(refs) == 0 || len(refs) > maxGetRefs {
 		return nil, entry, &argError{msg: fmt.Sprintf("get takes 1 to %d refs, got %d", maxGetRefs, len(refs)), hint: "split the refs into batches of 50"}
 	}
-	resp := &chainmailv1.GetResponse{Source: sourceServer, FetchedAt: timestamppb.New(m.s.opts.Now()), Items: make([]*chainmailv1.GetItem, len(refs))}
+	resp := &chainmailv1.GetResponse{FetchedAt: timestamppb.New(m.s.opts.Now()), Items: make([]*chainmailv1.GetItem, len(refs))}
 	parsed := make([]ref.Ref, len(refs))
 	byAccount := map[string][]int{}
 	accts := map[string]config.ResolvedAccount{}
@@ -237,29 +238,35 @@ func (m *messageService) get(ctx context.Context, req *chainmailv1.GetRequest) (
 			for j, i := range idx {
 				rs[j] = parsed[i]
 			}
-			for j, res := range m.store(accts[name]).FetchMessages(ctx, rs) {
-				m.fill(resp.Items[idx[j]], res, req.GetFull())
+			results, sources := m.reader(accts[name]).FetchMessagesFrom(ctx, rs)
+			for j, res := range results {
+				m.fill(resp.Items[idx[j]], res, req.GetFull(), sources[j])
 			}
 		})
 	}
 	wg.Wait()
 	capItems(resp)
 	messages := 0
+	var answered []string
 	for _, it := range resp.Items {
-		if it.GetMessage() != nil {
+		if msg := it.GetMessage(); msg != nil {
 			messages++
+			answered = append(answered, msg.GetSource())
 		}
 	}
+	resp.Source = cache.CombineSource(answered...)
 	if len(byAccount) == 1 {
 		for name := range byAccount {
 			entry.Account = name
 		}
 	}
-	entry.Targets = append(entry.Targets, tally("messages", messages), tally("errors", len(refs)-messages))
+	entry.Targets = append(entry.Targets, tally("messages", messages), tally("errors", len(refs)-messages), "source="+resp.GetSource())
 	return resp, entry, nil
 }
 
-func (m *messageService) fill(item *chainmailv1.GetItem, res mailstore.MessageResult, full bool) {
+// fill sets item to res rendered, or to its error. source says where res
+// came from, and the message carries it.
+func (m *messageService) fill(item *chainmailv1.GetItem, res mailstore.MessageResult, full bool, source string) {
 	if res.Err != nil {
 		item.Result = &chainmailv1.GetItem_Error{Error: itemError(res.Err)}
 		return
@@ -269,6 +276,7 @@ func (m *messageService) fill(item *chainmailv1.GetItem, res mailstore.MessageRe
 		item.Result = &chainmailv1.GetItem_Error{Error: itemError(err)}
 		return
 	}
+	msg.Source = source
 	item.Result = &chainmailv1.GetItem_Message{Message: msg}
 }
 
@@ -291,7 +299,7 @@ func capItems(resp *chainmailv1.GetResponse) {
 	}
 	items := resp.Items
 	resp.Items = nil
-	k := fitPrefix(proto.Size(resp), kept, dropped, maxResponseBytes)
+	k := fitPrefix(sizeWithSource(resp, &resp.Source), kept, dropped, maxResponseBytes)
 	for i := k; i < len(items); i++ {
 		if items[i].GetMessage() != nil {
 			items[i] = tooLarge(items[i])
@@ -330,21 +338,31 @@ func (m *messageService) GetThread(ctx context.Context, req *connect.Request[cha
 }
 
 func (m *messageService) thread(ctx context.Context, req *chainmailv1.GetThreadRequest, entry *audit.Entry) (*chainmailv1.GetThreadResponse, error) {
-	seed, acct, err := m.parseTarget(req.GetRef(), entry)
+	requested, acct, err := m.parseTarget(req.GetRef(), entry)
 	if err != nil {
 		return nil, err
 	}
-	st := m.store(acct)
-	refs, err := st.Thread(ctx, seed)
+	rd := m.reader(acct)
+	// seed is the ref the thread was found from: requested, or where a
+	// stale requested ref was recovered to. It picks the thread ID and
+	// decides whether a vanished member fails the call; the audit keeps
+	// requested.
+	refs, seed, membership, err := rd.ThreadFrom(ctx, requested)
 	if err != nil {
 		return nil, err
 	}
-	var msgs []*mailstore.Message
+	// member is a message of the thread and where it was read from.
+	type member struct {
+		msg    *mailstore.Message
+		source string
+	}
+	var members []member
 	var unreadable []string
 	var lost error
-	for i, res := range st.FetchMessages(ctx, refs) {
+	results, sources := rd.FetchMessagesFrom(ctx, refs)
+	for i, res := range results {
 		if res.Err == nil {
-			msgs = append(msgs, res.Message)
+			members = append(members, member{msg: res.Message, source: sources[i]})
 			continue
 		}
 		err := messageErr(res.Err)
@@ -362,33 +380,41 @@ func (m *messageService) thread(ctx context.Context, req *chainmailv1.GetThreadR
 			unreadable = append(unreadable, refs[i].String())
 		}
 	}
-	if len(msgs) == 0 && len(unreadable) == 0 && lost != nil {
+	if len(members) == 0 && len(unreadable) == 0 && lost != nil {
 		return nil, lost
 	}
-	slices.SortStableFunc(msgs, func(a, b *mailstore.Message) int {
-		if c := a.Summary.Date.Compare(b.Summary.Date); c != 0 {
+	slices.SortStableFunc(members, func(a, b member) int {
+		if c := a.msg.Summary.Date.Compare(b.msg.Summary.Date); c != 0 {
 			return c
 		}
-		return a.Summary.InternalDate.Compare(b.Summary.InternalDate)
+		return a.msg.Summary.InternalDate.Compare(b.msg.Summary.InternalDate)
 	})
-	resp := &chainmailv1.GetThreadResponse{Source: sourceServer, FetchedAt: timestamppb.New(m.s.opts.Now())}
-	rendered := make([]*chainmailv1.Message, 0, len(msgs))
-	for _, msg := range msgs {
-		if sameMessage(msg.Summary.Ref, seed) || resp.ThreadId == "" {
-			resp.ThreadId = msg.Summary.ThreadID
+	resp := &chainmailv1.GetThreadResponse{FetchedAt: timestamppb.New(m.s.opts.Now())}
+	rendered := make([]*chainmailv1.Message, 0, len(members))
+	for _, mb := range members {
+		if sameMessage(mb.msg.Summary.Ref, seed) || resp.ThreadId == "" {
+			resp.ThreadId = mb.msg.Summary.ThreadID
 		}
-		pm, err := m.renderMessage(msg, req.GetFull())
+		pm, err := m.renderMessage(mb.msg, req.GetFull())
 		if err != nil {
-			unreadable = append(unreadable, msg.Summary.Ref.String())
+			unreadable = append(unreadable, mb.msg.Summary.Ref.String())
 			continue
 		}
+		pm.Source = mb.source
 		rendered = append(rendered, pm)
 	}
 	capThread(resp, rendered, unreadable)
+	// The thread's source covers its membership and every message it returns.
+	answered := []string{membership}
+	for _, pm := range resp.Messages {
+		answered = append(answered, pm.GetSource())
+	}
+	resp.Source = cache.CombineSource(answered...)
 	entry.Targets = append(entry.Targets, tally("messages", len(resp.Messages)))
 	if resp.Truncated {
 		entry.Targets = append(entry.Targets, tally("omitted", len(resp.OmittedRefs)))
 	}
+	entry.Targets = append(entry.Targets, "source="+resp.GetSource())
 	return resp, nil
 }
 
@@ -405,7 +431,7 @@ func capThread(resp *chainmailv1.GetThreadResponse, msgs []*chainmailv1.Message,
 	}
 	// Both are counted in the base, so a cut response still fits.
 	resp.Truncated, resp.OmittedRefs = true, unreadable
-	k := fitPrefix(proto.Size(resp), kept, dropped, maxResponseBytes)
+	k := fitPrefix(sizeWithSource(resp, &resp.Source), kept, dropped, maxResponseBytes)
 	resp.Messages, resp.OmittedRefs = msgs[:k], nil
 	for _, pm := range msgs[k:] {
 		resp.OmittedRefs = append(resp.OmittedRefs, pm.GetRef())
@@ -517,4 +543,18 @@ func pump(r io.Reader, send func([]byte) error) (int, error) {
 			return total, fmt.Errorf("%w: the stream broke after %d bytes", mailstore.ErrUnavailable, total)
 		}
 	}
+}
+
+// longestSource is the longest value a get or thread response's source
+// takes. The source is set once the response is capped, so the caps count
+// this many bytes for it.
+const longestSource = cache.SourceServer
+
+// sizeWithSource is the encoded size of resp with *source set to
+// longestSource, leaving *source as it was.
+func sizeWithSource(resp proto.Message, source *string) int {
+	was := *source
+	*source = longestSource
+	defer func() { *source = was }()
+	return proto.Size(resp)
 }

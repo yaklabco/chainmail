@@ -31,8 +31,9 @@ provider = "hostinger"
 address = "me@work.example"
 `
 
-// groupHint is the daemon's hint for an invalid group name (contract C8).
-const groupHint = "group names are lowercase letters, digits, dot, dash and underscore"
+// groupHint is the daemon's hint for an invalid group name (contract C8),
+// which also covers the cache's reserved names (SP7 contract C3).
+const groupHint = "group names are lowercase letters, digits, dot, dash and underscore, and do not start with cache."
 
 // startWatch runs a daemon with watchConfig and the given heartbeat, where
 // 0 means the 30 second default. Supervisors stay off.
@@ -698,6 +699,79 @@ func TestListAndDeleteGroups(t *testing.T) {
 	}
 	if rows := h.AuditRows(t); !slices.Equal(rows, want) {
 		t.Errorf("audit = %+v, want %+v", rows, want)
+	}
+}
+
+// TestCacheGroupsAreHiddenAndRefused checks that a cache group is left out
+// of ListGroups and its audit count, and that Subscribe, ReadEvents, Ack
+// and DeleteGroup refuse its name as an invalid group without touching it.
+func TestCacheGroupsAreHiddenAndRefused(t *testing.T) {
+	t.Parallel()
+	h := startWatch(t, 0)
+	cacheGroup := watch.CacheGroup("host")
+	watchPublish(t, h, watchNew("host", "INBOX", 1, "a"))
+	for _, g := range []string{"alpha", cacheGroup} {
+		if _, _, err := watchLog(h).Group(t.Context(), g); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	resp, err := h.Client.Watch.ListGroups(t.Context(), connect.NewRequest(&chainmailv1.ListGroupsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, g := range resp.Msg.GetGroups() {
+		names = append(names, g.GetName())
+	}
+	if !slices.Equal(names, []string{"alpha"}) {
+		t.Errorf("ListGroups names = %v, want [alpha]", names)
+	}
+
+	refused := func(route string, err error) {
+		t.Helper()
+		if got := reasonOf(err); got != api.ReasonInvalidArgument {
+			t.Errorf("%s: reason = %s (%v), want INVALID_ARGUMENT", route, got, err)
+			return
+		}
+		if hint := api.Detail(err).GetHint(); hint != groupHint {
+			t.Errorf("%s: hint = %q, want %q", route, hint, groupHint)
+		}
+	}
+	refused("Subscribe", subscribeErr(t, h, &chainmailv1.SubscribeRequest{Group: cacheGroup}))
+	_, err = h.Client.Watch.ReadEvents(t.Context(), connect.NewRequest(&chainmailv1.ReadEventsRequest{Group: cacheGroup}))
+	refused("ReadEvents", err)
+	_, err = h.Client.Watch.Ack(t.Context(), connect.NewRequest(&chainmailv1.AckRequest{Group: cacheGroup, Id: 1}))
+	refused("Ack", err)
+	_, err = h.Client.Watch.DeleteGroup(t.Context(), connect.NewRequest(&chainmailv1.DeleteGroupRequest{Name: cacheGroup}))
+	refused("DeleteGroup", err)
+
+	groups, err := watchLog(h).Groups(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept bool
+	for _, g := range groups {
+		if g.Name == cacheGroup {
+			kept = g.AckedID == 1
+		}
+	}
+	if !kept {
+		t.Errorf("groups = %+v, want %s still acknowledged at 1", groups, cacheGroup)
+	}
+
+	rows := h.AuditRows(t)
+	if len(rows) != 4 {
+		t.Fatalf("audit rows = %+v, want list, subscribe, read and delete", rows)
+	}
+	if want := (daemontest.AuditRow{Client: "test", Action: "watch.groups.list", Targets: `["groups=1"]`, Result: "ok"}); rows[0] != want {
+		t.Errorf("list audit = %+v, want %+v", rows[0], want)
+	}
+	for i, action := range []string{"watch.subscribe", "watch.read", "watch.groups.delete"} {
+		r := rows[i+1]
+		if r.Action != action || r.Result != "error" || r.Reason != api.ReasonInvalidArgument || !strings.HasPrefix(r.Targets, `["group=(invalid)"`) {
+			t.Errorf("%s audit = %+v, want an invalid-group error", action, r)
+		}
 	}
 }
 

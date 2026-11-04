@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 )
@@ -302,11 +303,14 @@ func tailOf(ctx context.Context, q queryer) (int64, error) {
 }
 
 // Trim deletes events older than retention, then the oldest beyond
-// maxEvents, then groups not seen for longer than retention. It returns
-// the number of events deleted. Both event trims remove only a prefix of
-// IDs, oldest first, so the trimmed gap in Read reports every loss: an
-// event older than retention that follows a retained one (a caller-supplied
-// At, or a clock that stepped back) stays until those before it go.
+// maxEvents, then client groups not seen for longer than retention. Cache
+// groups (IsCacheGroup) never expire: the daemon owns them and recreates
+// none of their state, so a long pause of the cache must not reset it. It
+// returns the number of events deleted. Both event trims remove only a
+// prefix of IDs, oldest first, so the trimmed gap in Read reports every
+// loss: an event older than retention that follows a retained one (a
+// caller-supplied At, or a clock that stepped back) stays until those
+// before it go.
 //
 // Each trim finds its bound first, then deletes below it in batches of at
 // most 5000 events, each its own transaction, so a large trim never holds
@@ -344,7 +348,8 @@ func (l *Log) Trim(ctx context.Context, retention time.Duration, maxEvents int) 
 			return deleted, err
 		}
 	}
-	if _, err := l.db.ExecContext(ctx, "DELETE FROM event_groups WHERE last_seen_at < ?", cutoff); err != nil {
+	if _, err := l.db.ExecContext(ctx,
+		"DELETE FROM event_groups WHERE last_seen_at < ? AND name NOT LIKE 'cache.%'", cutoff); err != nil {
 		return deleted, fmt.Errorf("pruning groups: %w", err)
 	}
 	return deleted, nil
@@ -435,7 +440,7 @@ func (l *Log) Wait(ctx context.Context, after int64) error {
 // Group returns the group's acknowledged ID, creating the group at Tail
 // when it does not exist, and stamps last_seen_at.
 func (l *Log) Group(ctx context.Context, name string) (acked int64, created bool, err error) {
-	if !ValidGroupName(name) {
+	if !logGroupName(name) {
 		return 0, false, fmt.Errorf("invalid group name %q", name)
 	}
 	tx, err := l.db.BeginTx(ctx, nil)
@@ -473,7 +478,7 @@ func (l *Log) Group(ctx context.Context, name string) (acked int64, created bool
 // unknown group is not created: one deleted while its stream runs stays
 // deleted.
 func (l *Log) TouchGroup(ctx context.Context, name string) error {
-	if !ValidGroupName(name) {
+	if !logGroupName(name) {
 		return fmt.Errorf("invalid group name %q", name)
 	}
 	if _, err := l.db.ExecContext(ctx, "UPDATE event_groups SET last_seen_at = ? WHERE name = ?", formatTime(l.now()), name); err != nil {
@@ -486,7 +491,7 @@ func (l *Log) TouchGroup(ctx context.Context, name string) error {
 // never raises it above Tail. An unknown group is created. Ack stamps
 // last_seen_at.
 func (l *Log) Ack(ctx context.Context, name string, id int64) error {
-	if !ValidGroupName(name) {
+	if !logGroupName(name) {
 		return fmt.Errorf("invalid group name %q", name)
 	}
 	tx, err := l.db.BeginTx(ctx, nil)
@@ -523,7 +528,7 @@ func (l *Log) Ack(ctx context.Context, name string, id int64) error {
 // belongs to a log that no longer exists. It is not an acknowledgement, so
 // unlike Ack it can lower the ID, and it does not cap to at Tail.
 func (l *Log) ResetGroup(ctx context.Context, name string, from, to int64) (bool, error) {
-	if !ValidGroupName(name) {
+	if !logGroupName(name) {
 		return false, fmt.Errorf("invalid group name %q", name)
 	}
 	if to < 0 {
@@ -596,10 +601,11 @@ func (l *Log) DeleteGroup(ctx context.Context, name string) (bool, error) {
 // maxGroupName is the longest group name ValidGroupName accepts.
 const maxGroupName = 64
 
-// ValidGroupName reports whether name is a valid group name:
-// ^[a-z0-9][a-z0-9._-]{0,63}$
+// ValidGroupName reports whether name is a valid client group name:
+// ^[a-z0-9][a-z0-9._-]{0,63}$, not starting with "cache.", which is
+// reserved for the daemon's cache groups (IsCacheGroup).
 func ValidGroupName(name string) bool {
-	if name == "" || len(name) > maxGroupName {
+	if name == "" || len(name) > maxGroupName || strings.HasPrefix(name, cacheGroupPrefix) {
 		return false
 	}
 	for i := range len(name) {

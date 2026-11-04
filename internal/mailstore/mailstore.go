@@ -37,6 +37,12 @@ var (
 	// connection limit. It comes wrapped in ErrUnavailable: the refusal is
 	// temporary, and a later try can get in once a connection closes.
 	ErrConnLimit = errors.New("over the server's connection limit")
+	// ErrThrottled means the server refused for a quota or bandwidth
+	// limit, such as Gmail's daily download limit. It is ErrUnavailable
+	// too, so callers that only know that keep working, while background
+	// work can wait for the limit to renew instead of retrying at once.
+	// It never carries the server's text.
+	ErrThrottled = fmt.Errorf("%w: over a server quota or bandwidth limit", ErrUnavailable)
 )
 
 // FolderNotFoundError is ErrNotFound for a folder the account does not

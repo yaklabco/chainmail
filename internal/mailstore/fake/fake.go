@@ -10,6 +10,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -36,14 +37,16 @@ type Attachment struct {
 }
 
 // Message is a fake message. Add assigns its UID and, on Gmail accounts, any
-// GmailMsgID or GmailThreadID left zero. It has no Bcc, as a received message
-// has none, so bcc: matches no fake message and -bcc: matches every one.
+// GmailMsgID or GmailThreadID left zero. Bcc is what a message in Sent or
+// Drafts carries; bcc: matches it, as IMAP SEARCH BCC does, and a received
+// message seeded without one never matches bcc:.
 type Message struct {
 	Folder      string
 	Date        time.Time
 	From        []mailstore.Address
 	To          []mailstore.Address
 	Cc          []mailstore.Address
+	Bcc         []mailstore.Address
 	Subject     string
 	Body        string
 	Flags       []string
@@ -120,6 +123,11 @@ type Store struct {
 	after       func(time.Duration) <-chan time.Time
 	watches     map[*watchConn]bool
 	idleStarted chan string
+	// Background hooks, in background.go: busy makes background reads
+	// fail with mailstore.ErrBusy, and background counts the reads made
+	// with a background context, by method.
+	busy       bool
+	background map[string]int
 }
 
 var _ mailstore.Store = (*Store)(nil)
@@ -355,10 +363,10 @@ func (s *Store) begin(method string) error {
 }
 
 // ListFolders implements mailstore.Store.
-func (s *Store) ListFolders(context.Context) ([]mailstore.Folder, error) {
+func (s *Store) ListFolders(ctx context.Context) ([]mailstore.Folder, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.begin("ListFolders"); err != nil {
+	if err := s.beginRead(ctx, "ListFolders"); err != nil {
 		return nil, err
 	}
 	out := slices.Clone(s.folders)
@@ -407,10 +415,13 @@ func labelOf(f mailstore.Folder) string {
 }
 
 // Search implements mailstore.Store.
-func (s *Store) Search(_ context.Context, req mailstore.SearchRequest) ([]mailstore.SourceResult, error) {
+func (s *Store) Search(ctx context.Context, req mailstore.SearchRequest) ([]mailstore.SourceResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.begin("Search"); err != nil {
+	if err := s.beginRead(ctx, "Search"); err != nil {
+		if errors.Is(err, mailstore.ErrBusy) && req.Bounds != nil {
+			return s.busySourcesLocked(req.Bounds), nil
+		}
 		return nil, err
 	}
 	if err := s.checkSupported(req.Query); err != nil {
@@ -461,10 +472,10 @@ func (s *Store) searchSourceLocked(name string, req mailstore.SearchRequest, kee
 }
 
 // FetchSummaries implements mailstore.Store.
-func (s *Store) FetchSummaries(_ context.Context, src mailstore.Source, uids []uint32, opts mailstore.SummaryOptions) ([]mailstore.Summary, error) {
+func (s *Store) FetchSummaries(ctx context.Context, src mailstore.Source, uids []uint32, opts mailstore.SummaryOptions) ([]mailstore.Summary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.begin("FetchSummaries"); err != nil {
+	if err := s.beginRead(ctx, "FetchSummaries"); err != nil {
 		return nil, err
 	}
 	if v, ok := s.uidValidity[src.Folder]; !ok {
@@ -482,11 +493,11 @@ func (s *Store) FetchSummaries(_ context.Context, src mailstore.Source, uids []u
 }
 
 // FetchMessages implements mailstore.Store.
-func (s *Store) FetchMessages(_ context.Context, refs []ref.Ref) []mailstore.MessageResult {
+func (s *Store) FetchMessages(ctx context.Context, refs []ref.Ref) []mailstore.MessageResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]mailstore.MessageResult, len(refs))
-	err := s.begin("FetchMessages")
+	err := s.beginRead(ctx, "FetchMessages")
 	for i, r := range refs {
 		if err != nil {
 			out[i].Err = err
@@ -542,10 +553,10 @@ func (s *Store) StreamPart(_ context.Context, r ref.Ref, part string) (mailstore
 // GmailThreadID. Elsewhere it takes the messages outside Trash and Junk
 // whose Message-ID is the root or whose References contain it. Either way r
 // is included, and the result is oldest first by date.
-func (s *Store) Thread(_ context.Context, r ref.Ref) ([]ref.Ref, error) {
+func (s *Store) Thread(ctx context.Context, r ref.Ref) ([]ref.Ref, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.begin("Thread"); err != nil {
+	if err := s.beginRead(ctx, "Thread"); err != nil {
 		return nil, err
 	}
 	seed, err := s.resolveLocked(r)
@@ -888,9 +899,9 @@ func (s *Store) matchTerm(n *query.Node, m *Message) bool {
 	case query.FieldCc:
 		return addrs(m.Cc)
 	case query.FieldBcc:
-		// A fake message has no Bcc, as a received one has none, so
-		// bcc: matches nothing and -bcc: everything.
-		return false
+		// IMAP SEARCH BCC matches the Bcc header, which only a message
+		// in Sent or Drafts has.
+		return addrs(m.Bcc)
 	case query.FieldSubject:
 		return contains(m.Subject)
 	case query.FieldIs:
@@ -1011,7 +1022,7 @@ func attachments(m *Message) []mailstore.Attachment {
 
 func cloneMessage(m Message) Message {
 	m.views = nil // a copy is a message of its own
-	m.From, m.To, m.Cc = slices.Clone(m.From), slices.Clone(m.To), slices.Clone(m.Cc)
+	m.From, m.To, m.Cc, m.Bcc = slices.Clone(m.From), slices.Clone(m.To), slices.Clone(m.Cc), slices.Clone(m.Bcc)
 	m.Flags, m.Labels = slices.Clone(m.Flags), slices.Clone(m.Labels)
 	m.InReplyTo, m.References = slices.Clone(m.InReplyTo), slices.Clone(m.References)
 	m.Attachments = slices.Clone(m.Attachments)
@@ -1052,6 +1063,9 @@ func rawMessage(m *Message, withAttachments bool) []byte {
 	}
 	if len(m.Cc) > 0 {
 		header("Cc", addrs(m.Cc))
+	}
+	if len(m.Bcc) > 0 {
+		header("Bcc", addrs(m.Bcc))
 	}
 	header("Subject", mime.QEncoding.Encode("utf-8", m.Subject))
 	if !m.Date.IsZero() {

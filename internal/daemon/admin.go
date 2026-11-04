@@ -137,10 +137,11 @@ func (a *adminService) FinishAuthLogin(ctx context.Context, req *connect.Request
 	return connect.NewResponse(&chainmailv1.FinishAuthLoginResponse{}), nil
 }
 
-// GetStatus reports the daemon's version, start time, mode, secret names
-// and each synced folder's state. It is read-only and returns no secret
-// values or message content, so it is deliberately not audited: status
-// polling would otherwise flood the audit log.
+// GetStatus reports the daemon's version, start time, mode, secret names,
+// each synced folder's state and each account's cache summary. It is
+// read-only and returns no secret values or message content, so it is
+// deliberately not audited: status polling would otherwise flood the audit
+// log.
 func (a *adminService) GetStatus(ctx context.Context, _ *connect.Request[chainmailv1.GetStatusRequest]) (*connect.Response[chainmailv1.GetStatusResponse], error) {
 	rows, err := a.s.watchState.Folders(ctx)
 	if err != nil {
@@ -151,12 +152,20 @@ func (a *adminService) GetStatus(ctx context.Context, _ *connect.Request[chainma
 	for _, r := range rows {
 		folders = append(folders, folderStatusProto(r))
 	}
+	accts, err := a.s.resolveAccounts(nil)
+	if err != nil {
+		// A validated config resolves every account it names.
+		a.s.opts.Logger.Error("resolving accounts for the cache summary", "err", err)
+	}
+	cacheCtx, cancel := withDeadline(ctx, callTimeout)
+	defer cancel()
 	return connect.NewResponse(&chainmailv1.GetStatusResponse{
 		Version:     version.Version,
 		StartedAt:   timestamppb.New(a.s.started),
 		DevMode:     a.s.opts.DevMode,
 		SecretNames: a.s.opts.Vault.Names(),
 		Sync:        folders,
+		Cache:       a.s.cacheStatuses(cacheCtx, accts, false),
 	}), nil
 }
 

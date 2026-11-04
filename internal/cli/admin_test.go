@@ -68,3 +68,48 @@ func TestStatusSyncTableCleansText(t *testing.T) {
 		t.Errorf("syncTable =\n%q\nwant\n%q", b.String(), want)
 	}
 }
+
+// admin status prints one cache line per account under the synced folders.
+func TestStatusTableShowsCache(t *testing.T) {
+	t.Parallel()
+	r := &chainmailv1.GetStatusResponse{
+		Version: "1.2.3", StartedAt: statusAt(8, 0), SecretNames: []string{"accounts/host"},
+		Sync: []*chainmailv1.FolderSyncStatus{
+			{Account: "host", Folder: "INBOX", Mode: "idle", State: "watching", Condstore: true, LastSyncAt: statusAt(8, 59)},
+		},
+		Cache: []*chainmailv1.AccountCacheStatus{
+			{Account: "gm", Enabled: true, State: "backfilling", BudgetUsedBytes: 3 << 19, BudgetBytes: 1 << 30},
+			{Account: "host", Enabled: true, State: "ready", BudgetUsedBytes: 512 << 10, BudgetBytes: 1 << 30},
+			{Account: "old", State: "disabled", BudgetBytes: 1 << 30},
+		},
+	}
+	var b strings.Builder
+	if err := statusTable(&b, time.UTC, r); err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "admin_status_cache_table", b.String())
+}
+
+// A daemon with a cache but no synced folders prints the cache lines right
+// under its details.
+func TestStatusTableShowsCacheWithoutSync(t *testing.T) {
+	t.Parallel()
+	r := &chainmailv1.GetStatusResponse{
+		Version: "1.2.3", StartedAt: statusAt(8, 0),
+		Cache: []*chainmailv1.AccountCacheStatus{{Account: "host", State: "error", BudgetBytes: 16 << 20, LastError: "INTERNAL"}},
+	}
+	var b strings.Builder
+	if err := statusTable(&b, time.UTC, r); err != nil {
+		t.Fatal(err)
+	}
+	want := "version   1.2.3\n" +
+		"started   Mon, 02 Nov 2026 08:00 UTC\n" +
+		"dev mode  false\n" +
+		"secrets   \n" +
+		"\n" +
+		"ACCOUNT  CACHE  STATE  BUDGET TODAY     ERROR\n" +
+		"host     off    error  0 B of 16.0 MiB  INTERNAL\n"
+	if b.String() != want {
+		t.Errorf("statusTable =\n%q\nwant\n%q", b.String(), want)
+	}
+}

@@ -56,7 +56,8 @@ func TestToolsListGolden(t *testing.T) {
 // delete_draft are destructive then, and nothing else changes. read_events,
 // added in SP6, is not read-only, by James's decision: it changes no mail,
 // but a read with a group moves the group's acknowledged position, so it is
-// not idempotent either.
+// not idempotent either. cache_status, added in SP7, reads only the
+// daemon's own state, so like list_accounts it is not open world.
 func TestAnnotationsMatchTheSpec(t *testing.T) {
 	t.Parallel()
 	type h struct{ readOnly, destructive, idempotent, openWorld bool }
@@ -72,7 +73,8 @@ func TestAnnotationsMatchTheSpec(t *testing.T) {
 		"trash": {false, false, true, true}, "set_flags": {false, false, true, true}, "set_labels": {false, false, true, true},
 		"create_folder": {false, false, true, true}, "rename_folder": {false, false, false, true},
 		"expunge": {false, true, true, true}, "delete_folder": {false, true, true, true},
-		"read_events": {false, false, false, true},
+		"read_events":  {false, false, false, true},
+		"cache_status": {true, false, true, false},
 	}
 	for name, st := range map[string]struct {
 		policy  *gatePolicy

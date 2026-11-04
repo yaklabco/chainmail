@@ -47,8 +47,9 @@ func (s *Server) watchedAccounts() []config.ResolvedAccount {
 	return out
 }
 
-// startWatch starts a supervisor for each watched account. They run until
-// ctx ends or stopWatch runs. It does no IO: each supervisor opens its
+// startWatch starts a supervisor for each watched account, and a cache
+// worker for each of them with the cache enabled. They run until ctx ends
+// or stopWatch runs. It does no IO: each supervisor and worker opens its
 // account's store from its own goroutine, and the store's first use only
 // builds it and hands any connection probe to the background
 // (probeIfStale), so a slow or unreachable mail server never holds up
@@ -62,6 +63,10 @@ func (s *Server) startWatch(ctx context.Context) {
 		return
 	}
 	ctx, set.cancel = context.WithCancel(ctx)
+	// The run starts before any supervisor does, so a first pass that
+	// lands before startCacheAccounts creates the cache Accounts still
+	// counts as this run's for their freshness.
+	runStart := s.cacheClock.Now()
 	settings := s.opts.Config.WatchSettings()
 	for _, acct := range accts {
 		sup := watch.NewSupervisor(s.supervisorOptions(acct, settings))
@@ -69,12 +74,14 @@ func (s *Server) startWatch(ctx context.Context) {
 		set.wg.Go(func() { sup.Run(ctx) })
 	}
 	s.opts.Logger.Info("watching accounts", "accounts", set.accounts)
+	s.startCacheAccounts(ctx, accts, &set.wg, runStart)
 }
 
-// stopWatch cancels the supervisors and waits for them to close their
-// connections, which each bounds at watch.ShutdownLogout. startWatch
-// starts nothing after it. drain runs it before closing the stores, so no
-// watcher still holds a store being closed.
+// stopWatch cancels the supervisors and the cache workers and waits for
+// them to close their connections, which each bounds at
+// watch.ShutdownLogout. startWatch starts nothing after it. drain runs it
+// before closing the stores, so no watcher or worker still holds a store
+// being closed.
 func (s *Server) stopWatch() {
 	set := &s.supervisors
 	set.mu.Lock()

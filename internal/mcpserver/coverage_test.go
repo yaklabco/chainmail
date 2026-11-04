@@ -44,6 +44,7 @@ var toolRPC = map[string]string{
 	"expunge":             chainmailv1connect.OrganizeServiceExpungeProcedure,
 	"delete_folder":       chainmailv1connect.OrganizeServiceDeleteFolderProcedure,
 	"read_events":         chainmailv1connect.WatchServiceReadEventsProcedure,
+	"cache_status":        chainmailv1connect.CacheServiceGetCacheStatusProcedure,
 }
 
 // leftOut lists agent-facing RPCs with no tool, and why (spec section 4).
@@ -56,6 +57,8 @@ var leftOut = map[string]string{
 	chainmailv1connect.WatchServiceGetWatchStatusProcedure:     "an operator diagnostic",
 	chainmailv1connect.WatchServiceListGroupsProcedure:         "group administration for operators",
 	chainmailv1connect.WatchServiceDeleteGroupProcedure:        "group administration for operators",
+	chainmailv1connect.CacheServiceRebuildCacheProcedure:       "an operator action that drops cached mail and downloads it again",
+	chainmailv1connect.CacheServiceEvictCacheProcedure:         "an operator action; the daemon evicts bodies on its own",
 }
 
 // ignored lists request fields no tool sets, keyed "<procedure> <field path>", and why.
@@ -74,6 +77,7 @@ var agentServices = []protoreflect.ServiceDescriptor{
 	chainmailv1.File_chainmail_v1_compose_proto.Services().ByName("ComposeService"),
 	chainmailv1.File_chainmail_v1_organize_proto.Services().ByName("OrganizeService"),
 	chainmailv1.File_chainmail_v1_watch_proto.Services().ByName("WatchService"),
+	chainmailv1.File_chainmail_v1_cache_proto.Services().ByName("CacheService"),
 }
 
 func procedure(sd protoreflect.ServiceDescriptor, md protoreflect.MethodDescriptor) string {
@@ -171,7 +175,7 @@ func coverageSamples(file string) map[string][]map[string]any {
 		"list_accounts":       {{}},
 		"test_account":        {{"account": "work"}},
 		"list_folders":        {{"accounts": []string{"work"}}},
-		"search":              {{"query": "x", "accounts": []string{"work"}, "limit": 5, "cursor": "c1.x", "count_only": true, "snippets": true, "threads": true}},
+		"search":              {{"query": "x", "accounts": []string{"work"}, "limit": 5, "cursor": "c1.x", "count_only": true, "snippets": true, "threads": true, "source": "cache"}},
 		"get_message":         {{"refs": []string{testRef}, "full": true}},
 		"get_thread":          {{"ref": testRef, "full": true}},
 		"download_attachment": {{"ref": testRef, "part": "2"}},
@@ -197,6 +201,7 @@ func coverageSamples(file string) map[string][]map[string]any {
 			{"group": "triage", "kinds": []string{"new", "flags"}, "accounts": []string{"work"}, "in": "inbox", "wait_seconds": 1, "limit": 5},
 			{"cursor": 7},
 		},
+		"cache_status": {{"accounts": []string{"work"}}},
 	}
 }
 

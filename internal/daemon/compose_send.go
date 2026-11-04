@@ -87,10 +87,11 @@ func (s *Server) openSendState() error {
 	return err
 }
 
-// startBackground runs the idempotency pruner, the upload sweeper and the
-// event log trimmer until ctx ends or the returned stop is called. stop
-// waits for all of them to return. The trimmer runs with DisableWatch too,
-// since the log and its handlers still work then.
+// startBackground runs the idempotency pruner, the upload sweeper, the
+// event log trimmer and, with a cache, the evictor and the cache
+// housekeeping until ctx ends or the returned stop is called. stop waits
+// for all of them to return. The trimmer runs with DisableWatch too, since
+// the log and its handlers still work then.
 func (s *Server) startBackground(ctx context.Context) (stop func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
@@ -100,6 +101,10 @@ func (s *Server) startBackground(ctx context.Context) (stop func()) {
 	}
 	settings := s.opts.Config.WatchSettings()
 	wg.Go(func() { s.watchLog.Run(ctx, s.trimInterval, settings.Retention, settings.MaxEvents) })
+	if s.cacheEvictor != nil {
+		wg.Go(func() { s.cacheEvictor.Run(ctx) })
+		wg.Go(func() { s.runCacheHousekeeping(ctx) })
+	}
 	return func() {
 		cancel()
 		wg.Wait()

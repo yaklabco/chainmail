@@ -92,7 +92,7 @@ func TestSaveFileNeverReplaces(t *testing.T) {
 
 func TestOutputDir(t *testing.T) {
 	t.Parallel()
-	base := t.TempDir()
+	base := realTempDir(t)
 	file := filepath.Join(base, "f")
 	if err := os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -445,7 +445,7 @@ func fakeParts(t *testing.T, dir string) []string {
 func TestFilesSaveFileKeepsItsDir(t *testing.T) {
 	t.Parallel()
 	for _, fail := range []bool{false, true} {
-		base := t.TempDir()
+		base := realTempDir(t)
 		a, b := fakeMkdir(t, filepath.Join(base, "a"), 0o700), fakeMkdir(t, filepath.Join(base, "b"), 0o700)
 		link := filepath.Join(base, "link")
 		if err := os.Symlink(a, link); err != nil {
@@ -647,4 +647,16 @@ func TestFilesDefaultDirModeIsExactly0700(t *testing.T) {
 	if st, err := os.Stat(def); err != nil || st.Mode().Perm() != 0o700 {
 		t.Errorf("default dir mode %v, %v; want 0700", st.Mode(), err)
 	}
+}
+
+// realTempDir is t.TempDir with symlinks resolved. outputDir reports the
+// directory a file really lands in, and on macOS the temporary directory
+// sits under /var, a symlink to /private/var.
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

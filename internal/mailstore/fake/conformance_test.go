@@ -62,6 +62,12 @@ func seedFake(t *testing.T, s *fake.Store, gmail bool, m storetest.Message) ref.
 	if m.InReplyTo != "" {
 		fm.InReplyTo = []string{m.InReplyTo}
 	}
+	if m.Cc != "" {
+		fm.Cc = []mailstore.Address{{Email: m.Cc}}
+	}
+	if m.Bcc != "" {
+		fm.Bcc = []mailstore.Address{{Email: m.Bcc}}
+	}
 	for i, a := range m.Attachments {
 		fm.Attachments = append(fm.Attachments, fake.Attachment{Part: storetest.AttachmentPart(i), Filename: a.Filename, ContentType: a.ContentType, Data: a.Data})
 	}

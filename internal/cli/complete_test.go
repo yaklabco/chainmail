@@ -70,6 +70,9 @@ func TestCompleteStatic(t *testing.T) {
 		{name: "attach", args: []string{"send", "--attach", ""}, want: []string{}, dir: cobra.ShellCompDirectiveDefault},
 		{name: "state dir", args: []string{"daemon", "--state-dir", ""}, want: []string{}, dir: cobra.ShellCompDirectiveFilterDirs},
 		{name: "send-raw stdin", args: []string{"send-raw", ""}, want: []string{"-"}, dir: cobra.ShellCompDirectiveNoFileComp},
+		{name: "search source", args: []string{"search", "--source", ""}, want: []string{"auto", "cache", "server"}, dir: cobra.ShellCompDirectiveNoFileComp},
+		{name: "search source prefix", args: []string{"search", "--source", "s"}, want: []string{"server"}, dir: cobra.ShellCompDirectiveNoFileComp},
+		{name: "cache subcommand args", args: []string{"cache", "evict", ""}, want: []string{}, dir: cobra.ShellCompDirectiveNoFileComp},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

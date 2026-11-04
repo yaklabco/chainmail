@@ -237,3 +237,62 @@ func TestFlagsHash(t *testing.T) {
 		t.Error("flagsHash reordered its input")
 	}
 }
+
+// TestDropFolder checks that DropFolder removes one folder's sync row and
+// known UIDs, and nothing of any other folder or account, and that an
+// unknown folder is not an error.
+func TestDropFolder(t *testing.T) {
+	t.Parallel()
+	conn := openDB(t)
+	s := NewState(conn)
+	rows := []FolderRow{
+		{Account: "a", Folder: "INBOX", UIDValidity: 1, UIDNext: 5, Mode: ModeIdle, State: StateWatching},
+		{Account: "a", Folder: "Archive", UIDValidity: 2, UIDNext: 9, Mode: ModePoll, State: StatePolling},
+		{Account: "b", Folder: "Archive", UIDValidity: 3, UIDNext: 4, Mode: ModePoll, State: StatePolling},
+	}
+	inTx(t, conn, func(ctx context.Context, tx *sql.Tx) error {
+		for _, r := range rows {
+			if err := PutFolder(ctx, tx, r); err != nil {
+				return err
+			}
+		}
+		if err := putUIDs(ctx, tx, "a", "INBOX", map[uint32]knownUID{1: {}}); err != nil {
+			return err
+		}
+		if err := putUIDs(ctx, tx, "a", "Archive", map[uint32]knownUID{1: {}, 2: {}}); err != nil {
+			return err
+		}
+		return putUIDs(ctx, tx, "b", "Archive", map[uint32]knownUID{1: {}})
+	})
+
+	if err := s.DropFolder(t.Context(), "a", "Archive"); err != nil {
+		t.Fatalf("DropFolder: %v", err)
+	}
+	if err := s.DropFolder(t.Context(), "a", "Gone"); err != nil {
+		t.Fatalf("DropFolder(unknown folder): %v", err)
+	}
+
+	got, err := s.Folders(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []FolderRow{rows[0], rows[2]}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Folders =\n%+v\nwant\n%+v", got, want)
+	}
+	for _, tt := range []struct {
+		account, folder string
+		want            map[uint32]knownUID
+	}{
+		{"a", "INBOX", map[uint32]knownUID{1: {}}},
+		{"a", "Archive", map[uint32]knownUID{}},
+		{"b", "Archive", map[uint32]knownUID{1: {}}},
+	} {
+		uids, err := s.uids(t.Context(), tt.account, tt.folder)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(uids, tt.want) {
+			t.Errorf("UIDs(%s/%s) = %v, want %v", tt.account, tt.folder, uids, tt.want)
+		}
+	}
+}

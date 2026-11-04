@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
@@ -20,6 +21,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/audit"
 	"github.com/jamesainslie/chainmail/internal/auth"
+	"github.com/jamesainslie/chainmail/internal/cache"
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/idempotency"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
@@ -68,6 +70,14 @@ type Options struct {
 	// watched folder after the server reports an EXPUNGE. Zero means 5
 	// minutes (watch.ExpungeSweepFloor). Integration tests shorten it.
 	WatchSweepFloor time.Duration
+	// CacheDir is the directory of cache.db, created with mode 0700 when
+	// missing. Empty runs without a cache, so every search and read uses
+	// the mail servers. The CLI passes [cache] dir, or the state directory.
+	CacheDir string
+	// DisableCache runs without a cache whatever the config says.
+	// daemontest sets it unless a test asks for the cache, so tests that
+	// count mail store calls keep the server path.
+	DisableCache bool
 }
 
 const (
@@ -145,6 +155,32 @@ type Server struct {
 	supervisors supervisorSet
 	// trimInterval is how often the event log is trimmed. Tests shorten it.
 	trimInterval time.Duration
+	// cache is cache.db, or nil when the cache is off or did not open.
+	// Serve opens it before any handler, background loop or supervisor
+	// runs, and closes it after all of them have stopped.
+	cache *cache.Store
+	// cacheErr is why cache.db did not open, or nil.
+	cacheErr error
+	// cacheAccounts are the cache workers of the watched accounts with the
+	// cache enabled, by account. startWatch fills it before any handler
+	// runs, and it never changes after.
+	cacheAccounts map[string]*cache.Account
+	// cacheEvictor applies body retention and the size cap to the whole
+	// cache file. Nil without a cache.
+	cacheEvictor *cache.Evictor
+	// cacheDown is set while cache.db cannot be written because its disk
+	// is full. Searches and reads then use the mail servers, and status
+	// says error.
+	cacheDown atomic.Bool
+	// cacheProbeAccount is the account whose budget row the write probe
+	// touches: the first with the cache enabled.
+	cacheProbeAccount string
+	// cacheProbe tries one write to cache.db. Internal tests replace it.
+	cacheProbe func(context.Context) error
+	// cacheClock is the time of the cache workers, the evictor and the
+	// housekeeping: Options.Now, the time cache.db stamps rows with, and
+	// time.After. Internal tests replace it before the cache opens.
+	cacheClock watch.Clock
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -181,6 +217,8 @@ func New(opts Options) (*Server, error) {
 		watchWaitUnit: time.Second,
 		trimInterval:  eventTrimInterval,
 	}
+	s.cacheProbe = s.probeCache
+	s.cacheClock = daemonClock{now: opts.Now}
 	s.lim = newLimitState(opts.StateDB, opts.Now)
 	s.newStore = func(acct config.ResolvedAccount, p storeParams) mailstore.Store {
 		return imapstore.New(acct, s.auth, imapstore.Options{
@@ -208,6 +246,7 @@ func New(opts Options) (*Server, error) {
 	mux.Handle(composePath, withReadAbort(composeHandler))
 	mux.Handle(chainmailv1connect.NewOrganizeServiceHandler(&organizeService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewWatchServiceHandler(&watchService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
+	mux.Handle(chainmailv1connect.NewCacheServiceHandler(&cacheService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
@@ -244,6 +283,12 @@ func (s *Server) Serve(ctx context.Context) error {
 	// request's own context has ended with its deadline. Set before any
 	// handler runs.
 	s.shutdown = base.Done()
+	// cache.db opens before the background loops and the supervisors that
+	// use it, and closes after both have stopped: deferred calls run last
+	// in, first out, and drain has stopped the supervisors before Serve
+	// returns.
+	s.openCache(base)
+	defer s.closeCache()
 	defer s.startBackground(base)()
 	// Supervisors start once sends are recovered, on base, so a shutdown
 	// cancels them with the requests. drain joins them.
@@ -280,11 +325,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	return err
 }
 
-// drain waits for every handler to return, stops the supervisors and the
-// background probes, then logs out of the mail servers. The supervisors
-// stop first, closing their watch connections within
-// watch.ShutdownLogout, so none holds a store closeAll is closing. Each
-// store logs out within 5 seconds, all in parallel.
+// drain waits for every handler to return, stops the supervisors, the
+// cache workers and the background probes, then logs out of the mail
+// servers. The supervisors and workers stop first, closing their watch
+// connections within watch.ShutdownLogout, so none holds a store closeAll
+// is closing. Each store logs out within 5 seconds, all in parallel.
 func (s *Server) drain() {
 	s.handlers.wait()
 	s.stopWatch()
