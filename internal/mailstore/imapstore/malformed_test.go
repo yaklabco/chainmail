@@ -240,3 +240,79 @@ func TestWatchConnNeedsRedialAfterMalformedNewMail(t *testing.T) {
 		})
 	}
 }
+
+// A backlog of new mail with more malformed messages than one hunt can
+// isolate is read again in parts of mailstore.IsolatedBatch UIDs, at most
+// readNewParts of them per pass. Each pass so moves the checkpoint on, past
+// a message no part can read, and costs a bounded number of logins: the
+// pass's own, the hunt over the whole backlog, and each part's hunt.
+func TestSyncPassIsolatesABacklogInParts(t *testing.T) {
+	t.Parallel()
+	type pass struct {
+		from       uint32
+		new        []uint32
+		unreadable []uint32
+		more       bool
+	}
+	uidRange := func(lo, hi uint32) []uint32 {
+		var out []uint32
+		for u := lo; u <= hi; u++ {
+			out = append(out, u)
+		}
+		return out
+	}
+	for _, tt := range []struct {
+		name   string
+		n      int
+		passes []pass
+	}{
+		// Every body structure is malformed and the last envelope too: the
+		// hunt over 16 runs out before it reaches UID 16.
+		{name: "16 new", n: 16, passes: []pass{
+			{from: 1, new: uidRange(1, 15), unreadable: []uint32{16}},
+			{from: 17},
+		}},
+		{name: "60 new", n: 60, passes: []pass{
+			{from: 1, new: uidRange(1, uint32(readNewParts*mailstore.IsolatedBatch)), more: true},
+			{from: uint32(readNewParts*mailstore.IsolatedBatch) + 1, new: uidRange(uint32(readNewParts*mailstore.IsolatedBatch)+1, 59), unreadable: []uint32{60}},
+			{from: 61},
+		}},
+	} {
+		for name, sync := range syncers {
+			t.Run(tt.name+" "+name, func(t *testing.T) {
+				t.Parallel()
+				srv := startScriptServer(t, &scriptServer{n: tt.n, condstore: true, badStructure: -1, badEnvelope: tt.n})
+				s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second})
+				for _, p := range tt.passes {
+					before := srv.conns.Load()
+					from := mailstore.Checkpoint{UIDValidity: scriptUIDValidity, UIDNext: p.from, HighestModSeq: scriptModSeq}
+					d, err := sync(t, s, mailstore.SyncRequest{From: from})
+					if err != nil {
+						t.Fatalf("pass from %d: %v", p.from, err)
+					}
+					var got []uint32
+					for _, sum := range d.New {
+						got = append(got, sum.Ref.UID)
+						if !sum.AttachmentsUnknown {
+							t.Errorf("pass from %d: UID %d has its attachments known", p.from, sum.Ref.UID)
+						}
+					}
+					if !slices.Equal(got, p.new) || !slices.Equal(d.Unreadable, p.unreadable) || d.More != p.more {
+						t.Errorf("pass from %d = new %v, unreadable %v, more %v; want %v, %v, %v",
+							p.from, got, d.Unreadable, d.More, p.new, p.unreadable, p.more)
+					}
+					backlog := len(p.new) + len(p.unreadable)
+					if p.more {
+						backlog = tt.n - int(p.from) + 1
+					}
+					bound := 1 + isolateBudget(backlog) + 2 + readNewParts*(isolateBudget(mailstore.IsolatedBatch)+1)
+					c := int(srv.conns.Load() - before)
+					if c > bound {
+						t.Errorf("pass from %d: %d connections, want at most %d", p.from, c, bound)
+					}
+					t.Logf("pass from %d: %d connections, bound %d", p.from, c, bound)
+				}
+			})
+		}
+	}
+}

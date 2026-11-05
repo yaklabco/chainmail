@@ -57,21 +57,64 @@ func (s *Store) SyncFolder(ctx context.Context, folder string, req mailstore.Syn
 	return d, err
 }
 
+// readNewParts bounds the parts of mailstore.IsolatedBatch UIDs readNew
+// reads again in one pass, when the hunt over the whole new mail runs out,
+// so a pass costs a bounded number of logins however much of a backlog is
+// malformed.
+const readNewParts = 8
+
 // readNew fills d.New with summaries of the new mail uids, and d.Unreadable
 // with the UIDs of those it cannot read, through FetchSummaries, which
 // isolates a message the server sent in a form chainmail cannot read. A
 // pass calls it when its own FETCH of that mail failed so.
+//
+// The hunt for the malformed messages of a large batch can run out of
+// logins before it finds them all, and then FetchSummaries fails with a
+// plain mailstore.ErrMalformed. readNew then reads the UIDs again in parts
+// of mailstore.IsolatedBatch, which the store always isolates, at most
+// readNewParts of them. When UIDs remain after that, it leaves them out and
+// sets d.More, so the checkpoint moves past the parts read and the next
+// pass goes on from there. A plain ErrMalformed from a part is a fault in
+// the folder, such as its SELECT answer, and is returned.
 func (s *Store) readNew(ctx context.Context, folder string, req mailstore.SyncRequest, d *mailstore.Delta, uids []uint32) error {
 	src := mailstore.Source{Folder: folder, UIDValidity: d.State.UIDValidity}
-	sums, err := s.FetchSummaries(ctx, src, uids, mailstore.SummaryOptions{Snippets: req.Snippets})
-	if unreadable, ok := errors.AsType[*mailstore.UnreadableError](err); ok {
-		d.Unreadable, err = unreadable.UIDs, nil
+	opts := mailstore.SummaryOptions{Snippets: req.Snippets}
+	sums, unreadable, err := s.readNewPart(ctx, src, uids, opts)
+	if errors.Is(err, mailstore.ErrMalformed) && len(uids) > mailstore.IsolatedBatch {
+		sums, unreadable, err = nil, nil, nil
+		uids = slices.Sorted(slices.Values(uids))
+		for i, part := 0, uids; len(part) > 0; i++ {
+			if i == readNewParts {
+				d.More = true
+				break
+			}
+			n := min(len(part), mailstore.IsolatedBatch)
+			ps, pu, err := s.readNewPart(ctx, src, part[:n], opts)
+			if err != nil {
+				return err
+			}
+			sums, unreadable, part = append(sums, ps...), append(unreadable, pu...), part[n:]
+		}
 	}
 	if err != nil {
 		return err
 	}
-	d.New = sums
+	d.New, d.Unreadable = sums, unreadable
 	return nil
+}
+
+// readNewPart reads uids through FetchSummaries and returns the summaries
+// read and the UIDs of an *mailstore.UnreadableError, which is not an
+// error here.
+func (s *Store) readNewPart(ctx context.Context, src mailstore.Source, uids []uint32, opts mailstore.SummaryOptions) ([]mailstore.Summary, []uint32, error) {
+	sums, err := s.FetchSummaries(ctx, src, uids, opts)
+	if unreadable, ok := errors.AsType[*mailstore.UnreadableError](err); ok {
+		return sums, unreadable.UIDs, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return sums, nil, nil
 }
 
 // folderState is a mailstore.FolderState from what SELECT or STATUS
