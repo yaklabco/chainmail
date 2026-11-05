@@ -156,11 +156,12 @@ type accountFoldersOut struct {
 }
 
 type partialOut struct {
-	Account string     `json:"account"`
-	Folder  *untrusted `json:"folder,omitempty" jsonschema:"absent when the whole account failed"`
-	Reason  string     `json:"reason"`
-	Message string     `json:"message"`
-	Hint    string     `json:"hint,omitempty"`
+	Account    string     `json:"account"`
+	Folder     *untrusted `json:"folder,omitempty" jsonschema:"absent when the whole account failed"`
+	Reason     string     `json:"reason"`
+	Message    string     `json:"message"`
+	Hint       string     `json:"hint,omitempty"`
+	Unreadable uint64     `json:"unreadable,omitempty" jsonschema:"in a search with reason MALFORMED_RESPONSE: the folder's matches left out because the mail server's answer for them could not be read; its other rows are in the page"`
 }
 
 type listFoldersOut struct {
@@ -196,7 +197,10 @@ func serverNames(ss []string) []untrusted {
 func partials(ps []*chainmailv1.PartialSource) []partialOut {
 	var out []partialOut
 	for _, p := range ps {
-		out = append(out, partialOut{Account: p.GetAccount(), Folder: serverNamePtr(p.GetFolder()), Reason: p.GetReason(), Message: p.GetMessage(), Hint: p.GetHint()})
+		out = append(out, partialOut{
+			Account: p.GetAccount(), Folder: serverNamePtr(p.GetFolder()), Reason: p.GetReason(), Message: p.GetMessage(), Hint: p.GetHint(),
+			Unreadable: p.GetUnreadable(),
+		})
 	}
 	return out
 }

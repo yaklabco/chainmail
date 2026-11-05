@@ -39,6 +39,10 @@ message PartialSource {
   string reason = 3;
   string message = 4;
   string hint = 5;
+  // In a search, with reason MALFORMED_RESPONSE: the folder's matches left
+  // out of the page because the server's answer for them could not be
+  // parsed. The folder's other rows are in the page.
+  uint64 unreadable = 6;
 }
 
 message ListFoldersRequest {

@@ -226,3 +226,58 @@ func TestSearchCursorAfterAFolderIsRemoved(t *testing.T) {
 		t.Errorf("err = %v (hint %q), want INVALID_ARGUMENT saying the folders changed", err, hint)
 	}
 }
+
+// A server search leaves out the matches whose summaries the server's
+// answer could not be parsed for, keeps the rest of the source's rows, and
+// reports the source in partial with MALFORMED_RESPONSE and how many it
+// left out. A match is reported on the page that passes it, once: one the
+// cursor still has ahead waits for the page that reaches it.
+func TestSearchLeavesOutUnreadableMessages(t *testing.T) {
+	t.Parallel()
+	m := startFakeMail(t)
+	addDays(m.host, "INBOX", 1, 4, 5) // UIDs 1 to 3: d5, d4, d1
+	addDays(m.gmail, "[Gmail]/All Mail", 2, 3)
+	m.host.Malform("INBOX", 1, fake.BadEnvelope)
+	unreadable := func(resp *chainmailv1.SearchResponse) []string {
+		var out []string
+		for _, p := range resp.GetPartial() {
+			out = append(out, fmt.Sprintf("%s/%s %s %d", p.GetAccount(), p.GetFolder(), p.GetReason(), p.GetUnreadable()))
+		}
+		return out
+	}
+	// Page 1 fetches d1, d4 and d5 from host but uses only d1, so d5 is
+	// still ahead of the cursor.
+	page1, err := m.search(t, &chainmailv1.SearchRequest{Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := subjects(page1.GetRows()); !slices.Equal(got, []string{"d1", "d2", "d3"}) || len(page1.GetPartial()) != 0 {
+		t.Errorf("page 1 = %v, partial %v; want d1 to d3 and none", got, unreadable(page1))
+	}
+	page2, err := m.search(t, &chainmailv1.SearchRequest{Limit: 3, Cursor: page1.GetNextCursor()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := subjects(page2.GetRows()); !slices.Equal(got, []string{"d4"}) || page2.GetNextCursor() != "" {
+		t.Errorf("page 2 = %v, cursor %q; want d4 and the end", got, page2.GetNextCursor())
+	}
+	if got, want := unreadable(page2), []string{"host/INBOX MALFORMED_RESPONSE 1"}; !slices.Equal(got, want) {
+		t.Errorf("page 2 partial = %v, want %v", got, want)
+	}
+	if p := page2.GetPartial(); len(p) == 1 && (!strings.Contains(p[0].GetMessage(), "left out 1 of the folder's matches") || p[0].GetHint() == "") {
+		t.Errorf("page 2 partial message %q, hint %q", p[0].GetMessage(), p[0].GetHint())
+	}
+
+	// A page that fetches only the unreadable match passes it, and the
+	// source is done.
+	host, err := m.search(t, &chainmailv1.SearchRequest{Accounts: []string{"host"}, QueryString: "subject:d5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(host.GetRows()) != 0 || host.GetNextCursor() != "" || host.GetCount() != 1 {
+		t.Errorf("d5 alone = rows %v, cursor %q, count %d; want no rows, no cursor, count 1", subjects(host.GetRows()), host.GetNextCursor(), host.GetCount())
+	}
+	if got, want := unreadable(host), []string{"host/INBOX MALFORMED_RESPONSE 1"}; !slices.Equal(got, want) {
+		t.Errorf("d5 alone partial = %v, want %v", got, want)
+	}
+}

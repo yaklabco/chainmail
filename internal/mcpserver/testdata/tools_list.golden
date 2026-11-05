@@ -1979,6 +1979,11 @@
               },
               "reason": {
                 "type": "string"
+              },
+              "unreadable": {
+                "description": "in a search with reason MALFORMED_RESPONSE: the folder's matches left out because the mail server's answer for them could not be read; its other rows are in the page",
+                "minimum": 0,
+                "type": "integer"
               }
             },
             "required": [
@@ -2914,6 +2919,11 @@
               },
               "reason": {
                 "type": "string"
+              },
+              "unreadable": {
+                "description": "in a search with reason MALFORMED_RESPONSE: the folder's matches left out because the mail server's answer for them could not be read; its other rows are in the page",
+                "minimum": 0,
+                "type": "integer"
               }
             },
             "required": [
