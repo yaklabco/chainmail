@@ -193,7 +193,14 @@ func (w *watchConn) take() mailstore.Wake {
 // otherwise miss every one.
 func (w *watchConn) Sync(ctx context.Context, req mailstore.SyncRequest) (mailstore.Delta, error) {
 	view := passView{since: w.last.uidNext}
-	d, err := w.s.syncPass(ctx, w.c, w.folder, req, &view)
+	d, unread, err := w.s.syncPass(ctx, w.c, w.folder, req, &view)
+	if err == nil && len(unread) > 0 {
+		// The watch connection died on a message the server sent in a form
+		// chainmail cannot read. The pool reads the new mail again and
+		// isolates that message. The next Idle finds the connection dead,
+		// and the watcher dials again.
+		err = w.s.readNew(ctx, w.folder, req, &d, unread)
+	}
 	if err != nil {
 		return mailstore.Delta{}, w.s.watchError(err)
 	}

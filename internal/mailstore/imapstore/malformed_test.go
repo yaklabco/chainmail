@@ -2,6 +2,7 @@ package imapstore
 
 import (
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -135,5 +136,67 @@ func TestMalformedSampleDropsSnippets(t *testing.T) {
 	}
 	if n := srv.conns.Load(); n != 2 {
 		t.Errorf("%d connections, want 2: the one the sample broke is not reused", n)
+	}
+}
+
+// syncers run one sync pass through SyncFolder on the pool, or through a
+// watch connection.
+var syncers = map[string]func(t *testing.T, s *Store, req mailstore.SyncRequest) (mailstore.Delta, error){
+	"SyncFolder": func(t *testing.T, s *Store, req mailstore.SyncRequest) (mailstore.Delta, error) {
+		return s.SyncFolder(t.Context(), "INBOX", req)
+	},
+	"watch": func(t *testing.T, s *Store, req mailstore.SyncRequest) (mailstore.Delta, error) {
+		w, err := s.OpenWatch(t.Context(), "INBOX")
+		if err != nil {
+			t.Fatalf("OpenWatch: %v", err)
+		}
+		t.Cleanup(func() { _ = w.Close() }) // the pass may have left it dead
+		return w.Sync(t.Context(), req)
+	},
+}
+
+// A sync pass whose new mail holds a malformed message still reports the
+// rest. A message read without its body structure is new mail with its
+// attachments unknown, and one that cannot be read at all is in Unreadable,
+// so the checkpoint can move past it.
+func TestSyncPassIsolatesMalformedNewMail(t *testing.T) {
+	t.Parallel()
+	from := mailstore.Checkpoint{UIDValidity: scriptUIDValidity, UIDNext: 1, HighestModSeq: scriptModSeq}
+	for name, sync := range syncers {
+		t.Run(name+" structure", func(t *testing.T) {
+			t.Parallel()
+			srv := startScriptServer(t, &scriptServer{n: 4, condstore: true, badStructure: 2})
+			s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second})
+			d, err := sync(t, s, mailstore.SyncRequest{From: from})
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			var got []uint32
+			for _, sum := range d.New {
+				got = append(got, sum.Ref.UID)
+				if sum.AttachmentsUnknown != (sum.Ref.UID == 2) {
+					t.Errorf("UID %d attachments unknown = %v", sum.Ref.UID, sum.AttachmentsUnknown)
+				}
+			}
+			if !slices.Equal(got, []uint32{1, 2, 3, 4}) || len(d.Unreadable) != 0 || d.More {
+				t.Errorf("delta = new %v, unreadable %v, more %v; want 1 to 4, none, false", got, d.Unreadable, d.More)
+			}
+		})
+		t.Run(name+" envelope", func(t *testing.T) {
+			t.Parallel()
+			srv := startScriptServer(t, &scriptServer{n: 4, condstore: true, badEnvelope: 3})
+			s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second})
+			d, err := sync(t, s, mailstore.SyncRequest{From: from, Batch: 3})
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			var got []uint32
+			for _, sum := range d.New {
+				got = append(got, sum.Ref.UID)
+			}
+			if !slices.Equal(got, []uint32{1, 2}) || !slices.Equal(d.Unreadable, []uint32{3}) || !d.More {
+				t.Errorf("delta = new %v, unreadable %v, more %v; want [1 2], [3], true", got, d.Unreadable, d.More)
+			}
+		})
 	}
 }

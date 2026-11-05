@@ -55,7 +55,12 @@ type Delta struct {
 	// New holds summaries of messages with UID >= From.UIDNext, ascending
 	// by UID, at most Batch of them.
 	New []Summary
-	// More is set when more new messages exist beyond New.
+	// Unreadable holds the UIDs of new messages the pass could not read,
+	// since the server sent them in a form chainmail cannot read,
+	// ascending. They are in the batch New is from but not in New, and the
+	// checkpoint moves past them as past New.
+	Unreadable []uint32
+	// More is set when more new messages exist beyond New and Unreadable.
 	More bool
 	// Changed holds flag states. With CONDSTORE it is the CHANGEDSINCE
 	// result for UIDs below From.UIDNext. Without CONDSTORE it is every

@@ -249,7 +249,7 @@ func (srv *scriptServer) serve(conn net.Conn) {
 				}
 				continue
 			case kind == "SEARCH":
-				reply = "* SEARCH 1\r\n" + tag + " OK done\r\n"
+				reply = "* SEARCH" + srv.allUIDs() + "\r\n" + tag + " OK done\r\n"
 			default:
 				bodies++
 				if srv.dropAfter > 0 && bodies > srv.dropAfter {
@@ -644,4 +644,14 @@ func (srv *scriptServer) states(tag, rest string, send func(string) bool, r *buf
 		return false
 	}
 	return send(tag + " OK done\r\n")
+}
+
+// allUIDs is every UID, each after a space, as a SEARCH answer lists them.
+// The tests that use it ask for every message or bound only timing.
+func (srv *scriptServer) allUIDs() string {
+	var b strings.Builder
+	for uid := 1; uid <= srv.n; uid++ {
+		fmt.Fprintf(&b, " %d", uid)
+	}
+	return b.String()
 }
