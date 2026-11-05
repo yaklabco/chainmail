@@ -155,7 +155,7 @@ func TestBackfillMovesPastAnUnreadableMessage(t *testing.T) {
 
 // New mail a sync pass cannot read reaches the cache as an unreadable
 // event, which the builder records, and which waits in the log through a
-// restart like any other event.
+// restart like any other event. Its expunge later ends the record.
 func TestBuilderRecordsUnreadableNewMail(t *testing.T) {
 	t.Parallel()
 	fs := fake.New("acme", false)
@@ -179,6 +179,15 @@ func TestBuilderRecordsUnreadableNewMail(t *testing.T) {
 	}
 	if got := fs.Calls("FetchHeaders"); got != 1 {
 		t.Errorf("FetchHeaders ran %d times, want 1: the new mail it could read", got)
+	}
+
+	// The engine knows the UID, so a sweep reports it expunged, and the
+	// builder forgets the record.
+	fs.ExternalExpunge("INBOX", uids[1])
+	r.sweep("INBOX")
+	r.waitApplied()
+	if got := r.unreadable(); len(got) != 0 {
+		t.Errorf("unreadable after the expunge = %v, want none", got)
 	}
 }
 

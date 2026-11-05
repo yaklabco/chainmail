@@ -954,7 +954,7 @@ Every event has `id`, `at`, `kind`, `account` and `folder`. The rest depends on 
 |---|---|---|
 | `new` | `ref`, `message` | A message arrived. `message` is the message's search row, as `search` prints it, with the snippet when the server gave a preview. `thread_count` is always 0. |
 | `flags` | `ref`, `flags`, `labels` | A message's flags or Gmail labels changed. Both hold the current values, not a diff. `flags` holds keywords too, as the server names them. |
-| `expunged` | `ref` | A message left the folder. |
+| `expunged` | `ref` | A message left the folder. It can be a message no `new` event reported, because the daemon could not read it when it arrived. |
 | `status` | `state`, `detail` | A folder's sync state changed. An empty `folder` means the whole account. See [Sync status](#sync-status). |
 | `gap` | `reason`, `next_id` | Events are missing. `trimmed` means the log no longer holds them, and `uidvalidity` means the server renumbered the folder. |
 

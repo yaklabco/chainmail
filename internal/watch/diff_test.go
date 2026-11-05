@@ -407,7 +407,7 @@ func TestDiff(t *testing.T) {
 			deleted: []uint32{2},
 		},
 		{
-			name: "unreadable new mail follows the new events, by UID, and stays unknown",
+			name: "unreadable new mail follows the new events, by UID, and joins the known UIDs",
 			prev: diffCondRow(),
 			delta: mailstore.Delta{
 				State:      diffState(20, 50, true),
@@ -417,7 +417,27 @@ func TestDiff(t *testing.T) {
 			},
 			events: []string{newLine(5, 0), newLine(7, 0), unreadableLine(6), unreadableLine(8)},
 			next:   diffNext(diffCondRow(), diffState(20, 50, true), 9, diffEarlier),
-			put:    map[uint32]knownUID{5: {}, 7: {}},
+			put:    map[uint32]knownUID{5: {}, 6: {}, 7: {}, 8: {}},
+		},
+		{
+			name:  "without CONDSTORE unreadable new mail takes its flags hash from the full flags",
+			prev:  diffPlainRow(),
+			known: map[uint32]knownUID{1: {FlagsHash: flagsHash(nil, nil)}},
+			delta: mailstore.Delta{
+				State:      diffState(8, 0, false),
+				UIDs:       []uint32{1, 5, 6, 7},
+				FullFlags:  true,
+				New:        []mailstore.Summary{diffSummary(5, 0), diffSummary(7, 0)},
+				Unreadable: []uint32{6},
+				Changed:    []mailstore.FlagState{{UID: 1}, {UID: 5}, {UID: 6, Flags: []string{`\Seen`}, GmailMsgID: 906}, {UID: 7}},
+			},
+			events: []string{newLine(5, 0), newLine(7, 0), unreadableLine(6)},
+			next:   diffNext(diffPlainRow(), diffState(8, 0, false), 8, diffEarlier),
+			put: map[uint32]knownUID{
+				5: {FlagsHash: flagsHash(nil, nil)},
+				6: {GmailMsgID: 906, FlagsHash: flagsHash([]string{`\Seen`}, nil)},
+				7: {FlagsHash: flagsHash(nil, nil)},
+			},
 		},
 	})
 }

@@ -100,6 +100,21 @@ func TestPutRowsForgetsUnreadable(t *testing.T) {
 	}
 }
 
+// DeleteRow, which applies an expunged event, also ends the message's
+// record: the engine reports the expunge of mail it could not read too.
+func TestDeleteRowForgetsUnreadable(t *testing.T) {
+	t.Parallel()
+	s, _ := openStore(t)
+	putProgress(t, s, "INBOX")
+	markUnreadable(t, s, "INBOX", testUIDValidity, 5, 6)
+	if err := s.DeleteRow(t.Context(), testRef("INBOX", 5)); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := unreadableRows(t, s), [][5]int64{{1, 6, 1, t0.Unix(), t0.Unix()}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("unreadable = %v, want UID 6's alone", got)
+	}
+}
+
 // Records drop with their folder and their account.
 func TestUnreadableDropsWithItsFolder(t *testing.T) {
 	t.Parallel()

@@ -47,6 +47,7 @@ type diffResult struct {
 // (CONDSTORE's CHANGEDSINCE result below the old UIDNEXT, or every known
 // UID whose hash differs), each new summary becomes a new event, and each
 // UID of new mail the pass could not read becomes an unreadable event.
+// New mail joins the known UIDs, read or not.
 func diff(prev FolderRow, known map[uint32]knownUID, d mailstore.Delta, in diffInput) diffResult {
 	res := diffResult{Next: nextCheckpoint(prev, d, in)}
 	if d.Rebased {
@@ -75,6 +76,7 @@ func diff(prev FolderRow, known map[uint32]knownUID, d mailstore.Delta, in diffI
 		put[s.Ref.UID] = k
 	}
 	res.Events = append(res.Events, unreadableEvents(d, in)...)
+	putUnreadable(d, put)
 	if len(put) > 0 {
 		res.Put = put
 	}
@@ -83,8 +85,7 @@ func diff(prev FolderRow, known map[uint32]knownUID, d mailstore.Delta, in diffI
 
 // unreadableEvents are the unreadable events for the new mail the pass
 // could not read, by ascending UID. Their refs have no Gmail message ID,
-// since the pass read none. The UIDs never join the known set, so no flags
-// or expunged event follows for them.
+// since the pass read none.
 func unreadableEvents(d mailstore.Delta, in diffInput) []Event {
 	var events []Event
 	for _, uid := range slices.Sorted(slices.Values(d.Unreadable)) {
@@ -302,4 +303,30 @@ func lastNewUID(d mailstore.Delta) uint32 {
 		last = max(last, slices.Max(d.Unreadable))
 	}
 	return last
+}
+
+// putUnreadable adds the new mail the pass could not read to the known
+// UIDs, so a later sweep reports it expunged and a later flag change
+// reports it changed, as for mail read whole. The Gmail message ID and,
+// with full flags, the flags hash come from d.Changed when it lists the
+// UID. Otherwise the hash stays empty, and the first full flags
+// comparison reports the message's flags once.
+func putUnreadable(d mailstore.Delta, put map[uint32]knownUID) {
+	if len(d.Unreadable) == 0 {
+		return
+	}
+	changed := make(map[uint32]mailstore.FlagState, len(d.Changed))
+	for _, f := range d.Changed {
+		changed[f.UID] = f
+	}
+	for _, uid := range d.Unreadable {
+		var k knownUID
+		if f, ok := changed[uid]; ok {
+			k.GmailMsgID = f.GmailMsgID
+			if d.FullFlags {
+				k.FlagsHash = flagsHash(f.Flags, f.Labels)
+			}
+		}
+		put[uid] = k
+	}
 }

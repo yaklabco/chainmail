@@ -657,3 +657,22 @@ func TestPassMovesPastUnreadableNewMail(t *testing.T) {
 		t.Errorf("row UIDNEXT = %d, want 8", row.UIDNext)
 	}
 }
+
+// New mail the pass could not read joins the known UIDs, so a later sweep
+// that finds it gone reports it expunged, and the cache can forget it.
+func TestUnreadableNewMailIsExpungedLater(t *testing.T) {
+	t.Parallel()
+	h := newEngineHarness(t, EngineOptions{})
+	src := &scriptSource{results: []scriptResult{
+		{delta: baselineDelta(1, 2)},
+		{delta: mailstore.Delta{State: diffState(5, 14, true), New: []mailstore.Summary{diffSummary(3, 0)}, Unreadable: []uint32{4}}},
+		{delta: mailstore.Delta{State: diffState(5, 15, true), UIDs: []uint32{1, 2, 3}}},
+	}}
+	h.pass(t, src, PassOptions{Mode: "poll"})
+	h.pass(t, src, PassOptions{Mode: "poll"})
+	h.pass(t, src, PassOptions{Mode: "poll", Sweep: true})
+	want := []string{"status baselined", newLine(3, 0), unreadableLine(4), expungedLine(4, 0)}
+	if lines := diffLines(h.events(t)); !slices.Equal(lines, want) {
+		t.Errorf("events = %q, want %q", lines, want)
+	}
+}

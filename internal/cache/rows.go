@@ -612,11 +612,18 @@ func (s *Store) RootThreadRows(ctx context.Context, account, root string) ([]Row
 	return rows, nil
 }
 
-// DeleteRow deletes a cached row with its body, body failure and FTS row.
-// A missing row is not an error.
+// DeleteRow deletes a cached row with its body, body failure and FTS row,
+// and the message's unreadable record: the message is gone either way. A
+// missing row or record is not an error.
 func (s *Store) DeleteRow(ctx context.Context, r ref.Ref) error {
 	return s.inTx(ctx, "deleting a row", func(tx *sql.Tx) error {
-		return dropMessages(ctx, tx, msgKey, refArgs(r)...)
+		if err := dropMessages(ctx, tx, msgKey, refArgs(r)...); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM unreadable WHERE "+msgKey, refArgs(r)...); err != nil {
+			return fmt.Errorf("forgetting an unreadable message: %w", err)
+		}
+		return nil
 	})
 }
 
