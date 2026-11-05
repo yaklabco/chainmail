@@ -1,7 +1,10 @@
 package db
 
 import (
+	"fmt"
+	"io/fs"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -18,8 +21,8 @@ func TestOpenStateCreatesSchema(t *testing.T) {
 	if err := conn.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 3 {
-		t.Errorf("user_version = %d, want 3", version)
+	if version != 4 {
+		t.Errorf("user_version = %d, want 4", version)
 	}
 	for _, table := range []string{"audit", "idempotency", "account_limits", "sync_folders", "sync_uids", "events", "event_groups"} {
 		var name string
@@ -168,7 +171,7 @@ func TestWatchTablesCheckValues(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() }) // a close error at test end changes nothing
 	const event = "INSERT INTO events (at, account, kind) VALUES ('t', 'a', ?)"
-	for _, kind := range []string{"new", "flags", "expunged", "status", "gap"} {
+	for _, kind := range []string{"new", "flags", "expunged", "status", "gap", "unreadable"} {
 		if _, err := conn.ExecContext(t.Context(), event, kind); err != nil {
 			t.Errorf("event kind %q: %v", kind, err)
 		}
@@ -200,5 +203,105 @@ func TestWatchTablesCheckValues(t *testing.T) {
 	}
 	if _, err := conn.ExecContext(t.Context(), uid, 7); err == nil {
 		t.Error("duplicate (account, folder, uid) was accepted")
+	}
+}
+
+// Migration 0004 rebuilds the events table to admit unreadable events. It
+// keeps every event with its ID, the log's tail even when every event was
+// trimmed, the index on at, and the kind check.
+func TestUnreadableEventsMigrationKeepsTheLog(t *testing.T) {
+	t.Parallel()
+	sub, err := fs.Sub(stateMigrations, "migrations/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upTo3 := fstest.MapFS{}
+	for _, name := range []string{"0001_audit.sql", "0002_compose.sql", "0003_watch.sql"} {
+		data, err := fs.ReadFile(sub, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		upTo3[name] = &fstest.MapFile{Data: data}
+	}
+	for _, tt := range []struct {
+		name    string
+		trimmed bool // every event was deleted, leaving only the sequence
+	}{
+		{name: "events kept"},
+		{name: "every event trimmed", trimmed: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "state.db")
+			old, err := Open(t.Context(), path, upTo3)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, q := range []string{
+				"INSERT INTO events (id, at, account, folder, kind, ref, payload) VALUES (40, 't1', 'a', 'INBOX', 'new', 'r40', '{\"message\":{}}')",
+				"INSERT INTO events (id, at, account, folder, kind, ref, payload) VALUES (41, 't2', 'a', 'INBOX', 'expunged', 'r41', '{}')",
+				"UPDATE sqlite_sequence SET seq = 57 WHERE name = 'events'",
+			} {
+				if _, err := old.ExecContext(t.Context(), q); err != nil {
+					t.Fatalf("%s: %v", q, err)
+				}
+			}
+			if tt.trimmed {
+				if _, err := old.ExecContext(t.Context(), "DELETE FROM events"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := old.Close(); err != nil {
+				t.Fatal(err)
+			}
+			conn, err := OpenState(t.Context(), path)
+			if err != nil {
+				t.Fatalf("OpenState: %v", err)
+			}
+			t.Cleanup(func() { _ = conn.Close() }) // a close error at test end changes nothing
+			var tail int64
+			if err := conn.QueryRowContext(t.Context(), "SELECT seq FROM sqlite_sequence WHERE name = 'events'").Scan(&tail); err != nil || tail != 57 {
+				t.Errorf("events sequence = %d, %v, want 57", tail, err)
+			}
+			var events []string
+			rows, err := conn.QueryContext(t.Context(), "SELECT id, at, account, folder, kind, ref, payload FROM events ORDER BY id")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for rows.Next() {
+				var (
+					id                                      int64
+					at, account, folder, kind, ref, payload string
+				)
+				if err := rows.Scan(&id, &at, &account, &folder, &kind, &ref, &payload); err != nil {
+					t.Fatal(err)
+				}
+				events = append(events, fmt.Sprintf("%d %s %s %s %s %s %s", id, at, account, folder, kind, ref, payload))
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			_ = rows.Close() // read-only; rows.Err reported any failure
+			want := []string{`40 t1 a INBOX new r40 {"message":{}}`, "41 t2 a INBOX expunged r41 {}"}
+			if tt.trimmed {
+				want = nil
+			}
+			if !slices.Equal(events, want) {
+				t.Errorf("events = %q, want %q", events, want)
+			}
+			var id int64
+			if err := conn.QueryRowContext(t.Context(),
+				"INSERT INTO events (at, account, kind) VALUES ('t3', 'a', 'unreadable') RETURNING id").Scan(&id); err != nil || id != 58 {
+				t.Errorf("unreadable event id = %d, %v, want 58", id, err)
+			}
+			if _, err := conn.ExecContext(t.Context(), "INSERT INTO events (at, account, kind) VALUES ('t', 'a', 'moved')"); err == nil {
+				t.Error("event kind 'moved' was accepted")
+			}
+			var index string
+			if err := conn.QueryRowContext(t.Context(),
+				"SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'events'").Scan(&index); err != nil || index != "events_at" {
+				t.Errorf("events index = %q, %v, want events_at", index, err)
+			}
+		})
 	}
 }

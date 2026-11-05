@@ -15,6 +15,9 @@ type Filter struct {
 	// (the message's labels for new, Labels for flags). "inbox" also matches
 	// the Gmail label \Inbox, and "sent" matches \Sent.
 	In string
+	// Internal also matches unreadable events, which only the daemon's
+	// cache reads. API readers leave it false and never see them.
+	Internal bool
 }
 
 // Gmail system labels the In aliases match.
@@ -25,11 +28,16 @@ const (
 
 // Match reports whether e passes the filter.
 //
+// An unreadable event passes only a filter with Internal set, and then as
+// a new event would.
 // An event with no account (a trimmed gap) passes any Accounts filter. A
 // status or gap event passes a Kinds filter that names neither status nor
 // gap, and always passes In, since it describes a folder or the log rather
 // than a message. Labels compare case-insensitively, as folder names do.
 func (f Filter) Match(e Event) bool {
+	if e.Kind == KindUnreadable && !f.Internal {
+		return false
+	}
 	if len(f.Accounts) > 0 && e.Account != "" && !slices.Contains(f.Accounts, e.Account) {
 		return false
 	}

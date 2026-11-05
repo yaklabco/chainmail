@@ -75,6 +75,29 @@ func TestPayloadRoundTrip(t *testing.T) {
 	}
 }
 
+// An API read skips unreadable events and still moves past them, so a
+// group never stalls on one. The cache's internal read gets them with
+// their ref intact.
+func TestReadHidesUnreadableEventsFromTheAPI(t *testing.T) {
+	t.Parallel()
+	l, _, _ := newLog(t)
+	at := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
+	stored := publish(t, l,
+		Event{At: at, Kind: KindNew, Account: "a", Folder: "INBOX", Ref: "cm:a:INBOX:7:1", Message: &Message{Subject: "hi"}},
+		Event{At: at, Kind: KindUnreadable, Account: "a", Folder: "INBOX", Ref: "cm:a:INBOX:7:2"},
+	)
+	if got, next := readIDs(t, l, Query{After: stored[0].ID}); len(got) != 0 || next != stored[1].ID {
+		t.Errorf("API read after the new event = %v, next %d; want nothing, next %d", got, next, stored[1].ID)
+	}
+	page, err := l.Read(t.Context(), Query{Filter: Filter{Internal: true, Accounts: []string{"a"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(page.Events, stored) {
+		t.Errorf("internal read =\n%+v\nwant\n%+v", page.Events, stored)
+	}
+}
+
 func TestTailOfEmptyLog(t *testing.T) {
 	t.Parallel()
 	l, _, _ := newLog(t)

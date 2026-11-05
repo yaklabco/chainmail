@@ -92,6 +92,10 @@ func newLine(uid uint32, msgID uint64) string { return "new " + diffRef(uid, msg
 
 func expungedLine(uid uint32, msgID uint64) string { return "expunged " + diffRef(uid, msgID) }
 
+// unreadableLine is the line of an unreadable event, whose ref has no Gmail
+// message ID: the pass could not read one.
+func unreadableLine(uid uint32) string { return "unreadable " + diffRef(uid, 0) }
+
 func flagsLine(uid uint32, msgID uint64, flags, labels []string) string {
 	return fmt.Sprintf("flags %s %v %v", diffRef(uid, msgID), flags, labels)
 }
@@ -401,6 +405,19 @@ func TestDiff(t *testing.T) {
 			next:    diffNext(diffCondRow(), diffState(7, 45, true), 7, diffAt),
 			put:     map[uint32]knownUID{5: {}, 6: {}},
 			deleted: []uint32{2},
+		},
+		{
+			name: "unreadable new mail follows the new events, by UID, and stays unknown",
+			prev: diffCondRow(),
+			delta: mailstore.Delta{
+				State:      diffState(20, 50, true),
+				New:        []mailstore.Summary{diffSummary(5, 0), diffSummary(7, 0)},
+				Unreadable: []uint32{8, 6},
+				More:       true,
+			},
+			events: []string{newLine(5, 0), newLine(7, 0), unreadableLine(6), unreadableLine(8)},
+			next:   diffNext(diffCondRow(), diffState(20, 50, true), 9, diffEarlier),
+			put:    map[uint32]knownUID{5: {}, 7: {}},
 		},
 	})
 }

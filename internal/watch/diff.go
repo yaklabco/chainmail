@@ -24,8 +24,8 @@ type diffInput struct {
 
 // diffResult is what one batch writes, all in one transaction.
 type diffResult struct {
-	// Events are ordered gap, status, expunged, flags, then new, and by
-	// ascending UID within each kind.
+	// Events are ordered gap, status, expunged, flags, new, then
+	// unreadable, and by ascending UID within each kind.
 	Events  []Event
 	Next    FolderRow           // the checkpoint to store
 	Replace map[uint32]knownUID // non-nil: replace the folder's UID set with it
@@ -45,7 +45,8 @@ type diffResult struct {
 // whole UID set, possibly empty), every UID known below the old UIDNEXT and
 // missing from d.UIDs is expunged. Changed flags become flags events
 // (CONDSTORE's CHANGEDSINCE result below the old UIDNEXT, or every known
-// UID whose hash differs), and each new summary becomes a new event.
+// UID whose hash differs), each new summary becomes a new event, and each
+// UID of new mail the pass could not read becomes an unreadable event.
 func diff(prev FolderRow, known map[uint32]knownUID, d mailstore.Delta, in diffInput) diffResult {
 	res := diffResult{Next: nextCheckpoint(prev, d, in)}
 	if d.Rebased {
@@ -73,10 +74,25 @@ func diff(prev FolderRow, known map[uint32]knownUID, d mailstore.Delta, in diffI
 		}
 		put[s.Ref.UID] = k
 	}
+	res.Events = append(res.Events, unreadableEvents(d, in)...)
 	if len(put) > 0 {
 		res.Put = put
 	}
 	return res
+}
+
+// unreadableEvents are the unreadable events for the new mail the pass
+// could not read, by ascending UID. Their refs have no Gmail message ID,
+// since the pass read none. The UIDs never join the known set, so no flags
+// or expunged event follows for them.
+func unreadableEvents(d mailstore.Delta, in diffInput) []Event {
+	var events []Event
+	for _, uid := range slices.Sorted(slices.Values(d.Unreadable)) {
+		e := syncEvent(in, KindUnreadable)
+		e.Ref = syncRef(in, d.State.UIDValidity, uid, 0)
+		events = append(events, e)
+	}
+	return events
 }
 
 // nextCheckpoint is the row to store after d. The checkpoint fields come

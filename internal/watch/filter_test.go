@@ -13,6 +13,7 @@ func TestFilterMatch(t *testing.T) {
 	status := Event{Kind: KindStatus, Account: "a", Folder: "Sent", State: StateWatching}
 	uidGap := Event{Kind: KindGap, Account: "a", Folder: "INBOX", Reason: GapUIDValidity}
 	trimmed := Event{Kind: KindGap, Reason: GapTrimmed, NextID: 9}
+	unreadable := Event{Kind: KindUnreadable, Account: "a", Folder: "INBOX"}
 
 	tests := []struct {
 		name string
@@ -55,6 +56,15 @@ func TestFilterMatch(t *testing.T) {
 		{"all fields", Filter{Accounts: []string{"g"}, Kinds: []Kind{KindNew}, In: "inbox"}, gmailNew, true},
 		{"all fields one fails", Filter{Accounts: []string{"g"}, Kinds: []Kind{KindFlags}, In: "inbox"}, gmailNew, false},
 		{"new without message", Filter{In: "Receipts"}, Event{Kind: KindNew, Folder: "INBOX"}, false},
+		{"unreadable hidden from the API", Filter{}, unreadable, false},
+		{"unreadable hidden even when named", Filter{Kinds: []Kind{KindUnreadable}}, unreadable, false},
+		{"unreadable internal", Filter{Internal: true}, unreadable, true},
+		{"unreadable internal account listed", Filter{Internal: true, Accounts: []string{"a"}}, unreadable, true},
+		{"unreadable internal account not listed", Filter{Internal: true, Accounts: []string{"b"}}, unreadable, false},
+		{"unreadable internal in folder", Filter{Internal: true, In: "inbox"}, unreadable, true},
+		{"unreadable internal in other folder", Filter{Internal: true, In: "Archive"}, unreadable, false},
+		{"internal still filters kinds", Filter{Internal: true, Kinds: []Kind{KindNew}}, unreadable, false},
+		{"internal passes other kinds", Filter{Internal: true}, inbox, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

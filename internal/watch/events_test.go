@@ -40,6 +40,7 @@ func TestEncodePayload(t *testing.T) {
 		{name: "status", e: Event{Kind: KindStatus, State: StateWatching, Detail: "idle"}, want: `{"state":"watching","detail":"idle"}`},
 		{name: "gap", e: Event{Kind: KindGap, Reason: GapUIDValidity}, want: `{"reason":"uidvalidity","next_id":0}`},
 		{name: "expunged", e: Event{Kind: KindExpunged}, want: `{}`},
+		{name: "unreadable", e: Event{Kind: KindUnreadable}, want: `{}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -96,6 +97,7 @@ func TestDecodePayloadRoundTrip(t *testing.T) {
 		{Kind: KindFlags, Flags: []string{`\Seen`}, Labels: []string{"Work"}},
 		{Kind: KindFlags},
 		{Kind: KindExpunged},
+		{Kind: KindUnreadable},
 		{Kind: KindStatus, State: StateAuthRequired, Detail: "run: chainmail auth login a"},
 		{Kind: KindGap, Reason: GapUIDValidity},
 	}

@@ -110,10 +110,11 @@ func (h engineHarness) pass(t *testing.T, src Source, opts PassOptions) PassResu
 	return res
 }
 
-// events reads every event in the log, oldest first.
+// events reads every event in the log, oldest first, the internal
+// unreadable events included.
 func (h engineHarness) events(t *testing.T) []Event {
 	t.Helper()
-	page, err := h.log.Read(t.Context(), Query{Limit: 1000})
+	page, err := h.log.Read(t.Context(), Query{Filter: Filter{Internal: true}, Limit: 1000})
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -638,7 +639,7 @@ func TestPassMovesPastUnreadableNewMail(t *testing.T) {
 		{delta: mailstore.Delta{State: diffState(8, 14, true), New: []mailstore.Summary{diffSummary(7, 0)}}},
 	}}
 	h.pass(t, src, PassOptions{Mode: "poll"})
-	if res, want := h.pass(t, src, PassOptions{Mode: "poll"}), (PassResult{Events: 3, CondStore: true, Batches: 3}); res != want {
+	if res, want := h.pass(t, src, PassOptions{Mode: "poll"}), (PassResult{Events: 5, CondStore: true, Batches: 3}); res != want {
 		t.Errorf("Pass = %+v, want %+v", res, want)
 	}
 	var froms []uint32
@@ -648,7 +649,8 @@ func TestPassMovesPastUnreadableNewMail(t *testing.T) {
 	if want := []uint32{3, 6, 7}; !slices.Equal(froms, want) {
 		t.Errorf("batches started at UIDs %v, want %v", froms, want)
 	}
-	if lines, want := diffLines(h.events(t)), []string{"status baselined", newLine(3, 0), newLine(4, 0), newLine(7, 0)}; !slices.Equal(lines, want) {
+	want := []string{"status baselined", newLine(3, 0), newLine(4, 0), unreadableLine(5), unreadableLine(6), newLine(7, 0)}
+	if lines := diffLines(h.events(t)); !slices.Equal(lines, want) {
 		t.Errorf("events = %q, want %q", lines, want)
 	}
 	if row := h.row(t); row.UIDNext != 8 {
