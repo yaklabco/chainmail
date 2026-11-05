@@ -34,8 +34,10 @@ type rereadBatch struct {
 // ago and fetches them rereadChunk at a time. A message now read is
 // stored, which deletes its record. One still unreadable counts another
 // attempt. One its folder no longer holds loses its record. A folder in
-// error waits for a later start, and one whose UIDVALIDITY changed is left
-// to its gap. It waits while the account is paused. A failure returns with
+// error, or one whose answers cannot be parsed at all, waits for a later
+// start, and one whose UIDVALIDITY changed is left to its gap: the rest of
+// that folder's records are skipped for this start. It waits while the
+// account is paused. A failure returns with
 // the chunks not yet committed kept, so the builder's retry resumes there
 // and counts no attempt twice.
 func (a *Account) rereadUnreadable(ctx context.Context) error {
@@ -56,15 +58,24 @@ func (a *Account) rereadUnreadable(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	errored := erroredFolders(synced)
+	skip := erroredFolders(synced)
 	for len(a.rereadQueue) > 0 {
 		b := a.rereadQueue[0]
-		if !errored[b.src.Folder] {
+		if !skip[b.src.Folder] {
 			epoch := a.writeEpoch()
 			rows, unreadable, err := a.fetchIsolating(ctx, b.src, b.uids)
 			switch {
 			case errors.Is(err, mailstore.ErrStaleRef), errors.Is(err, mailstore.ErrNotFound):
 				// Left to the folder's gap or drop.
+				skip[b.src.Folder] = true
+			case errors.Is(err, mailstore.ErrMalformed):
+				// A fault in the folder, not in a message: the store
+				// isolates every message of a chunk this small. The
+				// reread is best effort, so the folder's records wait for
+				// a later start rather than hold the builder.
+				skip[b.src.Folder] = true
+				a.logger.WarnContext(ctx, "cache could not read a folder's unreadable messages again; it tries at a later start",
+					"folder", b.src.Folder, "reason", reasonCode(err))
 			case err != nil:
 				return err
 			default:

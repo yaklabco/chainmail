@@ -448,3 +448,82 @@ func TestBackfillBacksOffAFolderFault(t *testing.T) {
 		t.Errorf("cached UIDs = %v, want %v", got, uids)
 	}
 }
+
+// folderFaultMail is a MailStore whose header fetches in folder fail with
+// errFolderMalformed, a fault in the folder rather than in a message, and
+// that counts the header fetches made in each folder.
+type folderFaultMail struct {
+	*fake.Store
+	folder string
+	mu     sync.Mutex
+	calls  map[string]int
+}
+
+var _ MailStore = (*folderFaultMail)(nil)
+
+func (m *folderFaultMail) FetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32) ([]mailstore.Header, error) {
+	m.mu.Lock()
+	m.calls[src.Folder]++
+	m.mu.Unlock()
+	if src.Folder == m.folder {
+		return nil, errFolderMalformed
+	}
+	return m.Store.FetchHeaders(ctx, src, uids)
+}
+
+func (m *folderFaultMail) fetches(folder string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls[folder]
+}
+
+// A folder whose answers cannot be parsed at all, a fault in the folder
+// rather than in one message, does not hold the builder in the reread at
+// start: the reread leaves that folder's records for a later start after
+// its first fetch, counts no attempt, and goes on with the other folders.
+func TestRereadSkipsAFolderItCannotRead(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	folders := []string{"Archive", "INBOX"}
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", folders, folders))
+	// Archive sorts first, so the reread meets the fault before INBOX.
+	var archived []uint32
+	for i := range 9 {
+		archived = append(archived, fs.Add(acctMsg("Archive", fmt.Sprintf("a%d", i))).UID)
+	}
+	uid := fs.Add(acctMsg("INBOX", "i0")).UID
+	for _, a := range archived {
+		fs.Malform("Archive", a, fake.BadEnvelope)
+	}
+	fs.Malform("INBOX", uid, fake.BadEnvelope)
+	r.pass("Archive")
+	r.pass("INBOX")
+	r.start()
+	r.waitBackfilled("Archive", "INBOX")
+	r.waitApplied()
+	r.stop()
+
+	fs.Malform("INBOX", uid, fake.WellFormed)
+	mail := &folderFaultMail{Store: fs, folder: "Archive", calls: map[string]int{}}
+	r.mail = mail
+	r.publish(watch.Event{At: acctStart, Kind: watch.KindStatus, Account: "acme", Folder: "INBOX", State: watch.StateWatching})
+	r.renew()
+	r.start()
+	r.waitApplied() // the builder applies events only after its reread
+	r.stop()
+
+	if got := mail.fetches("Archive"); got != 1 {
+		t.Errorf("Archive header fetches = %d, want 1: the folder's other chunks wait for a later start", got)
+	}
+	for _, a := range archived {
+		if got := r.attempts("Archive", a); got != 1 {
+			t.Errorf("Archive UID %d: %d attempts, want 1", a, got)
+		}
+	}
+	if got, want := r.cachedUIDs("INBOX", 1), []uint32{uid}; !slices.Equal(got, want) {
+		t.Errorf("INBOX cached UIDs = %v, want %v: its reread still runs", got, want)
+	}
+	if e := r.a.lastError(); e != "" {
+		t.Errorf("last error = %q, want none", e)
+	}
+}
