@@ -177,12 +177,13 @@ func (a *Account) fetchBatch(ctx context.Context, w *walk) ([]uint32, []Row, []u
 // over max_size, records the UIDs it could not read as unreadable, and
 // records the walk's new low UID, marking the folder done when the walk
 // has no UIDs left, which wakes the prefetcher for its window. The walk's
-// next batch is full size again. It writes only the backfill's own progress columns, so a
-// window_done clear made meanwhile without wmu stands. A batch fetched
-// before a drop, or before the builder recorded a new walk of the folder, is
-// discarded with its walk. A batch with a UID whose flags or
-// expunge the builder applied during the fetch is not written: it returns
-// w unchanged, so the next step fetches the batch again.
+// next batch is full size again. It writes only the backfill's own
+// progress columns, so a window_done clear made meanwhile without wmu
+// stands. A batch fetched before a drop, or before the builder recorded a
+// new walk of the folder, is discarded with its walk. A batch with a UID
+// whose flags or expunge the builder applied during the fetch is not
+// written: it returns w unchanged, so the next step fetches the batch
+// again.
 func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows []Row, unreadable []uint32) (*walk, bool, error) {
 	a.lock()
 	defer a.unlock()
