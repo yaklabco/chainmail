@@ -47,6 +47,9 @@ type Store struct {
 	// evict is the size cap state shared by the prefetchers, the read path
 	// and the evictor (evict.go).
 	evict evictState
+	// beforeRepair, when set, runs as a body write starts repairing its
+	// row's attachments. Tests set it.
+	beforeRepair func()
 }
 
 // recreateError says why Open deletes the file: "corrupt", "version" or

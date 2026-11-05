@@ -191,28 +191,33 @@ func TestRowAttachmentsUnknown(t *testing.T) {
 	}
 }
 
-// RepairAttachments gives a row read without its body structure the
-// attachments a full read found, and leaves its flags and every other
-// column alone. A row whose attachments are known, or no row, is left as
-// it is.
-func TestRepairAttachments(t *testing.T) {
+// PutFullBody gives a row read without its body structure the attachments
+// the full read found, with the body, and leaves its flags and every other
+// column alone. A row whose attachments are known keeps them, and a nil
+// full read repairs nothing.
+func TestPutFullBodyRepairsAttachments(t *testing.T) {
 	t.Parallel()
 	s, _ := openStore(t)
-	degraded := testRow("INBOX", 5)
-	degraded.AttachmentsUnknown = true
+	degraded := func(uid uint32) Row {
+		r := testRow("INBOX", uid)
+		r.AttachmentsUnknown = true
+		return r
+	}
 	known := testRow("INBOX", 6)
-	putRows(t, s, degraded, known)
+	putRows(t, s, degraded(5), known, degraded(8))
 	if _, err := s.SetFlags(t.Context(), testRef("INBOX", 5), []string{`\Flagged`}, nil); err != nil {
 		t.Fatal(err)
 	}
 	pdf := []mailstore.Attachment{{Part: "2", Filename: "Invoice.pdf", ContentType: "application/pdf", Size: 300}}
+	full := &FullRead{HasAttachment: true, Attachments: pdf}
 	for _, tt := range []struct {
 		uid  uint32
+		full *FullRead
 		want bool
-	}{{5, true}, {6, false}, {7, false}} {
-		got, err := s.RepairAttachments(t.Context(), testRef("INBOX", tt.uid), true, pdf)
+	}{{5, full, true}, {6, full, true}, {7, full, false}, {8, nil, true}} {
+		got, err := s.PutFullBody(t.Context(), testRef("INBOX", tt.uid), Body{Raw: rawMessage("Report", "text")}, false, tt.full)
 		if err != nil || got != tt.want {
-			t.Errorf("RepairAttachments(UID %d) = %v, %v; want %v", tt.uid, got, err, tt.want)
+			t.Errorf("PutFullBody(UID %d) = %v, %v; want %v", tt.uid, got, err, tt.want)
 		}
 	}
 	want := testRow("INBOX", 5)
@@ -222,6 +227,9 @@ func TestRepairAttachments(t *testing.T) {
 	}
 	if got, _, _ := s.Row(t.Context(), testRef("INBOX", 6)); !reflect.DeepEqual(got, known) {
 		t.Errorf("known row =\n%+v\nwant\n%+v", got, known)
+	}
+	if got, _, _ := s.Row(t.Context(), testRef("INBOX", 8)); !reflect.DeepEqual(got, degraded(8)) {
+		t.Errorf("row stored without a full read =\n%+v\nwant\n%+v", got, degraded(8))
 	}
 	src := mailstore.Source{Folder: "INBOX", UIDValidity: testUIDValidity}
 	uids, _, err := s.SearchUIDs(t.Context(), testAccount, src, Where{SQL: "m.attachments_norm LIKE ?", Args: []any{"%invoice.pdf%"}}, 0, false)
