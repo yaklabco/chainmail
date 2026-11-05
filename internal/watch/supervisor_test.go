@@ -914,6 +914,36 @@ func TestSupervisorPollsUnwatchedFolders(t *testing.T) {
 	}
 }
 
+// A CONDSTORE poll that STATUS shows unchanged runs no pass, but it still
+// confirms the folder is current, so it stamps last_sync_at. The cache
+// counts a polled folder fresh only while last_sync_at is within twice
+// sync.poll, so a quiet folder must not age out between changes.
+func TestSupervisorUnchangedPollStampsLastSync(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	fs.SetCondStore(true)
+	acct := supAccount(t, "hostinger", nil, []string{"Sent"})
+	r := newSupRig(t, fs, acct)
+	r.start()
+	r.waitFor("Sent polling", supStatus("Sent", StatePolling))
+	r.clock.expectAfter(t, acct.SyncPoll)
+	first := r.row("Sent")
+	syncs := fs.Calls("SyncFolder")
+	r.clock.Advance(acct.SyncPoll)
+	r.clock.expectAfter(t, acct.SyncPoll)
+	if got := fs.Calls("SyncFolder") - syncs; got != 0 {
+		t.Fatalf("SyncFolder ran %d times on an unchanged tick, want 0", got)
+	}
+	row := r.row("Sent")
+	if want := first.LastSyncAt.Add(acct.SyncPoll); !row.LastSyncAt.Equal(want) {
+		t.Errorf("last_sync_at after an unchanged tick = %v, want %v", row.LastSyncAt, want)
+	}
+	row.LastSyncAt = first.LastSyncAt
+	if row != first {
+		t.Errorf("row after an unchanged tick = %+v, want only last_sync_at moved from %+v", row, first)
+	}
+}
+
 // A polled folder that does not exist reports FOLDER_NOT_FOUND once, the
 // other polled folder keeps working, and the folder recovers on the tick
 // after it appears.

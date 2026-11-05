@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jamesainslie/chainmail/internal/mailstore"
 )
 
 // inTx runs fn in a transaction on conn and commits it.
@@ -294,5 +296,50 @@ func TestDropFolder(t *testing.T) {
 		if !reflect.DeepEqual(uids, tt.want) {
 			t.Errorf("UIDs(%s/%s) = %v, want %v", tt.account, tt.folder, uids, tt.want)
 		}
+	}
+}
+
+// StampSync moves last_sync_at only while the row holds the checkpoint a
+// STATUS confirmed, and touches no other column.
+func TestStampSync(t *testing.T) {
+	t.Parallel()
+	conn := openDB(t)
+	s := NewState(conn)
+	checkpoint := FolderRow{
+		Account: "a", Folder: "Sent", UIDValidity: 5, UIDNext: 40, HighestModSeq: 900, CondStore: true,
+		Mode: ModePoll, State: StatePolling, LastSyncAt: t0, LastSweepAt: t0,
+	}
+	inTx(t, conn, func(ctx context.Context, tx *sql.Tx) error { return PutFolder(ctx, tx, checkpoint) })
+	later := t0.Add(time.Hour)
+
+	for _, tt := range []struct {
+		name string
+		st   mailstore.FolderState
+	}{
+		{"UIDVALIDITY moved", mailstore.FolderState{UIDValidity: 6, UIDNext: 40, HighestModSeq: 900, CondStore: true}},
+		{"UIDNEXT moved", mailstore.FolderState{UIDValidity: 5, UIDNext: 41, HighestModSeq: 900, CondStore: true}},
+		{"HIGHESTMODSEQ moved", mailstore.FolderState{UIDValidity: 5, UIDNext: 40, HighestModSeq: 901, CondStore: true}},
+	} {
+		ok, err := s.StampSync(t.Context(), "a", "Sent", tt.st, later)
+		if err != nil || ok {
+			t.Errorf("%s: StampSync = %v, %v, want false, nil", tt.name, ok, err)
+		}
+	}
+	if got, ok, err := s.Folder(t.Context(), "a", "Sent"); err != nil || !ok || !reflect.DeepEqual(got, checkpoint) {
+		t.Errorf("Folder after refused stamps = %+v, %v, %v, want %+v", got, ok, err, checkpoint)
+	}
+
+	ok, err := s.StampSync(t.Context(), "a", "Sent", mailstore.FolderState{UIDValidity: 5, UIDNext: 40, HighestModSeq: 900, CondStore: true}, later)
+	if err != nil || !ok {
+		t.Fatalf("StampSync = %v, %v, want true, nil", ok, err)
+	}
+	want := checkpoint
+	want.LastSyncAt = later
+	if got, ok, err := s.Folder(t.Context(), "a", "Sent"); err != nil || !ok || !reflect.DeepEqual(got, want) {
+		t.Errorf("Folder after StampSync = %+v, %v, %v, want %+v", got, ok, err, want)
+	}
+
+	if ok, err := s.StampSync(t.Context(), "a", "Missing", mailstore.FolderState{UIDValidity: 5}, later); err != nil || ok {
+		t.Errorf("StampSync of a missing row = %v, %v, want false, nil", ok, err)
 	}
 }
