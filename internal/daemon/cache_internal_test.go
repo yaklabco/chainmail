@@ -675,7 +675,7 @@ func TestCacheStatusOverCap(t *testing.T) {
 	t.Parallel()
 	const day = 1 << 30 // the default daily_download
 	tests := []struct {
-		name     string
+		name       string
 		progress   *cache.Progress // INBOX's, nil for none
 		syncWith   string          // INBOX's sync_folders state
 		spent      int64
