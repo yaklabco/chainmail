@@ -655,8 +655,8 @@ func dropMessages(ctx context.Context, tx *sql.Tx, where string, args ...any) er
 }
 
 // DropFolder deletes a folder's rows (and bodies, failures, FTS rows), its
-// progress row and its unreadable records. With keepRecovery, each row's Message-ID is first copied
-// to ref_recovery.
+// progress row and its unreadable records. With keepRecovery, each row's
+// Message-ID is first copied to ref_recovery.
 func (s *Store) DropFolder(ctx context.Context, account, folder string, keepRecovery bool) error {
 	now := s.now().Unix()
 	return s.inTx(ctx, "dropping a folder", func(tx *sql.Tx) error {
