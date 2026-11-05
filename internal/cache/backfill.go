@@ -23,6 +23,10 @@ type walk struct {
 	baseline    uint32   // the progress BaselineUIDNext the walk was listed under
 	low         uint32   // the progress BackfillLowUID the walk last left
 	uids        []uint32 // still to fetch, highest first
+	// limit, when not 0, caps the next batch. A batch that fails with a
+	// plain mailstore.ErrMalformed halves it, down to 1, and a committed
+	// batch clears it.
+	limit int
 }
 
 // matches reports whether p is still the progress the walk left: the
@@ -115,52 +119,71 @@ func (a *Account) backfillStep(ctx context.Context, w *walk) (*walk, bool, error
 		}
 		w = &walk{folder: p.Folder, uidValidity: p.UIDValidity, epoch: epoch, baseline: p.BaselineUIDNext, low: p.BackfillLowUID, uids: uids}
 	}
-	batch, rows, err := a.fetchBatch(ctx, w)
+	batch, rows, unreadable, err := a.fetchBatch(ctx, w)
+	if errors.Is(err, mailstore.ErrMalformed) {
+		// The store could not isolate what it could not read: try half as
+		// many UIDs, and give up on a single UID that still fails.
+		if len(batch) > 1 {
+			w.limit = len(batch) / 2
+			a.logger.InfoContext(ctx, "cache backfill halves its batch after an answer it cannot read",
+				"folder", w.folder, "batch", w.limit)
+			return w, true, nil
+		}
+		a.logger.WarnContext(ctx, "cache cannot read a message", "folder", w.folder, "uid", batch[0])
+		rows, unreadable, err = nil, batch, nil
+	}
 	if err != nil {
 		return w, false, err
 	}
-	return a.commitBatch(ctx, w, batch, rows)
+	return a.commitBatch(ctx, w, batch, rows, unreadable)
 }
 
-// fetchBatch fetches the walk's next batch and returns it with its rows.
-// Before every attempt, each retry after mailstore.ErrBusy included, it
-// waits until the day's remaining budget holds at least one header (until
-// 00:00 UTC when it does not) and sizes the batch to the headers it holds,
-// capped by backfill_batch. Budget the builder spends while the walk is
-// listed or a busy pool is waited out is so never overrun. A walk with no
-// UIDs left fetches nothing.
-func (a *Account) fetchBatch(ctx context.Context, w *walk) ([]uint32, []Row, error) {
+// fetchBatch fetches the walk's next batch and returns it with its rows
+// and the UIDs the store could not read. Before every attempt, each retry
+// after mailstore.ErrBusy included, it waits until the day's remaining
+// budget holds at least one header (until 00:00 UTC when it does not) and
+// sizes the batch to the headers it holds, capped by backfill_batch and
+// the walk's limit. Budget the builder spends while the walk is listed or
+// a busy pool is waited out is so never overrun. A walk with no UIDs left
+// fetches nothing. A plain mailstore.ErrMalformed comes back with the
+// batch it failed on.
+func (a *Account) fetchBatch(ctx context.Context, w *walk) ([]uint32, []Row, []uint32, error) {
 	if len(w.uids) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	src := mailstore.Source{Folder: w.folder, UIDValidity: w.uidValidity}
 	for {
 		allowance, err := a.waitAllowance(ctx)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		batch := w.uids[:min(len(w.uids), max(1, a.settings().BackfillBatch), allowance)]
-		rows, err := a.fetchHeadersOnce(ctx, src, batch)
+		size := min(len(w.uids), max(1, a.settings().BackfillBatch), allowance)
+		if w.limit > 0 {
+			size = min(size, w.limit)
+		}
+		batch := w.uids[:size]
+		rows, unreadable, err := a.fetchHeadersOnce(ctx, src, batch)
 		if !errors.Is(err, mailstore.ErrBusy) {
-			return batch, rows, err
+			return batch, rows, unreadable, err
 		}
 		if !a.sleep(ctx, max(a.settings().BackfillPause, busyRetryFloor)) {
-			return nil, nil, ctx.Err()
+			return nil, nil, nil, ctx.Err()
 		}
 	}
 }
 
 // commitBatch stores a fetched batch, which fetchHeaders has already
 // counted against the budget, waking the evictor when the file is then
-// over max_size, and records the walk's new low UID, marking the folder
-// done when the walk has no UIDs left, which wakes the prefetcher for its
-// window. It writes only the backfill's own progress columns, so a
+// over max_size, records the UIDs it could not read as unreadable, and
+// records the walk's new low UID, marking the folder done when the walk
+// has no UIDs left, which wakes the prefetcher for its window. The walk's
+// next batch is full size again. It writes only the backfill's own progress columns, so a
 // window_done clear made meanwhile without wmu stands. A batch fetched
 // before a drop, or before the builder recorded a new walk of the folder, is
 // discarded with its walk. A batch with a UID whose flags or
 // expunge the builder applied during the fetch is not written: it returns
 // w unchanged, so the next step fetches the batch again.
-func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows []Row) (*walk, bool, error) {
+func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows []Row, unreadable []uint32) (*walk, bool, error) {
 	a.lock()
 	defer a.unlock()
 	if a.epoch.Load() != w.epoch {
@@ -183,6 +206,10 @@ func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows
 		}
 		a.noteWrite(ctx)
 	}
+	src := mailstore.Source{Folder: w.folder, UIDValidity: w.uidValidity}
+	if err := a.o.Store.MarkUnreadable(ctx, a.name, src, unreadable); err != nil {
+		return w, false, err
+	}
 	rest := w.uids[len(batch):]
 	if len(batch) > 0 {
 		p.BackfillLowUID = batch[len(batch)-1]
@@ -191,7 +218,7 @@ func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows
 	if err := a.o.Store.SetBackfill(ctx, a.name, w.folder, p.BackfillLowUID, p.BackfillDone); err != nil {
 		return w, false, err
 	}
-	w.uids, w.low = rest, p.BackfillLowUID
+	w.uids, w.low, w.limit = rest, p.BackfillLowUID, 0
 	if p.BackfillDone {
 		a.logger.InfoContext(ctx, "cache backfill done", "folder", w.folder)
 		a.pokePrefetch()

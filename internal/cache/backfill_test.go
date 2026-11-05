@@ -361,7 +361,7 @@ func TestCommitBatchDiscardsAfterReset(t *testing.T) {
 	w := &walk{folder: "INBOX", uidValidity: 1, epoch: r.a.epoch.Load(), uids: []uint32{1}}
 	r.a.epoch.Add(1) // a drop ran while the batch was fetched
 	row := Row{Account: "acme", Folder: "INBOX", UIDValidity: 1, UID: 1, Subject: "one", MessageID: "one@example.com", InternalDate: acctStart, Date: acctStart}
-	next, more, err := r.a.commitBatch(t.Context(), w, []uint32{1}, []Row{row})
+	next, more, err := r.a.commitBatch(t.Context(), w, []uint32{1}, []Row{row}, nil)
 	if err != nil || next != nil || !more {
 		t.Fatalf("commitBatch = %v, %v, %v; want nil, true, nil after a reset", next, more, err)
 	}
@@ -517,7 +517,7 @@ func TestCommitBatchDiscardsAWalkTheBuilderRestarted(t *testing.T) {
 		t.Fatal(err)
 	}
 	row := Row{Account: "acme", Folder: "INBOX", UIDValidity: 1, UID: 2, Subject: "two", MessageID: "two@example.com", InternalDate: acctStart, Date: acctStart}
-	next, more, err := r.a.commitBatch(t.Context(), w, []uint32{2}, []Row{row})
+	next, more, err := r.a.commitBatch(t.Context(), w, []uint32{2}, []Row{row}, nil)
 	if err != nil || next != nil || !more {
 		t.Fatalf("commitBatch = %v, %v, %v; want nil, true, nil after a new walk", next, more, err)
 	}

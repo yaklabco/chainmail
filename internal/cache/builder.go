@@ -1,10 +1,12 @@
 package cache
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
@@ -42,11 +44,19 @@ func (a *Account) runBuilder(ctx context.Context) {
 	}
 }
 
-// buildStep opens the group while pos is negative, and otherwise applies
-// the events after pos. It returns the new position.
+// buildStep opens the group while pos is negative, then reads the
+// messages recorded as unreadable again, once per run, and otherwise
+// applies the events after pos. It returns the new position.
 func (a *Account) buildStep(ctx context.Context, pos int64) (int64, error) {
 	if pos < 0 {
 		return a.openGroup(ctx)
+	}
+	if !a.reread {
+		if err := a.rereadUnreadable(ctx); err != nil {
+			return pos, err
+		}
+		a.reread = true
+		return pos, nil
 	}
 	return a.build(ctx, pos)
 }
@@ -81,7 +91,7 @@ func (a *Account) build(ctx context.Context, pos int64) (int64, error) {
 	if err := a.track(ctx); err != nil {
 		return pos, err
 	}
-	q := watch.Query{After: pos, Filter: watch.Filter{Accounts: []string{a.name}}, Limit: builderPage}
+	q := watch.Query{After: pos, Filter: watch.Filter{Accounts: []string{a.name}, Internal: true}, Limit: builderPage}
 	page, err := a.o.Log.Read(ctx, q)
 	if err != nil {
 		return pos, err
@@ -136,6 +146,10 @@ type segmentPlan struct {
 	// rewalk lists, per folder, the new messages fetchNew skipped because
 	// the folder was in error, for commitSegment to record a new walk.
 	rewalk map[string]skipped
+	// unreadable lists, per folder and UIDVALIDITY, the new messages to
+	// record as unreadable: those of unreadable events, and those whose
+	// headers fetchNew could not read.
+	unreadable map[mailstore.Source][]uint32
 }
 
 // skipped is the highest UID of a folder's new messages that the builder
@@ -152,19 +166,20 @@ type change struct {
 	labels []string
 }
 
-// planSegment sorts a segment's events into fetches and changes. An event
-// of a folder the cache does not track, or whose ref has another
-// UIDVALIDITY than the folder's progress, is skipped: backfill, or the
-// folder's gap, covers it. Status events change nothing in the cache.
+// planSegment sorts a segment's events into fetches, unreadable messages
+// and changes. An event of a folder the cache does not track, or whose ref
+// has another UIDVALIDITY than the folder's progress, is skipped: backfill,
+// or the folder's gap, covers it. Status events change nothing in the
+// cache.
 func (a *Account) planSegment(ctx context.Context, seg []watch.Event, progress map[string]Progress) segmentPlan {
-	p := segmentPlan{fetch: map[string][]uint32{}, touched: map[string]bool{}}
+	p := segmentPlan{fetch: map[string][]uint32{}, touched: map[string]bool{}, unreadable: map[mailstore.Source][]uint32{}}
 	for i := range seg {
 		e := &seg[i]
 		switch e.Kind {
 		case watch.KindGap:
 			p.gap = e
 			continue
-		case watch.KindNew, watch.KindFlags, watch.KindExpunged:
+		case watch.KindNew, watch.KindFlags, watch.KindExpunged, watch.KindUnreadable:
 		default:
 			continue
 		}
@@ -178,8 +193,13 @@ func (a *Account) planSegment(ctx context.Context, seg []watch.Event, progress m
 			continue
 		}
 		p.touched[r.Folder] = true
-		if e.Kind == watch.KindNew {
+		switch e.Kind {
+		case watch.KindNew:
 			p.fetch[r.Folder] = append(p.fetch[r.Folder], r.UID)
+			continue
+		case watch.KindUnreadable:
+			src := mailstore.Source{Folder: r.Folder, UIDValidity: r.UIDValidity}
+			p.unreadable[src] = append(p.unreadable[src], r.UID)
 			continue
 		}
 		p.changes = append(p.changes, change{kind: e.Kind, ref: r, flags: e.Flags, labels: e.Labels})
@@ -203,62 +223,79 @@ func (a *Account) apply(ctx context.Context, seg []watch.Event) error {
 			return err
 		}
 		plan := a.planSegment(ctx, seg, progress)
-		rows, rewalk, err := a.fetchNew(ctx, plan.fetch, progress)
+		got, err := a.fetchNew(ctx, plan.fetch, progress)
 		if err != nil {
 			return err
 		}
-		plan.rewalk = rewalk
-		done, err := a.commitSegment(ctx, epoch, plan, rows)
+		plan.rewalk = got.rewalk
+		for src, uids := range got.unreadable {
+			plan.unreadable[src] = append(plan.unreadable[src], uids...)
+		}
+		done, err := a.commitSegment(ctx, epoch, plan, got.rows)
 		if err != nil || done {
 			return err
 		}
 	}
 }
 
+// newMail is what fetchNew read of a segment's new messages.
+type newMail struct {
+	rows []Row
+	// unreadable lists, per folder and UIDVALIDITY, the messages whose
+	// headers could not be read.
+	unreadable map[mailstore.Source][]uint32
+	// rewalk lists the folders skipped in error, as segmentPlan.rewalk.
+	rewalk map[string]skipped
+}
+
 // fetchNew fetches the headers of a segment's new messages, one batch per
 // folder, once no folder of the account is paused. A folder whose
 // UIDVALIDITY changed since its events is skipped: its gap follows. A
 // message the fetch no longer finds is left out: its expunged event
-// follows. A folder whose sync state is error is skipped alone
-// (integration note 12): its new messages are not fetched, and it is
-// returned with the highest UID skipped, so commitSegment records a new
-// walk of the folder before its events are acknowledged.
-func (a *Account) fetchNew(ctx context.Context, fetch map[string][]uint32, progress map[string]Progress) ([]Row, map[string]skipped, error) {
+// follows. A message whose headers cannot be read is returned as
+// unreadable (fetchIsolating). A folder whose sync state is error is
+// skipped alone (integration note 12): its new messages are not fetched,
+// and it is returned with the highest UID skipped, so commitSegment
+// records a new walk of the folder before its events are acknowledged.
+func (a *Account) fetchNew(ctx context.Context, fetch map[string][]uint32, progress map[string]Progress) (newMail, error) {
 	if len(fetch) == 0 {
-		return nil, nil, nil
+		return newMail{}, nil
 	}
 	if err := a.waitReady(ctx); err != nil {
-		return nil, nil, err
+		return newMail{}, err
 	}
 	synced, err := a.syncRows(ctx)
 	if err != nil {
-		return nil, nil, err
+		return newMail{}, err
 	}
 	errored := erroredFolders(synced)
-	var rows []Row
-	rewalk := map[string]skipped{}
+	out := newMail{unreadable: map[mailstore.Source][]uint32{}, rewalk: map[string]skipped{}}
 	for _, folder := range slices.Sorted(maps.Keys(fetch)) {
 		if errored[folder] {
 			a.logger.InfoContext(ctx, "cache builder skipped new mail of a folder in error", "folder", folder)
-			rewalk[folder] = skipped{uidValidity: progress[folder].UIDValidity, high: slices.Max(fetch[folder])}
+			out.rewalk[folder] = skipped{uidValidity: progress[folder].UIDValidity, high: slices.Max(fetch[folder])}
 			continue
 		}
 		src := mailstore.Source{Folder: folder, UIDValidity: progress[folder].UIDValidity}
-		got, err := a.fetchHeaders(ctx, src, fetch[folder])
+		rows, unreadable, err := a.fetchIsolating(ctx, src, fetch[folder])
 		if errors.Is(err, mailstore.ErrStaleRef) {
 			continue
 		}
 		if err != nil {
-			return nil, nil, err
+			return newMail{}, err
 		}
-		rows = append(rows, got...)
+		out.rows = append(out.rows, rows...)
+		if len(unreadable) > 0 {
+			out.unreadable[src] = unreadable
+		}
 	}
-	return rows, rewalk, nil
+	return out, nil
 }
 
 // commitSegment writes a planned segment: the fetched rows, then the
-// changes in log order, then a new walk of each folder whose new mail
-// was skipped in error, then the touched folders' LastAppliedAt.
+// messages it could not read as unreadable, then the changes in log order,
+// then a new walk of each folder whose new mail was skipped in error, then
+// the touched folders' LastAppliedAt.
 // fetchHeaders has already counted the headers against the budget. It
 // reports false, having written nothing, when a drop ran since epoch.
 // Every write is idempotent, so a failure part way is safe to retry. A
@@ -284,6 +321,9 @@ func (a *Account) commitSegment(ctx context.Context, epoch uint64, plan segmentP
 			a.pokePrefetch()
 		}
 		a.noteWrite(ctx)
+	}
+	if err := a.recordUnreadable(ctx, plan.unreadable); err != nil {
+		return false, err
 	}
 	for _, c := range plan.changes {
 		a.noteChange(c.ref)
@@ -376,4 +416,24 @@ func (a *Account) recordRewalks(ctx context.Context, rewalk map[string]skipped) 
 		a.poke()
 	}
 	return nil
+}
+
+// recordUnreadable records each folder's unreadable UIDs. MarkUnreadable
+// skips a folder whose progress is gone or has another UIDVALIDITY: its
+// gap or drop has removed what the records would describe. The caller
+// holds wmu.
+func (a *Account) recordUnreadable(ctx context.Context, unreadable map[mailstore.Source][]uint32) error {
+	for _, src := range slices.SortedFunc(maps.Keys(unreadable), bySource) {
+		uids := unreadable[src]
+		if err := a.o.Store.MarkUnreadable(ctx, a.name, src, uids); err != nil {
+			return err
+		}
+		a.logger.InfoContext(ctx, "cache recorded messages it cannot read", "folder", src.Folder, "count", len(uids))
+	}
+	return nil
+}
+
+// bySource orders sources by folder, then UIDVALIDITY.
+func bySource(a, b mailstore.Source) int {
+	return cmp.Or(strings.Compare(a.Folder, b.Folder), cmp.Compare(a.UIDValidity, b.UIDValidity))
 }

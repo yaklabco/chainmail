@@ -100,6 +100,9 @@ type Account struct {
 	// applied is the builder's acknowledged event ID, -1 until the builder
 	// has opened its group.
 	applied atomic.Int64
+	// reread is whether the builder has read the messages recorded as
+	// unreadable again in this run. Only the builder uses it.
+	reread bool
 	// started is the run's start, AccountOptions.Started or else when
 	// NewAccount ran, on the account's clock. A folder is fresh only once
 	// a pass of this run has synced it: a sync row from a previous run

@@ -242,7 +242,7 @@ func TestCommitBatchKeepsAConcurrentWindowClear(t *testing.T) {
 	row := Row{Account: "acme", Folder: "INBOX", UIDValidity: two.UIDValidity, UID: two.UID, Subject: "two", MessageID: "two@example.com", InternalDate: acctStart, Date: acctStart}
 	defer r.evictDuring("INBOX")()
 
-	if _, _, err := r.a.commitBatch(t.Context(), w, []uint32{two.UID}, []Row{row}); err != nil {
+	if _, _, err := r.a.commitBatch(t.Context(), w, []uint32{two.UID}, []Row{row}, nil); err != nil {
 		t.Fatal(err)
 	}
 	got := r.progress("INBOX")

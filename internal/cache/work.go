@@ -186,23 +186,36 @@ func (a *Account) retryBusy(ctx context.Context, f func() error) error {
 // background context, retrying while the pool is busy. UIDs the folder no
 // longer holds are left out. Every header received counts 2048 bytes
 // against the day's budget at once, whether or not its row is written, so
-// a fetch whose result is discarded is still accounted for.
-func (a *Account) fetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32) ([]Row, error) {
-	var rows []Row
+// a fetch whose result is discarded is still accounted for. The UIDs of a
+// *mailstore.UnreadableError come back as unreadable beside the rows read,
+// with no error, so the caller records them and moves on.
+func (a *Account) fetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32) ([]Row, []uint32, error) {
+	var (
+		rows       []Row
+		unreadable []uint32
+	)
 	err := a.retryBusy(ctx, func() error {
 		var err error
-		rows, err = a.fetchHeadersOnce(ctx, src, uids)
+		rows, unreadable, err = a.fetchHeadersOnce(ctx, src, uids)
 		return err
 	})
-	return rows, err
+	return rows, unreadable, err
 }
 
 // fetchHeadersOnce is one attempt of fetchHeaders, with no retry: it fails
-// with mailstore.ErrBusy when the pool is busy.
-func (a *Account) fetchHeadersOnce(ctx context.Context, src mailstore.Source, uids []uint32) ([]Row, error) {
-	var rows []Row
+// with mailstore.ErrBusy when the pool is busy. A mailstore.ErrMalformed it
+// returns is plain: the store could not isolate the messages it could not
+// read, and nothing it read is kept.
+func (a *Account) fetchHeadersOnce(ctx context.Context, src mailstore.Source, uids []uint32) ([]Row, []uint32, error) {
+	var (
+		rows       []Row
+		unreadable []uint32
+	)
 	err := a.withMail(ctx, func(bg context.Context, st MailStore) error {
 		hs, err := st.FetchHeaders(bg, src, uids)
+		if ue, ok := errors.AsType[*mailstore.UnreadableError](err); ok {
+			unreadable, err = ue.UIDs, nil
+		}
 		if err != nil {
 			return err
 		}
@@ -212,13 +225,41 @@ func (a *Account) fetchHeadersOnce(ctx context.Context, src mailstore.Source, ui
 		}
 		return nil
 	})
-	if err != nil || len(rows) == 0 {
-		return rows, err
+	if err != nil {
+		return nil, nil, err
 	}
-	if _, err := a.o.Store.AddBudget(ctx, a.name, a.day(), int64(len(rows))*headerBudgetBytes); err != nil {
-		return nil, err
+	if len(rows) > 0 {
+		if _, err := a.o.Store.AddBudget(ctx, a.name, a.day(), int64(len(rows))*headerBudgetBytes); err != nil {
+			return nil, nil, err
+		}
 	}
-	return rows, nil
+	return rows, unreadable, nil
+}
+
+// fetchIsolating is fetchHeaders that also copes with a plain
+// mailstore.ErrMalformed, which the store returns when it could not
+// isolate the messages it could not read: it fetches each half of uids in
+// turn, down to single UIDs, and reports a single UID that still fails as
+// unreadable. A fetch of n UIDs so costs at most 2n-1 calls, and only when
+// the store has given up.
+func (a *Account) fetchIsolating(ctx context.Context, src mailstore.Source, uids []uint32) ([]Row, []uint32, error) {
+	rows, unreadable, err := a.fetchHeaders(ctx, src, uids)
+	if !errors.Is(err, mailstore.ErrMalformed) {
+		return rows, unreadable, err
+	}
+	if len(uids) == 1 {
+		a.logger.WarnContext(ctx, "cache cannot read a message", "folder", src.Folder, "uid", uids[0])
+		return nil, uids, nil
+	}
+	mid := len(uids) / 2
+	for _, half := range [][]uint32{uids[:mid], uids[mid:]} {
+		r, u, err := a.fetchIsolating(ctx, src, half)
+		if err != nil {
+			return nil, nil, err
+		}
+		rows, unreadable = append(rows, r...), append(unreadable, u...)
+	}
+	return rows, unreadable, nil
 }
 
 // track records a baseline for each folder the account syncs that the
