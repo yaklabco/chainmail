@@ -619,3 +619,39 @@ func TestPassCapsBatch(t *testing.T) {
 		})
 	}
 }
+
+// A batch whose new mail holds a message the source could not read still
+// emits the rest, and the checkpoint moves past that message. A batch whose
+// new mail is all unreadable is progress too, not errNoProgress.
+func TestPassMovesPastUnreadableNewMail(t *testing.T) {
+	t.Parallel()
+	h := newEngineHarness(t, EngineOptions{Batch: 3})
+	src := &scriptSource{results: []scriptResult{
+		{delta: baselineDelta(1, 2)},
+		{delta: mailstore.Delta{
+			State:      diffState(8, 14, true),
+			New:        []mailstore.Summary{diffSummary(3, 0), diffSummary(4, 0)},
+			Unreadable: []uint32{5},
+			More:       true,
+		}},
+		{delta: mailstore.Delta{State: diffState(8, 14, true), Unreadable: []uint32{6}, More: true}},
+		{delta: mailstore.Delta{State: diffState(8, 14, true), New: []mailstore.Summary{diffSummary(7, 0)}}},
+	}}
+	h.pass(t, src, PassOptions{Mode: "poll"})
+	if res, want := h.pass(t, src, PassOptions{Mode: "poll"}), (PassResult{Events: 3, CondStore: true, Batches: 3}); res != want {
+		t.Errorf("Pass = %+v, want %+v", res, want)
+	}
+	var froms []uint32
+	for _, r := range src.reqs[1:] {
+		froms = append(froms, r.From.UIDNext)
+	}
+	if want := []uint32{3, 6, 7}; !slices.Equal(froms, want) {
+		t.Errorf("batches started at UIDs %v, want %v", froms, want)
+	}
+	if lines, want := diffLines(h.events(t)), []string{"status baselined", newLine(3, 0), newLine(4, 0), newLine(7, 0)}; !slices.Equal(lines, want) {
+		t.Errorf("events = %q, want %q", lines, want)
+	}
+	if row := h.row(t); row.UIDNext != 8 {
+		t.Errorf("row UIDNEXT = %d, want 8", row.UIDNext)
+	}
+}

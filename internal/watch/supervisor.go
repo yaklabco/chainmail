@@ -363,7 +363,7 @@ func (s *Supervisor) watchLoop(ctx context.Context, p *parker, folder string) {
 			wait = s.syncPoll
 		default:
 			s.logger.Warn("watch connection failed", "folder", w.folder, "reason", failureReason(err))
-			s.note(ctx, w.folder, w.mode, StateReconnecting, "", api.ReasonServerUnavailable)
+			s.note(ctx, w.folder, w.mode, StateReconnecting, "", failureCode(err))
 			wait = backoff(failures, s.jitter())
 			failures++
 		}
@@ -500,7 +500,7 @@ func (s *Supervisor) pollFolder(ctx context.Context, pf *polled) error {
 		return err
 	}
 	s.logger.Warn("polling a folder failed", "folder", pf.folder, "reason", failureReason(err))
-	s.note(ctx, pf.folder, ModePoll, StateReconnecting, "", api.ReasonServerUnavailable)
+	s.note(ctx, pf.folder, ModePoll, StateReconnecting, "", failureCode(err))
 	pf.next = s.clock.Now().Add(min(backoff(pf.failures, s.jitter()), s.syncPoll))
 	pf.failures++
 	return err
@@ -1001,6 +1001,8 @@ func failureReason(err error) string {
 		return "folder_not_found"
 	case errors.Is(err, mailstore.ErrNotFound):
 		return "not_found"
+	case errors.Is(err, mailstore.ErrMalformed):
+		return "malformed"
 	case errors.Is(err, mailstore.ErrUnavailable):
 		return "unavailable"
 	case errors.Is(err, errNoWatcher):
@@ -1010,4 +1012,14 @@ func failureReason(err error) string {
 	default:
 		return "other"
 	}
+}
+
+// failureCode is the reason code a folder's row records for a failed
+// connection or pass: MALFORMED_RESPONSE when the server sent something
+// chainmail cannot read, and SERVER_UNAVAILABLE for anything else.
+func failureCode(err error) string {
+	if errors.Is(err, mailstore.ErrMalformed) {
+		return api.ReasonMalformedResponse
+	}
+	return api.ReasonServerUnavailable
 }

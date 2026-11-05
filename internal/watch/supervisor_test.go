@@ -1086,17 +1086,21 @@ func TestSupervisorParksEveryLoopMidSession(t *testing.T) {
 // first success, and starts the backoff over for the next outage.
 func TestSupervisorPollerBacksOffOutages(t *testing.T) {
 	t.Parallel()
+	unavailable := fmt.Errorf("%w: test outage", mailstore.ErrUnavailable)
 	tests := []struct {
 		name   string
 		method string // the fake method that fails
+		outage error
+		reason string // the last error the folder's row records
 	}{
-		{name: "STATUS fails", method: "FolderState"},
-		{name: "the pass fails", method: "SyncFolder"},
+		{name: "STATUS fails", method: "FolderState", outage: unavailable, reason: "SERVER_UNAVAILABLE"},
+		{name: "the pass fails", method: "SyncFolder", outage: unavailable, reason: "SERVER_UNAVAILABLE"},
+		{name: "the pass is malformed", method: "SyncFolder", outage: fmt.Errorf("%w: test", mailstore.ErrMalformed), reason: "MALFORMED_RESPONSE"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			outage := fmt.Errorf("%w: test outage", mailstore.ErrUnavailable)
+			outage := tt.outage
 			fs := supFake(false)
 			acct := supAccount(t, "hostinger", nil, []string{"Sent"})
 			// Short enough that the backoff reaches it: Backoff(2, 0.5) is 4s.
@@ -1111,8 +1115,8 @@ func TestSupervisorPollerBacksOffOutages(t *testing.T) {
 			r.clock.Advance(acct.SyncPoll)
 			r.waitFor("Sent reconnecting", supStatus("Sent", StateReconnecting))
 			r.clock.expectAfter(t, backoff(0, 0.5))
-			if row := r.row("Sent"); row.State != StateReconnecting || row.LastError != "SERVER_UNAVAILABLE" {
-				t.Errorf("row = state %q last_error %q, want reconnecting and SERVER_UNAVAILABLE", row.State, row.LastError)
+			if row := r.row("Sent"); row.State != StateReconnecting || row.LastError != tt.reason {
+				t.Errorf("row = state %q last_error %q, want reconnecting and %s", row.State, row.LastError, tt.reason)
 			}
 			r.clock.Advance(backoff(0, 0.5))
 			r.clock.expectAfter(t, backoff(1, 0.5))
@@ -1556,4 +1560,12 @@ func TestSupervisorLogsTheBudgetOnAConnLimit(t *testing.T) {
 	r.clock.expectAfter(t, backoff(0, 0.5))
 	r.clock.Advance(backoff(0, 0.5))
 	r.waitFor("INBOX watching after the refusal", supStatus("INBOX", StateWatching))
+}
+
+// failureReason gives a malformed response its own class.
+func TestFailureReasonMalformed(t *testing.T) {
+	t.Parallel()
+	if got := failureReason(fmt.Errorf("syncing folder: %w", &mailstore.UnreadableError{Folder: "INBOX", UIDs: []uint32{5}})); got != "malformed" {
+		t.Errorf("failureReason = %q, want malformed", got)
+	}
 }

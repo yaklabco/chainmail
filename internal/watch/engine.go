@@ -45,7 +45,7 @@ type EngineOptions struct {
 }
 
 // errNoProgress means a source reported more new messages but returned
-// none. Pass stops rather than ask again from the same checkpoint forever.
+// none, not even as unreadable. Pass stops rather than ask again from the same checkpoint forever.
 var errNoProgress = errors.New("sync source reported more new messages but returned none")
 
 // Engine turns sync passes into events and checkpoints in state.db. It
@@ -139,7 +139,7 @@ func (e *Engine) step(ctx context.Context, account, folder string, src Source, s
 	if err != nil {
 		return false, fmt.Errorf("syncing folder: %w", err)
 	}
-	if d.More && len(d.New) == 0 {
+	if d.More && len(d.New) == 0 && len(d.Unreadable) == 0 {
 		return false, errNoProgress
 	}
 	// Known UIDs matter only for expunges and comparisons without

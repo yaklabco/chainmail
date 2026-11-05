@@ -81,9 +81,10 @@ func diff(prev FolderRow, known map[uint32]knownUID, d mailstore.Delta, in diffI
 
 // nextCheckpoint is the row to store after d. The checkpoint fields come
 // from the folder as selected, except that a batch with more new mail to
-// come stops just after its last new UID, so the next batch starts there.
-// Mode, State and LastError carry over from prev, except that a baseline
-// records the baselined state its status event reports.
+// come stops just after its last new UID, read or unreadable, so the next
+// batch starts there. Mode, State and LastError carry over from prev,
+// except that a baseline records the baselined state its status event
+// reports.
 func nextCheckpoint(prev FolderRow, d mailstore.Delta, in diffInput) FolderRow {
 	next := FolderRow{
 		Account:       in.Account,
@@ -98,8 +99,8 @@ func nextCheckpoint(prev FolderRow, d mailstore.Delta, in diffInput) FolderRow {
 		LastSweepAt:   prev.LastSweepAt,
 		LastError:     prev.LastError,
 	}
-	if d.More && len(d.New) > 0 {
-		next.UIDNext = slices.MaxFunc(d.New, bySummaryUID).Ref.UID + 1
+	if d.More && (len(d.New) > 0 || len(d.Unreadable) > 0) {
+		next.UIDNext = lastNewUID(d) + 1
 	}
 	if in.Sweep || d.Rebased {
 		next.LastSweepAt = in.At
@@ -274,3 +275,15 @@ func syncRef(in diffInput, uidValidity, uid uint32, msgID uint64) string {
 func bySummaryUID(a, b mailstore.Summary) int { return cmp.Compare(a.Ref.UID, b.Ref.UID) }
 
 func byFlagUID(a, b mailstore.FlagState) int { return cmp.Compare(a.UID, b.UID) }
+
+// lastNewUID is the highest UID of d's new mail, read or unreadable, or 0.
+func lastNewUID(d mailstore.Delta) uint32 {
+	var last uint32
+	if len(d.New) > 0 {
+		last = slices.MaxFunc(d.New, bySummaryUID).Ref.UID
+	}
+	if len(d.Unreadable) > 0 {
+		last = max(last, slices.Max(d.Unreadable))
+	}
+	return last
+}
