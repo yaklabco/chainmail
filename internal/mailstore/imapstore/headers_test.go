@@ -2,9 +2,11 @@ package imapstore
 
 import (
 	"errors"
+	"reflect"
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/mailstore/storetest"
@@ -193,5 +195,49 @@ func TestFetchHeadersSeesMailFromElsewhere(t *testing.T) {
 				return err
 			})
 		})
+	}
+}
+
+// gmailAttachedMessage is a body structure as Gmail sends it for some
+// attached messages: the MESSAGE/RFC822 part leaves out the envelope, body
+// structure and line count RFC 3501 requires after its size, and carries
+// the extension data in their place.
+const gmailAttachedMessage = `(("text" "plain" ("charset" "us-ascii") NIL NIL "7bit" 12 1 NIL NIL NIL)` +
+	`("MESSAGE" "RFC822" NIL NIL NIL "7BIT" 71499 NIL ("ATTACHMENT" NIL) NIL) "MIXED" ("BOUNDARY" "b1") NIL NIL)`
+
+// A message whose attached message Gmail describes without an envelope is
+// read like any other, with the attached message as an attachment. Such a
+// message used to fail the whole FETCH and drop the connection, so every
+// header and summary batch holding it failed as unavailable, and the cache
+// backfill retried that batch forever.
+func TestFetchHeadersReadsGmailAttachedMessageWithoutEnvelope(t *testing.T) {
+	t.Parallel()
+	srv := startScriptServer(t, &scriptServer{n: 2, structure: gmailAttachedMessage})
+	s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second})
+	src := mailstore.Source{Folder: "INBOX", UIDValidity: scriptUIDValidity}
+	hs, err := s.FetchHeaders(t.Context(), src, []uint32{1, 2})
+	if err != nil {
+		t.Fatalf("FetchHeaders: %v", err)
+	}
+	if len(hs) != 2 {
+		t.Fatalf("FetchHeaders gave %d headers, want 2", len(hs))
+	}
+	want := []mailstore.Attachment{{Part: "2", Filename: "message.eml", ContentType: "message/rfc822", Size: 71499}}
+	for _, h := range hs {
+		if !reflect.DeepEqual(h.Attachments, want) {
+			t.Errorf("UID %d attachments = %+v, want %+v", h.Summary.Ref.UID, h.Attachments, want)
+		}
+	}
+	sums, err := s.FetchSummaries(t.Context(), src, []uint32{1, 2}, mailstore.SummaryOptions{})
+	if err != nil {
+		t.Fatalf("FetchSummaries: %v", err)
+	}
+	if len(sums) != 2 {
+		t.Fatalf("FetchSummaries gave %d summaries, want 2", len(sums))
+	}
+	for _, sum := range sums {
+		if !sum.HasAttachment {
+			t.Errorf("UID %d summary has no attachment, want the attached message", sum.Ref.UID)
+		}
 	}
 }
