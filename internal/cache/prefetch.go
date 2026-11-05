@@ -347,6 +347,14 @@ func (p *prefetcher) download(ctx context.Context, r ref.Ref, set config.CacheSe
 		p.warn(ctx, "storing a prefetched body", err)
 		return false, retry, true
 	}
+	// A row read without its body structure gets the attachments of this
+	// full read (Store.RepairAttachments).
+	if !msg.Summary.AttachmentsUnknown {
+		if _, err := p.o.Store.RepairAttachments(ctx, r, msg.Summary.HasAttachment, msg.Attachments); err != nil {
+			p.warn(ctx, "repairing a row's attachments", err)
+			return false, retry, true
+		}
+	}
 	return true, 0, false
 }
 

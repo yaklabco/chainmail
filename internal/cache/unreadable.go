@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/ref"
 )
 
 // FolderIncomplete counts one folder's messages the cache could not read
@@ -191,4 +192,30 @@ func (s *Store) Incomplete(ctx context.Context, account string) ([]FolderIncompl
 		return nil, s.fail("counting incomplete messages", err)
 	}
 	return out, nil
+}
+
+// RepairAttachments gives the row of r, when it was read without its body
+// structure, the attachments a full read of the message found, and marks
+// them known. A message's attachments never change for a UID, so this is
+// safe whenever the full read was of r. Flags and every other column keep
+// their stored values, which may be newer than the read. It reports whether
+// it repaired a row: false when there is none or its attachments are
+// known.
+func (s *Store) RepairAttachments(ctx context.Context, r ref.Ref, has bool, attachments []mailstore.Attachment) (bool, error) {
+	aj, err := jsonList(attachments)
+	if err != nil {
+		return false, fmt.Errorf("repairing attachments: %w", err)
+	}
+	args := append([]any{boolInt(has), aj, normAttachments(attachments)}, refArgs(r)...)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE messages SET has_attachment = ?, attachments_json = ?, attachments_norm = ?, attachments_unknown = 0
+		 WHERE `+msgKey+` AND attachments_unknown = 1`, args...)
+	if err != nil {
+		return false, s.fail("repairing attachments", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, s.fail("repairing attachments", err)
+	}
+	return n > 0, nil
 }

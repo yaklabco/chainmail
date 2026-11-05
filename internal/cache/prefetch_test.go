@@ -743,3 +743,38 @@ func TestPrefetchWakesWhenABackfillCompletes(t *testing.T) {
 		return hasBody(t, r.store, one) && hasBody(t, r.store, two), nil
 	})
 }
+
+// A prefetched body of a message the cache holds without its body
+// structure repairs the row's attachments from the full read, keeping the
+// row's flags, so has:attachment and filename: match it afterwards.
+func TestPrefetchRepairsAttachmentsUnknown(t *testing.T) {
+	t.Parallel()
+	r := newPrefetchRig(t)
+	at := r.clk.Now().Add(-oneDay)
+	got := r.fk.Add(fake.Message{
+		Folder: "INBOX", Date: at, InternalDate: at, Subject: "invoice", Body: "see attached",
+		Attachments: []fake.Attachment{{Part: "2", Filename: "invoice.pdf", ContentType: "application/pdf", Data: []byte("%PDF")}},
+	})
+	row := Row{
+		Account: got.Account, Folder: got.Folder, UIDValidity: got.UIDValidity, UID: got.UID,
+		InternalDate: at, Date: at, Size: 100, Subject: "invoice", Flags: []string{`\Flagged`}, AttachmentsUnknown: true,
+	}
+	if err := r.st.PutRows(t.Context(), []Row{row}); err != nil {
+		t.Fatal(err)
+	}
+	r.track(true)
+	r.step(0)
+	if !r.has(got) {
+		t.Fatal("no body prefetched")
+	}
+	cached, ok, err := r.st.Row(t.Context(), got)
+	if err != nil || !ok {
+		t.Fatalf("Row: %v, %v", ok, err)
+	}
+	if cached.AttachmentsUnknown || !cached.HasAttachment || len(cached.Attachments) != 1 || cached.Attachments[0].Filename != "invoice.pdf" {
+		t.Errorf("row attachments: unknown %v, has %v, %+v; want invoice.pdf known", cached.AttachmentsUnknown, cached.HasAttachment, cached.Attachments)
+	}
+	if !slices.Equal(cached.Flags, []string{`\Flagged`}) {
+		t.Errorf("row flags = %v, want the row's own", cached.Flags)
+	}
+}

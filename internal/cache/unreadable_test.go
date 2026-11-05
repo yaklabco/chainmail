@@ -191,6 +191,45 @@ func TestRowAttachmentsUnknown(t *testing.T) {
 	}
 }
 
+// RepairAttachments gives a row read without its body structure the
+// attachments a full read found, and leaves its flags and every other
+// column alone. A row whose attachments are known, or no row, is left as
+// it is.
+func TestRepairAttachments(t *testing.T) {
+	t.Parallel()
+	s, _ := openStore(t)
+	degraded := testRow("INBOX", 5)
+	degraded.AttachmentsUnknown = true
+	known := testRow("INBOX", 6)
+	putRows(t, s, degraded, known)
+	if _, err := s.SetFlags(t.Context(), testRef("INBOX", 5), []string{`\Flagged`}, nil); err != nil {
+		t.Fatal(err)
+	}
+	pdf := []mailstore.Attachment{{Part: "2", Filename: "Invoice.pdf", ContentType: "application/pdf", Size: 300}}
+	for _, tt := range []struct {
+		uid  uint32
+		want bool
+	}{{5, true}, {6, false}, {7, false}} {
+		got, err := s.RepairAttachments(t.Context(), testRef("INBOX", tt.uid), true, pdf)
+		if err != nil || got != tt.want {
+			t.Errorf("RepairAttachments(UID %d) = %v, %v; want %v", tt.uid, got, err, tt.want)
+		}
+	}
+	want := testRow("INBOX", 5)
+	want.Flags, want.HasAttachment, want.Attachments = []string{`\Flagged`}, true, pdf
+	if got, _, _ := s.Row(t.Context(), testRef("INBOX", 5)); !reflect.DeepEqual(got, want) {
+		t.Errorf("repaired row =\n%+v\nwant\n%+v", got, want)
+	}
+	if got, _, _ := s.Row(t.Context(), testRef("INBOX", 6)); !reflect.DeepEqual(got, known) {
+		t.Errorf("known row =\n%+v\nwant\n%+v", got, known)
+	}
+	src := mailstore.Source{Folder: "INBOX", UIDValidity: testUIDValidity}
+	uids, _, err := s.SearchUIDs(t.Context(), testAccount, src, Where{SQL: "m.attachments_norm LIKE ?", Args: []any{"%invoice.pdf%"}}, 0, false)
+	if err != nil || !slices.Equal(uids, []uint32{5}) {
+		t.Errorf("filename matches = %v, %v; want [5]", uids, err)
+	}
+}
+
 // Incomplete counts each folder's unreadable records and rows read without
 // their body structure, for folders with either, in folder order.
 func TestIncomplete(t *testing.T) {
