@@ -206,13 +206,14 @@ func TestFolderCacheProto(t *testing.T) {
 					Folder: "INBOX", Headers: 380, Bodies: 40, BodyBytes: 1234,
 					WindowMessages: 50, WindowBodies: 40, BodyFailures: 2,
 				},
-				State: "backfilling",
+				State:      "backfilling",
+				Unreadable: 3, AttachmentsUnknown: 4,
 			},
 			want: &chainmailv1.FolderCacheStatus{
 				Folder: "INBOX", State: "backfilling", Headers: 380, BackfillDone: false,
 				BaselineUid: 500, BackfillLowUid: 120, Bodies: 40, BodyBytes: 1234,
 				WindowMessages: 50, WindowBodies: 40, WindowDone: true, BodyFailures: 2,
-				LastAppliedAt: timestamppb.New(at),
+				LastAppliedAt: timestamppb.New(at), Unreadable: 3, AttachmentsUnknown: 4,
 			},
 		},
 		{
@@ -668,19 +669,22 @@ func TestCacheHousekeepingRunsAtStart(t *testing.T) {
 }
 
 // When a sweep leaves cache.db over max_size with headers alone, status
-// reports a ready or prefetching account as over_cap and keeps every other
-// state, which says more about why the cache is not ready.
+// reports a ready, incomplete or prefetching account as over_cap and keeps
+// every other state, which says more about why the cache is not ready.
 func TestCacheStatusOverCap(t *testing.T) {
 	t.Parallel()
 	const day = 1 << 30 // the default daily_download
 	tests := []struct {
 		name     string
-		progress *cache.Progress // INBOX's, nil for none
-		syncWith string          // INBOX's sync_folders state
-		spent    int64
-		overCap  bool
-		want     string
+		progress   *cache.Progress // INBOX's, nil for none
+		syncWith   string          // INBOX's sync_folders state
+		spent      int64
+		unreadable bool // INBOX has a message recorded as unreadable
+		overCap    bool
+		want       string
 	}{
+		{name: "incomplete under the cap", progress: &cache.Progress{BackfillDone: true, WindowDone: true}, unreadable: true, want: cache.StateIncomplete},
+		{name: "incomplete", progress: &cache.Progress{BackfillDone: true, WindowDone: true}, unreadable: true, overCap: true, want: cache.StateOverCap},
 		{name: "ready under the cap", progress: &cache.Progress{BackfillDone: true, WindowDone: true}, want: cache.StateReady},
 		{name: "ready", progress: &cache.Progress{BackfillDone: true, WindowDone: true}, overCap: true, want: cache.StateOverCap},
 		{name: "prefetching", progress: &cache.Progress{BackfillDone: true}, overCap: true, want: cache.StateOverCap},
@@ -700,6 +704,11 @@ func TestCacheStatusOverCap(t *testing.T) {
 			if p := tt.progress; p != nil {
 				p.Account, p.Folder, p.UIDValidity, p.BaselineUIDNext = "host", "INBOX", 7, 100
 				if err := s.cache.PutProgress(ctx, *p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.unreadable {
+				if err := s.cache.MarkUnreadable(ctx, "host", mailstore.Source{Folder: "INBOX", UIDValidity: 7}, []uint32{5}); err != nil {
 					t.Fatal(err)
 				}
 			}

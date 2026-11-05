@@ -32,8 +32,8 @@ message GetCacheStatusResponse {
 message AccountCacheStatus {
   string account = 1;
   bool enabled = 2;
-  // backfilling, prefetching, ready, budget_exhausted, paused, disabled,
-  // error or over_cap.
+  // backfilling, prefetching, incomplete, ready, budget_exhausted, paused,
+  // disabled, error or over_cap. incomplete: a folder is incomplete.
   string state = 3;
   // Bytes downloaded for the cache today, UTC.
   int64 budget_used_bytes = 4;
@@ -47,6 +47,8 @@ message AccountCacheStatus {
 // FolderCacheStatus is the cache of one synced folder.
 message FolderCacheStatus {
   string folder = 1;
+  // paused, backfilling, prefetching, incomplete or ready. incomplete
+  // replaces ready while unreadable is not 0.
   string state = 2;
   // Messages whose headers are cached.
   uint64 headers = 3;
@@ -66,6 +68,12 @@ message FolderCacheStatus {
   // Bodies that failed to fetch 3 times and are not retried.
   uint64 body_failures = 12;
   google.protobuf.Timestamp last_applied_at = 13;
+  // Messages whose server answer could not be parsed, so the cache has no
+  // row for them. They are read again each time the daemon starts.
+  uint64 unreadable = 14;
+  // Messages cached without their body structure, whose attachments are
+  // not known.
+  uint64 attachments_unknown = 15;
 }
 
 message RebuildCacheRequest {

@@ -167,7 +167,7 @@ func (s *Server) cacheStatus(ctx context.Context, acct config.ResolvedAccount, w
 		return out
 	}
 	out = accountCacheProto(st, withFolders)
-	if s.cache.OverCap() && (out.State == cache.StateReady || out.State == cache.StatePrefetching) {
+	if s.cache.OverCap() && (out.State == cache.StateReady || out.State == cache.StateIncomplete || out.State == cache.StatePrefetching) {
 		out.State = cache.StateOverCap
 	}
 	return out
@@ -193,19 +193,21 @@ func accountCacheProto(st cache.AccountStatus, withFolders bool) *chainmailv1.Ac
 // FolderStatus embeds Progress and FolderStats, which both name the folder.
 func folderCacheProto(f cache.FolderStatus) *chainmailv1.FolderCacheStatus {
 	return &chainmailv1.FolderCacheStatus{
-		Folder:         cmp.Or(f.Progress.Folder, f.FolderStats.Folder),
-		State:          f.State,
-		Headers:        f.Headers,
-		BackfillDone:   f.BackfillDone,
-		BaselineUid:    f.BaselineUIDNext,
-		BackfillLowUid: f.BackfillLowUID,
-		Bodies:         f.Bodies,
-		BodyBytes:      f.BodyBytes,
-		WindowMessages: f.WindowMessages,
-		WindowBodies:   f.WindowBodies,
-		WindowDone:     f.WindowDone,
-		BodyFailures:   f.BodyFailures,
-		LastAppliedAt:  timestamp(f.LastAppliedAt),
+		Folder:             cmp.Or(f.Progress.Folder, f.FolderStats.Folder),
+		State:              f.State,
+		Headers:            f.Headers,
+		BackfillDone:       f.BackfillDone,
+		BaselineUid:        f.BaselineUIDNext,
+		BackfillLowUid:     f.BackfillLowUID,
+		Bodies:             f.Bodies,
+		BodyBytes:          f.BodyBytes,
+		WindowMessages:     f.WindowMessages,
+		WindowBodies:       f.WindowBodies,
+		WindowDone:         f.WindowDone,
+		BodyFailures:       f.BodyFailures,
+		LastAppliedAt:      timestamp(f.LastAppliedAt),
+		Unreadable:         f.Unreadable,
+		AttachmentsUnknown: f.AttachmentsUnknown,
 	}
 }
 

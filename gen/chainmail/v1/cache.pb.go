@@ -134,8 +134,8 @@ type AccountCacheStatus struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Account string                 `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
 	Enabled bool                   `protobuf:"varint,2,opt,name=enabled,proto3" json:"enabled,omitempty"`
-	// backfilling, prefetching, ready, budget_exhausted, paused, disabled,
-	// error or over_cap.
+	// backfilling, prefetching, incomplete, ready, budget_exhausted, paused,
+	// disabled, error or over_cap. incomplete: a folder is incomplete.
 	State string `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"`
 	// Bytes downloaded for the cache today, UTC.
 	BudgetUsedBytes int64 `protobuf:"varint,4,opt,name=budget_used_bytes,json=budgetUsedBytes,proto3" json:"budget_used_bytes,omitempty"`
@@ -231,7 +231,9 @@ func (x *AccountCacheStatus) GetFolders() []*FolderCacheStatus {
 type FolderCacheStatus struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Folder string                 `protobuf:"bytes,1,opt,name=folder,proto3" json:"folder,omitempty"`
-	State  string                 `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	// paused, backfilling, prefetching, incomplete or ready. incomplete
+	// replaces ready while unreadable is not 0.
+	State string `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
 	// Messages whose headers are cached.
 	Headers      uint64 `protobuf:"varint,3,opt,name=headers,proto3" json:"headers,omitempty"`
 	BackfillDone bool   `protobuf:"varint,4,opt,name=backfill_done,json=backfillDone,proto3" json:"backfill_done,omitempty"`
@@ -250,8 +252,14 @@ type FolderCacheStatus struct {
 	// Bodies that failed to fetch 3 times and are not retried.
 	BodyFailures  uint64                 `protobuf:"varint,12,opt,name=body_failures,json=bodyFailures,proto3" json:"body_failures,omitempty"`
 	LastAppliedAt *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=last_applied_at,json=lastAppliedAt,proto3" json:"last_applied_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Messages whose server answer could not be parsed, so the cache has no
+	// row for them. They are read again each time the daemon starts.
+	Unreadable uint64 `protobuf:"varint,14,opt,name=unreadable,proto3" json:"unreadable,omitempty"`
+	// Messages cached without their body structure, whose attachments are
+	// not known.
+	AttachmentsUnknown uint64 `protobuf:"varint,15,opt,name=attachments_unknown,json=attachmentsUnknown,proto3" json:"attachments_unknown,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *FolderCacheStatus) Reset() {
@@ -373,6 +381,20 @@ func (x *FolderCacheStatus) GetLastAppliedAt() *timestamppb.Timestamp {
 		return x.LastAppliedAt
 	}
 	return nil
+}
+
+func (x *FolderCacheStatus) GetUnreadable() uint64 {
+	if x != nil {
+		return x.Unreadable
+	}
+	return 0
+}
+
+func (x *FolderCacheStatus) GetAttachmentsUnknown() uint64 {
+	if x != nil {
+		return x.AttachmentsUnknown
+	}
+	return 0
 }
 
 type RebuildCacheRequest struct {
@@ -581,7 +603,7 @@ const file_chainmail_v1_cache_proto_rawDesc = "" +
 	"\fbudget_bytes\x18\x05 \x01(\x03R\vbudgetBytes\x12\x1d\n" +
 	"\n" +
 	"last_error\x18\x06 \x01(\tR\tlastError\x129\n" +
-	"\afolders\x18\a \x03(\v2\x1f.chainmail.v1.FolderCacheStatusR\afolders\"\xdc\x03\n" +
+	"\afolders\x18\a \x03(\v2\x1f.chainmail.v1.FolderCacheStatusR\afolders\"\xad\x04\n" +
 	"\x11FolderCacheStatus\x12\x16\n" +
 	"\x06folder\x18\x01 \x01(\tR\x06folder\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12\x18\n" +
@@ -598,7 +620,11 @@ const file_chainmail_v1_cache_proto_rawDesc = "" +
 	"\vwindow_done\x18\v \x01(\bR\n" +
 	"windowDone\x12#\n" +
 	"\rbody_failures\x18\f \x01(\x04R\fbodyFailures\x12B\n" +
-	"\x0flast_applied_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\rlastAppliedAt\"G\n" +
+	"\x0flast_applied_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\rlastAppliedAt\x12\x1e\n" +
+	"\n" +
+	"unreadable\x18\x0e \x01(\x04R\n" +
+	"unreadable\x12/\n" +
+	"\x13attachments_unknown\x18\x0f \x01(\x04R\x12attachmentsUnknown\"G\n" +
 	"\x13RebuildCacheRequest\x12\x18\n" +
 	"\aaccount\x18\x01 \x01(\tR\aaccount\x12\x16\n" +
 	"\x06folder\x18\x02 \x01(\tR\x06folder\"0\n" +

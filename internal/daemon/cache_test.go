@@ -41,7 +41,7 @@ enabled = false
 const cacheRunWait = 15 * time.Second
 
 // cacheStates are the account states C5 allows.
-var cacheStates = []string{"backfilling", "prefetching", "ready", "budget_exhausted", "paused", "disabled", "error", "over_cap"}
+var cacheStates = []string{"backfilling", "prefetching", "incomplete", "ready", "budget_exhausted", "paused", "disabled", "error", "over_cap"}
 
 // startCacheRun runs a watching daemon with the cache on, each account on
 // its store from stores, with passwords stored so no supervisor parks an

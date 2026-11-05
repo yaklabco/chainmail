@@ -30,7 +30,7 @@ func cacheStatusAnswer(context.Context, *chainmailv1.GetCacheStatusRequest) (*ch
 			Folders: []*chainmailv1.FolderCacheStatus{{
 				Folder: "INBOX", State: "backfilling", Headers: 1200, BaselineUid: 9000, BackfillLowUid: 4100,
 				Bodies: 300, BodyBytes: 1 << 20, WindowMessages: 310, WindowBodies: 300, BodyFailures: 2,
-				LastAppliedAt: timestamppb.New(cacheAt),
+				LastAppliedAt: timestamppb.New(cacheAt), Unreadable: 1, AttachmentsUnknown: 3,
 			}},
 		},
 		{Account: "old", State: "disabled", BudgetBytes: 1 << 30, LastError: "AUTH_REQUIRED"},
@@ -72,7 +72,7 @@ func TestCacheStatusOutput(t *testing.T) {
 			Folders: []cacheFolderOut{{
 				Folder: untrusted{Untrusted: "INBOX"}, State: "backfilling", Headers: 1200, BaselineUID: 9000, BackfillLowUID: 4100,
 				Bodies: 300, BodyBytes: 1 << 20, WindowMessages: 310, WindowBodies: 300, BodyFailures: 2,
-				LastAppliedAt: "2026-11-02T09:00:00Z",
+				LastAppliedAt: "2026-11-02T09:00:00Z", Unreadable: 1, AttachmentsUnknown: 3,
 			}},
 		},
 		{Account: "old", State: "disabled", BudgetBytes: 1 << 30, LastError: "AUTH_REQUIRED", Folders: []cacheFolderOut{}},
