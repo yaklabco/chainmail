@@ -482,6 +482,9 @@ type watchConn struct {
 	closed  bool
 	// unseenExpunge is a quiet expunge (SetQuietIdle) the next Sync reports.
 	unseenExpunge bool
+	// spent is set by a Sync that met malformed new mail, which drops the
+	// connection, as a parse error ends imapstore's.
+	spent bool
 }
 
 // notifyLocked wakes a waiting Idle without blocking.
@@ -531,7 +534,22 @@ func (c *watchConn) Sync(ctx context.Context, req mailstore.SyncRequest) (mailst
 		c.pending.Changed, c.pending.Expunged = true, true
 		c.notifyLocked()
 	}
+	if err == nil && s.malformedNewLocked(c.folder, d) {
+		// imapstore's connection dies on the FETCH of that mail, and the
+		// store reads it again on another, so the pass still succeeds.
+		c.spent, c.dropped = true, true
+	}
 	return d, err
+}
+
+var _ mailstore.Redialer = (*watchConn)(nil)
+
+// NeedsRedial implements mailstore.Redialer: the connection's last Sync
+// met new mail the server sent in a form imapstore cannot parse.
+func (c *watchConn) NeedsRedial() bool {
+	c.s.mu.Lock()
+	defer c.s.mu.Unlock()
+	return c.spent
 }
 
 // IdleSupported implements mailstore.WatchConn.

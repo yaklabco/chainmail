@@ -200,3 +200,39 @@ func TestSyncPassIsolatesMalformedNewMail(t *testing.T) {
 		})
 	}
 }
+
+// A watch connection whose pass met malformed new mail says it needs a
+// redial, since the parse error ended it, and one whose pass read its new
+// mail whole does not.
+func TestWatchConnNeedsRedialAfterMalformedNewMail(t *testing.T) {
+	t.Parallel()
+	from := mailstore.Checkpoint{UIDValidity: scriptUIDValidity, UIDNext: 1, HighestModSeq: scriptModSeq}
+	for name, tt := range map[string]struct {
+		srv  *scriptServer
+		want bool
+	}{
+		"well formed":   {srv: &scriptServer{n: 4, condstore: true}, want: false},
+		"bad structure": {srv: &scriptServer{n: 4, condstore: true, badStructure: 2}, want: true},
+		"bad envelope":  {srv: &scriptServer{n: 4, condstore: true, badEnvelope: 3}, want: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := scriptStore(t, startScriptServer(t, tt.srv), Options{CommandTimeout: 5 * time.Second})
+			w, err := s.OpenWatch(t.Context(), "INBOX")
+			if err != nil {
+				t.Fatalf("OpenWatch: %v", err)
+			}
+			t.Cleanup(func() { _ = w.Close() })
+			if _, err := w.Sync(t.Context(), mailstore.SyncRequest{From: from}); err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			r, ok := w.(mailstore.Redialer)
+			if !ok {
+				t.Fatal("the watch connection is not a mailstore.Redialer")
+			}
+			if got := r.NeedsRedial(); got != tt.want {
+				t.Errorf("NeedsRedial = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

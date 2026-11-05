@@ -108,6 +108,17 @@ type Aborter interface {
 	Abort()
 }
 
+// Redialer is optional on a WatchConn, found by type assertion.
+// NeedsRedial reports whether the connection's last Sync succeeded but
+// left it dead: the server sent new mail in a form chainmail cannot read,
+// which ends the connection, and the store read that mail again on
+// another. The connection is then not worth an Idle. The watch supervisor
+// dials a new one at once, which is no outage. imapstore's and the fake's
+// watch connections implement it.
+type Redialer interface {
+	NeedsRedial() bool
+}
+
 // Watcher is a store that can watch and sync folders. imapstore.Store and
 // fake.Store implement it.
 type Watcher interface {

@@ -230,6 +230,12 @@ func compareFolders(a, b string) int {
 func (s *Store) Add(m Message) ref.Ref {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_, r := s.addLocked(m)
+	return r
+}
+
+// addLocked is Add. It also returns the message stored.
+func (s *Store) addLocked(m Message) (*Message, ref.Ref) {
 	if _, ok := s.uidValidity[m.Folder]; !ok {
 		panic(fmt.Sprintf("fake: no folder %q; call AddFolder first", m.Folder))
 	}
@@ -251,7 +257,7 @@ func (s *Store) Add(m Message) ref.Ref {
 	s.nextUID[m.Folder]++
 	s.msgs = append(s.msgs, &m)
 	s.touchLocked(&m)
-	return s.refLocked(&m)
+	return &m, s.refLocked(&m)
 }
 
 // assignGmailIDsLocked fills in a zero X-GM-MSGID and thread ID. Gmail

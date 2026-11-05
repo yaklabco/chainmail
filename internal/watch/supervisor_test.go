@@ -1569,3 +1569,36 @@ func TestFailureReasonMalformed(t *testing.T) {
 		t.Errorf("failureReason = %q, want malformed", got)
 	}
 }
+
+// A pass on a watch connection that meets new mail the server sent in a
+// form chainmail cannot read succeeds, since the store reads that mail on
+// another connection, but the watch connection dies on it. The watcher
+// dials again at once and quietly: no warning, no reconnecting row and no
+// backoff, so the folder never looks like it had an outage.
+func TestSupervisorRedialsQuietlyAfterMalformedNewMail(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	var logs syncBuffer
+	r := newSupRig(t, fs, supAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}), func(o *SupervisorOptions) {
+		o.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	})
+	r.start()
+	r.waitFor("INBOX watching", supStatus("INBOX", StateWatching))
+	r.waitIdle("INBOX")
+
+	fs.AddMalformed(supMsg("INBOX", "bad structure"), fake.BadStructure)
+	r.waitFor("new event for the message", supNew("INBOX", "bad structure"))
+	r.waitIdle("INBOX") // on the new connection, with the clock never advanced
+	if n := fs.Calls("OpenWatch"); n != 2 {
+		t.Errorf("OpenWatch ran %d times, want 2", n)
+	}
+	if got := logs.String(); strings.Contains(got, "level=WARN") {
+		t.Errorf("logs hold a warning:\n%s", got)
+	}
+	if n := supCount(r.all(), supStatus("INBOX", StateReconnecting)); n != 0 {
+		t.Errorf("%d reconnecting events, want none:%s", n, supDump(r.all()))
+	}
+	if row := r.row("INBOX"); row.State != StateWatching || row.LastError != "" {
+		t.Errorf("row = state %q last_error %q, want watching and no error", row.State, row.LastError)
+	}
+}

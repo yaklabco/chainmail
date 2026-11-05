@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/ref"
 )
 
 // Malformation is how the fake answers a fetch of one message, for tests of
@@ -42,6 +43,21 @@ func (s *Store) Malform(folder string, uid uint32, how Malformation) {
 		return
 	}
 	s.malformed[m] = how
+}
+
+// AddMalformed adds m, as Add does, and sets how fetches answer for it in
+// the same step, so no pass can read it whole first.
+func (s *Store) AddMalformed(m Message, how Malformation) ref.Ref {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stored, r := s.addLocked(m)
+	if how != WellFormed {
+		if s.malformed == nil {
+			s.malformed = map[*Message]Malformation{}
+		}
+		s.malformed[stored] = how
+	}
+	return r
 }
 
 // SetMalformedBatch makes a FetchHeaders or FetchSummaries call that asks
@@ -87,4 +103,18 @@ func (s *Store) unreadableErrLocked(folder string, asked int, unreadable []uint3
 	default:
 		return &mailstore.UnreadableError{Folder: folder, UIDs: unreadable}
 	}
+}
+
+// malformedNewLocked reports whether the pass d on folder met new mail with
+// a malformation, read without its body structure or not at all.
+func (s *Store) malformedNewLocked(folder string, d mailstore.Delta) bool {
+	if len(d.Unreadable) > 0 {
+		return true
+	}
+	for _, sum := range d.New {
+		if m := s.findLocked(folder, sum.Ref.UID); m != nil && s.malformed[m] != WellFormed {
+			return true
+		}
+	}
+	return false
 }
