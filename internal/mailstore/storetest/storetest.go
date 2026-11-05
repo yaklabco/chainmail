@@ -1590,6 +1590,7 @@ func SameSummary(a, b mailstore.Summary) bool {
 	return a.Ref == b.Ref && a.Date.Equal(b.Date) && a.InternalDate.Equal(b.InternalDate) &&
 		slices.Equal(a.From, b.From) && slices.Equal(a.To, b.To) && a.Subject == b.Subject &&
 		slices.Equal(a.Flags, b.Flags) && a.Size == b.Size && a.HasAttachment == b.HasAttachment &&
+		a.AttachmentsUnknown == b.AttachmentsUnknown &&
 		a.ThreadID == b.ThreadID && slices.Equal(a.Labels, b.Labels)
 }
 

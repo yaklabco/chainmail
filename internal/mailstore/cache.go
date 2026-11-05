@@ -19,7 +19,8 @@ type Header struct {
 	// InReplyTo and References are as Message has them.
 	InReplyTo  []string
 	References []string
-	// Attachments are the attachment parts, as Message has them.
+	// Attachments are the attachment parts, as Message has them. They are
+	// nil when Summary.AttachmentsUnknown is set.
 	Attachments []Attachment
 }
 
@@ -29,7 +30,11 @@ type HeaderFetcher interface {
 	// FetchHeaders returns the headers of uids in src.Folder, in the order
 	// of uids, leaving out UIDs the folder no longer holds. A folder whose
 	// UIDVALIDITY is not src.UIDValidity is ErrStaleRef. It never sets
-	// \Seen.
+	// \Seen. A message whose body structure the server sent in a form
+	// chainmail cannot read comes back with Summary.AttachmentsUnknown.
+	// Messages it cannot read at all are left out, and the error is an
+	// *UnreadableError naming them: the headers that come with that error
+	// are valid.
 	FetchHeaders(ctx context.Context, src Source, uids []uint32) ([]Header, error)
 }
 

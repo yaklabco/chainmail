@@ -82,3 +82,21 @@ func TestErrThrottledIsUnavailable(t *testing.T) {
 		t.Error("ErrUnavailable or ErrConnLimit counts as ErrThrottled")
 	}
 }
+
+// An UnreadableError is ErrMalformed and nothing else, so a caller that
+// only knows the sentinel still sorts it, and one that knows the type gets
+// the folder and the UIDs.
+func TestUnreadableError(t *testing.T) {
+	t.Parallel()
+	err := fmt.Errorf("fetching: %w", &UnreadableError{Folder: "INBOX", UIDs: []uint32{5, 9}})
+	if !errors.Is(err, ErrMalformed) {
+		t.Errorf("%v is not ErrMalformed", err)
+	}
+	if errors.Is(err, ErrUnavailable) {
+		t.Errorf("%v is ErrUnavailable, want only ErrMalformed", err)
+	}
+	unreadable, ok := errors.AsType[*UnreadableError](err)
+	if !ok || unreadable.Folder != "INBOX" || !slices.Equal(unreadable.UIDs, []uint32{5, 9}) {
+		t.Errorf("errors.AsType = %+v, %v; want INBOX and UIDs 5 and 9", unreadable, ok)
+	}
+}
