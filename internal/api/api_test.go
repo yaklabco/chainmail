@@ -20,6 +20,7 @@ func TestExitCode(t *testing.T) {
 		ReasonNotFound:           ExitNotFound,
 		ReasonStaleRef:           ExitNotFound,
 		ReasonServerUnavailable:  ExitUnavailable,
+		ReasonMalformedResponse:  ExitInternal,
 		ReasonTimeout:            ExitUnavailable,
 		ReasonDaemonUnreachable:  ExitUnavailable,
 		ReasonSendOutcomeUnknown: ExitSendUnknown,

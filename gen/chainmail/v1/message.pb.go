@@ -249,10 +249,14 @@ type PartialSource struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Account string                 `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
 	// Empty when the whole account failed.
-	Folder        string `protobuf:"bytes,2,opt,name=folder,proto3" json:"folder,omitempty"`
-	Reason        string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
-	Message       string `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
-	Hint          string `protobuf:"bytes,5,opt,name=hint,proto3" json:"hint,omitempty"`
+	Folder  string `protobuf:"bytes,2,opt,name=folder,proto3" json:"folder,omitempty"`
+	Reason  string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	Message string `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+	Hint    string `protobuf:"bytes,5,opt,name=hint,proto3" json:"hint,omitempty"`
+	// In a search, with reason MALFORMED_RESPONSE: the folder's matches left
+	// out of the page because the server's answer for them could not be
+	// parsed. The folder's other rows are in the page.
+	Unreadable    uint64 `protobuf:"varint,6,opt,name=unreadable,proto3" json:"unreadable,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -320,6 +324,13 @@ func (x *PartialSource) GetHint() string {
 		return x.Hint
 	}
 	return ""
+}
+
+func (x *PartialSource) GetUnreadable() uint64 {
+	if x != nil {
+		return x.Unreadable
+	}
+	return 0
 }
 
 type ListFoldersRequest struct {
@@ -928,11 +939,12 @@ type AccountCount struct {
 	Source string `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`
 	// With source "cache": the oldest last sync of the folders searched.
 	SyncedAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=synced_at,json=syncedAt,proto3" json:"synced_at,omitempty"`
-	// False only when source "cache" was forced and the cache could not
-	// answer completely.
+	// False when source "cache" was forced and the cache could not answer
+	// completely, or when the cache answered and a folder searched holds
+	// messages it could not read.
 	Complete bool `protobuf:"varint,5,opt,name=complete,proto3" json:"complete,omitempty"`
 	// Set when complete is false: backfilling, stale, text_outside_window,
-	// folder_not_synced or cache_disabled.
+	// folder_not_synced, cache_disabled or unreadable_messages.
 	IncompleteReason string `protobuf:"bytes,6,opt,name=incomplete_reason,json=incompleteReason,proto3" json:"incomplete_reason,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
@@ -2144,13 +2156,16 @@ const file_chainmail_v1_message_proto_rawDesc = "" +
 	"\x06unseen\x18\x04 \x01(\rR\x06unseen\"Z\n" +
 	"\x0eAccountFolders\x12\x18\n" +
 	"\aaccount\x18\x01 \x01(\tR\aaccount\x12.\n" +
-	"\afolders\x18\x02 \x03(\v2\x14.chainmail.v1.FolderR\afolders\"\x87\x01\n" +
+	"\afolders\x18\x02 \x03(\v2\x14.chainmail.v1.FolderR\afolders\"\xa7\x01\n" +
 	"\rPartialSource\x12\x18\n" +
 	"\aaccount\x18\x01 \x01(\tR\aaccount\x12\x16\n" +
 	"\x06folder\x18\x02 \x01(\tR\x06folder\x12\x16\n" +
 	"\x06reason\x18\x03 \x01(\tR\x06reason\x12\x18\n" +
 	"\amessage\x18\x04 \x01(\tR\amessage\x12\x12\n" +
-	"\x04hint\x18\x05 \x01(\tR\x04hint\"0\n" +
+	"\x04hint\x18\x05 \x01(\tR\x04hint\x12\x1e\n" +
+	"\n" +
+	"unreadable\x18\x06 \x01(\x04R\n" +
+	"unreadable\"0\n" +
 	"\x12ListFoldersRequest\x12\x1a\n" +
 	"\baccounts\x18\x01 \x03(\tR\baccounts\"\x86\x01\n" +
 	"\x13ListFoldersResponse\x128\n" +

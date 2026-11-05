@@ -1,11 +1,13 @@
 package cache
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
 	"github.com/jamesainslie/chainmail/internal/watch"
 )
@@ -23,7 +25,7 @@ func acctReadyFolder(r *acctRig, folder string, window bool) {
 
 // The account state follows C5's states, the most pressing first:
 // disabled, error, paused, budget_exhausted, backfilling, prefetching,
-// ready. The daemon applies the file-wide over_cap itself.
+// incomplete, ready. The daemon applies the file-wide over_cap itself.
 func TestStatusStates(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -90,6 +92,31 @@ func TestStatusStates(t *testing.T) {
 			r.setSettings(func(s *config.CacheSettings) { s.PrefetchBodies = 90 * 24 * time.Hour })
 			acctReadyFolder(r, "INBOX", false)
 		}, want: StatePrefetching},
+		{name: "unreadable messages", setup: func(r *acctRig) {
+			acctReadyFolder(r, "INBOX", true)
+			putUnreadable(r, "INBOX", 3)
+		}, want: StateIncomplete},
+		{name: "attachments unknown is not incomplete", setup: func(r *acctRig) {
+			acctReadyFolder(r, "INBOX", true)
+			r.putRows(Row{Account: "acme", Folder: "INBOX", UIDValidity: 7, UID: 5, Subject: "a", MessageID: "a@example.com", InternalDate: acctStart, Date: acctStart, AttachmentsUnknown: true})
+		}, want: StateReady},
+		{name: "prefetching before incomplete", setup: func(r *acctRig) {
+			r.setSettings(func(s *config.CacheSettings) { s.PrefetchBodies = 90 * 24 * time.Hour })
+			acctReadyFolder(r, "INBOX", false)
+			putUnreadable(r, "INBOX", 3)
+		}, want: StatePrefetching},
+		{name: "backfilling before incomplete", setup: func(r *acctRig) {
+			acctReadyFolder(r, "INBOX", true)
+			putUnreadable(r, "INBOX", 3)
+			r.putFolder(watch.FolderRow{Account: "acme", Folder: "Archive", UIDValidity: 7, UIDNext: 10, Mode: watch.ModePoll, State: watch.StatePolling})
+		}, want: StateBackfilling},
+		{name: "budget spent before incomplete", setup: func(r *acctRig) {
+			acctReadyFolder(r, "INBOX", true)
+			putUnreadable(r, "INBOX", 3)
+			if _, err := r.store.AddBudget(r.t.Context(), "acme", "2026-11-02", 1<<30); err != nil {
+				r.t.Fatal(err)
+			}
+		}, want: StateBudgetExhausted},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -142,6 +169,51 @@ func TestStatusEmptyWindowIsComplete(t *testing.T) {
 				t.Errorf("window_done = true, want Status to leave it unset")
 			}
 		})
+	}
+}
+
+// putUnreadable records uids of the rig account's folder, at UIDVALIDITY
+// 7, as unreadable.
+func putUnreadable(r *acctRig, folder string, uids ...uint32) {
+	r.t.Helper()
+	if err := r.store.MarkUnreadable(r.t.Context(), "acme", mailstore.Source{Folder: folder, UIDValidity: 7}, uids); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+// Each folder reports how many of its messages are recorded as unreadable
+// and how many rows were read without their body structure. A folder with
+// unreadable messages is incomplete in place of ready. Rows whose
+// attachments are unknown alone leave it ready.
+func TestStatusReportsIncomplete(t *testing.T) {
+	t.Parallel()
+	r := newAcctRig(t, fake.New("acme", false), acctAccount(t, "hostinger", []string{"INBOX"}, []string{"Archive", "INBOX"}))
+	acctReadyFolder(r, "Archive", true)
+	acctReadyFolder(r, "INBOX", true)
+	putUnreadable(r, "INBOX", 3, 4)
+	r.putRows(
+		Row{Account: "acme", Folder: "INBOX", UIDValidity: 7, UID: 5, Subject: "a", MessageID: "a@example.com", InternalDate: acctStart, Date: acctStart, AttachmentsUnknown: true},
+		Row{Account: "acme", Folder: "Archive", UIDValidity: 7, UID: 6, Subject: "b", MessageID: "b@example.com", InternalDate: acctStart, Date: acctStart, AttachmentsUnknown: true},
+	)
+	st, err := r.a.Status(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.State != StateIncomplete {
+		t.Errorf("State = %q, want %q", st.State, StateIncomplete)
+	}
+	type folder struct {
+		name                         string
+		state                        string
+		unreadable, unknown, headers uint64
+	}
+	var got []folder
+	for _, f := range st.Folders {
+		got = append(got, folder{f.Progress.Folder, f.State, f.Unreadable, f.AttachmentsUnknown, f.Headers})
+	}
+	want := []folder{{"Archive", StateReady, 0, 1, 1}, {"INBOX", StateIncomplete, 2, 1, 1}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Folders = %+v, want %+v", got, want)
 	}
 }
 

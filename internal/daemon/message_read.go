@@ -78,6 +78,7 @@ var clientText = map[string]string{
 	api.ReasonStaleRef:          "the message is gone; search again",
 	api.ReasonNotFound:          "not found",
 	api.ReasonServerUnavailable: "the mail server failed while reading",
+	api.ReasonMalformedResponse: "the mail server sent a response chainmail cannot read",
 	api.ReasonTimeout:           "timed out",
 	api.ReasonAuthRequired:      "the account needs authentication",
 	api.ReasonAuthRejected:      "the server rejected the credentials",

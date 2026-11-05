@@ -21,7 +21,8 @@ import (
 
 // SchemaVersion is cache.db's PRAGMA user_version. A file with any other
 // version is deleted and created again: the cache has no migrations.
-const SchemaVersion = 1
+// Version 2 added the unreadable table and messages.attachments_unknown.
+const SchemaVersion = 2
 
 //go:embed schema.sql
 var schema string
@@ -46,6 +47,9 @@ type Store struct {
 	// evict is the size cap state shared by the prefetchers, the read path
 	// and the evictor (evict.go).
 	evict evictState
+	// beforeRepair, when set, runs as a body write starts repairing its
+	// row's attachments. Tests set it.
+	beforeRepair func()
 }
 
 // recreateError says why Open deletes the file: "corrupt", "version" or

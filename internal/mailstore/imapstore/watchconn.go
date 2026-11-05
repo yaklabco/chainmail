@@ -136,6 +136,10 @@ type watchConn struct {
 	idling atomic.Bool
 	// aborted is set by Abort, after which Close does not log out.
 	aborted atomic.Bool
+	// spent is set by a Sync whose new mail the server sent in a form
+	// chainmail cannot read, which ended the connection. Only the owner's
+	// goroutine uses it.
+	spent bool
 
 	closeOnce sync.Once
 	closeErr  error
@@ -193,7 +197,15 @@ func (w *watchConn) take() mailstore.Wake {
 // otherwise miss every one.
 func (w *watchConn) Sync(ctx context.Context, req mailstore.SyncRequest) (mailstore.Delta, error) {
 	view := passView{since: w.last.uidNext}
-	d, err := w.s.syncPass(ctx, w.c, w.folder, req, &view)
+	d, unread, err := w.s.syncPass(ctx, w.c, w.folder, req, &view)
+	if err == nil && len(unread) > 0 {
+		// The watch connection died on a message the server sent in a form
+		// chainmail cannot read. The pool reads the new mail again and
+		// isolates that message. NeedsRedial then tells the watcher to
+		// dial again rather than Idle on a dead connection.
+		w.spent = true
+		err = w.s.readNew(ctx, w.folder, req, &d, unread)
+	}
 	if err != nil {
 		return mailstore.Delta{}, w.s.watchError(err)
 	}
@@ -203,6 +215,14 @@ func (w *watchConn) Sync(ctx context.Context, req mailstore.SyncRequest) (mailst
 	w.last, w.hasLast = view, true
 	return d, nil
 }
+
+var _ mailstore.Redialer = (*watchConn)(nil)
+
+// NeedsRedial implements mailstore.Redialer: a Sync met new mail the server
+// sent in a form chainmail cannot read, which ended the connection, or the
+// connection is dead for another reason a Sync did not report, such as a
+// malformed text sample that only cost the snippets.
+func (w *watchConn) NeedsRedial() bool { return w.spent || w.c.Dead() }
 
 // unannouncedExpunge reports whether a message the pass before saw has left
 // the folder: the messages now are fewer than those then plus the new ones

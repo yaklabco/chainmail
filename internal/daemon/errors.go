@@ -87,6 +87,8 @@ func toConnectError(err error) *connect.Error {
 		return api.New(connect.CodeCanceled, api.ReasonTimeout, "", err)
 	case errors.Is(err, auth.ErrTokenEndpoint), errors.Is(err, mailstore.ErrUnavailable):
 		return api.New(connect.CodeUnavailable, api.ReasonServerUnavailable, "", err)
+	case errors.Is(err, mailstore.ErrMalformed):
+		return api.New(connect.CodeInternal, api.ReasonMalformedResponse, "retrying will not help", err)
 	default:
 		return api.New(connect.CodeInternal, api.ReasonInternal, "", err)
 	}

@@ -22,6 +22,10 @@ const (
 	KindExpunged Kind = "expunged"
 	KindStatus   Kind = "status"
 	KindGap      Kind = "gap"
+	// KindUnreadable is internal: new mail the pass could not read, which
+	// the cache records. Only a Filter with Internal set matches it, so
+	// the API never shows it.
+	KindUnreadable Kind = "unreadable"
 )
 
 // Status is a folder's sync state, as status events and sync_folders rows
@@ -80,7 +84,8 @@ type Event struct {
 	NextID  int64    // gap
 }
 
-// The payload column holds one of these per kind, as JSON. expunged stores {}.
+// The payload column holds one of these per kind, as JSON. expunged and
+// unreadable store {}.
 type (
 	newPayload struct {
 		Message *Message `json:"message"`
@@ -114,7 +119,7 @@ func encodePayload(e Event) (string, error) {
 		v = statusPayload{State: string(e.State), Detail: e.Detail}
 	case KindGap:
 		v = gapPayload{Reason: e.Reason, NextID: e.NextID}
-	case KindExpunged:
+	case KindExpunged, KindUnreadable:
 		return "{}", nil
 	default:
 		return "", fmt.Errorf("unknown event kind %q", e.Kind)
@@ -152,7 +157,7 @@ func decodePayload(e *Event, payload string) error {
 		if err = json.Unmarshal(data, &p); err == nil {
 			e.Reason, e.NextID = p.Reason, p.NextID
 		}
-	case KindExpunged:
+	case KindExpunged, KindUnreadable:
 	default:
 		return fmt.Errorf("event %d has unknown kind %q", e.ID, e.Kind)
 	}

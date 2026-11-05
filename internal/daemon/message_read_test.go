@@ -775,6 +775,7 @@ func TestClientNeverSeesServerText(t *testing.T) {
 	}{
 		"unavailable": {fmt.Errorf("%w: %s", mailstore.ErrUnavailable, serverText), api.ReasonServerUnavailable, "the mail server failed while reading"},
 		"stale":       {fmt.Errorf("%w: %s", mailstore.ErrStaleRef, serverText), api.ReasonStaleRef, "the message is gone; search again"},
+		"malformed":   {fmt.Errorf("%w: %s", mailstore.ErrMalformed, serverText), api.ReasonMalformedResponse, "the mail server sent a response chainmail cannot read"},
 		"internal":    {fmt.Errorf("decoding: %s", serverText), api.ReasonInternal, "the message could not be read"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -855,6 +856,7 @@ func TestCallErrorsNeverQuoteServerText(t *testing.T) {
 	}{
 		"unavailable": {fmt.Errorf("%w: host refused: NO %s", mailstore.ErrUnavailable, serverText), api.ReasonServerUnavailable, "the mail server failed while reading", ""},
 		"stale":       {fmt.Errorf("%w: %s", mailstore.ErrStaleRef, serverText), api.ReasonStaleRef, "the message is gone; search again", "search again"},
+		"malformed":   {fmt.Errorf("%w: %s", mailstore.ErrMalformed, serverText), api.ReasonMalformedResponse, "the mail server sent a response chainmail cannot read", "retrying will not help"},
 		"internal":    {fmt.Errorf("decoding: %s", serverText), api.ReasonInternal, "the message could not be read", ""},
 	} {
 		t.Run(name, func(t *testing.T) {

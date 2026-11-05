@@ -24,8 +24,8 @@ type diffInput struct {
 
 // diffResult is what one batch writes, all in one transaction.
 type diffResult struct {
-	// Events are ordered gap, status, expunged, flags, then new, and by
-	// ascending UID within each kind.
+	// Events are ordered gap, status, expunged, flags, new, then
+	// unreadable, and by ascending UID within each kind.
 	Events  []Event
 	Next    FolderRow           // the checkpoint to store
 	Replace map[uint32]knownUID // non-nil: replace the folder's UID set with it
@@ -45,7 +45,9 @@ type diffResult struct {
 // whole UID set, possibly empty), every UID known below the old UIDNEXT and
 // missing from d.UIDs is expunged. Changed flags become flags events
 // (CONDSTORE's CHANGEDSINCE result below the old UIDNEXT, or every known
-// UID whose hash differs), and each new summary becomes a new event.
+// UID whose hash differs), each new summary becomes a new event, and each
+// UID of new mail the pass could not read becomes an unreadable event.
+// New mail joins the known UIDs, read or not.
 func diff(prev FolderRow, known map[uint32]knownUID, d mailstore.Delta, in diffInput) diffResult {
 	res := diffResult{Next: nextCheckpoint(prev, d, in)}
 	if d.Rebased {
@@ -73,17 +75,33 @@ func diff(prev FolderRow, known map[uint32]knownUID, d mailstore.Delta, in diffI
 		}
 		put[s.Ref.UID] = k
 	}
+	res.Events = append(res.Events, unreadableEvents(d, in)...)
+	putUnreadable(d, put)
 	if len(put) > 0 {
 		res.Put = put
 	}
 	return res
 }
 
+// unreadableEvents are the unreadable events for the new mail the pass
+// could not read, by ascending UID. Their refs have no Gmail message ID,
+// since the pass read none.
+func unreadableEvents(d mailstore.Delta, in diffInput) []Event {
+	var events []Event
+	for _, uid := range slices.Sorted(slices.Values(d.Unreadable)) {
+		e := syncEvent(in, KindUnreadable)
+		e.Ref = syncRef(in, d.State.UIDValidity, uid, 0)
+		events = append(events, e)
+	}
+	return events
+}
+
 // nextCheckpoint is the row to store after d. The checkpoint fields come
 // from the folder as selected, except that a batch with more new mail to
-// come stops just after its last new UID, so the next batch starts there.
-// Mode, State and LastError carry over from prev, except that a baseline
-// records the baselined state its status event reports.
+// come stops just after its last new UID, read or unreadable, so the next
+// batch starts there. Mode, State and LastError carry over from prev,
+// except that a baseline records the baselined state its status event
+// reports.
 func nextCheckpoint(prev FolderRow, d mailstore.Delta, in diffInput) FolderRow {
 	next := FolderRow{
 		Account:       in.Account,
@@ -98,8 +116,8 @@ func nextCheckpoint(prev FolderRow, d mailstore.Delta, in diffInput) FolderRow {
 		LastSweepAt:   prev.LastSweepAt,
 		LastError:     prev.LastError,
 	}
-	if d.More && len(d.New) > 0 {
-		next.UIDNext = slices.MaxFunc(d.New, bySummaryUID).Ref.UID + 1
+	if d.More && (len(d.New) > 0 || len(d.Unreadable) > 0) {
+		next.UIDNext = lastNewUID(d) + 1
 	}
 	if in.Sweep || d.Rebased {
 		next.LastSweepAt = in.At
@@ -274,3 +292,41 @@ func syncRef(in diffInput, uidValidity, uid uint32, msgID uint64) string {
 func bySummaryUID(a, b mailstore.Summary) int { return cmp.Compare(a.Ref.UID, b.Ref.UID) }
 
 func byFlagUID(a, b mailstore.FlagState) int { return cmp.Compare(a.UID, b.UID) }
+
+// lastNewUID is the highest UID of d's new mail, read or unreadable, or 0.
+func lastNewUID(d mailstore.Delta) uint32 {
+	var last uint32
+	if len(d.New) > 0 {
+		last = slices.MaxFunc(d.New, bySummaryUID).Ref.UID
+	}
+	if len(d.Unreadable) > 0 {
+		last = max(last, slices.Max(d.Unreadable))
+	}
+	return last
+}
+
+// putUnreadable adds the new mail the pass could not read to the known
+// UIDs, so a later sweep reports it expunged and a later flag change
+// reports it changed, as for mail read whole. The Gmail message ID and,
+// with full flags, the flags hash come from d.Changed when it lists the
+// UID. Otherwise the hash stays empty, and the first full flags
+// comparison reports the message's flags once.
+func putUnreadable(d mailstore.Delta, put map[uint32]knownUID) {
+	if len(d.Unreadable) == 0 {
+		return
+	}
+	changed := make(map[uint32]mailstore.FlagState, len(d.Changed))
+	for _, f := range d.Changed {
+		changed[f.UID] = f
+	}
+	for _, uid := range d.Unreadable {
+		var k knownUID
+		if f, ok := changed[uid]; ok {
+			k.GmailMsgID = f.GmailMsgID
+			if d.FullFlags {
+				k.FlagsHash = flagsHash(f.Flags, f.Labels)
+			}
+		}
+		put[uid] = k
+	}
+}

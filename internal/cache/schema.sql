@@ -10,6 +10,7 @@ CREATE TABLE messages (
   thread_id TEXT NOT NULL,
   flags_json TEXT NOT NULL, labels_json TEXT NOT NULL,
   has_attachment INTEGER NOT NULL, attachments_json TEXT NOT NULL,
+  attachments_unknown INTEGER NOT NULL DEFAULT 0,
   subject_norm TEXT NOT NULL,
   from_norm TEXT NOT NULL, to_norm TEXT NOT NULL, cc_norm TEXT NOT NULL, bcc_norm TEXT NOT NULL,
   flags_norm TEXT NOT NULL, labels_norm TEXT NOT NULL, attachments_norm TEXT NOT NULL,
@@ -20,6 +21,7 @@ CREATE INDEX messages_by_uid ON messages (account, folder, uidvalidity, uid DESC
 CREATE INDEX messages_by_arrival ON messages (account, folder, internal_date DESC);
 CREATE INDEX messages_by_msgid ON messages (account, message_id);
 CREATE INDEX messages_by_thread ON messages (account, thread_id);
+CREATE INDEX messages_attachments_unknown ON messages (account, folder) WHERE attachments_unknown = 1;
 CREATE TABLE bodies (
   msg INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
   raw BLOB NOT NULL, text_clipped INTEGER NOT NULL, size_bytes INTEGER NOT NULL,
@@ -47,3 +49,8 @@ CREATE TABLE ref_recovery (
   PRIMARY KEY (account, folder, uidvalidity, uid)
 );
 CREATE TABLE budget (account TEXT NOT NULL, day TEXT NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY (account, day));
+CREATE TABLE unreadable (
+  account TEXT NOT NULL, folder TEXT NOT NULL, uidvalidity INTEGER NOT NULL, uid INTEGER NOT NULL,
+  first_at INTEGER NOT NULL, last_at INTEGER NOT NULL, attempts INTEGER NOT NULL,
+  PRIMARY KEY (account, folder, uidvalidity, uid)
+);

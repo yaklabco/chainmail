@@ -40,15 +40,81 @@ func (s *Store) FolderState(ctx context.Context, folder string) (mailstore.Folde
 
 // SyncFolder implements mailstore.Watcher on a pooled connection. A
 // dropped connection is retried on a fresh one, since a pass changes
-// nothing.
+// nothing. New mail the pass could not read on its connection is read
+// again through FetchSummaries once that connection is back, so the read
+// never waits for a pool slot while it holds one.
 func (s *Store) SyncFolder(ctx context.Context, folder string, req mailstore.SyncRequest) (mailstore.Delta, error) {
 	var d mailstore.Delta
+	var unread []uint32
 	err := s.withConn(ctx, folder, func(c *conn) error {
 		var err error
-		d, err = s.syncPass(ctx, c, folder, req, nil)
+		d, unread, err = s.syncPass(ctx, c, folder, req, nil)
 		return err
 	})
+	if err == nil && len(unread) > 0 {
+		err = s.readNew(ctx, folder, req, &d, unread)
+	}
 	return d, err
+}
+
+// readNewParts bounds the parts of mailstore.IsolatedBatch UIDs readNew
+// reads again in one pass, when the hunt over the whole new mail runs out,
+// so a pass costs a bounded number of logins however much of a backlog is
+// malformed.
+const readNewParts = 8
+
+// readNew fills d.New with summaries of the new mail uids, and d.Unreadable
+// with the UIDs of those it cannot read, through FetchSummaries, which
+// isolates a message the server sent in a form chainmail cannot read. A
+// pass calls it when its own FETCH of that mail failed so.
+//
+// The hunt for the malformed messages of a large batch can run out of
+// logins before it finds them all, and then FetchSummaries fails with a
+// plain mailstore.ErrMalformed. readNew then reads the UIDs again in parts
+// of mailstore.IsolatedBatch, which the store always isolates, at most
+// readNewParts of them. When UIDs remain after that, it leaves them out and
+// sets d.More, so the checkpoint moves past the parts read and the next
+// pass goes on from there. A plain ErrMalformed from a part is a fault in
+// the folder, such as its SELECT answer, and is returned.
+func (s *Store) readNew(ctx context.Context, folder string, req mailstore.SyncRequest, d *mailstore.Delta, uids []uint32) error {
+	src := mailstore.Source{Folder: folder, UIDValidity: d.State.UIDValidity}
+	opts := mailstore.SummaryOptions{Snippets: req.Snippets}
+	sums, unreadable, err := s.readNewPart(ctx, src, uids, opts)
+	if errors.Is(err, mailstore.ErrMalformed) && len(uids) > mailstore.IsolatedBatch {
+		sums, unreadable, err = nil, nil, nil
+		uids = slices.Sorted(slices.Values(uids))
+		for i, part := 0, uids; len(part) > 0; i++ {
+			if i == readNewParts {
+				d.More = true
+				break
+			}
+			n := min(len(part), mailstore.IsolatedBatch)
+			ps, pu, err := s.readNewPart(ctx, src, part[:n], opts)
+			if err != nil {
+				return err
+			}
+			sums, unreadable, part = append(sums, ps...), append(unreadable, pu...), part[n:]
+		}
+	}
+	if err != nil {
+		return err
+	}
+	d.New, d.Unreadable = sums, unreadable
+	return nil
+}
+
+// readNewPart reads uids through FetchSummaries and returns the summaries
+// read and the UIDs of an *mailstore.UnreadableError, which is not an
+// error here.
+func (s *Store) readNewPart(ctx context.Context, src mailstore.Source, uids []uint32, opts mailstore.SummaryOptions) ([]mailstore.Summary, []uint32, error) {
+	sums, err := s.FetchSummaries(ctx, src, uids, opts)
+	if unreadable, ok := errors.AsType[*mailstore.UnreadableError](err); ok {
+		return sums, unreadable.UIDs, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return sums, nil, nil
 }
 
 // folderState is a mailstore.FolderState from what SELECT or STATUS
@@ -100,10 +166,15 @@ type passView struct {
 // syncPass runs one sync pass on c with the semantics mailstore.SyncRequest
 // documents. WatchConn.Sync and SyncFolder share it. When view is not nil
 // the pass records in it what it saw.
-func (s *Store) syncPass(ctx context.Context, c *conn, folder string, req mailstore.SyncRequest, view *passView) (mailstore.Delta, error) {
+//
+// It fetches the new mail last. When that FETCH fails because the server
+// sent a message in a form chainmail cannot read, c is dead, and syncPass
+// returns the delta without New, and the UIDs of the new mail for the
+// caller to read through readNew, which isolates the message at fault.
+func (s *Store) syncPass(ctx context.Context, c *conn, folder string, req mailstore.SyncRequest, view *passView) (mailstore.Delta, []uint32, error) {
 	data, err := s.selectForSync(ctx, c, folder)
 	if err != nil {
-		return mailstore.Delta{}, err
+		return mailstore.Delta{}, nil, err
 	}
 	d := mailstore.Delta{State: folderState(c.uidValidity, c.uidNext, c.highestModSeq, c.client().Caps().Has(imap.CapCondStore))}
 	exists := data.NumMessages
@@ -124,24 +195,26 @@ func (s *Store) syncPass(ctx context.Context, c *conn, folder string, req mailst
 			d.UIDs, err = c.allUIDs(ctx, exists)
 		}
 		if err != nil {
-			return mailstore.Delta{}, err
+			return mailstore.Delta{}, nil, err
 		}
-		return d, nil
-	}
-	if d.State.UIDNext > req.From.UIDNext {
-		if err := s.syncNew(ctx, c, folder, req, &d, view); err != nil {
-			return mailstore.Delta{}, err
-		}
+		return d, nil, nil
 	}
 	if err := s.syncChanged(ctx, c, exists, req.From, &d); err != nil {
-		return mailstore.Delta{}, err
+		return mailstore.Delta{}, nil, err
 	}
 	if req.Sweep && d.State.CondStore {
 		if d.UIDs, err = c.allUIDs(ctx, exists); err != nil {
-			return mailstore.Delta{}, err
+			return mailstore.Delta{}, nil, err
 		}
 	}
-	return d, nil
+	if d.State.UIDNext <= req.From.UIDNext {
+		return d, nil, nil
+	}
+	unread, err := s.syncNew(ctx, c, folder, req, &d, view)
+	if err != nil {
+		return mailstore.Delta{}, nil, err
+	}
+	return d, unread, nil
 }
 
 // syncNew fills d.New with summaries of the messages from req.From.UIDNext
@@ -151,12 +224,15 @@ func (s *Store) syncPass(ctx context.Context, c *conn, folder string, req mailst
 // selected UIDNEXT arrived after the SELECT and are left for the next pass,
 // which the checkpoint from d.State sends there.
 // A view that is not nil gets the count of new mail from view.since on.
-func (s *Store) syncNew(ctx context.Context, c *conn, folder string, req mailstore.SyncRequest, d *mailstore.Delta, view *passView) error {
+// When the FETCH fails because the server sent a message in a form
+// chainmail cannot read, c is dead, and syncNew returns the UIDs it was
+// fetching, for syncPass's caller to read again.
+func (s *Store) syncNew(ctx context.Context, c *conn, folder string, req mailstore.SyncRequest, d *mailstore.Delta, view *passView) ([]uint32, error) {
 	from := max(req.From.UIDNext, 1)
 	criteria := &imap.SearchCriteria{UID: []imap.UIDSet{{imap.UIDRange{Start: imap.UID(from), Stop: 0}}}}
 	found, _, err := c.search(ctx, criteria, false)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if view != nil && from <= view.since {
 		view.counted = true
@@ -176,14 +252,17 @@ func (s *Store) syncNew(ctx context.Context, c *conn, folder string, req mailsto
 		uids, d.More = uids[:batch], true
 	}
 	if len(uids) == 0 {
-		return nil
+		return nil, nil
 	}
 	sums, err := s.fetchSummaries(ctx, c, folder, uids, req.Snippets)
-	if err != nil {
-		return err
+	switch {
+	case splittable(err):
+		return uids, nil
+	case err != nil:
+		return nil, err
 	}
 	d.New = sums
-	return nil
+	return nil, nil
 }
 
 // syncChanged fills d.Changed. With CONDSTORE it holds the messages below

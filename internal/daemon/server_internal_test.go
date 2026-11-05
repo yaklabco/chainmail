@@ -239,6 +239,8 @@ func TestToConnectError(t *testing.T) {
 		{err: fmt.Errorf("%w: gone", mailstore.ErrStaleRef), code: connect.CodeNotFound, reason: api.ReasonStaleRef},
 		{err: fmt.Errorf("%w: part 9", mailstore.ErrNotFound), code: connect.CodeNotFound, reason: api.ReasonNotFound},
 		{err: fmt.Errorf("%w: down", mailstore.ErrUnavailable), code: connect.CodeUnavailable, reason: api.ReasonServerUnavailable},
+		{err: fmt.Errorf("fetching: %w", mailstore.ErrMalformed), code: connect.CodeInternal, reason: api.ReasonMalformedResponse},
+		{err: &mailstore.UnreadableError{Folder: "INBOX", UIDs: []uint32{5}}, code: connect.CodeInternal, reason: api.ReasonMalformedResponse},
 		{err: fmt.Errorf("%w: %w", mailstore.ErrUnavailable, context.DeadlineExceeded), code: connect.CodeDeadlineExceeded, reason: api.ReasonTimeout},
 		{err: errors.New("boom"), code: connect.CodeInternal, reason: api.ReasonInternal},
 	}

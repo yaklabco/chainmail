@@ -32,6 +32,7 @@ func TestLogAttrsKeepServerTextOut(t *testing.T) {
 		{"connection lost", fmt.Errorf("%w: %w", errConnLost, &imap.Error{Type: imap.StatusResponseTypeBye, Text: private}), []string{"reason=connection_lost", "status=BYE"}},
 		{"command timeout", fmt.Errorf("%w: %w within 1s", errConnLost, errCommandTimeout), []string{"reason=command_timeout"}},
 		{"unavailable", fmt.Errorf("%w: %s", mailstore.ErrUnavailable, private), []string{"reason=unavailable"}},
+		{"malformed", fmt.Errorf("%w: %s", mailstore.ErrMalformed, private), []string{"reason=malformed"}},
 		{"stale", fmt.Errorf("%w: %s", mailstore.ErrStaleRef, private), []string{"reason=stale_ref"}},
 		{"cancelled", fmt.Errorf("%s: %w", private, context.Canceled), []string{"reason=canceled"}},
 		{"other", fmt.Errorf("%s", private), []string{"reason=other"}},

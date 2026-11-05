@@ -90,8 +90,8 @@ func startFakeCache(t *testing.T, f *fakeCache) string {
 	return startFakeServer(t, path, handler)
 }
 
-// cacheStatusFixture is a cache with an account backfilling, one ready and
-// one disabled with no folders.
+// cacheStatusFixture is a cache with an account backfilling, one
+// incomplete and one disabled with no folders.
 func cacheStatusFixture() *chainmailv1.GetCacheStatusResponse {
 	return &chainmailv1.GetCacheStatusResponse{
 		SizeBytes: 12 << 20, MaxSizeBytes: 2 << 30,
@@ -105,12 +105,12 @@ func cacheStatusFixture() *chainmailv1.GetCacheStatusResponse {
 				}},
 			},
 			{
-				Account: "host", Enabled: true, State: "ready", BudgetUsedBytes: 512 << 10, BudgetBytes: 1 << 30,
+				Account: "host", Enabled: true, State: "incomplete", BudgetUsedBytes: 512 << 10, BudgetBytes: 1 << 30,
 				Folders: []*chainmailv1.FolderCacheStatus{
 					{
-						Folder: "INBOX", State: "ready", Headers: 42, BackfillDone: true, BaselineUid: 40, BackfillLowUid: 1,
+						Folder: "INBOX", State: "incomplete", Headers: 42, BackfillDone: true, BaselineUid: 40, BackfillLowUid: 1,
 						Bodies: 40, BodyBytes: 80 << 10, WindowMessages: 40, WindowBodies: 38, WindowDone: true, BodyFailures: 2,
-						LastAppliedAt: timestamppb.New(cacheAt),
+						LastAppliedAt: timestamppb.New(cacheAt), Unreadable: 1, AttachmentsUnknown: 3,
 					},
 					{Folder: "Sent", State: "backfilling", BaselineUid: 7},
 				},
@@ -185,8 +185,8 @@ func TestCacheStatusTable(t *testing.T) {
 				"ACCOUNT  CACHE  STATE  BUDGET TODAY  ERROR\n" +
 				"host     on     ready  0 B of 0 B    -\n" +
 				"\n" +
-				"ACCOUNT  FOLDER  STATE  HEADERS  BACKFILL  BODIES  BODY SIZE  WINDOW  FAILED  LAST APPLIED\n" +
-				"host     a b[2J  ready  0        done      0       0 B        0/0     0       -\n",
+				"ACCOUNT  FOLDER  STATE  HEADERS  BACKFILL  BODIES  BODY SIZE  WINDOW  FAILED  UNREADABLE  ATTACH UNKNOWN  LAST APPLIED\n" +
+				"host     a b[2J  ready  0        done      0       0 B        0/0     0       0           0               -\n",
 		},
 	}
 	for _, tt := range tests {

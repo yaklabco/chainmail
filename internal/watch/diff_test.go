@@ -92,6 +92,10 @@ func newLine(uid uint32, msgID uint64) string { return "new " + diffRef(uid, msg
 
 func expungedLine(uid uint32, msgID uint64) string { return "expunged " + diffRef(uid, msgID) }
 
+// unreadableLine is the line of an unreadable event, whose ref has no Gmail
+// message ID: the pass could not read one.
+func unreadableLine(uid uint32) string { return "unreadable " + diffRef(uid, 0) }
+
 func flagsLine(uid uint32, msgID uint64, flags, labels []string) string {
 	return fmt.Sprintf("flags %s %v %v", diffRef(uid, msgID), flags, labels)
 }
@@ -401,6 +405,39 @@ func TestDiff(t *testing.T) {
 			next:    diffNext(diffCondRow(), diffState(7, 45, true), 7, diffAt),
 			put:     map[uint32]knownUID{5: {}, 6: {}},
 			deleted: []uint32{2},
+		},
+		{
+			name: "unreadable new mail follows the new events, by UID, and joins the known UIDs",
+			prev: diffCondRow(),
+			delta: mailstore.Delta{
+				State:      diffState(20, 50, true),
+				New:        []mailstore.Summary{diffSummary(5, 0), diffSummary(7, 0)},
+				Unreadable: []uint32{8, 6},
+				More:       true,
+			},
+			events: []string{newLine(5, 0), newLine(7, 0), unreadableLine(6), unreadableLine(8)},
+			next:   diffNext(diffCondRow(), diffState(20, 50, true), 9, diffEarlier),
+			put:    map[uint32]knownUID{5: {}, 6: {}, 7: {}, 8: {}},
+		},
+		{
+			name:  "without CONDSTORE unreadable new mail takes its flags hash from the full flags",
+			prev:  diffPlainRow(),
+			known: map[uint32]knownUID{1: {FlagsHash: flagsHash(nil, nil)}},
+			delta: mailstore.Delta{
+				State:      diffState(8, 0, false),
+				UIDs:       []uint32{1, 5, 6, 7},
+				FullFlags:  true,
+				New:        []mailstore.Summary{diffSummary(5, 0), diffSummary(7, 0)},
+				Unreadable: []uint32{6},
+				Changed:    []mailstore.FlagState{{UID: 1}, {UID: 5}, {UID: 6, Flags: []string{`\Seen`}, GmailMsgID: 906}, {UID: 7}},
+			},
+			events: []string{newLine(5, 0), newLine(7, 0), unreadableLine(6)},
+			next:   diffNext(diffPlainRow(), diffState(8, 0, false), 8, diffEarlier),
+			put: map[uint32]knownUID{
+				5: {FlagsHash: flagsHash(nil, nil)},
+				6: {GmailMsgID: 906, FlagsHash: flagsHash([]string{`\Seen`}, nil)},
+				7: {FlagsHash: flagsHash(nil, nil)},
+			},
 		},
 	})
 }

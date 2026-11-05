@@ -242,6 +242,9 @@ type sourceState struct {
 	lowest    uint32 // the lowest UID used
 	prevBelow uint32 // the bound this page started from
 	err       error
+	// unreadable are the requested UIDs the server's answer could not be
+	// parsed for, which have no row.
+	unreadable []uint32
 }
 
 func (st *sourceState) consume() {
@@ -430,7 +433,7 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 		answered = append(answered, o.route.Source)
 		// An incomplete account is listed even with nothing counted, so its
 		// reason reaches the caller.
-		if len(o.part.states) == 0 && o.route.Complete {
+		if len(o.part.states) == 0 && o.route.complete() {
 			continue
 		}
 		resp.AccountCounts = append(resp.AccountCounts, accountCount(a.Name, o.part.count, o.route))
@@ -460,6 +463,11 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 			count = r.count
 		}
 		resp.Rows = append(resp.Rows, rowFromSummary(r.sum, req.GetSnippets(), count))
+	}
+	for _, st := range states {
+		if part := st.unreadablePartial(); part != nil {
+			resp.Partial = append(resp.Partial, part)
+		}
 	}
 	resp.NextCursor = nextCursor(p, states, carried)
 	entry.Targets = []string{tally("accounts", len(p.named)), tally("rows", len(resp.GetRows())), "source=" + resp.GetSource()}
@@ -522,6 +530,11 @@ func (m *messageService) fetchRows(ctx context.Context, p *searchPlan, states []
 		}
 		wg.Go(func() {
 			st.rows, st.err = st.from.FetchSummaries(ctx, st.src, take, mailstore.SummaryOptions{Snippets: snippets})
+			// The summaries read are valid: the page goes on without the
+			// unreadable messages, and unreadablePartial reports them.
+			if ue, ok := errors.AsType[*mailstore.UnreadableError](st.err); ok {
+				st.unreadable, st.err = ue.UIDs, nil
+			}
 		})
 	}
 	wg.Wait()
@@ -606,23 +619,7 @@ func nextCursor(p *searchPlan, states []*sourceState, carried []ref.CursorSource
 	c := ref.Cursor{Query: p.fingerprint}
 	more := false
 	for _, st := range states {
-		cs := ref.CursorSource{Account: st.account, Folder: st.src.Folder, UIDValidity: st.src.UIDValidity, Below: st.prevBelow}
-		switch {
-		case st.err != nil:
-			// Retry from where this page started. This case comes first: a
-			// failed fetch also has next == len(rows), with no rows at all.
-		case st.requested > 0 && st.next == len(st.rows):
-			// Every UID fetched was used or has gone since SEARCH.
-			cs.Below = st.uids[st.requested-1]
-		case st.next > 0:
-			cs.Below = st.lowest
-		}
-		if cs.Below == 0 && len(st.uids) > 0 && st.uids[0] < math.MaxUint32 {
-			// No page has reached this source yet. Bound it at what matched
-			// now, so mail arriving later stays out of later pages.
-			cs.Below = st.uids[0] + 1
-		}
-		cs.Done = st.err == nil && st.next == len(st.rows) && len(st.uids) <= st.requested
+		cs := st.cursorSource()
 		if !cs.Done {
 			more = true
 		}
@@ -636,4 +633,52 @@ func nextCursor(p *searchPlan, states []*sourceState, carried []ref.CursorSource
 		return ""
 	}
 	return ref.EncodeCursor(c)
+}
+
+// cursorSource is where the source's next page starts, once merge has
+// used its rows.
+func (st *sourceState) cursorSource() ref.CursorSource {
+	cs := ref.CursorSource{Account: st.account, Folder: st.src.Folder, UIDValidity: st.src.UIDValidity, Below: st.prevBelow}
+	switch {
+	case st.err != nil:
+		// Retry from where this page started. This case comes first: a
+		// failed fetch also has next == len(rows), with no rows at all.
+	case st.requested > 0 && st.next == len(st.rows):
+		// Every UID fetched was used, has gone since SEARCH, or could not
+		// be read.
+		cs.Below = st.uids[st.requested-1]
+	case st.next > 0:
+		cs.Below = st.lowest
+	}
+	if cs.Below == 0 && len(st.uids) > 0 && st.uids[0] < math.MaxUint32 {
+		// No page has reached this source yet. Bound it at what matched
+		// now, so mail arriving later stays out of later pages.
+		cs.Below = st.uids[0] + 1
+	}
+	cs.Done = st.err == nil && st.next == len(st.rows) && len(st.uids) <= st.requested
+	return cs
+}
+
+// unreadablePartial reports the source's unreadable matches that this page
+// passed, nil when there are none. A match below where the next page
+// starts is fetched again there, and reported by the page that passes it,
+// so each is reported once.
+func (st *sourceState) unreadablePartial() *chainmailv1.PartialSource {
+	if len(st.unreadable) == 0 {
+		return nil
+	}
+	cs := st.cursorSource()
+	n := 0
+	for _, uid := range st.unreadable {
+		if cs.Done || uid >= cs.Below {
+			n++
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	part := partialSource(st.account, st.src.Folder, &mailstore.UnreadableError{Folder: st.src.Folder, UIDs: st.unreadable})
+	part.Message = fmt.Sprintf("left out %d of the folder's matches: %s", n, part.GetMessage())
+	part.Unreadable = uint64(n)
+	return part
 }

@@ -631,3 +631,31 @@ func TestKeywordsAreEnveloped(t *testing.T) {
 		})
 	}
 }
+
+// A search source that left out matches the server's answer could not be
+// read for says how many in its partial entry.
+func TestSearchPartialCountsUnreadableMessages(t *testing.T) {
+	t.Parallel()
+	f := &fakeDaemon{Search: func(context.Context, *chainmailv1.SearchRequest) (*chainmailv1.SearchResponse, error) {
+		return &chainmailv1.SearchResponse{Partial: []*chainmailv1.PartialSource{
+			{Account: "work", Folder: "INBOX", Reason: api.ReasonMalformedResponse, Message: "left out 2 of the folder's matches", Unreadable: 2},
+			{Account: "home", Reason: api.ReasonTimeout, Message: "timed out"},
+		}}, nil
+	}}
+	e := newTestEnv(t, f, latest)
+	res := e.call(t, "search", map[string]any{"query": "hi"})
+	wantOK(t, res)
+	var out struct {
+		Partial []map[string]any `json:"partial"`
+	}
+	decode(t, res, &out)
+	if len(out.Partial) != 2 {
+		t.Fatalf("partial = %+v", out.Partial)
+	}
+	if got := out.Partial[0]["unreadable"]; got != float64(2) {
+		t.Errorf("unreadable = %v, want 2", got)
+	}
+	if _, ok := out.Partial[1]["unreadable"]; ok {
+		t.Errorf("a timed out account has unreadable %v, want it absent", out.Partial[1]["unreadable"])
+	}
+}

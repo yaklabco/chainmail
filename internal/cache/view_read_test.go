@@ -390,6 +390,50 @@ func TestViewFetchMessagesMissIsKept(t *testing.T) {
 	}
 }
 
+// TestViewFetchMessagesRepairsAttachmentsUnknown checks that a get of a
+// message the cache holds without its body structure, read whole from the
+// server, repairs the row's attachments and keeps its flags: the second get
+// returns the attachment from the cache, and has:attachment matches it.
+func TestViewFetchMessagesRepairsAttachmentsUnknown(t *testing.T) {
+	t.Parallel()
+	f := newReadFixture(t, false)
+	refs := seedReadMail(f.fk, false)
+	memo := refs["memo"]
+	f.fk.Malform(memo.Folder, memo.UID, fake.BadStructure)
+	f.cacheFolder(t, mailstore.Source{Folder: memo.Folder, UIDValidity: memo.UIDValidity}, []uint32{memo.UID}, false)
+	if _, err := f.store.SetFlags(t.Context(), memo, []string{`\Flagged`}, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.fk.Malform(memo.Folder, memo.UID, fake.WellFormed)
+
+	first, sources := f.view.FetchMessagesFrom(t.Context(), []ref.Ref{memo})
+	if first[0].Err != nil || sources[0] != cache.SourceServer || len(first[0].Message.Attachments) != 1 {
+		t.Fatalf("first get: err %v, source %q, attachments %v; want memo.pdf from the server", first[0].Err, sources[0], first[0].Message)
+	}
+	again, sources := f.view.FetchMessagesFrom(t.Context(), []ref.Ref{memo})
+	if again[0].Err != nil || sources[0] != cache.SourceCache {
+		t.Fatalf("second get: err %v, source %q; want a cache hit", again[0].Err, sources[0])
+	}
+	if got := again[0].Message.Attachments; !slices.Equal(got, first[0].Message.Attachments) || !again[0].Message.Summary.HasAttachment {
+		t.Errorf("second get attachments = %v, has %v; want %v", got, again[0].Message.Summary.HasAttachment, first[0].Message.Attachments)
+	}
+	row, _, err := f.store.Row(t.Context(), memo)
+	if err != nil || row.AttachmentsUnknown || !slices.Equal(row.Flags, []string{`\Flagged`}) {
+		t.Errorf("row: unknown %v, flags %v, err %v; want known and the row's flags", row.AttachmentsUnknown, row.Flags, err)
+	}
+	got, err := f.view.Search(t.Context(), searchRequest(t, "has:attachment filename:memo.pdf", false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []uint32
+	for _, res := range got {
+		found = append(found, res.UIDs...)
+	}
+	if !slices.Equal(found, []uint32{memo.UID}) {
+		t.Errorf("has:attachment filename:memo.pdf = %v, want [%d]", found, memo.UID)
+	}
+}
+
 // TestViewFetchMessagesKeepsOnlyTrackedFolders checks that a message read
 // from a folder the cache does not track, here Trash, is returned but not
 // stored.

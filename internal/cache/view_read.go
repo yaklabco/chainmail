@@ -269,8 +269,11 @@ func (v *View) keepRead(ctx context.Context, epoch uint64, guard *readGuard, msg
 // row the cache lacks is not made when the builder changed the message
 // since guard started: an expunge must not be undone by a download that
 // predates it. A body is stored only on a row the cache holds, and never
-// changes for a UID. When ctx ends before wmu is free it logs that and
-// stores nothing; keepRead has already charged the download.
+// changes for a UID. A row the cache holds without its body structure
+// gets the attachments of the full read in the body's transaction, and
+// keeps its flags and other columns (Store.PutFullBody). When ctx ends
+// before wmu is free it logs that and stores nothing; keepRead has already
+// charged the download.
 // Folders the cache does not track, such as Trash or a Google label folder
 // other than All Mail, are never stored. It reports whether it stored a new
 // body.
@@ -307,7 +310,7 @@ func (v *View) storeRead(ctx context.Context, epoch uint64, guard *readGuard, ms
 			return false
 		}
 	}
-	stored, err := store.PutBody(ctx, r, Body{Raw: msg.Raw, TextClipped: msg.TextClipped}, true)
+	stored, err := store.PutFullBody(ctx, r, Body{Raw: msg.Raw, TextClipped: msg.TextClipped}, true, fullReadOf(msg))
 	if err != nil {
 		v.logReadError("storing a read body failed", err)
 		return false

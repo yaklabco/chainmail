@@ -55,7 +55,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if journal != "wal" {
 		t.Errorf("journal_mode = %q, want wal", journal)
 	}
-	for _, table := range []string{"messages", "bodies", "body_failures", "messages_fts", "folders", "ref_recovery", "budget"} {
+	for _, table := range []string{"messages", "bodies", "body_failures", "messages_fts", "folders", "ref_recovery", "budget", "unreadable"} {
 		if countRows(t, s, "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?", table) != 1 {
 			t.Errorf("table %s missing", table)
 		}

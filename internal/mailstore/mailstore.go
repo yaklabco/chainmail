@@ -43,7 +43,27 @@ var (
 	// work can wait for the limit to renew instead of retrying at once.
 	// It never carries the server's text.
 	ErrThrottled = fmt.Errorf("%w: over a server quota or bandwidth limit", ErrUnavailable)
+	// ErrMalformed means the mail server sent a response chainmail cannot
+	// read, such as a body structure in a form the parser does not know.
+	// Asking again gets the same response, so it is never retried.
+	ErrMalformed = errors.New("the mail server sent a response chainmail cannot read")
 )
+
+// UnreadableError names the messages of one folder whose responses
+// chainmail cannot read, even without their body structure. It is
+// ErrMalformed. FetchHeaders and FetchSummaries return it together with
+// what they read of the other messages.
+type UnreadableError struct {
+	Folder string
+	UIDs   []uint32
+}
+
+func (e *UnreadableError) Error() string {
+	return fmt.Sprintf("%v: UIDs %v in %q", ErrMalformed, e.UIDs, e.Folder)
+}
+
+// Unwrap makes an UnreadableError match ErrMalformed.
+func (e *UnreadableError) Unwrap() error { return ErrMalformed }
 
 // FolderNotFoundError is ErrNotFound for a folder the account does not
 // have, such as the destination of a move. Name is the folder as the store
@@ -128,6 +148,11 @@ type Summary struct {
 	Size int64
 	// HasAttachment is true when any part is an attachment.
 	HasAttachment bool
+	// AttachmentsUnknown is true when the message was read without its body
+	// structure, because the server sent that in a form chainmail cannot
+	// read. HasAttachment is then false and a Header has no Attachments,
+	// whatever the message holds.
+	AttachmentsUnknown bool
 	// ThreadID groups the messages of one thread. On Google accounts it is
 	// Gmail's own thread ID, from X-GM-EXT-1, in lowercase hexadecimal.
 	// Elsewhere it is ThreadKey of the root Message-ID, or "" when the
@@ -306,10 +331,16 @@ type Store interface {
 	// whole account failed, such as an unsupported operator or a login refusal.
 	Search(ctx context.Context, req SearchRequest) ([]SourceResult, error)
 	// FetchSummaries returns summaries for uids in src, in the order given.
-	// UIDs that no longer exist are left out.
+	// UIDs that no longer exist are left out. A message whose body
+	// structure the server sent in a form chainmail cannot read comes back
+	// with AttachmentsUnknown. Messages it cannot read at all are left out
+	// too, and the error is an *UnreadableError naming them: the summaries
+	// that come with that error are valid. A plain ErrMalformed from a
+	// fetch of IsolatedBatch UIDs or fewer is a fault in the folder.
 	FetchSummaries(ctx context.Context, src Source, uids []uint32, opts SummaryOptions) ([]Summary, error)
 	// FetchMessages reads refs, which must belong to this account. The
-	// result has one entry per ref, in order.
+	// result has one entry per ref, in order. A message whose response
+	// chainmail cannot read fails with ErrMalformed.
 	FetchMessages(ctx context.Context, refs []ref.Ref) []MessageResult
 	// StreamPart opens one part, decoded, or with part "" the whole raw
 	// message. The caller must close the reader. Bytes already read are

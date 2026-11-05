@@ -88,8 +88,9 @@ var errCommandTimeout = errors.New("the mail server stopped answering")
 
 // do runs one IMAP exchange, bounded by the command timeout and by ctx.
 // When either ends first, the connection is shut, which unblocks f, and c
-// is dead. A reply from the server, such as NO, leaves c usable; any other
-// failure means the connection broke.
+// is dead. A reply from the server, such as NO, leaves c usable. A response
+// the client cannot parse is mailstore.ErrMalformed, and leaves c dead. Any
+// other failure means the connection broke.
 func (c *conn) do(ctx context.Context, f func() error) error {
 	return c.pipeline(ctx, func(func()) error { return f() })
 }
@@ -122,6 +123,14 @@ func (c *conn) pipeline(ctx context.Context, f func(progress func()) error) erro
 	if timedOut {
 		c.dead.Store(true)
 		return fmt.Errorf("%w: %w within %v", errConnLost, errCommandTimeout, c.timeout)
+	}
+	// A response the client could not parse leaves the connection unread
+	// and so unusable, but asking again on a fresh one gets the same
+	// response. It is malformed, not lost, and never retried.
+	var parseErr *imapclient.ParseError
+	if errors.As(err, &parseErr) {
+		c.kill()
+		return fmt.Errorf("%w: %w", mailstore.ErrMalformed, err)
 	}
 	var imapErr *imap.Error
 	if err != nil && (!errors.As(err, &imapErr) || imapErr.Type == imap.StatusResponseTypeBye) {

@@ -1086,17 +1086,21 @@ func TestSupervisorParksEveryLoopMidSession(t *testing.T) {
 // first success, and starts the backoff over for the next outage.
 func TestSupervisorPollerBacksOffOutages(t *testing.T) {
 	t.Parallel()
+	unavailable := fmt.Errorf("%w: test outage", mailstore.ErrUnavailable)
 	tests := []struct {
 		name   string
 		method string // the fake method that fails
+		outage error
+		reason string // the last error the folder's row records
 	}{
-		{name: "STATUS fails", method: "FolderState"},
-		{name: "the pass fails", method: "SyncFolder"},
+		{name: "STATUS fails", method: "FolderState", outage: unavailable, reason: "SERVER_UNAVAILABLE"},
+		{name: "the pass fails", method: "SyncFolder", outage: unavailable, reason: "SERVER_UNAVAILABLE"},
+		{name: "the pass is malformed", method: "SyncFolder", outage: fmt.Errorf("%w: test", mailstore.ErrMalformed), reason: "MALFORMED_RESPONSE"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			outage := fmt.Errorf("%w: test outage", mailstore.ErrUnavailable)
+			outage := tt.outage
 			fs := supFake(false)
 			acct := supAccount(t, "hostinger", nil, []string{"Sent"})
 			// Short enough that the backoff reaches it: Backoff(2, 0.5) is 4s.
@@ -1111,8 +1115,8 @@ func TestSupervisorPollerBacksOffOutages(t *testing.T) {
 			r.clock.Advance(acct.SyncPoll)
 			r.waitFor("Sent reconnecting", supStatus("Sent", StateReconnecting))
 			r.clock.expectAfter(t, backoff(0, 0.5))
-			if row := r.row("Sent"); row.State != StateReconnecting || row.LastError != "SERVER_UNAVAILABLE" {
-				t.Errorf("row = state %q last_error %q, want reconnecting and SERVER_UNAVAILABLE", row.State, row.LastError)
+			if row := r.row("Sent"); row.State != StateReconnecting || row.LastError != tt.reason {
+				t.Errorf("row = state %q last_error %q, want reconnecting and %s", row.State, row.LastError, tt.reason)
 			}
 			r.clock.Advance(backoff(0, 0.5))
 			r.clock.expectAfter(t, backoff(1, 0.5))
@@ -1556,4 +1560,83 @@ func TestSupervisorLogsTheBudgetOnAConnLimit(t *testing.T) {
 	r.clock.expectAfter(t, backoff(0, 0.5))
 	r.clock.Advance(backoff(0, 0.5))
 	r.waitFor("INBOX watching after the refusal", supStatus("INBOX", StateWatching))
+}
+
+// failureReason gives a malformed response its own class.
+func TestFailureReasonMalformed(t *testing.T) {
+	t.Parallel()
+	if got := failureReason(fmt.Errorf("syncing folder: %w", &mailstore.UnreadableError{Folder: "INBOX", UIDs: []uint32{5}})); got != "malformed" {
+		t.Errorf("failureReason = %q, want malformed", got)
+	}
+}
+
+// A pass on a watch connection that meets new mail the server sent in a
+// form chainmail cannot read succeeds, since the store reads that mail on
+// another connection, but the watch connection dies on it. The watcher
+// dials again at once and quietly: no warning, no reconnecting row and no
+// backoff, so the folder never looks like it had an outage.
+func TestSupervisorRedialsQuietlyAfterMalformedNewMail(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	var logs syncBuffer
+	r := newSupRig(t, fs, supAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}), func(o *SupervisorOptions) {
+		o.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	})
+	r.start()
+	r.waitFor("INBOX watching", supStatus("INBOX", StateWatching))
+	r.waitIdle("INBOX")
+
+	fs.AddMalformed(supMsg("INBOX", "bad structure"), fake.BadStructure)
+	r.waitFor("new event for the message", supNew("INBOX", "bad structure"))
+	r.waitIdle("INBOX") // on the new connection, with the clock never advanced
+	if n := fs.Calls("OpenWatch"); n != 2 {
+		t.Errorf("OpenWatch ran %d times, want 2", n)
+	}
+	if got := logs.String(); strings.Contains(got, "level=WARN") {
+		t.Errorf("logs hold a warning:\n%s", got)
+	}
+	if n := supCount(r.all(), supStatus("INBOX", StateReconnecting)); n != 0 {
+		t.Errorf("%d reconnecting events, want none:%s", n, supDump(r.all()))
+	}
+	if row := r.row("INBOX"); row.State != StateWatching || row.LastError != "" {
+		t.Errorf("row = state %q last_error %q, want watching and no error", row.State, row.LastError)
+	}
+}
+
+// When malformed new mail is in an earlier batch of a pass, the pass ends
+// after that batch rather than run the next one on the dead connection,
+// and the next connection reads the rest: still no warning, no
+// reconnecting row and no backoff.
+func TestSupervisorRedialsQuietlyMidPass(t *testing.T) {
+	t.Parallel()
+	fs := supFake(false)
+	var logs syncBuffer
+	r := newSupRig(t, fs, supAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}), func(o *SupervisorOptions) {
+		o.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+		o.Engine.batch = 1
+	})
+	r.start()
+	r.waitFor("INBOX watching", supStatus("INBOX", StateWatching))
+	r.waitIdle("INBOX")
+	r.stop() // so one pass meets both messages below
+
+	fs.AddMalformed(supMsg("INBOX", "bad structure"), fake.BadStructure)
+	fs.Add(supMsg("INBOX", "good"))
+	opens := fs.Calls("OpenWatch")
+	r.start()
+	r.waitFor("new event for the malformed message", supNew("INBOX", "bad structure"))
+	r.waitFor("new event for the good message", supNew("INBOX", "good"))
+	r.waitIdle("INBOX") // with the clock never advanced
+	if n := fs.Calls("OpenWatch") - opens; n != 2 {
+		t.Errorf("OpenWatch ran %d times after the restart, want 2", n)
+	}
+	if got := logs.String(); strings.Contains(got, "level=WARN") {
+		t.Errorf("logs hold a warning:\n%s", got)
+	}
+	if n := supCount(r.all(), supStatus("INBOX", StateReconnecting)); n != 0 {
+		t.Errorf("%d reconnecting events, want none:%s", n, supDump(r.all()))
+	}
+	if row := r.row("INBOX"); row.State != StateWatching || row.LastError != "" {
+		t.Errorf("row = state %q last_error %q, want watching and no error", row.State, row.LastError)
+	}
 }

@@ -343,7 +343,10 @@ func (p *prefetcher) download(ctx context.Context, r ref.Ref, set config.CacheSe
 		return false, 0, false
 	}
 	msg := res.Message
-	if _, err := p.o.Store.PutBody(ctx, r, Body{Raw: msg.Raw, TextClipped: msg.TextClipped}, false); err != nil {
+	// A row read without its body structure gets the attachments of this
+	// full read in the same transaction as the body, so a failed repair
+	// leaves the message in the queue (Store.PutFullBody).
+	if _, err := p.o.Store.PutFullBody(ctx, r, Body{Raw: msg.Raw, TextClipped: msg.TextClipped}, false, fullReadOf(msg)); err != nil {
 		p.warn(ctx, "storing a prefetched body", err)
 		return false, retry, true
 	}

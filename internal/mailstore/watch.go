@@ -55,7 +55,12 @@ type Delta struct {
 	// New holds summaries of messages with UID >= From.UIDNext, ascending
 	// by UID, at most Batch of them.
 	New []Summary
-	// More is set when more new messages exist beyond New.
+	// Unreadable holds the UIDs of new messages the pass could not read,
+	// since the server sent them in a form chainmail cannot read,
+	// ascending. They are in the batch New is from but not in New, and the
+	// checkpoint moves past them as past New.
+	Unreadable []uint32
+	// More is set when more new messages exist beyond New and Unreadable.
 	More bool
 	// Changed holds flag states. With CONDSTORE it is the CHANGEDSINCE
 	// result for UIDs below From.UIDNext. Without CONDSTORE it is every
@@ -101,6 +106,17 @@ type WatchConn interface {
 // implement it.
 type Aborter interface {
 	Abort()
+}
+
+// Redialer is optional on a WatchConn, found by type assertion.
+// NeedsRedial reports whether the connection's last Sync succeeded but
+// left it dead: the server sent new mail in a form chainmail cannot read,
+// which ends the connection, and the store read that mail again on
+// another. The connection is then not worth an Idle. The watch supervisor
+// dials a new one at once, which is no outage. imapstore's and the fake's
+// watch connections implement it.
+type Redialer interface {
+	NeedsRedial() bool
 }
 
 // Watcher is a store that can watch and sync folders. imapstore.Store and

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/ref"
 )
 
@@ -22,9 +23,35 @@ type Body struct {
 // the prefetcher passes it to BodylessSince as maxAttempts.
 const finalAttempts = 3
 
+// FullRead is what a full read of a message found of its attachments.
+type FullRead struct {
+	HasAttachment bool
+	Attachments   []mailstore.Attachment
+}
+
+// fullReadOf is what msg, read from the server, says of its attachments,
+// or nil when it was read without its body structure too.
+func fullReadOf(msg *mailstore.Message) *FullRead {
+	if msg.Summary.AttachmentsUnknown {
+		return nil
+	}
+	return &FullRead{HasAttachment: msg.Summary.HasAttachment, Attachments: msg.Attachments}
+}
+
 // PutBody stores a body and its FTS body terms; read sets last_read_at to now.
 // It clears any body failure for the message. False when no row.
 func (s *Store) PutBody(ctx context.Context, r ref.Ref, b Body, read bool) (bool, error) {
+	return s.PutFullBody(ctx, r, b, read, nil)
+}
+
+// PutFullBody is PutBody for a body that came with a full read of the
+// message, full, or nil for none. In the same transaction it gives a row
+// read without its body structure the attachments full found and marks
+// them known. A message's attachments never change for a UID, and the
+// row's flags and other columns keep their stored values, which may be
+// newer than the read. A failure, or a context that ends, stores neither,
+// so the message still lacks a body and the next fetch of it repairs it.
+func (s *Store) PutFullBody(ctx context.Context, r ref.Ref, b Body, read bool, full *FullRead) (bool, error) {
 	text := bodyText(b.Raw) // rendered before the transaction opens
 	raw := b.Raw
 	if raw == nil {
@@ -52,6 +79,11 @@ func (s *Store) PutBody(ctx context.Context, r ref.Ref, b Body, read bool) (bool
 		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM body_failures WHERE msg = ?", id); err != nil {
 			return fmt.Errorf("clearing the failures of message %d: %w", id, err)
+		}
+		if full != nil {
+			if err := s.repairAttachments(ctx, tx, id, *full); err != nil {
+				return err
+			}
 		}
 		return writeFTS(ctx, tx, id, row, text)
 	})
@@ -204,4 +236,24 @@ func (s *Store) queryRefs(ctx context.Context, query string, args ...any) ([]ref
 		return nil, err
 	}
 	return out, nil
+}
+
+// repairAttachments gives message id, when it was read without its body
+// structure, the attachments full found, and marks them known. A row whose
+// attachments are known is left alone.
+func (s *Store) repairAttachments(ctx context.Context, tx *sql.Tx, id int64, full FullRead) error {
+	if s.beforeRepair != nil {
+		s.beforeRepair()
+	}
+	aj, err := jsonList(full.Attachments)
+	if err != nil {
+		return fmt.Errorf("repairing the attachments of message %d: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE messages SET has_attachment = ?, attachments_json = ?, attachments_norm = ?, attachments_unknown = 0
+		 WHERE id = ? AND attachments_unknown = 1`,
+		boolInt(full.HasAttachment), aj, normAttachments(full.Attachments), id); err != nil {
+		return fmt.Errorf("repairing the attachments of message %d: %w", id, err)
+	}
+	return nil
 }

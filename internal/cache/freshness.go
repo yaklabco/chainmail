@@ -17,6 +17,10 @@ const (
 	// ReasonTextOutsideWindow: the query has text the cache holds bodies
 	// for only inside the prefetch window, and nothing keeps it there.
 	ReasonTextOutsideWindow = "text_outside_window"
+	// ReasonUnreadableMessages: the cache answered, but a folder searched
+	// holds messages the server's answer could not be parsed for, which
+	// the cache has no row for (Account.Unreadable).
+	ReasonUnreadableMessages = "unreadable_messages"
 )
 
 // Freshness reports whether every folder is fresh (spec 6.1 check 1), the
@@ -120,7 +124,7 @@ func (a *Account) lagging(ctx context.Context, cutoff time.Time) (bool, error) {
 			default:
 			}
 		}
-		page, err := a.o.Log.Read(ctx, watch.Query{After: after, Filter: watch.Filter{Accounts: []string{a.name}}, Limit: 1})
+		page, err := a.o.Log.Read(ctx, watch.Query{After: after, Filter: watch.Filter{Accounts: []string{a.name}, Internal: true}, Limit: 1})
 		if err != nil {
 			return false, err
 		}
@@ -161,4 +165,11 @@ func (a *Account) WindowCovers(ctx context.Context, folders []string, since time
 		}
 	}
 	return true, nil
+}
+
+// Unreadable reports whether any of folders holds a message recorded as
+// unreadable. The cache has no row for such a message, so an answer over
+// those folders can miss it, though the folders are fresh.
+func (a *Account) Unreadable(ctx context.Context, folders []string) (bool, error) {
+	return a.o.Store.HasUnreadable(ctx, a.name, folders)
 }

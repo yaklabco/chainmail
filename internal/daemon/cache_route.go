@@ -21,7 +21,8 @@ const sourceAuto = "auto"
 // reasonCacheDisabled is the incomplete reason of a forced cache search of
 // an account without a cache. The others are the cache package's Reason
 // constants: Account.Freshness gives stale, backfilling and
-// folder_not_synced, and Compile text_outside_window and folder_not_synced.
+// folder_not_synced, Compile text_outside_window and folder_not_synced,
+// and Account.Unreadable unreadable_messages.
 const reasonCacheDisabled = "cache_disabled"
 
 // searchSource is where one account's search page runs: the account's mail
@@ -45,9 +46,30 @@ type routeInfo struct {
 	// cache answered and knew it.
 	SyncedAt time.Time
 	// Complete is false only when a forced cache could not answer completely.
+	// The cursor checks rely on it: an incomplete answer may leave out
+	// folders.
 	Complete bool
 	// Reason says why, when Complete is false.
 	Reason string
+	// Unreadable is set when the cache answered over folders holding
+	// messages it recorded as unreadable. The answer covers every folder,
+	// so it stays Complete for the cursor, but its AccountCount reports
+	// complete false with cache.ReasonUnreadableMessages.
+	Unreadable bool
+}
+
+// complete reports whether the account's answer is complete, as its
+// AccountCount says.
+func (r routeInfo) complete() bool { return r.Complete && !r.Unreadable }
+
+// reason is the AccountCount's incomplete_reason: Reason, or
+// unreadable_messages for a complete answer that misses messages. A
+// complete answer that misses none has an empty Reason, so it gives "".
+func (r routeInfo) reason() string {
+	if r.Complete && r.Unreadable {
+		return cache.ReasonUnreadableMessages
+	}
+	return r.Reason
 }
 
 // noSource answers nothing: a forced cache search of an account whose cache
@@ -110,7 +132,7 @@ func (m *messageService) searcher(ctx context.Context, acct config.ResolvedAccou
 	v := m.cacheCanAnswer(ctx, ca, server, acct, p)
 	switch {
 	case v.ok:
-		return ca.View(server), routeInfo{Source: cache.SourceCache, SyncedAt: v.syncedAt, Complete: true}
+		return ca.View(server), routeInfo{Source: cache.SourceCache, SyncedAt: v.syncedAt, Complete: true, Unreadable: v.unreadable}
 	case forced && v.reason != "":
 		return ca.View(server), routeInfo{Source: cache.SourceCache, SyncedAt: v.syncedAt, Reason: v.reason}
 	default:
@@ -184,6 +206,9 @@ type cacheVerdict struct {
 	reason string
 	// syncedAt is the oldest last sync of the folders searched.
 	syncedAt time.Time
+	// unreadable is set, with ok, when a folder searched holds messages
+	// the cache recorded as unreadable.
+	unreadable bool
 	// miss is why the cache cannot answer, when ok is false.
 	miss cacheMiss
 }
@@ -247,7 +272,15 @@ func (m *messageService) cacheCanAnswer(ctx context.Context, ca *cache.Account, 
 			return cacheVerdict{reason: cache.ReasonTextOutsideWindow, syncedAt: syncedAt, miss: missPrefetch}
 		}
 	}
-	return cacheVerdict{ok: true, syncedAt: syncedAt}
+	// Unreadable messages do not send the search to the server: it could
+	// list them, but reading them fails the same way.
+	unreadable, err := ca.Unreadable(ctx, folders)
+	if err != nil {
+		log.Warn("reading the cache's unreadable messages for a search failed", "account", acct.Name, "reason", cacheFaultCode(err))
+		m.s.noteCacheErr(err)
+		return cacheVerdict{reason: cache.ReasonStale, syncedAt: syncedAt, miss: miss(missWait)}
+	}
+	return cacheVerdict{ok: true, syncedAt: syncedAt, unreadable: unreadable}
 }
 
 // cacheFaultCode is the fixed code a log gives a cache failure, never its
@@ -322,6 +355,6 @@ func errNeedsCache(field query.Field, miss cacheMiss) error {
 func accountCount(account string, n uint64, route routeInfo) *chainmailv1.AccountCount {
 	return &chainmailv1.AccountCount{
 		Account: account, Count: n, Source: route.Source, SyncedAt: timestamp(route.SyncedAt),
-		Complete: route.Complete, IncompleteReason: route.Reason,
+		Complete: route.complete(), IncompleteReason: route.reason(),
 	}
 }

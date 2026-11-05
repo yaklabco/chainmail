@@ -2,8 +2,10 @@ package cache
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -742,4 +744,118 @@ func TestPrefetchWakesWhenABackfillCompletes(t *testing.T) {
 	r.eventually("the window bodies", func() (bool, error) {
 		return hasBody(t, r.store, one) && hasBody(t, r.store, two), nil
 	})
+}
+
+// prefetchDegraded adds a message with invoice.pdf to the fake's INBOX,
+// caches its row as a read without its body structure would, flagged
+// \Flagged in the cache, and tracks INBOX with the backfill done.
+func (r *prefetchRig) prefetchDegraded() ref.Ref {
+	r.t.Helper()
+	at := r.clk.Now().Add(-oneDay)
+	got := r.fk.Add(fake.Message{
+		Folder: "INBOX", Date: at, InternalDate: at, Subject: "invoice", Body: "see attached",
+		Attachments: []fake.Attachment{{Part: "2", Filename: "invoice.pdf", ContentType: "application/pdf", Data: []byte("%PDF")}},
+	})
+	row := Row{
+		Account: got.Account, Folder: got.Folder, UIDValidity: got.UIDValidity, UID: got.UID,
+		InternalDate: at, Date: at, Size: 100, Subject: "invoice", Flags: []string{`\Flagged`}, AttachmentsUnknown: true,
+	}
+	if err := r.st.PutRows(r.t.Context(), []Row{row}); err != nil {
+		r.t.Fatal(err)
+	}
+	r.track(true)
+	return got
+}
+
+// checkRepaired checks that x's cached row knows invoice.pdf, keeps the
+// row's flags, and that a get answered from the cache, the row's Message
+// over its body, returns the attachment.
+func (r *prefetchRig) checkRepaired(x ref.Ref) {
+	r.t.Helper()
+	cached, ok, err := r.st.Row(r.t.Context(), x)
+	if err != nil || !ok {
+		r.t.Fatalf("Row: %v, %v", ok, err)
+	}
+	if cached.AttachmentsUnknown || !cached.HasAttachment || len(cached.Attachments) != 1 || cached.Attachments[0].Filename != "invoice.pdf" {
+		r.t.Errorf("row attachments: unknown %v, has %v, %+v; want invoice.pdf known", cached.AttachmentsUnknown, cached.HasAttachment, cached.Attachments)
+	}
+	if !slices.Equal(cached.Flags, []string{`\Flagged`}) {
+		r.t.Errorf("row flags = %v, want the row's own", cached.Flags)
+	}
+	body, ok, err := r.st.Body(r.t.Context(), x)
+	if err != nil || !ok {
+		r.t.Fatalf("Body: %v, %v", ok, err)
+	}
+	if got := cached.Message(body).Attachments; len(got) != 1 || got[0].Filename != "invoice.pdf" {
+		r.t.Errorf("a cached get's attachments = %+v, want invoice.pdf", got)
+	}
+}
+
+// A prefetched body of a message the cache holds without its body
+// structure repairs the row's attachments from the full read, keeping the
+// row's flags, so has:attachment and filename: match it afterwards.
+func TestPrefetchRepairsAttachmentsUnknown(t *testing.T) {
+	t.Parallel()
+	r := newPrefetchRig(t)
+	got := r.prefetchDegraded()
+	r.step(0)
+	if !r.has(got) {
+		t.Fatal("no body prefetched")
+	}
+	r.checkRepaired(got)
+}
+
+// The body and the attachment repair commit together. When the repair
+// fails, no body is stored either, so the message stays in the prefetch
+// queue and the next step fetches and repairs it.
+func TestPrefetchRetriesAFailedRepair(t *testing.T) {
+	t.Parallel()
+	r := newPrefetchRig(t)
+	got := r.prefetchDegraded()
+	dsn := "file:" + r.st.path + "?" + url.Values{"_pragma": {"busy_timeout(5000)"}}.Encode()
+	conn, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	const trigger = `CREATE TRIGGER prefetch_fail_repair BEFORE UPDATE OF attachments_unknown ON messages
+		WHEN OLD.attachments_unknown = 1 AND NEW.attachments_unknown = 0
+		BEGIN SELECT RAISE(ABORT, 'injected failure'); END`
+	if _, err := conn.ExecContext(t.Context(), trigger); err != nil {
+		t.Fatal(err)
+	}
+	r.p.step(t.Context())
+	if r.has(got) {
+		t.Error("a body was stored beside a failed repair")
+	}
+	if _, err := conn.ExecContext(t.Context(), "DROP TRIGGER prefetch_fail_repair"); err != nil {
+		t.Fatal(err)
+	}
+	fetches := r.fetches()
+	r.p.step(t.Context())
+	if r.fetches() != fetches+1 || !r.has(got) {
+		t.Fatalf("next step: %d fetches, body %v; want the message fetched and stored", r.fetches()-fetches, r.has(got))
+	}
+	r.checkRepaired(got)
+}
+
+// A prefetch cancelled as its repair starts stores no body either, so a
+// later step with a live context fetches and repairs the message.
+func TestPrefetchRetriesACancelledRepair(t *testing.T) {
+	t.Parallel()
+	r := newPrefetchRig(t)
+	got := r.prefetchDegraded()
+	ctx, cancel := context.WithCancel(t.Context())
+	r.st.beforeRepair = cancel
+	r.p.step(ctx)
+	r.st.beforeRepair = nil
+	if r.has(got) {
+		t.Error("a body was stored beside a cancelled repair")
+	}
+	fetches := r.fetches()
+	r.p.step(t.Context())
+	if r.fetches() != fetches+1 || !r.has(got) {
+		t.Fatalf("next step: %d fetches, body %v; want the message fetched and stored", r.fetches()-fetches, r.has(got))
+	}
+	r.checkRepaired(got)
 }

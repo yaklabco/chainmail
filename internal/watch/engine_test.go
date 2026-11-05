@@ -110,10 +110,11 @@ func (h engineHarness) pass(t *testing.T, src Source, opts PassOptions) PassResu
 	return res
 }
 
-// events reads every event in the log, oldest first.
+// events reads every event in the log, oldest first, the internal
+// unreadable events included.
 func (h engineHarness) events(t *testing.T) []Event {
 	t.Helper()
-	page, err := h.log.Read(t.Context(), Query{Limit: 1000})
+	page, err := h.log.Read(t.Context(), Query{Filter: Filter{Internal: true}, Limit: 1000})
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -617,5 +618,61 @@ func TestPassCapsBatch(t *testing.T) {
 				t.Errorf("SyncRequest.Batch = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+// A batch whose new mail holds a message the source could not read still
+// emits the rest, and the checkpoint moves past that message. A batch whose
+// new mail is all unreadable is progress too, not errNoProgress.
+func TestPassMovesPastUnreadableNewMail(t *testing.T) {
+	t.Parallel()
+	h := newEngineHarness(t, EngineOptions{Batch: 3})
+	src := &scriptSource{results: []scriptResult{
+		{delta: baselineDelta(1, 2)},
+		{delta: mailstore.Delta{
+			State:      diffState(8, 14, true),
+			New:        []mailstore.Summary{diffSummary(3, 0), diffSummary(4, 0)},
+			Unreadable: []uint32{5},
+			More:       true,
+		}},
+		{delta: mailstore.Delta{State: diffState(8, 14, true), Unreadable: []uint32{6}, More: true}},
+		{delta: mailstore.Delta{State: diffState(8, 14, true), New: []mailstore.Summary{diffSummary(7, 0)}}},
+	}}
+	h.pass(t, src, PassOptions{Mode: "poll"})
+	if res, want := h.pass(t, src, PassOptions{Mode: "poll"}), (PassResult{Events: 5, CondStore: true, Batches: 3}); res != want {
+		t.Errorf("Pass = %+v, want %+v", res, want)
+	}
+	var froms []uint32
+	for _, r := range src.reqs[1:] {
+		froms = append(froms, r.From.UIDNext)
+	}
+	if want := []uint32{3, 6, 7}; !slices.Equal(froms, want) {
+		t.Errorf("batches started at UIDs %v, want %v", froms, want)
+	}
+	want := []string{"status baselined", newLine(3, 0), newLine(4, 0), unreadableLine(5), unreadableLine(6), newLine(7, 0)}
+	if lines := diffLines(h.events(t)); !slices.Equal(lines, want) {
+		t.Errorf("events = %q, want %q", lines, want)
+	}
+	if row := h.row(t); row.UIDNext != 8 {
+		t.Errorf("row UIDNEXT = %d, want 8", row.UIDNext)
+	}
+}
+
+// New mail the pass could not read joins the known UIDs, so a later sweep
+// that finds it gone reports it expunged, and the cache can forget it.
+func TestUnreadableNewMailIsExpungedLater(t *testing.T) {
+	t.Parallel()
+	h := newEngineHarness(t, EngineOptions{})
+	src := &scriptSource{results: []scriptResult{
+		{delta: baselineDelta(1, 2)},
+		{delta: mailstore.Delta{State: diffState(5, 14, true), New: []mailstore.Summary{diffSummary(3, 0)}, Unreadable: []uint32{4}}},
+		{delta: mailstore.Delta{State: diffState(5, 15, true), UIDs: []uint32{1, 2, 3}}},
+	}}
+	h.pass(t, src, PassOptions{Mode: "poll"})
+	h.pass(t, src, PassOptions{Mode: "poll"})
+	h.pass(t, src, PassOptions{Mode: "poll", Sweep: true})
+	want := []string{"status baselined", newLine(3, 0), unreadableLine(4), expungedLine(4, 0)}
+	if lines := diffLines(h.events(t)); !slices.Equal(lines, want) {
+		t.Errorf("events = %q, want %q", lines, want)
 	}
 }

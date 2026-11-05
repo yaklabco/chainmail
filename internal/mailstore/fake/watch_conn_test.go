@@ -719,3 +719,39 @@ func TestWatchConcurrent(t *testing.T) {
 		t.Errorf("saw %d messages, want %d", seen, n)
 	}
 }
+
+// A pass on a watch connection that meets new mail the server sent in a
+// form imapstore cannot parse returns the pass, then leaves the
+// connection dead and needing a redial, as imapstore's does: the parse
+// error ends the connection, and the store reads the new mail on another.
+// A pass over well-formed mail leaves it alive.
+func TestWatchConnNeedsRedialAfterMalformedNewMail(t *testing.T) {
+	t.Parallel()
+	for _, how := range []Malformation{BadStructure, BadEnvelope} {
+		t.Run(strconv.Itoa(int(how)), func(t *testing.T) {
+			t.Parallel()
+			s := New("host", false)
+			s.SetIdle(true)
+			c := openWatch(t, s, "INBOX")
+			base := syncConn(t, c, mailstore.SyncRequest{})
+			from := mailstore.Checkpoint{UIDValidity: base.State.UIDValidity, UIDNext: base.State.UIDNext}
+			s.Add(Message{Folder: "INBOX", Subject: "fine"})
+			d := syncConn(t, c, mailstore.SyncRequest{From: from})
+			if c.(mailstore.Redialer).NeedsRedial() {
+				t.Fatal("NeedsRedial after well-formed mail, want false")
+			}
+			from.UIDNext = d.State.UIDNext
+			bad := s.AddMalformed(Message{Folder: "INBOX", Subject: "bad"}, how)
+			d = syncConn(t, c, mailstore.SyncRequest{From: from})
+			if len(d.New)+len(d.Unreadable) != 1 || (len(d.Unreadable) == 1) != (how == BadEnvelope) {
+				t.Errorf("pass = new %v, unreadable %v; want UID %d once", d.New, d.Unreadable, bad.UID)
+			}
+			if !c.(mailstore.Redialer).NeedsRedial() {
+				t.Error("NeedsRedial = false after malformed new mail, want true")
+			}
+			if _, err := c.Idle(t.Context(), time.Second); !errors.Is(err, mailstore.ErrUnavailable) {
+				t.Errorf("Idle after the pass = %v, want ErrUnavailable: the connection is dead", err)
+			}
+		})
+	}
+}

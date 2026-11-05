@@ -212,13 +212,13 @@ func cacheAccountsTable(w io.Writer, accounts []*chainmailv1.AccountCacheStatus)
 // from mail servers, so every value is cleaned for the terminal.
 func cacheFoldersTable(w io.Writer, loc *time.Location, accounts []*chainmailv1.AccountCacheStatus) error {
 	tw := newTable(w)
-	_, _ = fmt.Fprintln(tw, "ACCOUNT\tFOLDER\tSTATE\tHEADERS\tBACKFILL\tBODIES\tBODY SIZE\tWINDOW\tFAILED\tLAST APPLIED")
+	_, _ = fmt.Fprintln(tw, "ACCOUNT\tFOLDER\tSTATE\tHEADERS\tBACKFILL\tBODIES\tBODY SIZE\tWINDOW\tFAILED\tUNREADABLE\tATTACH UNKNOWN\tLAST APPLIED")
 	for _, a := range accounts {
 		for _, f := range a.GetFolders() {
-			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%d\t%s\n",
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%d\t%d\t%d\t%s\n",
 				termText(a.GetAccount()), termText(f.GetFolder()), orDash(termText(f.GetState())), f.GetHeaders(),
 				backfillText(f), f.GetBodies(), byteSize(f.GetBodyBytes()), windowText(f), f.GetBodyFailures(),
-				orDash(shortDate(f.GetLastAppliedAt(), loc)))
+				f.GetUnreadable(), f.GetAttachmentsUnknown(), orDash(shortDate(f.GetLastAppliedAt(), loc)))
 		}
 	}
 	return tw.Flush()

@@ -235,6 +235,20 @@ func (f *routeFixture) putSync(t *testing.T, row watch.FolderRow) {
 	}
 }
 
+// markUnreadable records a message of account's folder as unreadable, as
+// a backfill that could not parse the server's answer for it does.
+func (f *routeFixture) markUnreadable(t *testing.T, account, folder string) {
+	t.Helper()
+	p, ok, err := f.store.Progress(t.Context(), account, folder)
+	if err != nil || !ok {
+		t.Fatalf("progress %s/%s: %v, %t", account, folder, err, ok)
+	}
+	src := mailstore.Source{Folder: folder, UIDValidity: p.UIDValidity}
+	if err := f.store.MarkUnreadable(t.Context(), account, src, []uint32{p.BaselineUIDNext + 100}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // ageSync makes folder's last successful pass age old.
 func (f *routeFixture) ageSync(t *testing.T, account, folder string, age time.Duration) {
 	t.Helper()
@@ -328,6 +342,15 @@ func TestSearcherRoutes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	unreadable := func(t *testing.T, f *routeFixture) { f.markUnreadable(t, "host", "Archive") }
+	both := func(spoils ...func(*testing.T, *routeFixture)) func(*testing.T, *routeFixture) {
+		return func(t *testing.T, f *routeFixture) {
+			for _, s := range spoils {
+				s(t, f)
+			}
+		}
+	}
+	missing := routeInfo{Source: cache.SourceCache, Complete: true, Unreadable: true}
 	tests := []struct {
 		name    string
 		query   string
@@ -354,6 +377,13 @@ func TestSearcherRoutes(t *testing.T) {
 		{name: "forced backfilling", query: "from:acme", source: "cache", spoil: backfilling, want: "view", route: incomplete("backfilling")},
 		{name: "folder not synced", query: "from:acme", spoil: unsynced, want: "server", route: server},
 		{name: "forced folder not synced", query: "from:acme", source: "cache", spoil: unsynced, want: "view", route: incomplete("folder_not_synced")},
+		// A folder with unreadable messages keeps the cache answering: the
+		// server could list them, but reading them fails the same way.
+		{name: "unreadable messages", query: "from:acme", spoil: unreadable, want: "view", route: missing},
+		{name: "forced unreadable messages", query: "from:acme", source: "cache", spoil: unreadable, want: "view", route: missing},
+		{name: "unreadable messages outside the search", query: "in:inbox from:acme", spoil: unreadable, want: "view", route: complete},
+		{name: "stale with unreadable messages", query: "from:acme", spoil: both(staleArchive, unreadable), want: "server", route: server},
+		{name: "forced backfilling with unreadable messages", query: "from:acme", source: "cache", spoil: both(backfilling, unreadable), want: "view", route: incomplete("backfilling")},
 		{name: "no cache", query: "from:acme", noCache: true, want: "server", route: server},
 		{name: "forced no cache", query: "from:acme", source: "cache", noCache: true, want: "none", route: incomplete("cache_disabled")},
 		{name: "forced unsupported term without a cache", query: `label:\Seen`, source: "cache", noCache: true, want: "refusal", route: server},
@@ -639,6 +669,54 @@ func TestSearchForcedCacheIsIncomplete(t *testing.T) {
 	}
 	if entry.Targets[len(entry.Targets)-1] != "source=cache" {
 		t.Errorf("audit targets = %v", entry.Targets)
+	}
+}
+
+// TestSearchReportsUnreadableMessages checks that a cache answer over a
+// folder with messages recorded as unreadable stays with the cache, gives
+// the rows the cache holds, and marks the account incomplete with
+// unreadable_messages, even with no match. Its cursor pages as a complete
+// answer's does.
+func TestSearchReportsUnreadableMessages(t *testing.T) {
+	t.Parallel()
+	f := newRouteFixture(t)
+	seedRouteMail(f)
+	f.warm(t, "host")
+	f.install(t, "host")
+	f.markUnreadable(t, "host", "Archive")
+	host := []string{"host"}
+	for _, q := range []string{"from:acme", "subject:nothing-matches"} {
+		before := f.storeCalls()
+		c := f.search(t, &chainmailv1.SearchRequest{QueryString: q, Accounts: host})
+		if n := f.storeCalls() - before; n != 0 {
+			t.Errorf("%s: the cached page made %d server calls", q, n)
+		}
+		s := f.search(t, &chainmailv1.SearchRequest{QueryString: q, Accounts: host, Source: cache.SourceServer})
+		if c.GetSource() != cache.SourceCache || !sameRows(c.GetRows(), s.GetRows()) || len(c.GetPartial()) != 0 {
+			t.Errorf("%s: source %q, rows %v, partial %v; want the server's rows %v from the cache", q, c.GetSource(), rowSubjects(c.GetRows()), c.GetPartial(), rowSubjects(s.GetRows()))
+		}
+		counts := c.GetAccountCounts()
+		if len(counts) != 1 || counts[0].GetComplete() || counts[0].GetIncompleteReason() != cache.ReasonUnreadableMessages || counts[0].GetCount() != s.GetCount() {
+			t.Errorf("%s: account counts %v, want host incomplete: unreadable_messages, count %d", q, counts, s.GetCount())
+		}
+	}
+	var got, want []string
+	for _, out := range []struct {
+		source string
+		rows   *[]string
+	}{{"", &got}, {cache.SourceServer, &want}} {
+		req := &chainmailv1.SearchRequest{Accounts: host, Limit: 1, Source: out.source}
+		for range 20 {
+			resp := f.search(t, req)
+			*out.rows = append(*out.rows, rowSubjects(resp.GetRows())...)
+			if resp.GetNextCursor() == "" {
+				break
+			}
+			req.Cursor = resp.GetNextCursor()
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("paged from the cache %v, from the server %v", got, want)
 	}
 }
 

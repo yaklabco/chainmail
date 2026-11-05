@@ -156,11 +156,12 @@ type accountFoldersOut struct {
 }
 
 type partialOut struct {
-	Account string     `json:"account"`
-	Folder  *untrusted `json:"folder,omitempty" jsonschema:"absent when the whole account failed"`
-	Reason  string     `json:"reason"`
-	Message string     `json:"message"`
-	Hint    string     `json:"hint,omitempty"`
+	Account    string     `json:"account"`
+	Folder     *untrusted `json:"folder,omitempty" jsonschema:"absent when the whole account failed"`
+	Reason     string     `json:"reason"`
+	Message    string     `json:"message"`
+	Hint       string     `json:"hint,omitempty"`
+	Unreadable uint64     `json:"unreadable,omitempty" jsonschema:"in a search with reason MALFORMED_RESPONSE: the folder's matches left out because the mail server's answer for them could not be read; its other rows are in the page"`
 }
 
 type listFoldersOut struct {
@@ -196,7 +197,10 @@ func serverNames(ss []string) []untrusted {
 func partials(ps []*chainmailv1.PartialSource) []partialOut {
 	var out []partialOut
 	for _, p := range ps {
-		out = append(out, partialOut{Account: p.GetAccount(), Folder: serverNamePtr(p.GetFolder()), Reason: p.GetReason(), Message: p.GetMessage(), Hint: p.GetHint()})
+		out = append(out, partialOut{
+			Account: p.GetAccount(), Folder: serverNamePtr(p.GetFolder()), Reason: p.GetReason(), Message: p.GetMessage(), Hint: p.GetHint(),
+			Unreadable: p.GetUnreadable(),
+		})
 	}
 	return out
 }
@@ -259,8 +263,8 @@ type accountCountOut struct {
 	Count            uint64 `json:"count"`
 	Source           string `json:"source,omitempty" jsonschema:"cache or server: what answered for this account"`
 	SyncedAt         string `json:"synced_at,omitempty" jsonschema:"with source cache: the oldest last sync of the folders searched, in RFC 3339"`
-	Complete         bool   `json:"complete" jsonschema:"false only when source cache was forced and the cache could not answer completely; incomplete_reason says why"`
-	IncompleteReason string `json:"incomplete_reason,omitempty" jsonschema:"backfilling, stale, text_outside_window, folder_not_synced or cache_disabled"`
+	Complete         bool   `json:"complete" jsonschema:"false when source cache was forced and the cache could not answer completely, or when the cache answered and a folder searched holds messages it could not read; incomplete_reason says why"`
+	IncompleteReason string `json:"incomplete_reason,omitempty" jsonschema:"backfilling, stale, text_outside_window, folder_not_synced, cache_disabled or unreadable_messages"`
 }
 
 type searchOut struct {
