@@ -253,7 +253,9 @@ type FolderCacheStatus struct {
 	BodyFailures  uint64                 `protobuf:"varint,12,opt,name=body_failures,json=bodyFailures,proto3" json:"body_failures,omitempty"`
 	LastAppliedAt *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=last_applied_at,json=lastAppliedAt,proto3" json:"last_applied_at,omitempty"`
 	// Messages whose server answer could not be parsed, so the cache has no
-	// row for them. They are read again each time the daemon starts.
+	// row for them. Each start reads up to 200 of an account's again, the
+	// longest-waiting first, and skips a folder whose answers cannot be
+	// parsed at all.
 	Unreadable uint64 `protobuf:"varint,14,opt,name=unreadable,proto3" json:"unreadable,omitempty"`
 	// Messages cached without their body structure, whose attachments are
 	// not known.

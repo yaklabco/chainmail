@@ -207,7 +207,7 @@
                       "type": "string"
                     },
                     "unreadable": {
-                      "description": "messages the cache lacks because the mail server's answer for them could not be parsed; the folder's state is incomplete while any remain, and they are read again each time the daemon starts",
+                      "description": "messages the cache lacks because the mail server's answer for them could not be parsed; the folder's state is incomplete while any remain, and each daemon start reads up to 200 of an account's again, the longest-waiting first, skipping a folder whose answers cannot be parsed at all",
                       "minimum": 0,
                       "type": "integer"
                     },

@@ -69,7 +69,9 @@ message FolderCacheStatus {
   uint64 body_failures = 12;
   google.protobuf.Timestamp last_applied_at = 13;
   // Messages whose server answer could not be parsed, so the cache has no
-  // row for them. They are read again each time the daemon starts.
+  // row for them. Each start reads up to 200 of an account's again, the
+  // longest-waiting first, and skips a folder whose answers cannot be
+  // parsed at all.
   uint64 unreadable = 14;
   // Messages cached without their body structure, whose attachments are
   // not known.

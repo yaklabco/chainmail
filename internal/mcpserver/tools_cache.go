@@ -42,7 +42,7 @@ type cacheFolderOut struct {
 	WindowDone         bool      `json:"window_done" jsonschema:"every message in the window has a cached body or failed for good, so text search inside the window can use the cache"`
 	BodyFailures       uint64    `json:"body_failures,omitempty" jsonschema:"bodies that failed to fetch three times and are not retried"`
 	LastAppliedAt      string    `json:"last_applied_at,omitempty" jsonschema:"when the cache last applied a change from the mail server, in RFC 3339"`
-	Unreadable         uint64    `json:"unreadable,omitempty" jsonschema:"messages the cache lacks because the mail server's answer for them could not be parsed; the folder's state is incomplete while any remain, and they are read again each time the daemon starts"`
+	Unreadable         uint64    `json:"unreadable,omitempty" jsonschema:"messages the cache lacks because the mail server's answer for them could not be parsed; the folder's state is incomplete while any remain, and each daemon start reads up to 200 of an account's again, the longest-waiting first, skipping a folder whose answers cannot be parsed at all"`
 	AttachmentsUnknown uint64    `json:"attachments_unknown,omitempty" jsonschema:"messages cached without their body structure, so their attachments are not known and has: and filename: may miss them"`
 }
 
