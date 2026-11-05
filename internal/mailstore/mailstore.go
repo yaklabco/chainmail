@@ -59,7 +59,7 @@ type UnreadableError struct {
 }
 
 func (e *UnreadableError) Error() string {
-	return fmt.Sprintf("%v: %d messages in %q", ErrMalformed, len(e.UIDs), e.Folder)
+	return fmt.Sprintf("%v: UIDs %v in %q", ErrMalformed, e.UIDs, e.Folder)
 }
 
 // Unwrap makes an UnreadableError match ErrMalformed.
