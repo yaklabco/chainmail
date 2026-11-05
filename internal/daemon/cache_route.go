@@ -63,7 +63,8 @@ type routeInfo struct {
 func (r routeInfo) complete() bool { return r.Complete && !r.Unreadable }
 
 // reason is the AccountCount's incomplete_reason: Reason, or
-// unreadable_messages for a complete answer that misses messages.
+// unreadable_messages for a complete answer that misses messages. A
+// complete answer that misses none has an empty Reason, so it gives "".
 func (r routeInfo) reason() string {
 	if r.Complete && r.Unreadable {
 		return cache.ReasonUnreadableMessages

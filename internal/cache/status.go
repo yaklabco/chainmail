@@ -60,8 +60,9 @@ type FolderStatus struct {
 
 // Status reports the account's cache state for CacheService: settings,
 // today's budget, the latest failure, and each tracked folder's progress,
-// row counts, counts of messages not read whole, and state. A synced folder without progress yet reports a
-// zero progress with its sync row's UIDVALIDITY and UIDNEXT.
+// row counts, counts of messages not read whole, and state. A synced
+// folder without progress yet reports a zero progress with its sync row's
+// UIDVALIDITY and UIDNEXT.
 func (a *Account) Status(ctx context.Context) (AccountStatus, error) {
 	s := a.settings()
 	st := AccountStatus{Account: a.name, Enabled: s.Enabled, BudgetBytes: s.DailyDownload, LastError: a.lastError()}

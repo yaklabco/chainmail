@@ -37,9 +37,8 @@ type rereadBatch struct {
 // error, or one whose answers cannot be parsed at all, waits for a later
 // start, and one whose UIDVALIDITY changed is left to its gap: the rest of
 // that folder's records are skipped for this start. It waits while the
-// account is paused. A failure returns with
-// the chunks not yet committed kept, so the builder's retry resumes there
-// and counts no attempt twice.
+// account is paused. A failure returns with the chunks not yet committed
+// kept, so the builder's retry resumes there and counts no attempt twice.
 func (a *Account) rereadUnreadable(ctx context.Context) error {
 	if !a.rereadLoaded {
 		recorded, err := a.o.Store.OldestUnreadable(ctx, a.name, rereadLimit)
