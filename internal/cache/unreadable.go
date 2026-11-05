@@ -98,6 +98,40 @@ func (s *Store) UnreadableUIDs(ctx context.Context, account string) (map[mailsto
 	return out, nil
 }
 
+// UnreadableMessage is one recorded unreadable message.
+type UnreadableMessage struct {
+	Source mailstore.Source
+	UID    uint32
+}
+
+// OldestUnreadable returns up to limit of the account's recorded
+// unreadable messages, those attempted longest ago first.
+func (s *Store) OldestUnreadable(ctx context.Context, account string, limit int) ([]UnreadableMessage, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT folder, uidvalidity, uid FROM unreadable WHERE account = ?
+		 ORDER BY last_at, folder, uidvalidity, uid LIMIT ?`, account, limit)
+	if err != nil {
+		return nil, s.fail("reading unreadable messages", err)
+	}
+	defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
+	var out []UnreadableMessage
+	for rows.Next() {
+		var (
+			m                UnreadableMessage
+			uidValidity, uid int64
+		)
+		if err := rows.Scan(&m.Source.Folder, &uidValidity, &uid); err != nil {
+			return nil, s.fail("reading unreadable messages", err)
+		}
+		m.Source.UIDValidity, m.UID = uint32(uidValidity), uint32(uid)
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, s.fail("reading unreadable messages", err)
+	}
+	return out, nil
+}
+
 // Incomplete returns, for each of the account's folders with any, how many
 // messages are recorded as unreadable and how many rows were read without
 // their body structure, ordered by folder.

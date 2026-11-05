@@ -14,6 +14,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
 	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/jamesainslie/chainmail/internal/watch"
 )
 
 // unreadable is the rig account's recorded unreadable UIDs.
@@ -52,11 +53,14 @@ func (r *acctRig) cachedUIDs(folder string, uidValidity uint32) []uint32 {
 	return uids
 }
 
-// acctBatchMail is a MailStore that records the size of every header fetch.
+// acctBatchMail is a MailStore that records the size of every header
+// fetch. When failAt is set, the header fetch with that number, counting
+// from 1, fails with mailstore.ErrUnavailable.
 type acctBatchMail struct {
 	*fake.Store
-	mu    sync.Mutex
-	sizes []int
+	failAt int
+	mu     sync.Mutex
+	sizes  []int
 }
 
 var _ MailStore = (*acctBatchMail)(nil)
@@ -64,7 +68,11 @@ var _ MailStore = (*acctBatchMail)(nil)
 func (m *acctBatchMail) FetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32) ([]mailstore.Header, error) {
 	m.mu.Lock()
 	m.sizes = append(m.sizes, len(uids))
+	fail := len(m.sizes) == m.failAt
 	m.mu.Unlock()
+	if fail {
+		return nil, fmt.Errorf("%w: the connection dropped", mailstore.ErrUnavailable)
+	}
 	return m.Store.FetchHeaders(ctx, src, uids)
 }
 
@@ -150,6 +158,89 @@ func TestBackfillMovesPastAnUnreadableMessage(t *testing.T) {
 	}
 	if got := fs.Calls("FetchHeaders"); got != 2 {
 		t.Errorf("FetchHeaders ran %d times, want 2: the backfill, then the one reread", got)
+	}
+}
+
+// The reread at start fetches at most four UIDs at a time, so the store
+// always isolates them, and takes at most 200 records, those attempted
+// longest ago. A reread that fails part way resumes after the chunks it
+// committed, so no attempt is counted twice.
+func TestRereadChunksCapsAndResumes(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	uids := addInbox(fs, 205)
+	for _, uid := range uids {
+		fs.Malform("INBOX", uid, fake.BadEnvelope)
+	}
+	r.pass("INBOX")
+	r.start()
+	r.waitBackfilled("INBOX")
+	r.stop()
+	// The first five were attempted again since, so they are the newest.
+	r.clock.Advance(time.Minute)
+	if err := r.store.MarkUnreadable(t.Context(), "acme", inbox, uids[:5]); err != nil {
+		t.Fatal(err)
+	}
+	for _, uid := range uids[9:13] {
+		fs.Malform("INBOX", uid, fake.WellFormed)
+	}
+
+	mail := &acctBatchMail{Store: fs, failAt: 2}
+	r.mail = mail
+	r.renew()
+	r.start()
+	r.clock.expectAfter(t, time.Second) // the builder's backoff after the failed chunk
+	r.clock.Advance(time.Second)
+	r.eventually("the reread of the last chunk", func() (bool, error) {
+		return r.attempts("INBOX", uids[204]) == 2, nil
+	})
+	r.stop()
+
+	sizes := mail.batches()
+	if len(sizes) != 51 || slices.ContainsFunc(sizes, func(n int) bool { return n != 4 }) {
+		t.Errorf("header fetch sizes = %v, want 51 fetches of 4: 200 records, one chunk again after the failure", sizes)
+	}
+	for i, uid := range uids {
+		want := 2
+		if i >= 9 && i < 13 {
+			want = 0 // read now, so the record is gone
+		}
+		if got := r.attempts("INBOX", uid); got != want {
+			t.Errorf("UID %d: %d attempts, want %d", uid, got, want)
+		}
+	}
+	if got, want := r.cachedUIDs("INBOX", 1), uids[9:13]; !slices.Equal(got, want) {
+		t.Errorf("cached UIDs = %v, want %v", got, want)
+	}
+}
+
+// The reread leaves a folder in error for a later start: it fetches
+// nothing there and counts no attempt, and the builder goes on.
+func TestRereadSkipsAFolderInError(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	uids := addInbox(fs, 3)
+	fs.Malform("INBOX", uids[1], fake.BadEnvelope)
+	r.pass("INBOX")
+	r.start()
+	r.waitBackfilled("INBOX")
+	r.waitApplied()
+	r.stop()
+
+	fs.Malform("INBOX", uids[1], fake.WellFormed)
+	r.setState("INBOX", watch.StateError)
+	r.publish(watch.Event{At: acctStart, Kind: watch.KindStatus, Account: "acme", Folder: "INBOX", State: watch.StateError})
+	calls := fs.Calls("FetchHeaders")
+	r.renew()
+	r.start()
+	r.waitApplied() // the builder applies events only after its reread
+	if got := fs.Calls("FetchHeaders"); got != calls {
+		t.Errorf("FetchHeaders ran %d more times, want none for a folder in error", got-calls)
+	}
+	if got := r.attempts("INBOX", uids[1]); got != 1 {
+		t.Errorf("%d attempts, want 1", got)
 	}
 }
 
