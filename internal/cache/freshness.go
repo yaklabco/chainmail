@@ -24,8 +24,9 @@ const (
 // oldest last_sync_at among them.
 //
 // A folder is fresh when it has a sync_folders row with a UIDVALIDITY
-// (else folder_not_synced), is watching at any age or polling with a pass
-// within twice sync.poll, and has been synced by a pass since the run
+// (else folder_not_synced), is watching at any age or polling with a pass,
+// or a poll whose STATUS confirmed the checkpoint, within twice sync.poll,
+// and has been synced by a pass since the run
 // started, AccountOptions.Started (else stale), and has finished its
 // backfill under that UIDVALIDITY (else backfilling), checked in that
 // order and in folder order. The account is then stale while the builder
@@ -76,8 +77,9 @@ func (a *Account) Freshness(ctx context.Context, folders []string) (ok bool, rea
 }
 
 // syncFresh reports whether SP6 keeps the folder current: watching at any
-// age, or polling with a successful pass within twice sync.poll
-// (amendment 8), and in either state synced by a pass of this run. The
+// age, or polling with a successful pass, or a poll whose STATUS confirmed
+// the checkpoint, within twice sync.poll (amendment 8), and in either state
+// synced by a pass of this run. The
 // state survives a restart, but the mail that arrived while the daemon was
 // down reaches the log only through this run's first pass, which stamps
 // last_sync_at.

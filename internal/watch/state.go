@@ -11,6 +11,8 @@ import (
 	"maps"
 	"slices"
 	"time"
+
+	"github.com/jamesainslie/chainmail/internal/mailstore"
 )
 
 // Mode is how a folder is synced, as sync_folders records it. The API
@@ -332,4 +334,25 @@ func writeSet(h hash.Hash, set []string) {
 		h.Write([]byte(v))
 		h.Write([]byte{'\n'})
 	}
+}
+
+// StampSync records at as the folder's last_sync_at when its row still
+// holds the checkpoint st confirms (UIDVALIDITY, UIDNEXT and
+// HIGHESTMODSEQ), and reports whether it did. A poll whose STATUS shows
+// nothing changed runs no pass, so this is how it records that the folder
+// is current. No other column changes; a row missing or holding another
+// checkpoint is left alone.
+func (s *State) StampSync(ctx context.Context, account, folder string, st mailstore.FolderState, at time.Time) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE sync_folders SET last_sync_at = ?
+		 WHERE account = ? AND folder = ? AND uidvalidity = ? AND uidnext = ? AND highest_modseq = ?`,
+		formatTime(at), account, folder, int64(st.UIDValidity), int64(st.UIDNext), int64(st.HighestModSeq))
+	if err != nil {
+		return false, fmt.Errorf("stamping the sync of %s/%s: %w", account, folder, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("stamping the sync of %s/%s: %w", account, folder, err)
+	}
+	return n > 0, nil
 }

@@ -508,7 +508,8 @@ func (s *Supervisor) pollFolder(ctx context.Context, pf *polled) error {
 
 // pollPass runs STATUS on folder and then a pass when a sweep is due, the
 // folder has no CONDSTORE or no checkpoint, or its UIDVALIDITY, UIDNEXT or
-// HIGHESTMODSEQ moved. Each call holds the store only while it runs.
+// HIGHESTMODSEQ moved. Otherwise it stamps last_sync_at, since STATUS
+// confirmed the checkpoint. Each call holds the store only while it runs.
 func (s *Supervisor) pollPass(ctx context.Context, folder string, sweep bool) (PassResult, error) {
 	w, release, err := s.watcherStore(ctx)
 	if err != nil {
@@ -520,11 +521,16 @@ func (s *Supervisor) pollPass(ctx context.Context, folder string, sweep bool) (P
 		return PassResult{}, err
 	}
 	if !sweep && st.CondStore {
-		row, ok, rerr := s.o.State.Folder(ctx, s.o.Account.Name, folder)
-		if rerr != nil {
-			return PassResult{}, rerr
+		// The stamp lands only when the row holds the checkpoint STATUS
+		// shows, so nothing changed and no pass runs, but the folder is
+		// current: the cache counts a polled folder fresh only while its
+		// last_sync_at is recent. A missing row or a moved checkpoint gets
+		// a pass.
+		stamped, err := s.o.State.StampSync(ctx, s.o.Account.Name, folder, st, s.clock.Now())
+		if err != nil {
+			return PassResult{}, err
 		}
-		if ok && row.UIDValidity == st.UIDValidity && row.UIDNext == st.UIDNext && row.HighestModSeq == st.HighestModSeq {
+		if stamped {
 			return PassResult{}, nil
 		}
 	}
