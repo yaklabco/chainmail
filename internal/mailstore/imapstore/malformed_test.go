@@ -1,0 +1,91 @@
+package imapstore
+
+import (
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/jamesainslie/chainmail/internal/mailstore"
+)
+
+// fetchedRow is what the malformed-response tests check of a header or a
+// summary.
+type fetchedRow struct {
+	uid                uint32
+	subject            string
+	hasAttachment      bool
+	attachments        int
+	attachmentsUnknown bool
+}
+
+// rowFetcher runs FetchHeaders or FetchSummaries and returns its rows.
+type rowFetcher func(t *testing.T, s *Store, src mailstore.Source, uids []uint32) ([]fetchedRow, error)
+
+// rowFetchers are FetchHeaders and FetchSummaries, the latter with
+// snippets, so its text samples are fetched too.
+var rowFetchers = map[string]rowFetcher{
+	"FetchHeaders": func(t *testing.T, s *Store, src mailstore.Source, uids []uint32) ([]fetchedRow, error) {
+		hs, err := s.FetchHeaders(t.Context(), src, uids)
+		var rows []fetchedRow
+		for _, h := range hs {
+			rows = append(rows, fetchedRow{h.Summary.Ref.UID, h.Summary.Subject, h.Summary.HasAttachment, len(h.Attachments), h.Summary.AttachmentsUnknown})
+		}
+		return rows, err
+	},
+	"FetchSummaries": func(t *testing.T, s *Store, src mailstore.Source, uids []uint32) ([]fetchedRow, error) {
+		sums, err := s.FetchSummaries(t.Context(), src, uids, mailstore.SummaryOptions{Snippets: true})
+		var rows []fetchedRow
+		for _, sum := range sums {
+			rows = append(rows, fetchedRow{sum.Ref.UID, sum.Subject, sum.HasAttachment, -1, sum.AttachmentsUnknown})
+		}
+		return rows, err
+	},
+}
+
+func scriptUIDs(n int) []uint32 {
+	uids := make([]uint32, n)
+	for i := range uids {
+		uids[i] = uint32(i + 1)
+	}
+	return uids
+}
+
+// A malformed response fails at once, as ErrMalformed and not as an
+// unavailable server: asking again on a fresh connection gets the same
+// response. FetchMessages has no batch to split, so the message fails.
+func TestMalformedResponseIsNotRetried(t *testing.T) {
+	t.Parallel()
+	srv := startScriptServer(t, &scriptServer{n: 1, badStructure: 1})
+	s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second})
+	err := fetchWithin(t, s, scriptRefs(1), 5*time.Second)[0].Err
+	if !errors.Is(err, mailstore.ErrMalformed) || errors.Is(err, mailstore.ErrUnavailable) || errors.Is(err, errConnLost) {
+		t.Errorf("FetchMessages error = %v, want ErrMalformed only", err)
+	}
+	if n, c := srv.fetches.Load(), srv.conns.Load(); n != 1 || c != 1 {
+		t.Errorf("FETCH sent %d times on %d connections, want once on one", n, c)
+	}
+}
+
+// A connection that drops partway through a summary FETCH is not a
+// malformed response: the batch is retried on a fresh connection, whole.
+func TestDroppedConnectionIsStillRetried(t *testing.T) {
+	t.Parallel()
+	for name, fetch := range rowFetchers {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := &scriptServer{n: 4}
+			srv.dropSummaries.Store(1)
+			s := scriptStore(t, startScriptServer(t, srv), Options{CommandTimeout: 5 * time.Second})
+			rows, err := fetch(t, s, mailstore.Source{Folder: "INBOX", UIDValidity: scriptUIDValidity}, scriptUIDs(4))
+			if err != nil || len(rows) != 4 {
+				t.Fatalf("%s = %+v, %v; want 4 rows", name, rows, err)
+			}
+			if n := srv.summaryFetches("1:4"); n != 2 {
+				t.Errorf("UID set 1:4 fetched %d times, want twice: once dropped, once retried", n)
+			}
+			if n := srv.conns.Load(); n != 2 {
+				t.Errorf("%d connections, want 2", n)
+			}
+		})
+	}
+}

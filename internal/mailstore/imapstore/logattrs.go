@@ -49,6 +49,8 @@ func logReason(err error) string {
 		return "deadline"
 	case errors.Is(err, errCommandTimeout):
 		return "command_timeout"
+	case errors.Is(err, mailstore.ErrMalformed):
+		return "malformed"
 	case errors.Is(err, errConnLost):
 		return "connection_lost"
 	case errors.Is(err, mailstore.ErrStaleRef):

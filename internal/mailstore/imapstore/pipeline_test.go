@@ -79,8 +79,20 @@ type scriptServer struct {
 	// structure, when set, is every message's BODYSTRUCTURE in a summary
 	// FETCH instead of a text/plain part.
 	structure string
+	// badStructure, when set, is the UID whose BODYSTRUCTURE a summary
+	// FETCH sends in a form the client cannot parse, and badEnvelope the
+	// UID whose ENVELOPE it sends so.
+	badStructure, badEnvelope int
+	// dropSummaries is how many summary FETCHes, counting across
+	// connections, hang up partway through their answer.
+	dropSummaries atomic.Int32
 
 	conns, searches, fetches atomic.Int32
+
+	// summarySets counts the summary FETCHes by the UID set they asked
+	// for, with " without BODYSTRUCTURE" after a set that left it out.
+	mu          sync.Mutex
+	summarySets map[string]int
 
 	ca *tlstest.CA
 	ep provider.Endpoint
@@ -203,6 +215,13 @@ func (srv *scriptServer) serve(conn net.Conn) {
 			switch {
 			case kind == srv.refuse:
 				reply = tag + " " + srv.refusal + "\r\n"
+			case kind == "FETCH" && (strings.Contains(rest, "ENVELOPE") || strings.Contains(rest, "BODYSTRUCTURE")):
+				srv.countSummary(rest)
+				if srv.dropSummaries.Add(-1) >= 0 {
+					send("* 1 FETCH (UID 1 ")
+					return
+				}
+				reply = srv.summaries(rest) + tag + " OK done\r\n"
 			case kind == "FETCH" && !strings.Contains(strings.ToUpper(rest), "BODY"):
 				if !srv.states(tag, rest, send, r) {
 					return
@@ -210,8 +229,6 @@ func (srv *scriptServer) serve(conn net.Conn) {
 				continue
 			case kind == "SEARCH":
 				reply = "* SEARCH 1\r\n" + tag + " OK done\r\n"
-			case strings.Contains(rest, "BODYSTRUCTURE"):
-				reply = srv.summaries(rest) + tag + " OK done\r\n"
 			default:
 				bodies++
 				if srv.dropAfter > 0 && bodies > srv.dropAfter {
@@ -259,8 +276,10 @@ func (srv *scriptServer) body(cmd string, held *[]string) (string, bool) {
 	return data.String(), true
 }
 
-// summaries answers the summary FETCH for every message, echoing the body
-// section asked for with the whole header.
+// summaries answers the summary FETCH for each message of the UID set it
+// asks for, echoing the body section asked for with the whole header. It
+// sends BODYSTRUCTURE only when asked, and badStructure's and
+// badEnvelope's messages in a form the client cannot parse.
 func (srv *scriptServer) summaries(rest string) string {
 	sec := "HEADER"
 	if m := peekSection.FindStringSubmatch(rest); m != nil {
@@ -270,20 +289,89 @@ func (srv *scriptServer) summaries(rest string) string {
 	if encoding == "" {
 		encoding = "7bit"
 	}
+	asked := scriptUIDSet(rest, srv.n)
 	var b strings.Builder
 	for uid := 1; uid <= srv.n; uid++ {
+		if !asked[uid] {
+			continue
+		}
 		h := scriptHeader(uid)
 		structure := fmt.Sprintf("(\"text\" \"plain\" (\"charset\" \"utf-8\") NIL NIL \"%s\" %d 1 NIL NIL NIL NIL)", encoding, len(srv.bodyOf(uid)))
 		if srv.structure != "" {
 			structure = srv.structure
 		}
+		if uid == srv.badStructure {
+			structure = `("TEXT" NIL)` // a body type without its subtype
+		}
+		if strings.Contains(rest, "BODYSTRUCTURE") {
+			structure = "BODYSTRUCTURE " + structure + " "
+		} else {
+			structure = ""
+		}
+		envelope := fmt.Sprintf("(\"Mon, 26 Oct 2026 09:00:00 +0000\" \"m%d\" ((NIL NIL \"a\" \"example.com\")) ((NIL NIL \"a\" \"example.com\")) "+
+			"((NIL NIL \"a\" \"example.com\")) ((NIL NIL \"me\" \"example.test\")) NIL NIL NIL \"<m%d@x>\")", uid, uid)
+		if uid == srv.badEnvelope {
+			envelope = "(NIL)" // a date and nothing after it
+		}
 		fmt.Fprintf(&b, "* %d FETCH (UID %d INTERNALDATE \"20-Oct-2026 09:00:00 +0000\" RFC822.SIZE %d FLAGS () "+
-			"BODYSTRUCTURE %s "+
-			"ENVELOPE (\"Mon, 26 Oct 2026 09:00:00 +0000\" \"m%d\" ((NIL NIL \"a\" \"example.com\")) ((NIL NIL \"a\" \"example.com\")) "+
-			"((NIL NIL \"a\" \"example.com\")) ((NIL NIL \"me\" \"example.test\")) NIL NIL NIL \"<m%d@x>\") BODY[%s] {%d}\r\n%s)\r\n",
-			uid, uid, len(h)+len(srv.bodyOf(uid)), structure, uid, uid, sec, len(h), h)
+			"%sENVELOPE %s BODY[%s] {%d}\r\n%s)\r\n",
+			uid, uid, len(h)+len(srv.bodyOf(uid)), structure, envelope, sec, len(h), h)
 	}
 	return b.String()
+}
+
+// countSummary counts a summary FETCH in summarySets.
+func (srv *scriptServer) countSummary(rest string) {
+	key := "?"
+	if m := uidFetch.FindStringSubmatch(rest); m != nil {
+		key = m[1]
+	}
+	if !strings.Contains(rest, "BODYSTRUCTURE") {
+		key += " without BODYSTRUCTURE"
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if srv.summarySets == nil {
+		srv.summarySets = map[string]int{}
+	}
+	srv.summarySets[key]++
+}
+
+// summaryFetches returns how many summary FETCHes asked for set.
+func (srv *scriptServer) summaryFetches(set string) int {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	return srv.summarySets[set]
+}
+
+// scriptUIDSet reads the UID set of a UID FETCH, such as 1:4,7, into the
+// UIDs from 1 to n it names. A set it cannot read names every one.
+func scriptUIDSet(rest string, n int) map[int]bool {
+	out := map[int]bool{}
+	m := uidFetch.FindStringSubmatch(rest)
+	if m == nil {
+		for uid := 1; uid <= n; uid++ {
+			out[uid] = true
+		}
+		return out
+	}
+	for _, r := range strings.Split(m[1], ",") {
+		lo, hi, isRange := strings.Cut(r, ":")
+		start, err := strconv.Atoi(lo)
+		if err != nil {
+			start = n
+		}
+		stop := start
+		if isRange {
+			if stop, err = strconv.Atoi(hi); err != nil {
+				stop = n
+			}
+		}
+		for uid := min(start, stop); uid <= max(start, stop); uid++ {
+			out[uid] = true
+		}
+	}
+	return out
 }
 
 // answer returns the data and the completion for one body FETCH.
