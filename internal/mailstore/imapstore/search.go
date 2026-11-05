@@ -217,10 +217,11 @@ func (s *Store) summaryItems(preview, fullHeader bool) *imap.FetchOptions {
 // Any other error, such as a failure to fetch the snippets, comes with the
 // summaries read before it.
 func (s *Store) FetchSummaries(ctx context.Context, src mailstore.Source, uids []uint32, opts mailstore.SummaryOptions) ([]mailstore.Summary, error) {
-	if len(uids) == 0 {
+	want := absent(uids, nil) // each UID once, and no 0, which a UID set reads as *
+	if len(want) == 0 {
 		return nil, nil
 	}
-	read, unreadable, err := isolate(s, src.Folder, uids, func(part []uint32, structure bool) ([]mailstore.Summary, error) {
+	read, unreadable, err := isolate(s, src.Folder, want, func(part []uint32, structure bool) ([]mailstore.Summary, error) {
 		var out []mailstore.Summary
 		err := s.withConn(ctx, src.Folder, func(c *conn) error {
 			out = nil

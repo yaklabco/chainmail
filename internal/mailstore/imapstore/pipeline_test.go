@@ -81,8 +81,18 @@ type scriptServer struct {
 	structure string
 	// badStructure, when set, is the UID whose BODYSTRUCTURE a summary
 	// FETCH sends in a form the client cannot parse, and badEnvelope the
-	// UID whose ENVELOPE it sends so.
+	// UID whose ENVELOPE it sends so. -1 means every UID.
 	badStructure, badEnvelope int
+	// hideReduced leaves badStructure's message out of a summary FETCH
+	// without BODYSTRUCTURE, as if it was expunged in between.
+	hideReduced bool
+	// badText, when set, is the UID whose body FETCH, such as a text
+	// sample, is answered in a form the client cannot parse.
+	badText int
+	// staleAfter, when set, makes SELECT and EXAMINE report another
+	// UIDVALIDITY once that many summary FETCHes have been answered.
+	staleAfter int32
+	answered   atomic.Int32 // summary FETCHes answered, for staleAfter
 	// badSelect answers SELECT and EXAMINE in a form the client cannot
 	// parse.
 	badSelect bool
@@ -199,7 +209,11 @@ func (srv *scriptServer) serve(conn net.Conn) {
 		case "CAPABILITY":
 			reply = "* CAPABILITY " + srv.caps() + "\r\n" + tag + " OK done\r\n"
 		case "EXAMINE", "SELECT":
-			reply = fmt.Sprintf("* %d EXISTS\r\n* OK [UIDVALIDITY %d] ok\r\n", srv.n, scriptUIDValidity)
+			validity := scriptUIDValidity
+			if srv.staleAfter > 0 && srv.answered.Load() >= srv.staleAfter {
+				validity++
+			}
+			reply = fmt.Sprintf("* %d EXISTS\r\n* OK [UIDVALIDITY %d] ok\r\n", srv.n, validity)
 			if srv.badSelect {
 				reply = fmt.Sprintf("* %d EXISTS\r\n* OK [UIDVALIDITY x] ok\r\n", srv.n)
 			}
@@ -228,6 +242,7 @@ func (srv *scriptServer) serve(conn net.Conn) {
 					return
 				}
 				reply = srv.summaries(rest) + tag + " OK done\r\n"
+				srv.answered.Add(1)
 			case kind == "FETCH" && !strings.Contains(strings.ToUpper(rest), "BODY"):
 				if !srv.states(tag, rest, send, r) {
 					return
@@ -298,7 +313,7 @@ func (srv *scriptServer) summaries(rest string) string {
 	asked := scriptUIDSet(rest, srv.n)
 	var b strings.Builder
 	for uid := 1; uid <= srv.n; uid++ {
-		if !asked[uid] {
+		if !asked[uid] || srv.hideReduced && uid == srv.badStructure && !strings.Contains(rest, "BODYSTRUCTURE") {
 			continue
 		}
 		h := scriptHeader(uid)
@@ -306,7 +321,7 @@ func (srv *scriptServer) summaries(rest string) string {
 		if srv.structure != "" {
 			structure = srv.structure
 		}
-		if uid == srv.badStructure {
+		if uid == srv.badStructure || srv.badStructure < 0 {
 			structure = `("TEXT" NIL)` // a body type without its subtype
 		}
 		if strings.Contains(rest, "BODYSTRUCTURE") {
@@ -316,7 +331,7 @@ func (srv *scriptServer) summaries(rest string) string {
 		}
 		envelope := fmt.Sprintf("(\"Mon, 26 Oct 2026 09:00:00 +0000\" \"m%d\" ((NIL NIL \"a\" \"example.com\")) ((NIL NIL \"a\" \"example.com\")) "+
 			"((NIL NIL \"a\" \"example.com\")) ((NIL NIL \"me\" \"example.test\")) NIL NIL NIL \"<m%d@x>\")", uid, uid)
-		if uid == srv.badEnvelope {
+		if uid == srv.badEnvelope || srv.badEnvelope < 0 {
 			envelope = "(NIL)" // a date and nothing after it
 		}
 		fmt.Fprintf(&b, "* %d FETCH (UID %d INTERNALDATE \"20-Oct-2026 09:00:00 +0000\" RFC822.SIZE %d FLAGS () "+
@@ -399,6 +414,10 @@ func (srv *scriptServer) answer(cmd string) (data, done string) {
 			refusal = "NO [SERVERBUG] cannot read this message"
 		}
 		return "", tag + " " + refusal + "\r\n"
+	}
+	if uid == srv.badText {
+		// A list where the section's text belongs.
+		return fmt.Sprintf("* %d FETCH (UID %d BODY[%s] (x))\r\n", uid, uid, sec[1]), done
 	}
 	body := srv.bodyOf(uid)
 	if sec[1] == "" {

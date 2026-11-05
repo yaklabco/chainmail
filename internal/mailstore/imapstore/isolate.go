@@ -56,6 +56,9 @@ func bisect[T any](s *Store, folder string, uids []uint32, fetch func(uids []uin
 	rows, err = fetch(uids, false)
 	switch {
 	case err == nil:
+		if len(rows) == 0 {
+			return nil, nil, nil // gone since; nothing was read
+		}
 		log.Warn("read a message without its body structure, which the mail server sent in a form chainmail cannot read; its attachments are unknown",
 			logAttrs(first, "account", s.acct.Name, "folder", folder, "uid", uids[0])...)
 		return rows, nil, nil

@@ -135,3 +135,86 @@ func (b *lockedBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
+
+// A UID asked for twice is fetched and reported once.
+func TestFetchSummariesIsolatesEachUIDOnce(t *testing.T) {
+	t.Parallel()
+	srv := startScriptServer(t, &scriptServer{n: 8, badEnvelope: 5})
+	logs := &lockedBuffer{}
+	s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second, Logger: slog.New(slog.NewTextHandler(logs, nil))})
+	sums, err := s.FetchSummaries(t.Context(), mailstore.Source{Folder: "INBOX", UIDValidity: scriptUIDValidity}, []uint32{5, 5, 1}, mailstore.SummaryOptions{})
+	unreadable, ok := errors.AsType[*mailstore.UnreadableError](err)
+	if !ok || !slices.Equal(unreadable.UIDs, []uint32{5}) {
+		t.Fatalf("FetchSummaries error = %v, want an UnreadableError for UID 5 alone", err)
+	}
+	if len(sums) != 1 || sums[0].Ref.UID != 1 {
+		t.Errorf("FetchSummaries = %+v, want UID 1 alone", sums)
+	}
+	if n := srv.summaryFetches("5 without BODYSTRUCTURE"); n != 1 {
+		t.Errorf("UID 5 fetched %d times without BODYSTRUCTURE, want once", n)
+	}
+	wantWarning(t, logs.String(), "cannot read a message")
+}
+
+// A message that is gone by the time it is fetched without its body
+// structure is not reported as read, nor as unreadable.
+func TestIsolateWarnsOnlyOfMessagesRead(t *testing.T) {
+	t.Parallel()
+	for name, fetch := range rowFetchers {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := startScriptServer(t, &scriptServer{n: 8, badStructure: 5, hideReduced: true})
+			logs := &lockedBuffer{}
+			s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second, Logger: slog.New(slog.NewTextHandler(logs, nil))})
+			rows, err := fetch(t, s, mailstore.Source{Folder: "INBOX", UIDValidity: scriptUIDValidity}, scriptUIDs(8))
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			var got []uint32
+			for _, r := range rows {
+				got = append(got, r.uid)
+			}
+			if want := []uint32{1, 2, 3, 4, 6, 7, 8}; !slices.Equal(got, want) {
+				t.Errorf("UIDs = %v, want %v", got, want)
+			}
+			if l := logs.String(); strings.Contains(l, "without its body structure") {
+				t.Errorf("logs = %q, want no warning of a message read without its body structure", l)
+			}
+		})
+	}
+}
+
+// Another error partway through the hunt, here the folder's UIDVALIDITY
+// changing before the bad message is fetched without its body structure,
+// ends it. FetchHeaders returns only the error, and FetchSummaries the
+// summaries of the half it read before it, never an UnreadableError.
+func TestIsolateStopsAtAnotherError(t *testing.T) {
+	t.Parallel()
+	for name, fetch := range rowFetchers {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			// The FETCHes of 1:8, 1:4, 5:8, 5:6 and 5 are answered before
+			// the connection for the refetch of 5 opens the folder.
+			srv := startScriptServer(t, &scriptServer{n: 8, badStructure: 5, staleAfter: 5})
+			s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second})
+			rows, err := fetch(t, s, mailstore.Source{Folder: "INBOX", UIDValidity: scriptUIDValidity}, scriptUIDs(8))
+			if !errors.Is(err, mailstore.ErrStaleRef) || errors.Is(err, mailstore.ErrMalformed) {
+				t.Fatalf("%s error = %v, want ErrStaleRef alone", name, err)
+			}
+			var got []uint32
+			for _, r := range rows {
+				got = append(got, r.uid)
+			}
+			want := []uint32{1, 2, 3, 4}
+			if name == "FetchHeaders" {
+				want = nil
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("UIDs = %v, want %v", got, want)
+			}
+			if n := srv.summaryFetches("5 without BODYSTRUCTURE"); n != 0 {
+				t.Errorf("UID 5 fetched %d times without BODYSTRUCTURE, want none: the folder open failed first", n)
+			}
+		})
+	}
+}
