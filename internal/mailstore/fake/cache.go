@@ -17,7 +17,9 @@ var (
 // FetchSummaries gives, with Cc, Bcc, the Message-ID without angle
 // brackets, In-Reply-To, References and attachments as FetchMessages gives
 // them, in the order of uids and leaving out UIDs the folder lacks. No
-// UIDs gives nil, nil without checking src, as imapstore does.
+// UIDs gives nil, nil without checking src, as imapstore does. Malform and
+// SetMalformedBatch make it answer as imapstore does for messages it cannot
+// parse.
 func (s *Store) FetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32) ([]mailstore.Header, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -32,20 +34,34 @@ func (s *Store) FetchHeaders(ctx context.Context, src mailstore.Source, uids []u
 	} else if v != src.UIDValidity {
 		return nil, fmt.Errorf("%w: %s changed", mailstore.ErrStaleRef, src.Folder)
 	}
-	var out []mailstore.Header
+	var (
+		out        []mailstore.Header
+		unreadable []uint32
+	)
 	for _, uid := range uids {
 		m := s.findLocked(src.Folder, uid)
 		if m == nil {
 			continue
 		}
-		out = append(out, mailstore.Header{
+		h := mailstore.Header{
 			Summary: s.summaryLocked(m, s.refInLocked(m, src.Folder), mailstore.SummaryOptions{}),
 			Cc:      slices.Clone(m.Cc), Bcc: slices.Clone(m.Bcc), MessageID: trimID(m.MessageID),
 			InReplyTo: slices.Clone(m.InReplyTo), References: slices.Clone(m.References),
-			Attachments: attachments(m),
-		})
+		}
+		if !s.degradeLocked(m, &h.Summary) {
+			unreadable = append(unreadable, uid)
+			continue
+		}
+		if !h.Summary.AttachmentsUnknown {
+			h.Attachments = attachments(m)
+		}
+		out = append(out, h)
 	}
-	return out, nil
+	plain, err := s.unreadableErrLocked(src.Folder, len(uids), unreadable)
+	if plain {
+		return nil, err
+	}
+	return out, err
 }
 
 // SearchFolders implements mailstore.Scoper with the folders Search picks.

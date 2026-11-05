@@ -239,7 +239,12 @@ func (s *Store) syncLocked(folder string, req mailstore.SyncRequest, condstore b
 			fresh, d.More = fresh[:batch], true
 		}
 		for _, m := range fresh {
-			d.New = append(d.New, s.summaryLocked(m, s.refLocked(m), mailstore.SummaryOptions{Snippets: req.Snippets}))
+			sum := s.summaryLocked(m, s.refLocked(m), mailstore.SummaryOptions{Snippets: req.Snippets})
+			if !s.degradeLocked(m, &sum) {
+				d.Unreadable = append(d.Unreadable, m.uid)
+				continue
+			}
+			d.New = append(d.New, sum)
 		}
 	}
 	switch {

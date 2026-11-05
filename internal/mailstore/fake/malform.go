@@ -1,0 +1,85 @@
+package fake
+
+import (
+	"fmt"
+
+	"github.com/jamesainslie/chainmail/internal/mailstore"
+)
+
+// Malformation is how the fake answers a fetch of one message, for tests of
+// messages whose FETCH response imapstore cannot parse.
+type Malformation int
+
+const (
+	// WellFormed is a message read whole, the default.
+	WellFormed Malformation = iota
+	// BadStructure is a message whose body structure cannot be parsed.
+	// imapstore reads it again without one, so FetchHeaders, FetchSummaries
+	// and a sync pass return it with AttachmentsUnknown set, HasAttachment
+	// false and no attachments.
+	BadStructure
+	// BadEnvelope is a message that cannot be read at all. FetchHeaders and
+	// FetchSummaries leave it out and return what they read with a
+	// *mailstore.UnreadableError naming it. A sync pass lists it in
+	// Delta.Unreadable instead of Delta.New.
+	BadEnvelope
+)
+
+// Malform sets how fetches answer for the message at uid in folder, in
+// every folder it is in. It panics when there is no such message.
+func (s *Store) Malform(folder string, uid uint32, how Malformation) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.findLocked(folder, uid)
+	if m == nil {
+		panic(fmt.Sprintf("fake: no message %d in %q", uid, folder))
+	}
+	if s.malformed == nil {
+		s.malformed = map[*Message]Malformation{}
+	}
+	if how == WellFormed {
+		delete(s.malformed, m)
+		return
+	}
+	s.malformed[m] = how
+}
+
+// SetMalformedBatch makes a FetchHeaders or FetchSummaries call that asks
+// for n UIDs or more, and holds a BadEnvelope message, fail with a plain
+// mailstore.ErrMalformed and nothing read, as imapstore's does once its
+// hunt for the malformed messages runs out of logins. With n of 1 every
+// such call fails, even one for that message alone. 0, the default, turns
+// it off.
+func (s *Store) SetMalformedBatch(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.malformedBatch = n
+}
+
+// degradeLocked reports how m reads: false when its envelope is bad, so it
+// is unreadable. Otherwise it clears what a bad body structure loses from
+// sum.
+func (s *Store) degradeLocked(m *Message, sum *mailstore.Summary) bool {
+	switch s.malformed[m] {
+	case BadEnvelope:
+		return false
+	case BadStructure:
+		sum.AttachmentsUnknown, sum.HasAttachment = true, false
+	}
+	return true
+}
+
+// unreadableErrLocked is the error of a fetch of asked UIDs in folder that
+// could not read unreadable: nil when it read everything, a plain
+// mailstore.ErrMalformed under SetMalformedBatch, and otherwise a
+// *mailstore.UnreadableError. A plain error means nothing read is returned.
+func (s *Store) unreadableErrLocked(folder string, asked int, unreadable []uint32) (plain bool, err error) {
+	switch {
+	case len(unreadable) == 0:
+		return false, nil
+	case s.malformedBatch > 0 && asked >= s.malformedBatch:
+		return true, fmt.Errorf("%w: %d messages in %q", mailstore.ErrMalformed, asked, folder)
+	default:
+		return false, &mailstore.UnreadableError{Folder: folder, UIDs: unreadable}
+	}
+}

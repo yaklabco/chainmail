@@ -128,6 +128,10 @@ type Store struct {
 	// with a background context, by method.
 	busy       bool
 	background map[string]int
+	// Malformed message hooks, in malform.go: how fetches answer for each
+	// message Malform set, and the SetMalformedBatch size.
+	malformed      map[*Message]Malformation
+	malformedBatch int
 }
 
 var _ mailstore.Store = (*Store)(nil)
@@ -471,7 +475,8 @@ func (s *Store) searchSourceLocked(name string, req mailstore.SearchRequest, kee
 	return res
 }
 
-// FetchSummaries implements mailstore.Store.
+// FetchSummaries implements mailstore.Store. Malform and SetMalformedBatch
+// make it answer as imapstore does for messages it cannot parse.
 func (s *Store) FetchSummaries(ctx context.Context, src mailstore.Source, uids []uint32, opts mailstore.SummaryOptions) ([]mailstore.Summary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -483,13 +488,27 @@ func (s *Store) FetchSummaries(ctx context.Context, src mailstore.Source, uids [
 	} else if v != src.UIDValidity {
 		return nil, fmt.Errorf("%w: %s changed", mailstore.ErrStaleRef, src.Folder)
 	}
-	var out []mailstore.Summary
+	var (
+		out        []mailstore.Summary
+		unreadable []uint32
+	)
 	for _, uid := range uids {
-		if m := s.findLocked(src.Folder, uid); m != nil {
-			out = append(out, s.summaryLocked(m, s.refInLocked(m, src.Folder), opts))
+		m := s.findLocked(src.Folder, uid)
+		if m == nil {
+			continue
 		}
+		sum := s.summaryLocked(m, s.refInLocked(m, src.Folder), opts)
+		if !s.degradeLocked(m, &sum) {
+			unreadable = append(unreadable, uid)
+			continue
+		}
+		out = append(out, sum)
 	}
-	return out, nil
+	plain, err := s.unreadableErrLocked(src.Folder, len(uids), unreadable)
+	if plain {
+		return nil, err
+	}
+	return out, err
 }
 
 // FetchMessages implements mailstore.Store.
