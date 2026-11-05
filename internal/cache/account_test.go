@@ -75,6 +75,7 @@ func TestReasonCode(t *testing.T) {
 		{name: "missing folder", err: &mailstore.FolderNotFoundError{Name: "Gone", Requested: "Gone"}, want: api.ReasonNotFound},
 		{name: "unavailable", err: fmt.Errorf("dial: %w", mailstore.ErrUnavailable), want: api.ReasonServerUnavailable},
 		{name: "busy", err: mailstore.ErrBusy, want: api.ReasonServerUnavailable},
+		{name: "malformed", err: fmt.Errorf("fetching: %w", mailstore.ErrMalformed), want: api.ReasonMalformedResponse},
 		{name: "disk full", err: fmt.Errorf("writing rows: %w", ErrDiskFull), want: api.ReasonInternal},
 		{name: "anything else", err: errors.New("boom"), want: api.ReasonInternal},
 	}

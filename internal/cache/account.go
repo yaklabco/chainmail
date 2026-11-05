@@ -285,6 +285,8 @@ func reasonCode(err error) string {
 		return api.ReasonNotFound
 	case errors.Is(err, mailstore.ErrUnavailable), errors.Is(err, mailstore.ErrBusy):
 		return api.ReasonServerUnavailable
+	case errors.Is(err, mailstore.ErrMalformed):
+		return api.ReasonMalformedResponse
 	default:
 		return api.ReasonInternal
 	}

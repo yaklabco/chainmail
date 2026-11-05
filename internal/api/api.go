@@ -32,6 +32,10 @@ const (
 	ReasonForbidden          = "FORBIDDEN"
 	ReasonDaemonUnreachable  = "DAEMON_UNREACHABLE"
 	ReasonInternal           = "INTERNAL"
+	// ReasonMalformedResponse means the mail server sent a response
+	// chainmail cannot read, such as a message in a form its parser does
+	// not know. Asking again gets the same response.
+	ReasonMalformedResponse = "MALFORMED_RESPONSE"
 )
 
 // CLI exit codes.
@@ -68,6 +72,8 @@ func ExitCode(reason string) int {
 	case ReasonTOTPInvalid, ReasonTOTPLocked:
 		return ExitTOTP
 	default:
+		// INTERNAL, any reason not listed, and MALFORMED_RESPONSE, which
+		// is not exit 7 because trying again later gets the same response.
 		return ExitInternal
 	}
 }

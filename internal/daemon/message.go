@@ -99,10 +99,11 @@ func partialSource(account, folder string, err error) *chainmailv1.PartialSource
 // severity orders reasons for a call whose every source failed: what needs
 // a human first, then a caller's mistake, then what may pass on its own.
 var severity = map[string]int{
-	api.ReasonInternal:          8,
-	api.ReasonAuthRejected:      7,
-	api.ReasonAuthRequired:      6,
-	api.ReasonInvalidArgument:   5,
+	api.ReasonInternal:          9,
+	api.ReasonAuthRejected:      8,
+	api.ReasonAuthRequired:      7,
+	api.ReasonInvalidArgument:   6,
+	api.ReasonMalformedResponse: 5,
 	api.ReasonNotFound:          4,
 	api.ReasonStaleRef:          3,
 	api.ReasonServerUnavailable: 2,

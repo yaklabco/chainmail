@@ -758,6 +758,7 @@ const outcomeHint = "search the Sent folder for this message, by its subject or 
 // reason. As for reads, mail server and sender text never reaches a client.
 var sendText = map[string]string{
 	api.ReasonServerUnavailable: "the mail server failed; nothing was sent",
+	api.ReasonMalformedResponse: "the mail server sent a response chainmail cannot read; nothing was sent",
 	api.ReasonTimeout:           "timed out; nothing was sent",
 	api.ReasonAuthRequired:      "the account needs authentication",
 	api.ReasonAuthRejected:      "the server rejected the credentials",
