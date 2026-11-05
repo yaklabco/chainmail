@@ -10,6 +10,7 @@ CREATE TABLE messages (
   thread_id TEXT NOT NULL,
   flags_json TEXT NOT NULL, labels_json TEXT NOT NULL,
   has_attachment INTEGER NOT NULL, attachments_json TEXT NOT NULL,
+  attachments_unknown INTEGER NOT NULL DEFAULT 0,
   subject_norm TEXT NOT NULL,
   from_norm TEXT NOT NULL, to_norm TEXT NOT NULL, cc_norm TEXT NOT NULL, bcc_norm TEXT NOT NULL,
   flags_norm TEXT NOT NULL, labels_norm TEXT NOT NULL, attachments_norm TEXT NOT NULL,
@@ -47,3 +48,8 @@ CREATE TABLE ref_recovery (
   PRIMARY KEY (account, folder, uidvalidity, uid)
 );
 CREATE TABLE budget (account TEXT NOT NULL, day TEXT NOT NULL, bytes INTEGER NOT NULL, PRIMARY KEY (account, day));
+CREATE TABLE unreadable (
+  account TEXT NOT NULL, folder TEXT NOT NULL, uidvalidity INTEGER NOT NULL, uid INTEGER NOT NULL,
+  first_at INTEGER NOT NULL, last_at INTEGER NOT NULL, attempts INTEGER NOT NULL,
+  PRIMARY KEY (account, folder, uidvalidity, uid)
+);

@@ -30,6 +30,10 @@ type Row struct {
 	Flags, Labels          []string
 	HasAttachment          bool
 	Attachments            []mailstore.Attachment
+	// AttachmentsUnknown says the header was read without its body
+	// structure, so HasAttachment is false and Attachments nil whatever the
+	// message holds. The next write of the row sets it again.
+	AttachmentsUnknown bool
 }
 
 // Ref returns the row's message reference.
@@ -46,17 +50,18 @@ func (r Row) Ref() ref.Ref {
 // Summary returns the row as a search summary. Preview and Sample are nil.
 func (r Row) Summary() mailstore.Summary {
 	return mailstore.Summary{
-		Ref:           r.Ref(),
-		Date:          r.Date,
-		InternalDate:  r.InternalDate,
-		From:          r.From,
-		To:            r.To,
-		Subject:       r.Subject,
-		Flags:         r.Flags,
-		Size:          r.Size,
-		HasAttachment: r.HasAttachment,
-		ThreadID:      r.ThreadID,
-		Labels:        r.Labels,
+		Ref:                r.Ref(),
+		Date:               r.Date,
+		InternalDate:       r.InternalDate,
+		From:               r.From,
+		To:                 r.To,
+		Subject:            r.Subject,
+		Flags:              r.Flags,
+		Size:               r.Size,
+		HasAttachment:      r.HasAttachment,
+		AttachmentsUnknown: r.AttachmentsUnknown,
+		ThreadID:           r.ThreadID,
+		Labels:             r.Labels,
 	}
 }
 
@@ -95,7 +100,7 @@ var writeColumns = []string{
 	"message_id", "in_reply_to_json", "references_json", "thread_id",
 	"flags_json", "labels_json", "has_attachment", "attachments_json",
 	"subject_norm", "from_norm", "to_norm", "cc_norm", "bcc_norm",
-	"flags_norm", "labels_norm", "attachments_norm", "cached_at",
+	"flags_norm", "labels_norm", "attachments_norm", "cached_at", "attachments_unknown",
 }
 
 // upsertRow inserts a row or updates every column but the key, keeping the
@@ -155,7 +160,7 @@ func rowArgs(r Row, cachedAt int64) ([]any, error) {
 		r.MessageID, inReplyTo, references, r.ThreadID,
 		flags, labels, boolInt(r.HasAttachment), attachments,
 		normSubject(r.Subject), normAddresses(r.From), normAddresses(r.To), normAddresses(r.Cc), normAddresses(r.Bcc),
-		normList(r.Flags), normList(r.Labels), normAttachments(r.Attachments), cachedAt,
+		normList(r.Flags), normList(r.Labels), normAttachments(r.Attachments), cachedAt, boolInt(r.AttachmentsUnknown),
 	}, nil
 }
 
@@ -281,7 +286,9 @@ func storedBodyText(ctx context.Context, tx *sql.Tx, id int64) (string, error) {
 }
 
 // PutRows upserts rows in one transaction and writes their FTS header terms.
-// An upsert of an existing key keeps its body and body FTS terms.
+// An upsert of an existing key keeps its body and body FTS terms. A row
+// written for a UID recorded as unreadable deletes the record: the message
+// has been read.
 func (s *Store) PutRows(ctx context.Context, rows []Row) error {
 	_, err := s.putRows(ctx, rows, time.Time{})
 	return err
@@ -335,6 +342,9 @@ func (s *Store) putRows(ctx context.Context, rows []Row, windowStart time.Time) 
 			if err := writeFTS(ctx, tx, id, r, body); err != nil {
 				return err
 			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM unreadable WHERE "+msgKey, refArgs(r.Ref())...); err != nil {
+				return fmt.Errorf("forgetting %s UID %d as unreadable: %w", r.Folder, r.UID, err)
+			}
 			if windowStart.IsZero() || r.InternalDate.Before(windowStart) {
 				continue
 			}
@@ -387,7 +397,7 @@ func (s *Store) SetFlags(ctx context.Context, r ref.Ref, flags, labels []string)
 const rowColumns = `m.id, m.account, m.folder, m.uidvalidity, m.uid, m.gmail_msgid, m.gmail_thrid,
 	m.internal_date, m.date, m.size, m.subject, m.from_json, m.to_json, m.cc_json, m.bcc_json,
 	m.message_id, m.in_reply_to_json, m.references_json, m.thread_id, m.flags_json, m.labels_json,
-	m.has_attachment, m.attachments_json`
+	m.has_attachment, m.attachments_json, m.attachments_unknown`
 
 // rowScan holds one messages row as stored, before decoding.
 type rowScan struct {
@@ -400,6 +410,7 @@ type rowScan struct {
 	threadID, flags, labels                  string
 	hasAttachment                            int64
 	attachments                              string
+	attachmentsUnknown                       int64
 }
 
 func (sc *rowScan) dest() []any {
@@ -407,25 +418,26 @@ func (sc *rowScan) dest() []any {
 		&sc.id, &sc.account, &sc.folder, &sc.uidValidity, &sc.uid, &sc.gmailMsgID, &sc.gmailThrID,
 		&sc.internalDate, &sc.date, &sc.size, &sc.subject, &sc.from, &sc.to, &sc.cc, &sc.bcc,
 		&sc.messageID, &sc.inReplyTo, &sc.references, &sc.threadID, &sc.flags, &sc.labels,
-		&sc.hasAttachment, &sc.attachments,
+		&sc.hasAttachment, &sc.attachments, &sc.attachmentsUnknown,
 	}
 }
 
 func (sc *rowScan) row() (Row, error) {
 	r := Row{
-		Account:       sc.account,
-		Folder:        sc.folder,
-		UIDValidity:   uint32(sc.uidValidity),
-		UID:           uint32(sc.uid),
-		GmailMsgID:    uint64(sc.gmailMsgID),
-		GmailThrID:    uint64(sc.gmailThrID),
-		InternalDate:  fromUnix(sc.internalDate),
-		Date:          fromUnix(sc.date),
-		Size:          sc.size,
-		Subject:       sc.subject,
-		MessageID:     sc.messageID,
-		ThreadID:      sc.threadID,
-		HasAttachment: sc.hasAttachment == 1,
+		Account:            sc.account,
+		Folder:             sc.folder,
+		UIDValidity:        uint32(sc.uidValidity),
+		UID:                uint32(sc.uid),
+		GmailMsgID:         uint64(sc.gmailMsgID),
+		GmailThrID:         uint64(sc.gmailThrID),
+		InternalDate:       fromUnix(sc.internalDate),
+		Date:               fromUnix(sc.date),
+		Size:               sc.size,
+		Subject:            sc.subject,
+		MessageID:          sc.messageID,
+		ThreadID:           sc.threadID,
+		HasAttachment:      sc.hasAttachment == 1,
+		AttachmentsUnknown: sc.attachmentsUnknown == 1,
 	}
 	var err error
 	if r.From, err = decodeList[mailstore.Address](sc.from); err != nil {
@@ -621,8 +633,8 @@ func dropMessages(ctx context.Context, tx *sql.Tx, where string, args ...any) er
 	return nil
 }
 
-// DropFolder deletes a folder's rows (and bodies, failures, FTS rows) and
-// its progress row. With keepRecovery, each row's Message-ID is first copied
+// DropFolder deletes a folder's rows (and bodies, failures, FTS rows), its
+// progress row and its unreadable records. With keepRecovery, each row's Message-ID is first copied
 // to ref_recovery.
 func (s *Store) DropFolder(ctx context.Context, account, folder string, keepRecovery bool) error {
 	now := s.now().Unix()
@@ -642,12 +654,15 @@ func (s *Store) DropFolder(ctx context.Context, account, folder string, keepReco
 		if _, err := tx.ExecContext(ctx, "DELETE FROM folders WHERE account = ? AND folder = ?", account, folder); err != nil {
 			return fmt.Errorf("deleting progress: %w", err)
 		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM unreadable WHERE account = ? AND folder = ?", account, folder); err != nil {
+			return fmt.Errorf("deleting unreadable records: %w", err)
+		}
 		return nil
 	})
 }
 
-// DropAccount deletes every row, progress row and recovery row of the
-// account. Its download budget stays, so a rebuild cannot exceed the day's.
+// DropAccount deletes every row, progress row, recovery row and unreadable
+// record of the account. Its download budget stays, so a rebuild cannot exceed the day's.
 func (s *Store) DropAccount(ctx context.Context, account string) error {
 	return s.inTx(ctx, "dropping an account", func(tx *sql.Tx) error {
 		if err := dropMessages(ctx, tx, "account = ?", account); err != nil {
@@ -658,6 +673,9 @@ func (s *Store) DropAccount(ctx context.Context, account string) error {
 		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM ref_recovery WHERE account = ?", account); err != nil {
 			return fmt.Errorf("deleting recovery rows: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM unreadable WHERE account = ?", account); err != nil {
+			return fmt.Errorf("deleting unreadable records: %w", err)
 		}
 		return nil
 	})

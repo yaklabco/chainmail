@@ -57,6 +57,15 @@ func TestRowFromHeader(t *testing.T) {
 		{name: "gmail without a thread", in: header(allMail, 9001, ""), want: row(allMail, 9001, 0, "")},
 		{name: "gmail thread that is not hex", in: header(allMail, 9001, "not-hex"), want: row(allMail, 9001, 0, "not-hex")},
 	}
+	degraded := header("INBOX", 0, "5f3c")
+	degraded.Summary.AttachmentsUnknown, degraded.Summary.HasAttachment, degraded.Attachments = true, false, nil
+	degradedRow := row("INBOX", 0, 0, "5f3c")
+	degradedRow.AttachmentsUnknown, degradedRow.HasAttachment, degradedRow.Attachments = true, false, nil
+	tests = append(tests, struct {
+		name string
+		in   mailstore.Header
+		want Row
+	}{name: "read without its body structure", in: degraded, want: degradedRow})
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
