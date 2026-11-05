@@ -79,7 +79,7 @@ func (s *Store) fetchHeaders(ctx context.Context, src mailstore.Source, uids []u
 			if err := c.fetchEach(ctx, uidSet(missing), items, func(b *imapclient.FetchMessageBuffer) {
 				batch = append(batch, b)
 			}); err != nil {
-				return false, asDownload(err)
+				return false, markFetch(asDownload(err))
 			}
 			for _, b := range batch {
 				got[uint32(b.UID)] = b

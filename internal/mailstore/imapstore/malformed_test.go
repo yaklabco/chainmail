@@ -89,3 +89,24 @@ func TestDroppedConnectionIsStillRetried(t *testing.T) {
 		})
 	}
 }
+
+// A folder that cannot even be opened, since the server's answer to
+// EXAMINE is malformed, fails the batch at once: splitting it would fail
+// every part alike, at a login each, and report every message unreadable.
+func TestMalformedFolderOpenIsNotSplit(t *testing.T) {
+	t.Parallel()
+	for name, fetch := range rowFetchers {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := startScriptServer(t, &scriptServer{n: 8, badSelect: true})
+			s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second})
+			rows, err := fetch(t, s, mailstore.Source{Folder: "INBOX", UIDValidity: scriptUIDValidity}, scriptUIDs(8))
+			if _, ok := errors.AsType[*mailstore.UnreadableError](err); ok || !errors.Is(err, mailstore.ErrMalformed) || len(rows) != 0 {
+				t.Errorf("%s = %+v, %v; want no rows and ErrMalformed, not an UnreadableError", name, rows, err)
+			}
+			if n := srv.conns.Load(); n != 1 {
+				t.Errorf("%d connections, want 1", n)
+			}
+		})
+	}
+}

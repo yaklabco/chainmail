@@ -214,6 +214,8 @@ func (s *Store) summaryItems(preview, fullHeader bool) *imap.FetchOptions {
 // with AttachmentsUnknown when it reads without its body structure, and is
 // left out otherwise. The summaries then come with an
 // *mailstore.UnreadableError naming the messages left out, and are valid.
+// Any other error, such as a failure to fetch the snippets, comes with the
+// summaries read before it.
 func (s *Store) FetchSummaries(ctx context.Context, src mailstore.Source, uids []uint32, opts mailstore.SummaryOptions) ([]mailstore.Summary, error) {
 	if len(uids) == 0 {
 		return nil, nil
@@ -270,7 +272,7 @@ func (s *Store) readSummaries(ctx context.Context, c *conn, folder string, uids 
 	}
 	bufs, err := c.fetch(ctx, uidSet(uids), items)
 	if err != nil {
-		return nil, err
+		return nil, markFetch(err)
 	}
 	byUID := make(map[uint32]*imapclient.FetchMessageBuffer, len(bufs))
 	for _, b := range bufs {

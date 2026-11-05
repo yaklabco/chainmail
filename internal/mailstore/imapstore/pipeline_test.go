@@ -83,6 +83,9 @@ type scriptServer struct {
 	// FETCH sends in a form the client cannot parse, and badEnvelope the
 	// UID whose ENVELOPE it sends so.
 	badStructure, badEnvelope int
+	// badSelect answers SELECT and EXAMINE in a form the client cannot
+	// parse.
+	badSelect bool
 	// dropSummaries is how many summary FETCHes, counting across
 	// connections, hang up partway through their answer.
 	dropSummaries atomic.Int32
@@ -197,6 +200,9 @@ func (srv *scriptServer) serve(conn net.Conn) {
 			reply = "* CAPABILITY " + srv.caps() + "\r\n" + tag + " OK done\r\n"
 		case "EXAMINE", "SELECT":
 			reply = fmt.Sprintf("* %d EXISTS\r\n* OK [UIDVALIDITY %d] ok\r\n", srv.n, scriptUIDValidity)
+			if srv.badSelect {
+				reply = fmt.Sprintf("* %d EXISTS\r\n* OK [UIDVALIDITY x] ok\r\n", srv.n)
+			}
 			if srv.condstore {
 				reply += fmt.Sprintf("* OK [UIDNEXT %d] ok\r\n* OK [HIGHESTMODSEQ %d] ok\r\n", srv.n+1, scriptModSeq)
 			}
