@@ -209,25 +209,45 @@ func (s *Store) summaryItems(preview, fullHeader bool) *imap.FetchOptions {
 	return o
 }
 
-// FetchSummaries implements mailstore.Store.
+// FetchSummaries implements mailstore.Store. A message whose response
+// chainmail cannot read does not fail the batch (isolate). It comes back
+// with AttachmentsUnknown when it reads without its body structure, and is
+// left out otherwise. The summaries then come with an
+// *mailstore.UnreadableError naming the messages left out, and are valid.
 func (s *Store) FetchSummaries(ctx context.Context, src mailstore.Source, uids []uint32, opts mailstore.SummaryOptions) ([]mailstore.Summary, error) {
 	if len(uids) == 0 {
 		return nil, nil
 	}
-	var out []mailstore.Summary
-	err := s.withConn(ctx, src.Folder, func(c *conn) error {
-		out = nil
-		if err := s.open(ctx, c, src.Folder); err != nil {
+	read, unreadable, err := isolate(s, src.Folder, uids, func(part []uint32, structure bool) ([]mailstore.Summary, error) {
+		var out []mailstore.Summary
+		err := s.withConn(ctx, src.Folder, func(c *conn) error {
+			out = nil
+			if err := s.open(ctx, c, src.Folder); err != nil {
+				return err
+			}
+			if c.uidValidity != src.UIDValidity {
+				return fmt.Errorf("%w: %s changed; search again", mailstore.ErrStaleRef, src.Folder)
+			}
+			var err error
+			out, err = s.readSummaries(ctx, c, src.Folder, part, opts.Snippets, structure)
 			return err
-		}
-		if c.uidValidity != src.UIDValidity {
-			return fmt.Errorf("%w: %s changed; search again", mailstore.ErrStaleRef, src.Folder)
-		}
-		var err error
-		out, err = s.fetchSummaries(ctx, c, src.Folder, uids, opts.Snippets)
-		return err
+		})
+		return out, err
 	})
-	return out, err
+	byUID := make(map[uint32]mailstore.Summary, len(read))
+	for _, sum := range read {
+		byUID[sum.Ref.UID] = sum
+	}
+	var out []mailstore.Summary
+	for _, uid := range uids {
+		if sum, ok := byUID[uid]; ok {
+			out = append(out, sum)
+		}
+	}
+	if err != nil {
+		return out, err
+	}
+	return out, unreadableError(src.Folder, unreadable)
 }
 
 // fetchSummaries fetches summaries of uids in folder, which must be open on
@@ -236,8 +256,19 @@ func (s *Store) FetchSummaries(ctx context.Context, src mailstore.Source, uids [
 // and a text sample otherwise. When fetching the samples fails it returns
 // the summaries with the error.
 func (s *Store) fetchSummaries(ctx context.Context, c *conn, folder string, uids []uint32, snippets bool) ([]mailstore.Summary, error) {
+	return s.readSummaries(ctx, c, folder, uids, snippets, true)
+}
+
+// readSummaries is fetchSummaries, without the body structure unless
+// structure is set. Without it, every summary has AttachmentsUnknown and
+// none gets a text sample.
+func (s *Store) readSummaries(ctx context.Context, c *conn, folder string, uids []uint32, snippets, structure bool) ([]mailstore.Summary, error) {
 	preview := snippets && c.client().Caps().Has(imap.CapPreview)
-	bufs, err := c.fetch(ctx, uidSet(uids), s.summaryItems(preview, false))
+	items := s.summaryItems(preview, false)
+	if !structure {
+		items.BodyStructure = nil
+	}
+	bufs, err := c.fetch(ctx, uidSet(uids), items)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +280,9 @@ func (s *Store) fetchSummaries(ctx context.Context, c *conn, folder string, uids
 	var structures []imap.BodyStructure
 	for _, uid := range uids {
 		if b, ok := byUID[uid]; ok {
-			out = append(out, s.summary(folder, c.uidValidity, b))
+			sum := s.summary(folder, c.uidValidity, b)
+			sum.AttachmentsUnknown = !structure
+			out = append(out, sum)
 			structures = append(structures, b.BodyStructure)
 		}
 	}

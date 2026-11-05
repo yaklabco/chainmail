@@ -26,9 +26,42 @@ func (s *Store) headerItems() *imap.FetchOptions {
 // more after the folder is opened afresh, as reads do, since a server may
 // tell a session of new mail late. UID 0 names no message and is left out.
 // Every item is read with PEEK or carries no body, so nothing sets \Seen.
+//
+// A message whose response chainmail cannot read does not fail the batch
+// (isolate). It comes back with AttachmentsUnknown when it reads without
+// its body structure, and is left out otherwise. The headers then come
+// with an *mailstore.UnreadableError naming the messages left out, and are
+// valid.
 func (s *Store) FetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32) ([]mailstore.Header, error) {
 	if len(uids) == 0 {
 		return nil, nil
+	}
+	read, unreadable, err := isolate(s, src.Folder, absent(uids, nil), func(part []uint32, structure bool) ([]mailstore.Header, error) {
+		return s.fetchHeaders(ctx, src, part, structure)
+	})
+	if err != nil {
+		return nil, err
+	}
+	byUID := make(map[uint32]mailstore.Header, len(read))
+	for _, h := range read {
+		byUID[h.Summary.Ref.UID] = h
+	}
+	var out []mailstore.Header
+	for _, uid := range uids {
+		if h, ok := byUID[uid]; ok {
+			out = append(out, h)
+		}
+	}
+	return out, unreadableError(src.Folder, unreadable)
+}
+
+// fetchHeaders is FetchHeaders for uids, which hold no 0 and no UID twice,
+// in no set order. Without structure it leaves out the body structure, and
+// every header has AttachmentsUnknown.
+func (s *Store) fetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32, structure bool) ([]mailstore.Header, error) {
+	items := s.headerItems()
+	if !structure {
+		items.BodyStructure = nil
 	}
 	var out []mailstore.Header
 	err := s.withConn(ctx, src.Folder, func(c *conn) error {
@@ -43,7 +76,7 @@ func (s *Store) FetchHeaders(ctx context.Context, src mailstore.Source, uids []u
 				return false, nil
 			}
 			var batch []*imapclient.FetchMessageBuffer
-			if err := c.fetchEach(ctx, uidSet(missing), s.headerItems(), func(b *imapclient.FetchMessageBuffer) {
+			if err := c.fetchEach(ctx, uidSet(missing), items, func(b *imapclient.FetchMessageBuffer) {
 				batch = append(batch, b)
 			}); err != nil {
 				return false, asDownload(err)
@@ -58,7 +91,9 @@ func (s *Store) FetchHeaders(ctx context.Context, src mailstore.Source, uids []u
 		}
 		for _, uid := range uids {
 			if b, ok := got[uid]; ok {
-				out = append(out, s.header(src.Folder, src.UIDValidity, b))
+				h := s.header(src.Folder, src.UIDValidity, b)
+				h.Summary.AttachmentsUnknown = !structure
+				out = append(out, h)
 			}
 		}
 		return nil
