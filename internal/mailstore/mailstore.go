@@ -335,7 +335,8 @@ type Store interface {
 	// structure the server sent in a form chainmail cannot read comes back
 	// with AttachmentsUnknown. Messages it cannot read at all are left out
 	// too, and the error is an *UnreadableError naming them: the summaries
-	// that come with that error are valid.
+	// that come with that error are valid. A plain ErrMalformed from a
+	// fetch of IsolatedBatch UIDs or fewer is a fault in the folder.
 	FetchSummaries(ctx context.Context, src Source, uids []uint32, opts SummaryOptions) ([]Summary, error)
 	// FetchMessages reads refs, which must belong to this account. The
 	// result has one entry per ref, in order. A message whose response

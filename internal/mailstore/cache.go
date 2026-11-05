@@ -34,9 +34,18 @@ type HeaderFetcher interface {
 	// chainmail cannot read comes back with Summary.AttachmentsUnknown.
 	// Messages it cannot read at all are left out, and the error is an
 	// *UnreadableError naming them: the headers that come with that error
-	// are valid.
+	// are valid. A plain ErrMalformed means the store could not isolate
+	// the messages at fault. It never does so for IsolatedBatch UIDs or
+	// fewer, so from such a fetch it is a fault in the folder, such as its
+	// SELECT answer, and not in a message.
 	FetchHeaders(ctx context.Context, src Source, uids []uint32) ([]Header, error)
 }
+
+// IsolatedBatch is the largest fetch in which FetchHeaders and
+// FetchSummaries always isolate the messages they cannot read, however
+// many of them are at fault: each comes back in an *UnreadableError, never
+// as a plain ErrMalformed.
+const IsolatedBatch = 5
 
 // Scoper is implemented by stores that can say which folders a search
 // covers.

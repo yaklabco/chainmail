@@ -266,3 +266,25 @@ func TestIsolateBoundsItsLogins(t *testing.T) {
 		})
 	}
 }
+
+// A batch of mailstore.IsolatedBatch UIDs or fewer never runs out of its
+// hunt's budget: even when every message in it is unreadable, each comes
+// back in an UnreadableError and never as a plain ErrMalformed. The cache
+// relies on this to tell a fault in a message from one in the folder.
+func TestIsolateAlwaysIsolatesASmallBatch(t *testing.T) {
+	t.Parallel()
+	for name, fetch := range rowFetchers {
+		for n := 1; n <= mailstore.IsolatedBatch; n++ {
+			t.Run(fmt.Sprintf("%s %d", name, n), func(t *testing.T) {
+				t.Parallel()
+				srv := startScriptServer(t, &scriptServer{n: n, badEnvelope: -1})
+				s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second})
+				rows, err := fetch(t, s, mailstore.Source{Folder: "INBOX", UIDValidity: scriptUIDValidity}, scriptUIDs(n))
+				ue, ok := errors.AsType[*mailstore.UnreadableError](err)
+				if !ok || !slices.Equal(ue.UIDs, scriptUIDs(n)) || len(rows) != 0 {
+					t.Errorf("%s of %d bad messages = %d rows, %v; want an UnreadableError naming all of them", name, n, len(rows), err)
+				}
+			})
+		}
+	}
+}
