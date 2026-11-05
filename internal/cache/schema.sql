@@ -21,6 +21,7 @@ CREATE INDEX messages_by_uid ON messages (account, folder, uidvalidity, uid DESC
 CREATE INDEX messages_by_arrival ON messages (account, folder, internal_date DESC);
 CREATE INDEX messages_by_msgid ON messages (account, message_id);
 CREATE INDEX messages_by_thread ON messages (account, thread_id);
+CREATE INDEX messages_attachments_unknown ON messages (account, folder) WHERE attachments_unknown = 1;
 CREATE TABLE bodies (
   msg INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
   raw BLOB NOT NULL, text_clipped INTEGER NOT NULL, size_bytes INTEGER NOT NULL,

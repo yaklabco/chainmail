@@ -156,16 +156,21 @@ func (s *Store) OldestUnreadable(ctx context.Context, account string, limit int)
 	return out, nil
 }
 
+// incompleteQuery counts an account's unreadable records and degraded rows
+// per folder. Both halves run from an index: the unreadable table's
+// primary key, and messages_attachments_unknown, a partial index over the
+// few degraded rows, so cache status never scans the account's messages.
+const incompleteQuery = `SELECT folder, sum(unreadable), sum(unknown) FROM (
+	   SELECT folder, 1 AS unreadable, 0 AS unknown FROM unreadable WHERE account = ?1
+	   UNION ALL
+	   SELECT folder, 0, 1 FROM messages WHERE account = ?1 AND attachments_unknown = 1
+	 ) GROUP BY folder ORDER BY folder`
+
 // Incomplete returns, for each of the account's folders with any, how many
 // messages are recorded as unreadable and how many rows were read without
 // their body structure, ordered by folder.
 func (s *Store) Incomplete(ctx context.Context, account string) ([]FolderIncomplete, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT folder, sum(unreadable), sum(unknown) FROM (
-		   SELECT folder, 1 AS unreadable, 0 AS unknown FROM unreadable WHERE account = ?1
-		   UNION ALL
-		   SELECT folder, 0, 1 FROM messages WHERE account = ?1 AND attachments_unknown = 1
-		 ) GROUP BY folder ORDER BY folder`, account)
+	rows, err := s.db.QueryContext(ctx, incompleteQuery, account)
 	if err != nil {
 		return nil, s.fail("counting incomplete messages", err)
 	}

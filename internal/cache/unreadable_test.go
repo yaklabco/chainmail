@@ -3,6 +3,7 @@ package cache
 import (
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -250,5 +251,39 @@ func TestHasUnreadable(t *testing.T) {
 	}
 	if got, err := s.HasUnreadable(t.Context(), "other", []string{"Sent"}); err != nil || got {
 		t.Errorf("HasUnreadable of another account = %v, %v; want false", got, err)
+	}
+}
+
+// Incomplete runs from indexes only. Cache status calls it on every
+// account, and a scan of an account's messages would hold the store's one
+// connection for about a second on a large account.
+func TestIncompleteUsesIndexes(t *testing.T) {
+	t.Parallel()
+	s, _ := openStore(t)
+	rows, err := s.db.QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+incompleteQuery, testAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	all := strings.Join(plan, "\n")
+	if !strings.Contains(all, "USING COVERING INDEX messages_attachments_unknown") {
+		t.Errorf("plan does not read messages through messages_attachments_unknown:\n%s", all)
+	}
+	for _, step := range plan {
+		if strings.HasPrefix(step, "SCAN messages") || strings.HasPrefix(step, "SCAN unreadable") {
+			t.Errorf("plan scans a table: %q\n%s", step, all)
+		}
 	}
 }
