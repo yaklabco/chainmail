@@ -107,7 +107,9 @@ type PassResult struct {
 // fetches the same range again, so no event is lost or repeated. The result
 // then counts the batches committed before the error. Errors from src keep
 // their chain, such as mailstore.ErrUnavailable or a
-// *mailstore.FolderNotFoundError.
+// *mailstore.FolderNotFoundError. A src that needs a redial after a batch
+// (mailstore.Redialer) ends the pass there, with no error, and the caller
+// dials again.
 func (e *Engine) Pass(ctx context.Context, account, folder string, src Source, opts PassOptions) (PassResult, error) {
 	var res PassResult
 	sweep := opts.Sweep
@@ -117,6 +119,11 @@ func (e *Engine) Pass(ctx context.Context, account, folder string, src Source, o
 			return res, err
 		}
 		if !more {
+			return res, nil
+		}
+		if r, ok := src.(mailstore.Redialer); ok && r.NeedsRedial() {
+			// The batch committed, but its connection is dead. The next
+			// connection's pass resumes from the checkpoint.
 			return res, nil
 		}
 		sweep = false // the first batch already compared the full UID set
