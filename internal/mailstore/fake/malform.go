@@ -46,11 +46,16 @@ func (s *Store) Malform(folder string, uid uint32, how Malformation) {
 
 // SetMalformedBatch makes a FetchHeaders or FetchSummaries call that asks
 // for n UIDs or more, and holds a BadEnvelope message, fail with a plain
-// mailstore.ErrMalformed and nothing read, as imapstore's does once its
-// hunt for the malformed messages runs out of logins. With n of 1 every
-// such call fails, even one for that message alone. 0, the default, turns
-// it off.
+// mailstore.ErrMalformed beside what it read, as imapstore's does once its
+// hunt for the malformed messages runs out of logins. imapstore always
+// isolates a fetch of mailstore.IsolatedBatch UIDs or fewer, so n must be
+// larger: SetMalformedBatch panics otherwise. 0, the default, turns it
+// off. A fault in the folder, which fails every fetch with a plain
+// ErrMalformed, is Fail("FetchHeaders", err).
 func (s *Store) SetMalformedBatch(n int) {
+	if n > 0 && n <= mailstore.IsolatedBatch {
+		panic(fmt.Sprintf("fake: imapstore isolates every fetch of %d UIDs or fewer; SetMalformedBatch(%d) cannot happen", mailstore.IsolatedBatch, n))
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.malformedBatch = n
@@ -72,14 +77,14 @@ func (s *Store) degradeLocked(m *Message, sum *mailstore.Summary) bool {
 // unreadableErrLocked is the error of a fetch of asked UIDs in folder that
 // could not read unreadable: nil when it read everything, a plain
 // mailstore.ErrMalformed under SetMalformedBatch, and otherwise a
-// *mailstore.UnreadableError. A plain error means nothing read is returned.
-func (s *Store) unreadableErrLocked(folder string, asked int, unreadable []uint32) (plain bool, err error) {
+// *mailstore.UnreadableError. Either way the fetch returns what it read.
+func (s *Store) unreadableErrLocked(folder string, asked int, unreadable []uint32) error {
 	switch {
 	case len(unreadable) == 0:
-		return false, nil
+		return nil
 	case s.malformedBatch > 0 && asked >= s.malformedBatch:
-		return true, fmt.Errorf("%w: %d messages in %q", mailstore.ErrMalformed, asked, folder)
+		return fmt.Errorf("%w: %d messages in %q", mailstore.ErrMalformed, asked, folder)
 	default:
-		return false, &mailstore.UnreadableError{Folder: folder, UIDs: unreadable}
+		return &mailstore.UnreadableError{Folder: folder, UIDs: unreadable}
 	}
 }

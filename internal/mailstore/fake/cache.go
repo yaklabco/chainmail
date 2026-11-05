@@ -57,11 +57,7 @@ func (s *Store) FetchHeaders(ctx context.Context, src mailstore.Source, uids []u
 		}
 		out = append(out, h)
 	}
-	plain, err := s.unreadableErrLocked(src.Folder, len(uids), unreadable)
-	if plain {
-		return nil, err
-	}
-	return out, err
+	return out, s.unreadableErrLocked(src.Folder, len(uids), unreadable)
 }
 
 // SearchFolders implements mailstore.Scoper with the folders Search picks.

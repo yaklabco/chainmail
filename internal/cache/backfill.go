@@ -23,9 +23,9 @@ type walk struct {
 	baseline    uint32   // the progress BaselineUIDNext the walk was listed under
 	low         uint32   // the progress BackfillLowUID the walk last left
 	uids        []uint32 // still to fetch, highest first
-	// limit, when not 0, caps the next batch. A batch that fails with a
-	// plain mailstore.ErrMalformed halves it, down to 1, and a committed
-	// batch clears it.
+	// limit, when not 0, caps the next batch. A batch larger than
+	// mailstore.IsolatedBatch that fails with a plain
+	// mailstore.ErrMalformed halves it, and a committed batch clears it.
 	limit int
 }
 
@@ -120,17 +120,14 @@ func (a *Account) backfillStep(ctx context.Context, w *walk) (*walk, bool, error
 		w = &walk{folder: p.Folder, uidValidity: p.UIDValidity, epoch: epoch, baseline: p.BaselineUIDNext, low: p.BackfillLowUID, uids: uids}
 	}
 	batch, rows, unreadable, err := a.fetchBatch(ctx, w)
-	if errors.Is(err, mailstore.ErrMalformed) {
+	if errors.Is(err, mailstore.ErrMalformed) && len(batch) > mailstore.IsolatedBatch {
 		// The store could not isolate what it could not read: try half as
-		// many UIDs, and give up on a single UID that still fails.
-		if len(batch) > 1 {
-			w.limit = len(batch) / 2
-			a.logger.InfoContext(ctx, "cache backfill halves its batch after an answer it cannot read",
-				"folder", w.folder, "batch", w.limit)
-			return w, true, nil
-		}
-		a.logger.WarnContext(ctx, "cache cannot read a message", "folder", w.folder, "uid", batch[0])
-		rows, unreadable, err = nil, batch, nil
+		// many UIDs. A batch it always isolates fails instead, below,
+		// since the fault is then in the folder and not in a message.
+		w.limit = len(batch) / 2
+		a.logger.InfoContext(ctx, "cache backfill halves its batch after an answer it cannot read",
+			"folder", w.folder, "batch", w.limit)
+		return w, true, nil
 	}
 	if err != nil {
 		return w, false, err

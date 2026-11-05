@@ -2,11 +2,14 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
@@ -79,7 +82,7 @@ var inbox = mailstore.Source{Folder: "INBOX", UIDValidity: 1}
 func addInbox(fs *fake.Store, n int) []uint32 {
 	var uids []uint32
 	for i := range n {
-		m := acctMsg("INBOX", "m"+string(rune('a'+i)))
+		m := acctMsg("INBOX", fmt.Sprintf("m%d", i))
 		if i == 1 {
 			m.Attachments = []fake.Attachment{{Part: "2", Filename: "a.pdf", ContentType: "application/pdf", Data: []byte("%PDF")}}
 		}
@@ -180,18 +183,19 @@ func TestBuilderRecordsUnreadableNewMail(t *testing.T) {
 }
 
 // New mail the pass read but whose headers the builder cannot read is
-// stored around the unreadable message, which is recorded. A fetch that
-// fails with a plain ErrMalformed is split until each part is isolated.
+// stored around the unreadable message, which is recorded. A fetch larger
+// than mailstore.IsolatedBatch that fails with a plain ErrMalformed is
+// split until the store isolates each part.
 func TestBuilderRecordsUnreadableHeaders(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name  string
+		n     int // new messages, the second unreadable
 		batch int // SetMalformedBatch
 		sizes []int
 	}{
-		{name: "isolated by the store", sizes: []int{4}},
-		{name: "split after a plain ErrMalformed", batch: 2, sizes: []int{4, 2, 1, 1, 2}},
-		{name: "a single UID still malformed", batch: 1, sizes: []int{4, 2, 1, 1, 2}},
+		{name: "isolated by the store", n: 4, sizes: []int{4}},
+		{name: "split after a plain ErrMalformed", n: 12, batch: 6, sizes: []int{12, 6, 3, 3, 6}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -204,14 +208,14 @@ func TestBuilderRecordsUnreadableHeaders(t *testing.T) {
 			r.waitApplied()
 			r.stop()
 
-			uids := addInbox(fs, 4)
+			uids := addInbox(fs, tt.n)
 			r.pass("INBOX")
 			fs.Malform("INBOX", uids[1], fake.BadEnvelope)
 			fs.SetMalformedBatch(tt.batch)
 			r.renew()
 			r.start()
 			r.waitApplied()
-			if got, want := r.cachedUIDs("INBOX", 1), []uint32{uids[0], uids[2], uids[3]}; !slices.Equal(got, want) {
+			if got, want := r.cachedUIDs("INBOX", 1), slices.Delete(slices.Clone(uids), 1, 2); !slices.Equal(got, want) {
 				t.Errorf("cached UIDs = %v, want %v", got, want)
 			}
 			if got, want := r.unreadable(), map[mailstore.Source][]uint32{inbox: {uids[1]}}; !reflect.DeepEqual(got, want) {
@@ -227,49 +231,118 @@ func TestBuilderRecordsUnreadableHeaders(t *testing.T) {
 	}
 }
 
-// A backfill batch that fails with a plain ErrMalformed, which the store
-// returns when it cannot isolate the message, is halved for the next
-// attempt, down to one UID. A single UID that still fails is recorded as
-// unreadable. The batch returns to backfill_batch after a success.
+// errFolderMalformed is a plain ErrMalformed, which a fetch of
+// mailstore.IsolatedBatch UIDs or fewer returns only for a fault in the
+// folder, such as a SELECT answer the reader cannot parse.
+var errFolderMalformed = fmt.Errorf("%w: the folder's SELECT answer", mailstore.ErrMalformed)
+
+// A plain ErrMalformed that splitting cannot explain is a fault in the
+// folder: the builder's step fails with MALFORMED_RESPONSE and backs off,
+// records nothing, and applies the events once the folder reads again.
+func TestBuilderBacksOffAFolderFault(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	mail := &acctBatchMail{Store: fs}
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	r.mail = mail
+	r.pass("INBOX")
+	r.start()
+	r.waitApplied()
+	r.stop()
+
+	uids := addInbox(fs, 4)
+	r.pass("INBOX")
+	fs.Fail("FetchHeaders", errFolderMalformed)
+	r.renew()
+	r.start()
+	r.clock.expectAfter(t, time.Second) // the builder's first backoff
+	if e := r.a.lastError(); e != api.ReasonMalformedResponse {
+		t.Errorf("last error = %q, want %q", e, api.ReasonMalformedResponse)
+	}
+	if got := r.unreadable(); len(got) != 0 {
+		t.Errorf("unreadable = %v, want none for a folder fault", got)
+	}
+	if got, want := mail.batches(), []int{4}; !slices.Equal(got, want) {
+		t.Errorf("header fetch sizes = %v, want %v: no split of what the store isolates", got, want)
+	}
+	if r.acked() == r.tail() {
+		t.Error("the builder acknowledged events it could not apply")
+	}
+	fs.Fail("FetchHeaders", nil)
+	r.clock.Advance(time.Second)
+	r.waitApplied()
+	if got := r.cachedUIDs("INBOX", 1); !slices.Equal(got, uids) {
+		t.Errorf("cached UIDs = %v, want %v", got, uids)
+	}
+}
+
+// A backfill batch larger than mailstore.IsolatedBatch that fails with a
+// plain ErrMalformed, which the store returns when it cannot isolate the
+// messages at fault, is halved for the next attempt until the store
+// isolates them. The walk then goes on past the unreadable message.
 func TestBackfillHalvesItsBatchOnAPlainMalformedResponse(t *testing.T) {
 	t.Parallel()
-	for _, tt := range []struct {
-		name  string
-		batch int // SetMalformedBatch
-	}{
-		{name: "the store isolates one UID", batch: 3},
-		{name: "a single UID still fails", batch: 1},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			fs := fake.New("acme", false)
-			mail := &acctBatchMail{Store: fs}
-			r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
-			r.mail = mail
-			uids := addInbox(fs, 8)
-			fs.Malform("INBOX", uids[5], fake.BadEnvelope)
-			fs.SetMalformedBatch(tt.batch)
-			r.setSettings(func(s *config.CacheSettings) { s.BackfillBatch = 8 })
-			r.pass("INBOX")
-			r.start()
-			r.waitBackfilled("INBOX")
-			r.stop()
+	fs := fake.New("acme", false)
+	mail := &acctBatchMail{Store: fs}
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	r.mail = mail
+	uids := addInbox(fs, 24)
+	fs.Malform("INBOX", uids[19], fake.BadEnvelope)
+	fs.SetMalformedBatch(6)
+	r.setSettings(func(s *config.CacheSettings) { s.BackfillBatch = 16 })
+	r.pass("INBOX")
+	r.start()
+	r.waitBackfilled("INBOX")
+	r.stop()
 
-			// 8 fails, 4 fails, 2 (UIDs 8 and 7) succeed; then 6 left: 6
-			// fails, 3 fails, 1 (UID 6) is recorded; then the last 5.
-			if got, want := mail.batches(), []int{8, 4, 2, 6, 3, 1, 5}; !slices.Equal(got, want) {
-				t.Errorf("header fetch sizes = %v, want %v", got, want)
-			}
-			want := slices.Delete(slices.Clone(uids), 5, 6)
-			if got := r.cachedUIDs("INBOX", 1); !slices.Equal(got, want) {
-				t.Errorf("cached UIDs = %v, want %v", got, want)
-			}
-			if got, want := r.unreadable(), map[mailstore.Source][]uint32{inbox: {uids[5]}}; !reflect.DeepEqual(got, want) {
-				t.Errorf("unreadable = %v, want %v", got, want)
-			}
-			if e := r.a.lastError(); e != "" {
-				t.Errorf("last error = %q, want none: halving is not a failure", e)
-			}
-		})
+	// Highest first: 24 to 9 fails, 24 to 17 fails, 24 to 21 commits; 20
+	// to 5 fails, 20 to 13 fails, 20 to 17 commits with 20 unreadable;
+	// then 16 to 1.
+	if got, want := mail.batches(), []int{16, 8, 4, 16, 8, 4, 16}; !slices.Equal(got, want) {
+		t.Errorf("header fetch sizes = %v, want %v", got, want)
+	}
+	if got, want := r.cachedUIDs("INBOX", 1), slices.Delete(slices.Clone(uids), 19, 20); !slices.Equal(got, want) {
+		t.Errorf("cached UIDs = %v, want %v", got, want)
+	}
+	if got, want := r.unreadable(), map[mailstore.Source][]uint32{inbox: {uids[19]}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("unreadable = %v, want %v", got, want)
+	}
+	if e := r.a.lastError(); e != "" {
+		t.Errorf("last error = %q, want none: halving is not a failure", e)
+	}
+}
+
+// A plain ErrMalformed for a batch the store always isolates is a fault in
+// the folder: the backfill fails with MALFORMED_RESPONSE and backs off,
+// records nothing, and finishes once the folder reads again.
+func TestBackfillBacksOffAFolderFault(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	mail := &acctBatchMail{Store: fs}
+	r := newAcctRig(t, fs, acctAccount(t, "hostinger", []string{"INBOX"}, []string{"INBOX"}))
+	r.mail = mail
+	uids := addInbox(fs, 24)
+	fs.Fail("FetchHeaders", errFolderMalformed)
+	r.setSettings(func(s *config.CacheSettings) { s.BackfillBatch = 16 })
+	r.pass("INBOX")
+	r.start()
+	r.clock.expectAfter(t, time.Second) // the backfill's first backoff
+	if got, want := mail.batches(), []int{16, 8, 4}; !slices.Equal(got, want) {
+		t.Errorf("header fetch sizes = %v, want %v: halving stops where the store isolates", got, want)
+	}
+	if e := r.a.lastError(); e != api.ReasonMalformedResponse {
+		t.Errorf("last error = %q, want %q", e, api.ReasonMalformedResponse)
+	}
+	if got := r.unreadable(); len(got) != 0 {
+		t.Errorf("unreadable = %v, want none for a folder fault", got)
+	}
+	if p := r.progress("INBOX"); p.BackfillDone {
+		t.Error("backfill done after a folder fault")
+	}
+	fs.Fail("FetchHeaders", nil)
+	r.clock.Advance(time.Second)
+	r.waitBackfilled("INBOX")
+	if got := r.cachedUIDs("INBOX", 1); !slices.Equal(got, uids) {
+		t.Errorf("cached UIDs = %v, want %v", got, uids)
 	}
 }

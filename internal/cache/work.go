@@ -239,17 +239,13 @@ func (a *Account) fetchHeadersOnce(ctx context.Context, src mailstore.Source, ui
 // fetchIsolating is fetchHeaders that also copes with a plain
 // mailstore.ErrMalformed, which the store returns when it could not
 // isolate the messages it could not read: it fetches each half of uids in
-// turn, down to single UIDs, and reports a single UID that still fails as
-// unreadable. A fetch of n UIDs so costs at most 2n-1 calls, and only when
-// the store has given up.
+// turn, until the store isolates them. A plain ErrMalformed from a fetch
+// of mailstore.IsolatedBatch UIDs or fewer, which the store always
+// isolates, is a fault in the folder and is returned.
 func (a *Account) fetchIsolating(ctx context.Context, src mailstore.Source, uids []uint32) ([]Row, []uint32, error) {
 	rows, unreadable, err := a.fetchHeaders(ctx, src, uids)
-	if !errors.Is(err, mailstore.ErrMalformed) {
+	if !errors.Is(err, mailstore.ErrMalformed) || len(uids) <= mailstore.IsolatedBatch {
 		return rows, unreadable, err
-	}
-	if len(uids) == 1 {
-		a.logger.WarnContext(ctx, "cache cannot read a message", "folder", src.Folder, "uid", uids[0])
-		return nil, uids, nil
 	}
 	mid := len(uids) / 2
 	for _, half := range [][]uint32{uids[:mid], uids[mid:]} {

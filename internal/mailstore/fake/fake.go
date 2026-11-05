@@ -504,11 +504,7 @@ func (s *Store) FetchSummaries(ctx context.Context, src mailstore.Source, uids [
 		}
 		out = append(out, sum)
 	}
-	plain, err := s.unreadableErrLocked(src.Folder, len(uids), unreadable)
-	if plain {
-		return nil, err
-	}
-	return out, err
+	return out, s.unreadableErrLocked(src.Folder, len(uids), unreadable)
 }
 
 // FetchMessages implements mailstore.Store.
