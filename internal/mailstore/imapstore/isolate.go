@@ -2,6 +2,8 @@ package imapstore
 
 import (
 	"errors"
+	"fmt"
+	"math/bits"
 	"slices"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
@@ -20,54 +22,101 @@ import (
 // most often malformed, and fetch marks what it reads then as having
 // attachments unknown. A message that fails that way too is unreadable.
 // Both are logged with the account, folder and UID. A malformed answer to
-// the text samples FetchSummaries fetches after the FETCH is not split on:
-// it fails the batch.
+// opening the folder is not split on: it fails the batch.
+//
+// Each failure costs a login, so the hunt stops after isolateBudget of
+// them. The messages it has not reached by then are fetched in one go
+// without their body structures. When that fails too, isolate returns the
+// rows read with a plain ErrMalformed and no unreadable UIDs, so the caller
+// backs off instead of recording a whole batch as unreadable.
 //
 // It returns the rows read, in no set order, and the UIDs of the
 // unreadable messages, ascending. Any other error ends it, with the rows
 // read so far.
 func isolate[T any](s *Store, folder string, uids []uint32, fetch func(uids []uint32, structure bool) ([]T, error)) ([]T, []uint32, error) {
-	rows, unreadable, err := bisect(s, folder, uids, fetch)
-	slices.Sort(unreadable)
-	return rows, unreadable, err
+	h := &hunt[T]{s: s, folder: folder, fetch: fetch, budget: isolateBudget(len(uids))}
+	if err := h.run(uids); err != nil {
+		return h.rows, nil, err
+	}
+	if len(h.rest) > 0 {
+		s.opts.Logger.Warn("too many messages in a form chainmail cannot read; reading the rest of the batch without their body structures",
+			"account", s.acct.Name, "folder", folder, "messages", len(h.rest))
+		rows, err := fetch(h.rest, false)
+		h.rows = append(h.rows, rows...)
+		switch {
+		case splittable(err):
+			return h.rows, nil, fmt.Errorf("%w: %d messages in %q, even without their body structures", mailstore.ErrMalformed, len(h.rest), folder)
+		case err != nil:
+			return h.rows, nil, err
+		}
+	}
+	slices.Sort(h.unreadable)
+	return h.rows, h.unreadable, nil
 }
 
-// bisect is isolate, with the unreadable UIDs in the order found.
-func bisect[T any](s *Store, folder string, uids []uint32, fetch func(uids []uint32, structure bool) ([]T, error)) ([]T, []uint32, error) {
-	rows, err := fetch(uids, true)
-	if !splittable(err) || len(uids) == 0 {
-		return rows, nil, err
+// isolateBudget is how many malformed answers, each costing a login, the
+// hunt for the bad messages of a batch of n may meet: enough to find a few
+// bad messages in any batch, and about 26 for a batch of 500.
+func isolateBudget(n int) int { return 2*bits.Len(uint(n)) + 8 }
+
+// hunt is the state of one isolate call.
+type hunt[T any] struct {
+	s      *Store
+	folder string
+	fetch  func(uids []uint32, structure bool) ([]T, error)
+	// budget is how many more malformed answers the hunt may meet.
+	budget     int
+	rows       []T
+	unreadable []uint32
+	// rest are the UIDs the hunt left once its budget ran out.
+	rest []uint32
+}
+
+// run fetches uids, splitting them on a malformed answer while the budget
+// lasts and leaving them in rest once it is spent.
+func (h *hunt[T]) run(uids []uint32) error {
+	if h.budget <= 0 {
+		h.rest = append(h.rest, uids...)
+		return nil
 	}
+	rows, err := h.fetch(uids, true)
+	if !splittable(err) || len(uids) == 0 {
+		h.rows = append(h.rows, rows...)
+		return err
+	}
+	h.budget--
 	if len(uids) > 1 {
 		half := len(uids) / 2
-		var out []T
-		var unreadable []uint32
-		for _, part := range [][]uint32{uids[:half], uids[half:]} {
-			rows, bad, err := bisect(s, folder, part, fetch)
-			out, unreadable = append(out, rows...), append(unreadable, bad...)
-			if err != nil {
-				return out, unreadable, err
-			}
+		if err := h.run(uids[:half]); err != nil {
+			return err
 		}
-		return out, unreadable, nil
+		return h.run(uids[half:])
 	}
-	log := s.opts.Logger
+	if h.budget <= 0 {
+		h.rest = append(h.rest, uids...)
+		return nil
+	}
+	log := h.s.opts.Logger
 	first := err
-	rows, err = fetch(uids, false)
+	rows, err = h.fetch(uids, false)
 	switch {
 	case err == nil:
 		if len(rows) == 0 {
-			return nil, nil, nil // gone since; nothing was read
+			return nil // gone since; nothing was read
 		}
 		log.Warn("read a message without its body structure, which the mail server sent in a form chainmail cannot read; its attachments are unknown",
-			logAttrs(first, "account", s.acct.Name, "folder", folder, "uid", uids[0])...)
-		return rows, nil, nil
+			logAttrs(first, "account", h.s.acct.Name, "folder", h.folder, "uid", uids[0])...)
+		h.rows = append(h.rows, rows...)
+		return nil
 	case splittable(err):
+		h.budget--
 		log.Warn("cannot read a message: the mail server's response to it is in a form chainmail cannot read",
-			logAttrs(err, "account", s.acct.Name, "folder", folder, "uid", uids[0])...)
-		return nil, slices.Clone(uids), nil
+			logAttrs(err, "account", h.s.acct.Name, "folder", h.folder, "uid", uids[0])...)
+		h.unreadable = append(h.unreadable, uids[0])
+		return nil
 	default:
-		return rows, nil, err
+		h.rows = append(h.rows, rows...)
+		return err
 	}
 }
 

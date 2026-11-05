@@ -218,3 +218,51 @@ func TestIsolateStopsAtAnotherError(t *testing.T) {
 		})
 	}
 }
+
+// A batch where every message is malformed costs a bounded number of logins:
+// once the hunt has used its budget of failures, the rest of the batch is
+// read in one go without body structures. When even that fails, the result
+// is a plain ErrMalformed, so the caller backs off rather than record every
+// message as unreadable.
+func TestIsolateBoundsItsLogins(t *testing.T) {
+	t.Parallel()
+	const n, maxLogins = 500, 30
+	for name, fetch := range rowFetchers {
+		t.Run(name+" structures", func(t *testing.T) {
+			t.Parallel()
+			srv := startScriptServer(t, &scriptServer{n: n, badStructure: -1})
+			s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second})
+			rows, err := fetch(t, s, mailstore.Source{Folder: "INBOX", UIDValidity: scriptUIDValidity}, scriptUIDs(n))
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if len(rows) != n {
+				t.Errorf("%d rows, want %d", len(rows), n)
+			}
+			for _, r := range rows {
+				if !r.attachmentsUnknown {
+					t.Errorf("UID %d has its attachments known, want unknown", r.uid)
+					break
+				}
+			}
+			if c := srv.conns.Load(); c > maxLogins {
+				t.Errorf("%d connections, want at most %d", c, maxLogins)
+			}
+		})
+		t.Run(name+" envelopes", func(t *testing.T) {
+			t.Parallel()
+			srv := startScriptServer(t, &scriptServer{n: n, badEnvelope: -1})
+			s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second})
+			rows, err := fetch(t, s, mailstore.Source{Folder: "INBOX", UIDValidity: scriptUIDValidity}, scriptUIDs(n))
+			if _, ok := errors.AsType[*mailstore.UnreadableError](err); ok || !errors.Is(err, mailstore.ErrMalformed) {
+				t.Errorf("%s error = %v, want a plain ErrMalformed", name, err)
+			}
+			if len(rows) != 0 {
+				t.Errorf("%d rows, want none", len(rows))
+			}
+			if c := srv.conns.Load(); c > maxLogins {
+				t.Errorf("%d connections, want at most %d", c, maxLogins)
+			}
+		})
+	}
+}
