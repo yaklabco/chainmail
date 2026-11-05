@@ -267,6 +267,21 @@ func TestFreshnessStaleWithATrimmedGapPending(t *testing.T) {
 	}
 }
 
+// An old unreadable event still to apply makes the account stale too: the
+// builder has yet to record a message the cache lacks.
+func TestFreshnessStaleWithAnUnreadableEventPending(t *testing.T) {
+	t.Parallel()
+	r := acctFreshRig(t)
+	r.publish(watch.Event{At: acctStart.Add(-time.Hour), Kind: watch.KindUnreadable, Account: "acme", Folder: "INBOX", Ref: "cm1:lag"})
+	ok, reason, _, err := r.a.Freshness(t.Context(), []string{"INBOX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok || reason != ReasonStale {
+		t.Errorf("Freshness = %v, %q; want false, %q with an old unreadable event pending", ok, reason, ReasonStale)
+	}
+}
+
 // An old event of the account behind more than one Read's scan of other
 // accounts' events still makes the account stale.
 func TestFreshnessFindsALagBehindOtherAccounts(t *testing.T) {

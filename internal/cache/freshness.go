@@ -120,7 +120,7 @@ func (a *Account) lagging(ctx context.Context, cutoff time.Time) (bool, error) {
 			default:
 			}
 		}
-		page, err := a.o.Log.Read(ctx, watch.Query{After: after, Filter: watch.Filter{Accounts: []string{a.name}}, Limit: 1})
+		page, err := a.o.Log.Read(ctx, watch.Query{After: after, Filter: watch.Filter{Accounts: []string{a.name}, Internal: true}, Limit: 1})
 		if err != nil {
 			return false, err
 		}
