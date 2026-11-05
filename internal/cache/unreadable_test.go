@@ -2,6 +2,7 @@ package cache
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -137,26 +138,55 @@ func TestUnreadableDropsWithItsFolder(t *testing.T) {
 }
 
 // A row read without its body structure keeps AttachmentsUnknown, and its
-// summary says so. A later full read clears it.
+// summary says so. A later full read clears it. A degraded read of a row
+// read whole keeps the attachments it knew, and their filename: terms.
 func TestRowAttachmentsUnknown(t *testing.T) {
 	t.Parallel()
 	s, _ := openStore(t)
-	want := testRow("INBOX", 5)
-	want.AttachmentsUnknown = true
-	putRows(t, s, want)
-	got, ok, err := s.Row(t.Context(), want.Ref())
-	if err != nil || !ok {
-		t.Fatalf("Row: ok %v, err %v", ok, err)
+	degraded := func(uid uint32) Row {
+		r := testRow("INBOX", uid)
+		r.AttachmentsUnknown = true
+		return r
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("Row =\n%+v\nwant\n%+v", got, want)
+	whole := func(uid uint32) Row {
+		r := testRow("INBOX", uid)
+		r.HasAttachment = true
+		r.Attachments = []mailstore.Attachment{{Part: "2", Filename: "Invoice.pdf", ContentType: "application/pdf", Size: 300}}
+		return r
 	}
-	if !got.Summary().AttachmentsUnknown {
+	row := func(uid uint32) Row {
+		t.Helper()
+		got, ok, err := s.Row(t.Context(), testRef("INBOX", uid))
+		if err != nil || !ok {
+			t.Fatalf("Row %d: ok %v, err %v", uid, ok, err)
+		}
+		return got
+	}
+
+	putRows(t, s, degraded(5))
+	if got := row(5); !reflect.DeepEqual(got, degraded(5)) {
+		t.Errorf("Row =\n%+v\nwant\n%+v", got, degraded(5))
+	}
+	if !row(5).Summary().AttachmentsUnknown {
 		t.Error("Summary lost AttachmentsUnknown")
 	}
-	putRows(t, s, testRow("INBOX", 5))
-	if got, _, _ := s.Row(t.Context(), want.Ref()); got.AttachmentsUnknown {
-		t.Error("a full read left AttachmentsUnknown set")
+	putRows(t, s, whole(5))
+	if got := row(5); !reflect.DeepEqual(got, whole(5)) {
+		t.Errorf("after a full read Row =\n%+v\nwant\n%+v", got, whole(5))
+	}
+
+	putRows(t, s, whole(6))
+	putRows(t, s, degraded(6))
+	if got := row(6); !reflect.DeepEqual(got, whole(6)) {
+		t.Errorf("after a degraded read of a whole row Row =\n%+v\nwant\n%+v", got, whole(6))
+	}
+	src := mailstore.Source{Folder: "INBOX", UIDValidity: testUIDValidity}
+	uids, _, err := s.SearchUIDs(t.Context(), testAccount, src, Where{SQL: "m.attachments_norm LIKE ?", Args: []any{"%invoice.pdf%"}}, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(uids, []uint32{6, 5}) {
+		t.Errorf("filename matches = %v, want [6 5]", uids)
 	}
 }
 

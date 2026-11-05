@@ -32,7 +32,8 @@ type Row struct {
 	Attachments            []mailstore.Attachment
 	// AttachmentsUnknown says the header was read without its body
 	// structure, so HasAttachment is false and Attachments nil whatever the
-	// message holds. The next write of the row sets it again.
+	// message holds. A full read clears it. A degraded read of a row whose
+	// attachments are known leaves them, and this, as they were.
 	AttachmentsUnknown bool
 }
 
@@ -103,11 +104,24 @@ var writeColumns = []string{
 	"flags_norm", "labels_norm", "attachments_norm", "cached_at", "attachments_unknown",
 }
 
+// attachmentColumns are the messages columns that describe attachments.
+// A row read without its body structure leaves them as they are when the
+// stored row's attachments are known.
+var attachmentColumns = []string{"has_attachment", "attachments_json", "attachments_norm", "attachments_unknown"}
+
 // upsertRow inserts a row or updates every column but the key, keeping the
-// row's id (and so its body and failures), and returns the id.
+// row's id (and so its body and failures), and returns the id. A row read
+// without its body structure does not overwrite attachments the stored row
+// knows: those take a parser regression or a server change to lose, and
+// the old values are the better answer.
 var upsertRow = func() string {
 	set := make([]string, 0, len(writeColumns)-4)
 	for _, c := range writeColumns[4:] {
+		if slices.Contains(attachmentColumns, c) {
+			set = append(set, c+" = CASE WHEN excluded.attachments_unknown = 1 AND messages.attachments_unknown = 0 THEN messages."+
+				c+" ELSE excluded."+c+" END")
+			continue
+		}
 		set = append(set, c+" = excluded."+c)
 	}
 	return "INSERT INTO messages (" + strings.Join(writeColumns, ", ") + ") VALUES (" +
