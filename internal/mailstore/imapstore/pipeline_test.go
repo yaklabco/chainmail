@@ -41,7 +41,8 @@ const (
 )
 
 // scriptServer is an IMAP server over implicit TLS with one folder, INBOX,
-// holding n single-part text messages with UIDs 1 to n. It answers just
+// holding n single-part text messages with UIDs 1 to n, unless structure
+// gives their body structure. It answers just
 // enough of IMAP for the Store's reads.
 type scriptServer struct {
 	n     int
@@ -75,6 +76,9 @@ type scriptServer struct {
 	// stallBeforeDone makes a state FETCH go silent after answering for
 	// every message, before the tagged OK, until the client hangs up.
 	stallBeforeDone bool
+	// structure, when set, is every message's BODYSTRUCTURE in a summary
+	// FETCH instead of a text/plain part.
+	structure string
 
 	conns, searches, fetches atomic.Int32
 
@@ -269,11 +273,15 @@ func (srv *scriptServer) summaries(rest string) string {
 	var b strings.Builder
 	for uid := 1; uid <= srv.n; uid++ {
 		h := scriptHeader(uid)
+		structure := fmt.Sprintf("(\"text\" \"plain\" (\"charset\" \"utf-8\") NIL NIL \"%s\" %d 1 NIL NIL NIL NIL)", encoding, len(srv.bodyOf(uid)))
+		if srv.structure != "" {
+			structure = srv.structure
+		}
 		fmt.Fprintf(&b, "* %d FETCH (UID %d INTERNALDATE \"20-Oct-2026 09:00:00 +0000\" RFC822.SIZE %d FLAGS () "+
-			"BODYSTRUCTURE (\"text\" \"plain\" (\"charset\" \"utf-8\") NIL NIL \"%s\" %d 1 NIL NIL NIL NIL) "+
+			"BODYSTRUCTURE %s "+
 			"ENVELOPE (\"Mon, 26 Oct 2026 09:00:00 +0000\" \"m%d\" ((NIL NIL \"a\" \"example.com\")) ((NIL NIL \"a\" \"example.com\")) "+
 			"((NIL NIL \"a\" \"example.com\")) ((NIL NIL \"me\" \"example.test\")) NIL NIL NIL \"<m%d@x>\") BODY[%s] {%d}\r\n%s)\r\n",
-			uid, uid, len(h)+len(srv.bodyOf(uid)), encoding, len(srv.bodyOf(uid)), uid, uid, sec, len(h), h)
+			uid, uid, len(h)+len(srv.bodyOf(uid)), structure, uid, uid, sec, len(h), h)
 	}
 	return b.String()
 }

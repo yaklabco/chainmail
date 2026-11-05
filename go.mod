@@ -98,4 +98,4 @@ tool (
 	google.golang.org/protobuf/cmd/protoc-gen-go
 )
 
-replace github.com/emersion/go-imap/v2 => github.com/jamesainslie/go-imap/v2 v2.0.0-beta.8.0.20261030150908-e39a9564a74d
+replace github.com/emersion/go-imap/v2 => github.com/jamesainslie/go-imap/v2 v2.0.0-beta.8.0.20261105110437-a49d5314a0c4
