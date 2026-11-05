@@ -928,11 +928,12 @@ type AccountCount struct {
 	Source string `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`
 	// With source "cache": the oldest last sync of the folders searched.
 	SyncedAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=synced_at,json=syncedAt,proto3" json:"synced_at,omitempty"`
-	// False only when source "cache" was forced and the cache could not
-	// answer completely.
+	// False when source "cache" was forced and the cache could not answer
+	// completely, or when the cache answered and a folder searched holds
+	// messages it could not read.
 	Complete bool `protobuf:"varint,5,opt,name=complete,proto3" json:"complete,omitempty"`
 	// Set when complete is false: backfilling, stale, text_outside_window,
-	// folder_not_synced or cache_disabled.
+	// folder_not_synced, cache_disabled or unreadable_messages.
 	IncompleteReason string `protobuf:"bytes,6,opt,name=incomplete_reason,json=incompleteReason,proto3" json:"incomplete_reason,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache

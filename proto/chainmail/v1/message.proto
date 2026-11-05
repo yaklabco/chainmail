@@ -133,11 +133,12 @@ message AccountCount {
   string source = 3;
   // With source "cache": the oldest last sync of the folders searched.
   google.protobuf.Timestamp synced_at = 4;
-  // False only when source "cache" was forced and the cache could not
-  // answer completely.
+  // False when source "cache" was forced and the cache could not answer
+  // completely, or when the cache answered and a folder searched holds
+  // messages it could not read.
   bool complete = 5;
   // Set when complete is false: backfilling, stale, text_outside_window,
-  // folder_not_synced or cache_disabled.
+  // folder_not_synced, cache_disabled or unreadable_messages.
   string incomplete_reason = 6;
 }
 

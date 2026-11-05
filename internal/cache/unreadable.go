@@ -98,6 +98,30 @@ func (s *Store) UnreadableUIDs(ctx context.Context, account string) (map[mailsto
 	return out, nil
 }
 
+// HasUnreadable reports whether any of the account's folders holds a
+// message recorded as unreadable.
+func (s *Store) HasUnreadable(ctx context.Context, account string, folders []string) (bool, error) {
+	if len(folders) == 0 {
+		return false, nil
+	}
+	for chunk := range slices.Chunk(folders, rowsChunk) {
+		args := make([]any, 0, 1+len(chunk))
+		args = append(args, account)
+		for _, f := range chunk {
+			args = append(args, f)
+		}
+		var found bool
+		if err := s.db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM unreadable WHERE account = ? AND folder IN ("+
+			placeholders(len(chunk))+"))", args...).Scan(&found); err != nil {
+			return false, s.fail("reading unreadable messages", err)
+		}
+		if found {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // UnreadableMessage is one recorded unreadable message.
 type UnreadableMessage struct {
 	Source mailstore.Source

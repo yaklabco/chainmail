@@ -2842,7 +2842,7 @@
                 "type": "string"
               },
               "complete": {
-                "description": "false only when source cache was forced and the cache could not answer completely; incomplete_reason says why",
+                "description": "false when source cache was forced and the cache could not answer completely, or when the cache answered and a folder searched holds messages it could not read; incomplete_reason says why",
                 "type": "boolean"
               },
               "count": {
@@ -2850,7 +2850,7 @@
                 "type": "integer"
               },
               "incomplete_reason": {
-                "description": "backfilling, stale, text_outside_window, folder_not_synced or cache_disabled",
+                "description": "backfilling, stale, text_outside_window, folder_not_synced, cache_disabled or unreadable_messages",
                 "type": "string"
               },
               "source": {

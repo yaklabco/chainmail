@@ -430,7 +430,7 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 		answered = append(answered, o.route.Source)
 		// An incomplete account is listed even with nothing counted, so its
 		// reason reaches the caller.
-		if len(o.part.states) == 0 && o.route.Complete {
+		if len(o.part.states) == 0 && o.route.complete() {
 			continue
 		}
 		resp.AccountCounts = append(resp.AccountCounts, accountCount(a.Name, o.part.count, o.route))

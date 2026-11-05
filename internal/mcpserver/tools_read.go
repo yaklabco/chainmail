@@ -259,8 +259,8 @@ type accountCountOut struct {
 	Count            uint64 `json:"count"`
 	Source           string `json:"source,omitempty" jsonschema:"cache or server: what answered for this account"`
 	SyncedAt         string `json:"synced_at,omitempty" jsonschema:"with source cache: the oldest last sync of the folders searched, in RFC 3339"`
-	Complete         bool   `json:"complete" jsonschema:"false only when source cache was forced and the cache could not answer completely; incomplete_reason says why"`
-	IncompleteReason string `json:"incomplete_reason,omitempty" jsonschema:"backfilling, stale, text_outside_window, folder_not_synced or cache_disabled"`
+	Complete         bool   `json:"complete" jsonschema:"false when source cache was forced and the cache could not answer completely, or when the cache answered and a folder searched holds messages it could not read; incomplete_reason says why"`
+	IncompleteReason string `json:"incomplete_reason,omitempty" jsonschema:"backfilling, stale, text_outside_window, folder_not_synced, cache_disabled or unreadable_messages"`
 }
 
 type searchOut struct {

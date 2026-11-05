@@ -218,3 +218,37 @@ func TestIncomplete(t *testing.T) {
 		t.Errorf("Incomplete = %+v, want %+v", got, want)
 	}
 }
+
+// HasUnreadable reports whether any of the folders holds a message
+// recorded as unreadable. Rows read without their body structure do not
+// count, and no folders means none.
+func TestHasUnreadable(t *testing.T) {
+	t.Parallel()
+	s, _ := openStore(t)
+	putProgress(t, s, "INBOX", "Sent", "Archive")
+	markUnreadable(t, s, "Sent", testUIDValidity, 5)
+	degraded := testRow("Archive", 6)
+	degraded.AttachmentsUnknown = true
+	putRows(t, s, degraded)
+	tests := []struct {
+		folders []string
+		want    bool
+	}{
+		{folders: []string{"INBOX", "Sent"}, want: true},
+		{folders: []string{"Sent"}, want: true},
+		{folders: []string{"INBOX", "Archive"}, want: false},
+		{folders: nil, want: false},
+	}
+	for _, tt := range tests {
+		got, err := s.HasUnreadable(t.Context(), testAccount, tt.folders)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != tt.want {
+			t.Errorf("HasUnreadable(%v) = %v, want %v", tt.folders, got, tt.want)
+		}
+	}
+	if got, err := s.HasUnreadable(t.Context(), "other", []string{"Sent"}); err != nil || got {
+		t.Errorf("HasUnreadable of another account = %v, %v; want false", got, err)
+	}
+}
