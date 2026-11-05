@@ -110,3 +110,30 @@ func TestMalformedFolderOpenIsNotSplit(t *testing.T) {
 		})
 	}
 }
+
+// A text sample the client cannot parse drops the snippets of the page
+// rather than fail it. The connection the sample broke is not used again.
+func TestMalformedSampleDropsSnippets(t *testing.T) {
+	t.Parallel()
+	srv := startScriptServer(t, &scriptServer{n: 4, badText: 2})
+	s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second})
+	src := mailstore.Source{Folder: "INBOX", UIDValidity: scriptUIDValidity}
+	sums, err := s.FetchSummaries(t.Context(), src, scriptUIDs(4), mailstore.SummaryOptions{Snippets: true})
+	if err != nil || len(sums) != 4 {
+		t.Fatalf("FetchSummaries = %+v, %v; want 4 summaries", sums, err)
+	}
+	for _, sum := range sums {
+		if sum.Sample != nil || sum.AttachmentsUnknown {
+			t.Errorf("UID %d = %+v, want no sample and its attachments known", sum.Ref.UID, sum)
+		}
+	}
+	if n := srv.summaryFetches("1:4"); n != 1 {
+		t.Errorf("UID set 1:4 fetched %d times, want once", n)
+	}
+	if _, err := s.FetchSummaries(t.Context(), src, []uint32{1}, mailstore.SummaryOptions{}); err != nil {
+		t.Fatalf("FetchSummaries after: %v", err)
+	}
+	if n := srv.conns.Load(); n != 2 {
+		t.Errorf("%d connections, want 2: the one the sample broke is not reused", n)
+	}
+}

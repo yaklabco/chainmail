@@ -22,7 +22,8 @@ import (
 // most often malformed, and fetch marks what it reads then as having
 // attachments unknown. A message that fails that way too is unreadable.
 // Both are logged with the account, folder and UID. A malformed answer to
-// opening the folder is not split on: it fails the batch.
+// opening the folder is not split on: it fails the batch. A malformed text
+// sample drops the snippets (readSummaries) and is not split on either.
 //
 // Each failure costs a login, so the hunt stops after isolateBudget of
 // them. The messages it has not reached by then are fetched in one go

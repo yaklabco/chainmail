@@ -214,7 +214,8 @@ func (s *Store) summaryItems(preview, fullHeader bool) *imap.FetchOptions {
 // with AttachmentsUnknown when it reads without its body structure, and is
 // left out otherwise. The summaries then come with an
 // *mailstore.UnreadableError naming the messages left out, and are valid.
-// Any other error, such as a failure to fetch the snippets, comes with the
+// A snippet the client cannot parse drops the snippets of the page. Any
+// other error, such as a failure to fetch the snippets, comes with the
 // summaries read before it.
 func (s *Store) FetchSummaries(ctx context.Context, src mailstore.Source, uids []uint32, opts mailstore.SummaryOptions) ([]mailstore.Summary, error) {
 	want := absent(uids, nil) // each UID once, and no 0, which a UID set reads as *
@@ -264,7 +265,8 @@ func (s *Store) fetchSummaries(ctx context.Context, c *conn, folder string, uids
 
 // readSummaries is fetchSummaries, without the body structure unless
 // structure is set. Without it, every summary has AttachmentsUnknown and
-// none gets a text sample.
+// none gets a text sample. A text sample the client cannot parse drops the
+// samples of every summary, and the summaries come back without an error.
 func (s *Store) readSummaries(ctx context.Context, c *conn, folder string, uids []uint32, snippets, structure bool) ([]mailstore.Summary, error) {
 	preview := snippets && c.client().Caps().Has(imap.CapPreview)
 	items := s.summaryItems(preview, false)
@@ -290,7 +292,19 @@ func (s *Store) readSummaries(ctx context.Context, c *conn, folder string, uids 
 		}
 	}
 	if snippets && !preview {
-		return out, c.samples(ctx, out, structures)
+		err := c.samples(ctx, out, structures)
+		if !errors.Is(err, mailstore.ErrMalformed) {
+			return out, err
+		}
+		// The summaries are whole, so a sample the client cannot parse costs
+		// the page its snippets and not its rows. The reader has stopped, so
+		// c must never be used again, which pipeline has seen to already.
+		c.kill()
+		for i := range out {
+			out[i].Sample = nil
+		}
+		s.opts.Logger.Warn("dropped the snippets of a page: the mail server sent a text sample in a form chainmail cannot read",
+			logAttrs(err, "account", s.acct.Name, "folder", folder)...)
 	}
 	return out, nil
 }
