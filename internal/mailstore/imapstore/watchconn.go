@@ -219,8 +219,10 @@ func (w *watchConn) Sync(ctx context.Context, req mailstore.SyncRequest) (mailst
 var _ mailstore.Redialer = (*watchConn)(nil)
 
 // NeedsRedial implements mailstore.Redialer: a Sync met new mail the server
-// sent in a form chainmail cannot read, which ended the connection.
-func (w *watchConn) NeedsRedial() bool { return w.spent }
+// sent in a form chainmail cannot read, which ended the connection, or the
+// connection is dead for another reason a Sync did not report, such as a
+// malformed text sample that only cost the snippets.
+func (w *watchConn) NeedsRedial() bool { return w.spent || w.c.Dead() }
 
 // unannouncedExpunge reports whether a message the pass before saw has left
 // the folder: the messages now are fewer than those then plus the new ones

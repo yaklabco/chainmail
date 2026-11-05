@@ -203,17 +203,21 @@ func TestSyncPassIsolatesMalformedNewMail(t *testing.T) {
 
 // A watch connection whose pass met malformed new mail says it needs a
 // redial, since the parse error ended it, and one whose pass read its new
-// mail whole does not.
+// mail whole does not. A malformed text sample, which the pass leaves out
+// of its snippets without failing, ends the connection too.
 func TestWatchConnNeedsRedialAfterMalformedNewMail(t *testing.T) {
 	t.Parallel()
 	from := mailstore.Checkpoint{UIDValidity: scriptUIDValidity, UIDNext: 1, HighestModSeq: scriptModSeq}
 	for name, tt := range map[string]struct {
-		srv  *scriptServer
-		want bool
+		srv      *scriptServer
+		snippets bool
+		want     bool
 	}{
-		"well formed":   {srv: &scriptServer{n: 4, condstore: true}, want: false},
-		"bad structure": {srv: &scriptServer{n: 4, condstore: true, badStructure: 2}, want: true},
-		"bad envelope":  {srv: &scriptServer{n: 4, condstore: true, badEnvelope: 3}, want: true},
+		"well formed":          {srv: &scriptServer{n: 4, condstore: true}, want: false},
+		"well formed snippets": {srv: &scriptServer{n: 4, condstore: true}, snippets: true, want: false},
+		"bad structure":        {srv: &scriptServer{n: 4, condstore: true, badStructure: 2}, want: true},
+		"bad envelope":         {srv: &scriptServer{n: 4, condstore: true, badEnvelope: 3}, want: true},
+		"bad text sample":      {srv: &scriptServer{n: 4, condstore: true, badText: 2}, snippets: true, want: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -223,7 +227,7 @@ func TestWatchConnNeedsRedialAfterMalformedNewMail(t *testing.T) {
 				t.Fatalf("OpenWatch: %v", err)
 			}
 			t.Cleanup(func() { _ = w.Close() })
-			if _, err := w.Sync(t.Context(), mailstore.SyncRequest{From: from}); err != nil {
+			if _, err := w.Sync(t.Context(), mailstore.SyncRequest{From: from, Snippets: tt.snippets}); err != nil {
 				t.Fatalf("Sync: %v", err)
 			}
 			r, ok := w.(mailstore.Redialer)
