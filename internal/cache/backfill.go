@@ -25,7 +25,8 @@ type walk struct {
 	uids        []uint32 // still to fetch, highest first
 	// limit, when not 0, caps the next batch. A batch larger than
 	// mailstore.IsolatedBatch that fails with a plain
-	// mailstore.ErrMalformed halves it, and a committed batch clears it.
+	// mailstore.ErrMalformed halves it, and each committed batch doubles
+	// it until it reaches backfill_batch, which clears it.
 	limit int
 }
 
@@ -174,9 +175,8 @@ func (a *Account) fetchBatch(ctx context.Context, w *walk) ([]uint32, []Row, []u
 // over max_size, records the UIDs it could not read as unreadable, and
 // records the walk's new low UID, marking the folder done when the walk
 // has no UIDs left, which wakes the prefetcher for its window. The walk's
-// next batch is full size again. It writes only the backfill's own
-// progress columns, so a window_done clear made meanwhile without wmu
-// stands. A batch fetched before a drop, or before the builder recorded a
+// limit, if any, doubles. It writes only the backfill's own progress
+// columns, so a window_done clear made meanwhile without wmu stands. A batch fetched before a drop, or before the builder recorded a
 // new walk of the folder, is discarded with its walk. A batch with a UID
 // whose flags or expunge the builder applied during the fetch is not
 // written: it returns w unchanged, so the next step fetches the batch
@@ -216,7 +216,14 @@ func (a *Account) commitBatch(ctx context.Context, w *walk, batch []uint32, rows
 	if err := a.o.Store.SetBackfill(ctx, a.name, w.folder, p.BackfillLowUID, p.BackfillDone); err != nil {
 		return w, false, err
 	}
-	w.uids, w.low, w.limit = rest, p.BackfillLowUID, 0
+	w.uids, w.low = rest, p.BackfillLowUID
+	if w.limit > 0 {
+		// Grow back after a halving one step at a time, so a batch that
+		// still holds the fault is not retried at full size at once.
+		if w.limit *= 2; w.limit >= a.settings().BackfillBatch {
+			w.limit = 0
+		}
+	}
 	if p.BackfillDone {
 		a.logger.InfoContext(ctx, "cache backfill done", "folder", w.folder)
 		a.pokePrefetch()

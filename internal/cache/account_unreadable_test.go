@@ -279,7 +279,8 @@ func TestBuilderBacksOffAFolderFault(t *testing.T) {
 // A backfill batch larger than mailstore.IsolatedBatch that fails with a
 // plain ErrMalformed, which the store returns when it cannot isolate the
 // messages at fault, is halved for the next attempt until the store
-// isolates them. The walk then goes on past the unreadable message.
+// isolates them. The walk then goes on past the unreadable message, and
+// each committed batch doubles the limit back towards backfill_batch.
 func TestBackfillHalvesItsBatchOnAPlainMalformedResponse(t *testing.T) {
 	t.Parallel()
 	fs := fake.New("acme", false)
@@ -295,10 +296,11 @@ func TestBackfillHalvesItsBatchOnAPlainMalformedResponse(t *testing.T) {
 	r.waitBackfilled("INBOX")
 	r.stop()
 
-	// Highest first: 24 to 9 fails, 24 to 17 fails, 24 to 21 commits; 20
-	// to 5 fails, 20 to 13 fails, 20 to 17 commits with 20 unreadable;
-	// then 16 to 1.
-	if got, want := mail.batches(), []int{16, 8, 4, 16, 8, 4, 16}; !slices.Equal(got, want) {
+	// Highest first: 24 to 9 fails, 24 to 17 fails, 24 to 21 commits and
+	// the limit doubles to 8; 20 to 13 fails, 20 to 17 commits with 20
+	// unreadable and the limit doubles to 8; 16 to 9 commits and the limit
+	// is back at 16; then 8 to 1.
+	if got, want := mail.batches(), []int{16, 8, 4, 8, 4, 8, 8}; !slices.Equal(got, want) {
 		t.Errorf("header fetch sizes = %v, want %v", got, want)
 	}
 	if got, want := r.cachedUIDs("INBOX", 1), slices.Delete(slices.Clone(uids), 19, 20); !slices.Equal(got, want) {
