@@ -242,3 +242,80 @@ func saveLink(ctx context.Context, tx *sql.Tx, l Link) error {
 	}
 	return nil
 }
+
+// subtreeLinksSQL lists the distinct (account, thread key) pairs linked to
+// an item or any live item below it, by account then key. The walk stops at
+// deleted items: a delete with live children needs cascade, which takes the
+// subtree with it.
+const subtreeLinksSQL = `WITH RECURSIVE subtree(id) AS (
+    SELECT ?
+    UNION
+    SELECT items.id FROM items JOIN subtree ON items.parent_id = subtree.id
+    WHERE items.deleted_at IS NULL
+)
+SELECT DISTINCT item_links.account, item_links.thread_key
+FROM item_links JOIN subtree ON item_links.item_id = subtree.id
+ORDER BY item_links.account, item_links.thread_key`
+
+// ThreadKeys returns, per account, the distinct thread keys linked to id or
+// any live item below it, each account's keys sorted. The map is never nil.
+// ErrNotFound "item" for an unknown or deleted id.
+func (s *Store) ThreadKeys(ctx context.Context, id string) (map[string][]string, error) {
+	out := map[string][]string{}
+	// One read transaction, so the item cannot be deleted between the check
+	// and the walk.
+	err := s.read(ctx, func(tx *sql.Tx) error {
+		h, err := itemHead(ctx, tx, id, "item")
+		if err != nil {
+			return err
+		}
+		if h.deleted {
+			return errMissing("item")
+		}
+		rows, err := tx.QueryContext(ctx, subtreeLinksSQL, id)
+		if err != nil {
+			return fmt.Errorf("items: reading links: %w", err)
+		}
+		defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
+		for rows.Next() {
+			var account, key string
+			if err := rows.Scan(&account, &key); err != nil {
+				return fmt.Errorf("items: reading links: %w", err)
+			}
+			out[account] = append(out[account], key)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("items: reading links: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// LinkedThreadKeys returns the distinct thread keys of account linked to any
+// live item, sorted. An account with none gives an empty, non-nil slice.
+func (s *Store) LinkedThreadKeys(ctx context.Context, account string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT item_links.thread_key
+FROM item_links JOIN items ON items.id = item_links.item_id
+WHERE item_links.account = ? AND items.deleted_at IS NULL
+ORDER BY item_links.thread_key`, account)
+	if err != nil {
+		return nil, fmt.Errorf("items: reading links: %w", err)
+	}
+	defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
+	out := []string{}
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("items: reading links: %w", err)
+		}
+		out = append(out, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("items: reading links: %w", err)
+	}
+	return out, nil
+}
