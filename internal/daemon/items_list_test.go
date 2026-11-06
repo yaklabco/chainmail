@@ -109,7 +109,7 @@ func TestListItems(t *testing.T) {
 		{Client: "test", Action: "item.list", Targets: itemTargets(t, "changed_since=0", fmt.Sprintf("rows=%d", len(changed)+2)), Result: "ok"},
 		{Client: "test", Action: "item.list", Targets: itemTargets(t, "rows=0"), Result: "error", Reason: api.ReasonInvalidArgument},
 		{Client: "test", Action: "item.list", Targets: itemTargets(t, "rows=0"), Result: "error", Reason: api.ReasonInvalidArgument},
-		{Client: "test", Action: "item.list", Targets: itemTargets(t, "changed_since=-1", "rows=0"), Result: "error", Reason: api.ReasonInvalidArgument},
+		{Client: "test", Action: "item.list", Targets: itemTargets(t, "changed_since=(invalid)", "rows=0"), Result: "error", Reason: api.ReasonInvalidArgument},
 		{Client: "test", Action: "item.list", Targets: itemTargets(t, "type=(invalid)", "rows=0"), Result: "error", Reason: api.ReasonInvalidArgument},
 		{Client: "test", Action: "item.list", Targets: itemTargets(t, "under=(invalid)", "rows=0"), Result: "error", Reason: api.ReasonInvalidArgument},
 		{Client: "test", Action: "item.list", Targets: itemTargets(t, "rows=0"), Result: "error", Reason: api.ReasonInvalidArgument},

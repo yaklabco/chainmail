@@ -375,9 +375,10 @@ func listQuery(m *chainmailv1.ListItemsRequest) (items.ListQuery, []string, erro
 		targets = append(targets, "inbox=1")
 	}
 	if v := m.ChangedSince; v != nil {
-		targets = append(targets, fmt.Sprintf("changed_since=%d", *v))
 		if *v < 0 {
-			errs = append(errs, errChangedSince)
+			targets, errs = append(targets, "changed_since="+invalidTarget), append(errs, errChangedSince)
+		} else {
+			targets = append(targets, fmt.Sprintf("changed_since=%d", *v))
 		}
 	}
 	if q.Limit < 0 || q.Limit > maxListLimit {
