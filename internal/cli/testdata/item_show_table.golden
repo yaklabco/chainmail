@@ -1,0 +1,36 @@
+id        it_task1
+type      task
+title     Renew the domain
+state     in-progress
+area      work (inherited)
+priority  p1
+parent    it_admin_work
+start     -
+due       2026-11-20
+estimate  1.5
+ongoing   false
+deleted   -
+revision  42
+created   2026-11-06 09:00 by 1000/mcp
+updated   2026-11-06 10:00 by 1000/cli
+
+description:
+  Pay before the 20th.
+
+  Ask about [31mbulk pricing.
+
+criteria: 1 of 2 ticked
+  [x] cr_a Invoice paid
+      evidence: receipt in cm1:work:INBOX:7:42
+  [ ] cr_b DNS checked
+
+ancestors:
+  it_admin_work  initiative  backlog  Admin (ongoing)
+
+blocked by:
+  it_task0  task  done  Find the registrar login
+
+threads: 2
+  STATE                    ACCOUNT  THREAD    MESSAGES  LATEST            SUBJECT             REF                  NOTE
+  ok                       work     a1b2c3d4  3         2026-11-06 07:00  Re: Domain renewal  cm1:work:INBOX:7:42  the renewal notice
+  unavailable (NOT_FOUND)  old      ffee      0         -                 -                   -                    -

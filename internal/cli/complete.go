@@ -386,7 +386,7 @@ func (cp *completer) specs() map[string]compSpec {
 	labels := cp.folders(folderSpec{accounts: cp.googleAccounts, keep: labelFolder})
 	existingFolder := cp.folders(folderSpec{accounts: flagAccount, maxArgs: 1})
 	answer := mergeFlagCompletions(contentFlagSpecs(), recipientFlagSpecs(), map[string]cobra.CompletionFunc{"idempotency-key": noComplete})
-	return map[string]compSpec{
+	specs := map[string]compSpec{
 		"chainmail": {args: noComplete, flags: map[string]cobra.CompletionFunc{
 			"socket": files,
 			"output": fixed(
@@ -464,6 +464,8 @@ func (cp *completer) specs() map[string]compSpec {
 		"chainmail folder delete": {args: existingFolder},
 		"chainmail folder rename": {args: existingFolder},
 	}
+	maps.Copy(specs, cp.itemSpecs())
+	return specs
 }
 
 // applyCompletions registers specs on the tree. A missing args function
