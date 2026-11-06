@@ -325,7 +325,7 @@ func errNeedsCache(field query.Field, miss cacheMiss) error {
 	case missBound:
 		return &argError{
 			msg:  lead + ", and the cache holds message text only for mail inside its body window",
-			hint: "add a top-level newer_than: or after: inside the account's prefetch_bodies window, or drop the text terms; waiting does not change this; see the window with: chainmail cache status",
+			hint: cacheBoundHint,
 		}
 	case missPrefetch:
 		return &argError{
@@ -345,7 +345,7 @@ func errNeedsCache(field query.Field, miss cacheMiss) error {
 	case missFailed:
 		return &argError{
 			msg:  lead + ", and the cache failed reading it",
-			hint: "the daemon log has the cause; see the cache with: chainmail cache status",
+			hint: cacheFailedHint,
 		}
 	default:
 		return &argError{

@@ -85,7 +85,7 @@ func toConnectError(err error) *connect.Error {
 		return api.New(connect.CodeNotFound, api.ReasonNotFound, folderHint,
 			&fixedTextError{msg: folderMissingText(noFolder), err: err})
 	case errors.Is(err, errNotReady):
-		return api.New(connect.CodeFailedPrecondition, api.ReasonCacheNotReady, cacheNotReadyHint, err)
+		return api.New(connect.CodeFailedPrecondition, api.ReasonCacheNotReady, notReadyHint(err), err)
 	case errors.Is(err, items.ErrNotFound):
 		return api.New(connect.CodeNotFound, api.ReasonNotFound, itemListHint, err)
 	case errors.Is(err, mailstore.ErrNotFound):

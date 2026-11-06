@@ -171,6 +171,19 @@ func TestSearchItemRefusals(t *testing.T) {
 		f.s.itemThreads = &stubItemResolver{err: errors.New("database is locked near it_secret")}
 	}
 	notReady := errItemCacheNotReady.Error()
+	const (
+		boundMsg    = "item: is answered from the local cache, which holds message text only for mail inside its body window"
+		boundHint   = "add a top-level newer_than: or after: inside the account's prefetch_bodies window, or drop the text terms; waiting does not change this; see the window with: chainmail cache status"
+		failedMsg   = "item: is answered from the local cache, which failed reading this account"
+		failedHint  = "the daemon log has the cause; see the cache with: chainmail cache status"
+		failedQuery = "item:none invoice newer_than:30d"
+	)
+	readFailure := func(t *testing.T, f *routeFixture) {
+		if got := f.search(t, &chainmailv1.SearchRequest{QueryString: failedQuery, Accounts: itemHostOnly}); got.GetSource() != cache.SourceCache {
+			t.Fatalf("before the damage: source %q, want cache", got.GetSource())
+		}
+		f.damage(t, "DROP TABLE messages_fts")
+	}
 	tests := []struct {
 		name     string
 		query    string
@@ -184,7 +197,8 @@ func TestSearchItemRefusals(t *testing.T) {
 	}{
 		{name: "no cache", query: "item:none", setup: uninstall, code: connect.CodeFailedPrecondition, reason: api.ReasonCacheNotReady, hint: notReadyHint, msg: notReady},
 		{name: "stale cache", query: "item:it_plan", setup: staleArchive, code: connect.CodeFailedPrecondition, reason: api.ReasonCacheNotReady, hint: notReadyHint, msg: notReady},
-		{name: "text outside the window", query: "item:none invoice", code: connect.CodeFailedPrecondition, reason: api.ReasonCacheNotReady, hint: notReadyHint, msg: notReady},
+		{name: "text outside the window", query: "item:none invoice", code: connect.CodeFailedPrecondition, reason: api.ReasonCacheNotReady, hint: boundHint, msg: boundMsg},
+		{name: "cache read failure", query: failedQuery, setup: readFailure, code: connect.CodeFailedPrecondition, reason: api.ReasonCacheNotReady, hint: failedHint, msg: failedMsg},
 		{name: "Google account without a cache", query: "item:none", accounts: []string{"gmail"}, code: connect.CodeFailedPrecondition, reason: api.ReasonCacheNotReady, hint: notReadyHint, msg: notReady},
 		{name: "Google trash", query: "item:none in:trash", accounts: []string{"gmail"}, setup: gmailCache, code: connect.CodeFailedPrecondition, reason: api.ReasonCacheNotReady, hint: notReadyHint, msg: notReady},
 		{name: "source server", query: "item:none", source: cache.SourceServer, code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument, hint: "item: is answered from the cache; drop source=server", msg: errItemSourceServer.Error()},
@@ -336,8 +350,9 @@ func TestCacheNotReadySeverity(t *testing.T) {
 
 // TestCacheNotReadyIsFailedPrecondition pins the pairing the CLI and MCP
 // rely on: CACHE_NOT_READY travels as Connect FailedPrecondition with the
-// cache status hint, however the error is wrapped, and an unknown item is
-// NotFound with the item list hint.
+// cache status hint, however the error is wrapped, text outside the body
+// window and a failed cache read with hints of their own, and an unknown
+// item is NotFound with the item list hint.
 func TestCacheNotReadyIsFailedPrecondition(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -351,16 +366,36 @@ func TestCacheNotReadyIsFailedPrecondition(t *testing.T) {
 		{name: "wrapped", err: fmt.Errorf("host: %w", errNotReady), code: connect.CodeFailedPrecondition, reason: api.ReasonCacheNotReady, hint: cacheNotReadyHint},
 		{name: "item refusal", err: errItemCacheNotReady, code: connect.CodeFailedPrecondition, reason: api.ReasonCacheNotReady, hint: cacheNotReadyHint},
 		{name: "item refusal through messageErr", err: messageErr(errItemCacheNotReady), code: connect.CodeFailedPrecondition, reason: api.ReasonCacheNotReady, hint: cacheNotReadyHint},
+		{name: "text outside the window", err: messageErr(errItemCacheBound), code: connect.CodeFailedPrecondition, reason: api.ReasonCacheNotReady, hint: cacheBoundHint},
+		{name: "wrapped text outside the window", err: fmt.Errorf("host: %w", errItemCacheBound), code: connect.CodeFailedPrecondition, reason: api.ReasonCacheNotReady, hint: cacheBoundHint},
+		{name: "cache read failure", err: messageErr(errItemCacheFailed), code: connect.CodeFailedPrecondition, reason: api.ReasonCacheNotReady, hint: cacheFailedHint},
 		{name: "unknown item", err: itemLookupErr(fmt.Errorf("%w: item", items.ErrNotFound)), code: connect.CodeNotFound, reason: api.ReasonNotFound, hint: "run: chainmail item list"},
 	}
 	for _, tt := range tests {
-		got := toConnectError(tt.err)
-		d := api.Detail(got)
-		if got.Code() != tt.code || d.GetReason() != tt.reason || d.GetHint() != tt.hint {
-			t.Errorf("%s: toConnectError = %v %s (hint %q), want %v %s (hint %q)", tt.name, got.Code(), d.GetReason(), d.GetHint(), tt.code, tt.reason, tt.hint)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := toConnectError(tt.err)
+			d := api.Detail(got)
+			if got.Code() != tt.code || d.GetReason() != tt.reason || d.GetHint() != tt.hint {
+				t.Errorf("toConnectError = %v %s (hint %q), want %v %s (hint %q)", got.Code(), d.GetReason(), d.GetHint(), tt.code, tt.reason, tt.hint)
+			}
+		})
 	}
-	if got := partialSource("host", "", errItemCacheNotReady); got.GetReason() != api.ReasonCacheNotReady || got.GetMessage() != errItemCacheNotReady.Error() || got.GetHint() != cacheNotReadyHint {
-		t.Errorf("partialSource = %v, want CACHE_NOT_READY with the fixed text and the cache status hint", got)
+	partials := []struct {
+		name string
+		err  *fixedTextError
+		hint string
+	}{
+		{name: "not ready", err: errItemCacheNotReady, hint: cacheNotReadyHint},
+		{name: "text outside the window", err: errItemCacheBound, hint: cacheBoundHint},
+		{name: "cache read failure", err: errItemCacheFailed, hint: cacheFailedHint},
+	}
+	for _, tt := range partials {
+		t.Run("partial "+tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := partialSource("host", "", tt.err); got.GetReason() != api.ReasonCacheNotReady || got.GetMessage() != tt.err.Error() || got.GetHint() != tt.hint {
+				t.Errorf("partialSource = %v, want CACHE_NOT_READY with %q and hint %q", got, tt.err.Error(), tt.hint)
+			}
+		})
 	}
 }
