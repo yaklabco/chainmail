@@ -1,6 +1,10 @@
 package mailstore
 
-import "context"
+import (
+	"context"
+
+	"github.com/jamesainslie/chainmail/internal/ref"
+)
 
 // Header is what the local cache keeps of a message without its body: the
 // summary a search row shows and the fields a summary leaves out.
@@ -54,4 +58,19 @@ type Scoper interface {
 	// with Bounds nil, in the order Search reports them, and the same
 	// errors.
 	SearchFolders(ctx context.Context, in string) ([]string, error)
+}
+
+// ThreadFinder is implemented by stores that can find a thread's messages
+// by its key, with no seed message.
+type ThreadFinder interface {
+	// FindThread returns the refs of the account's messages in the thread
+	// with key threadKey, in the default search scope, sorted by folder then
+	// UID. On Google it searches All Mail by X-GM-THRID (threadKey is the
+	// lowercase hex thread ID, as Summary.ThreadID gives it) and ignores
+	// rootMessageID. Elsewhere it runs the same search the server thread
+	// call runs for a root Message-ID, using rootMessageID, with or without
+	// angle brackets, and ignores threadKey. No match is an empty slice and
+	// a nil error, and so are a Google key Summary.ThreadID could not have
+	// given and an empty rootMessageID elsewhere. It never sets \Seen.
+	FindThread(ctx context.Context, threadKey, rootMessageID string) ([]ref.Ref, error)
 }
