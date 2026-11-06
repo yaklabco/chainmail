@@ -45,11 +45,12 @@ func daemonActor() items.Actor {
 	return items.Actor{UID: uint32(os.Getuid()), Client: daemonClient}
 }
 
-// ensureAdmin creates the two Admin items when they are missing. New runs
-// it, so the items exist before any client connects. They are bootstrap
-// rows: no event, no audit row. A second run changes nothing.
-func (s *Server) ensureAdmin() error {
-	ctx, cancel := context.WithTimeout(context.Background(), adminTimeout)
+// ensureAdmin creates the two Admin items when they are missing. Serve
+// runs it first, so the items exist before it accepts a connection. Its
+// timeout bounds the call within ctx. They are bootstrap rows: no event,
+// no audit row. A second run changes nothing.
+func (s *Server) ensureAdmin(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, adminTimeout)
 	defer cancel()
 	if err := s.items.EnsureAdmin(ctx, daemonActor()); err != nil {
 		return fmt.Errorf("daemon: creating the Admin items: %w", err)

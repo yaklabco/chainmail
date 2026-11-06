@@ -236,9 +236,6 @@ func New(opts Options) (*Server, error) {
 	s.stores = &storeSet{build: s.buildStore, buildSized: s.buildSized, firstUse: s.probeIfStale, logger: opts.Logger}
 	s.engine = watch.NewEngine(opts.StateDB, s.watchLog, s.watchState, watch.EngineOptions{Now: opts.Now, Snippet: snippetOf})
 	s.items = items.NewStore(opts.StateDB, s.watchLog, opts.Now)
-	if err := s.ensureAdmin(); err != nil {
-		return nil, err
-	}
 	if err := s.openSendState(); err != nil {
 		return nil, err
 	}
@@ -278,7 +275,16 @@ func New(opts Options) (*Server, error) {
 // cancels every request in flight, so mail server probes stop and report
 // TIMEOUT while their audit rows are still written. Serve returns only once
 // every handler has returned, so the caller can close the state database.
+// Before it accepts a connection it creates the Admin items that are
+// missing, then recovers interrupted sends; either failing ends Serve.
 func (s *Server) Serve(ctx context.Context) error {
+	if err := s.ensureAdmin(ctx); err != nil {
+		_ = s.opts.Listener.Close() // the Admin items error is the one to report
+		if ctx.Err() != nil {
+			return nil // stopped before serving: a shutdown, not a failure
+		}
+		return err
+	}
 	if err := s.recoverSends(ctx); err != nil {
 		_ = s.opts.Listener.Close() // the recovery error is the one to report
 		if ctx.Err() != nil {

@@ -6,6 +6,9 @@ import (
 	"slices"
 	"testing"
 
+	"connectrpc.com/connect"
+
+	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
 )
 
@@ -33,9 +36,9 @@ func itemStrings(t *testing.T, h *daemontest.Harness, query string) []string {
 }
 
 // TestAdminItemsAreCreatedOnce checks that a new daemon has the two Admin
-// items before Start returns, that creating them writes no event and no
-// audit row (they are bootstrap rows, found by revision), and that a
-// restart on the same state adds nothing.
+// items before it serves its first call, that creating them writes no
+// event and no audit row (they are bootstrap rows, found by revision), and
+// that a restart on the same state adds nothing.
 func TestAdminItemsAreCreatedOnce(t *testing.T) {
 	t.Parallel()
 	const (
@@ -48,6 +51,7 @@ func TestAdminItemsAreCreatedOnce(t *testing.T) {
 		"it_admin_work initiative Admin work 1 " + by,
 	}
 	h := daemontest.Start(t, hostingerConfig, daemontest.Options{})
+	served(t, h)
 	if got := itemStrings(t, h, itemsQuery); !slices.Equal(got, want) {
 		t.Fatalf("items = %q, want %q", got, want)
 	}
@@ -55,6 +59,7 @@ func TestAdminItemsAreCreatedOnce(t *testing.T) {
 		t.Fatalf("item events = %q, want none: the event log starts empty", payloads)
 	}
 	again := daemontest.Start(t, hostingerConfig, daemontest.Options{Reuse: h})
+	served(t, again)
 	if got := itemStrings(t, again, itemsQuery); !slices.Equal(got, want) {
 		t.Errorf("after a restart items = %q, want %q", got, want)
 	}
@@ -63,5 +68,14 @@ func TestAdminItemsAreCreatedOnce(t *testing.T) {
 	}
 	if rows := again.AuditRows(t); len(rows) != 0 {
 		t.Errorf("audit rows = %+v, want none: startup is not a call", rows)
+	}
+}
+
+// served waits for h's daemon to serve a call. Serve creates the Admin
+// items before it accepts one, and GetStatus writes no audit row.
+func served(t *testing.T, h *daemontest.Harness) {
+	t.Helper()
+	if _, err := h.Client.Admin.GetStatus(t.Context(), connect.NewRequest(&chainmailv1.GetStatusRequest{})); err != nil {
+		t.Fatalf("GetStatus: %v", err)
 	}
 }
