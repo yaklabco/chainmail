@@ -325,3 +325,46 @@ func TestItemPayloadRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// A reader that names no kinds, and the cache's internal reader, never sees
+// item kinds and still moves past them. Named kinds see them; an item
+// filter sees only its items' events, plus status and gap.
+func TestReadItemKinds(t *testing.T) {
+	t.Parallel()
+	l, _, _ := newLog(t)
+	at := time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)
+	stored := publish(t, l,
+		Event{At: at, Kind: KindNew, Account: "a", Folder: "INBOX", Ref: "cm:a:INBOX:7:1", Message: &Message{Subject: "hi"}},
+		Event{At: at, Kind: KindItem, Item: &ItemChange{ItemID: "it_a", Type: "task", Revision: 1, Op: "linked"}},
+		Event{At: at, Kind: KindItemMail, Account: "a", Folder: "INBOX", Ref: "cm:a:INBOX:7:1", ItemID: "it_a", Message: &Message{Subject: "hi"}},
+		Event{At: at, Kind: KindItem, Item: &ItemChange{ItemID: "it_b", Type: "epic", Revision: 2, Op: "created"}},
+		Event{At: at, Kind: KindItemMail, Account: "a", Folder: "INBOX", Ref: "cm:a:INBOX:7:1", ItemID: "it_b", Message: &Message{Subject: "hi"}},
+		Event{At: at, Kind: KindStatus, Account: "a", Folder: "INBOX", State: StateWatching},
+	)
+	last := stored[len(stored)-1].ID
+	tests := []struct {
+		name string
+		f    Filter
+		want []int // indexes into stored
+	}{
+		{"api reader with no kinds", Filter{}, []int{0, 5}},
+		{"api reader for the account", Filter{Accounts: []string{"a"}}, []int{0, 5}},
+		{"cache reader", Filter{Accounts: []string{"a"}, Internal: true}, []int{0, 5}},
+		{"both item kinds named", Filter{Kinds: []Kind{KindItem, KindItemMail}}, []int{1, 2, 3, 4, 5}},
+		{"item kind named", Filter{Kinds: []Kind{KindItem}}, []int{1, 3, 5}},
+		{"item filter", Filter{Items: map[string]bool{"it_a": true}}, []int{1, 2, 5}},
+		{"item filter and item_mail", Filter{Kinds: []Kind{KindItemMail}, Items: map[string]bool{"it_b": true}}, []int{4, 5}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var want []int64
+			for _, i := range tt.want {
+				want = append(want, stored[i].ID)
+			}
+			got, next := readIDs(t, l, Query{Filter: tt.f})
+			if !slices.Equal(got, want) || next != last {
+				t.Errorf("Read(%+v) = %v next %d, want %v next %d", tt.f, got, next, want, last)
+			}
+		})
+	}
+}
