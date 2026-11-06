@@ -1182,7 +1182,7 @@ nix develop -c go tool stave snapshot
 
 ### 13.3 Run the release workflow
 
-The workflow takes no inputs. It refuses to tag when the tag already exists, when the tree is dirty or when `HEAD` is not `origin/main`.
+The workflow takes no inputs and runs only from `main`. The release target refuses to tag when `GITHUB_TOKEN` or `HOMEBREW_TAP_TOKEN` is empty, when the tag already exists, when the tree is dirty, when `HEAD` is not `origin/main`, or when `goreleaser check` fails.
 
 ```sh
 gh workflow run release --repo yaklabco/chainmail --ref main
@@ -1237,7 +1237,7 @@ Use `brew install yaklabco/tap/chainmail` instead of `brew upgrade` on a machine
 
 ### 13.7 A release that fails halfway
 
-The release target pushes the tag before it runs goreleaser. If goreleaser fails after that, the tag is on `origin` with no complete release behind it, and a second run refuses because the tag exists. Look first for what the failed run left behind:
+The release target pushes the tag before it runs goreleaser. If goreleaser fails after that, most often because a token has expired or lacks access to the tap, the tag is on `origin` with no complete release behind it, and a second run refuses because the tag exists. Look first for what the failed run left behind:
 
 ```sh
 git fetch --tags origin

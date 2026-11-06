@@ -239,13 +239,13 @@ signature = "James\n[example.org](https://example.org)"   # Markdown
 
 [accounts.personal]
 provider = "gmail"
-address = "james@gmail.com"
+address = "you@gmail.com"
 auth = "oauth2"                  # gmail accepts two methods, so auth is required
 oauth_client = "gmail"
 
 [accounts.icloud]
 provider = "icloud"
-address = "james@icloud.com"     # app password in the vault as accounts/icloud
+address = "you@icloud.com"       # app password in the vault as accounts/icloud
 
 [accounts.site]
 provider = "hostinger"
