@@ -21,6 +21,10 @@ type gitRepo struct {
 // newGitRepo makes a bare origin with one commit on main and a clone of it.
 func newGitRepo(t *testing.T) *gitRepo {
 	t.Helper()
+	// checkReleasable runs git with this process's environment, so keep the
+	// user's global and system git config out of every guard test.
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	root := t.TempDir()
 	r := &gitRepo{t: t, dir: filepath.Join(root, "clone"), origin: filepath.Join(root, "origin.git")}
 	r.git(root, "init", "-q", "--bare", "-b", "main", r.origin)
@@ -128,6 +132,27 @@ func TestCheckReleasableRefusesUntrackedFile(t *testing.T) {
 	}
 	if err := checkReleasable(r.dir, "v0.1.0"); !errors.Is(err, errDirtyTree) {
 		t.Fatalf("err = %v, want errDirtyTree", err)
+	}
+}
+
+// A config that hides untracked files from git status must not hide them
+// from the release guard, since an untracked .go file is built into the
+// published binary.
+func TestCheckReleasableRefusesUntrackedFileWhenStatusHidesThem(t *testing.T) {
+	r := newGitRepo(t)
+	r.git(r.dir, "config", "status.showUntrackedFiles", "no")
+	if err := os.MkdirAll(filepath.Join(r.dir, "pkg"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r.dir, "pkg", "new.go"), []byte("package pkg\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := checkReleasable(r.dir, "v0.1.0")
+	if !errors.Is(err, errDirtyTree) {
+		t.Fatalf("err = %v, want errDirtyTree", err)
+	}
+	if !strings.Contains(err.Error(), "pkg/new.go") {
+		t.Errorf("error %q does not name the untracked file", err)
 	}
 }
 

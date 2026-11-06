@@ -250,7 +250,9 @@ func checkReleasable(dir, tag string) error {
 		return fmt.Errorf("%w: %s exists on origin", errTagExists, tag)
 	}
 
-	status, err := git("status", "--porcelain")
+	// --untracked-files=all overrides a status.showUntrackedFiles setting
+	// that would hide untracked files, which the release build would include.
+	status, err := git("status", "--porcelain", "--untracked-files=all")
 	if err != nil {
 		return err
 	}
