@@ -111,8 +111,11 @@ func TestEncodePayloadRejects(t *testing.T) {
 func TestDecodePayloadRoundTrip(t *testing.T) {
 	t.Parallel()
 	snippet := "preview"
-	tests := []Event{
-		{Kind: KindNew, Message: &Message{
+	tests := []struct {
+		name string
+		e    Event
+	}{
+		{"new with every field", Event{Kind: KindNew, Message: &Message{
 			Date:          time.Date(2026, 11, 1, 9, 30, 0, 0, time.UTC),
 			InternalDate:  time.Date(2026, 11, 1, 9, 31, 0, 0, time.UTC),
 			From:          []mailstore.Address{{Name: "Ann", Email: "ann@example.com"}},
@@ -124,29 +127,30 @@ func TestDecodePayloadRoundTrip(t *testing.T) {
 			HasAttachment: true,
 			ThreadID:      "18c2",
 			Snippet:       &snippet,
-		}},
-		{Kind: KindNew, Message: &Message{Subject: "bare"}},
-		{Kind: KindFlags, Flags: []string{`\Seen`}, Labels: []string{"Work"}},
-		{Kind: KindFlags},
-		{Kind: KindExpunged},
-		{Kind: KindUnreadable},
-		{Kind: KindStatus, State: StateAuthRequired, Detail: "run: chainmail auth login a"},
-		{Kind: KindGap, Reason: GapUIDValidity},
-		{Kind: KindItem, Item: &ItemChange{ItemID: "it_01", Type: "story", Revision: 12, Op: "moved", Fields: []string{"parent_id"}}},
-		{Kind: KindItem, Item: &ItemChange{ItemID: "it_02", Type: "task", Revision: 13, Op: "linked"}},
-		{Kind: KindItemMail, ItemID: "it_01", FromSelf: true, Message: &Message{
+		}}},
+		{"new with only a subject", Event{Kind: KindNew, Message: &Message{Subject: "bare"}}},
+		{"flags with flags and labels", Event{Kind: KindFlags, Flags: []string{`\Seen`}, Labels: []string{"Work"}}},
+		{"flags with none", Event{Kind: KindFlags}},
+		{"expunged", Event{Kind: KindExpunged}},
+		{"unreadable", Event{Kind: KindUnreadable}},
+		{"status with detail", Event{Kind: KindStatus, State: StateAuthRequired, Detail: "run: chainmail auth login a"}},
+		{"gap", Event{Kind: KindGap, Reason: GapUIDValidity}},
+		{"item moved with fields", Event{Kind: KindItem, Item: &ItemChange{ItemID: "it_01", Type: "story", Revision: 12, Op: "moved", Fields: []string{"parent_id"}}}},
+		{"item linked without fields", Event{Kind: KindItem, Item: &ItemChange{ItemID: "it_02", Type: "task", Revision: 13, Op: "linked"}}},
+		{"item_mail from self with a snippet", Event{Kind: KindItemMail, ItemID: "it_01", FromSelf: true, Message: &Message{
 			Date:     time.Date(2026, 11, 1, 9, 30, 0, 0, time.UTC),
 			From:     []mailstore.Address{{Name: "Me", Email: "me@example.com"}},
 			Subject:  "re: plan",
 			Labels:   []string{`\Inbox`},
 			ThreadID: "18c2",
 			Snippet:  &snippet,
-		}},
-		{Kind: KindItemMail, ItemID: "it_02", Message: &Message{Subject: "bare"}},
+		}}},
+		{"item_mail with only a subject", Event{Kind: KindItemMail, ItemID: "it_02", Message: &Message{Subject: "bare"}}},
 	}
-	for _, want := range tests {
-		t.Run(string(want.Kind), func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			want := tt.e
 			payload, err := encodePayload(want)
 			if err != nil {
 				t.Fatal(err)

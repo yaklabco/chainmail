@@ -310,3 +310,80 @@ func TestPassOnNewSkipsBatchesWithoutNewMail(t *testing.T) {
 		})
 	}
 }
+
+// pairNewMail pairs each new summary with the new event of the same ref,
+// skipping every other kind, and refuses a batch whose new events do not
+// line up with its summaries, which only a bug in diff could build.
+func TestPairNewMail(t *testing.T) {
+	t.Parallel()
+	newEvent := func(id int64, uid uint32) Event {
+		return Event{ID: id, Kind: KindNew, Account: "host", Folder: "INBOX", Ref: diffRef(uid, 0)}
+	}
+	flags := Event{ID: 1, Kind: KindFlags, Account: "host", Folder: "INBOX", Ref: diffRef(2, 0)}
+	tests := []struct {
+		name    string
+		dr      diffResult
+		want    []int64 // the paired event IDs, in order
+		wantErr string
+	}{
+		{
+			name: "paired in order past other kinds",
+			dr: diffResult{
+				Events: []Event{flags, newEvent(2, 5), newEvent(3, 6)},
+				New:    []mailstore.Summary{diffSummary(5, 0), diffSummary(6, 0)},
+			},
+			want: []int64{2, 3},
+		},
+		{
+			name: "fewer new events than summaries",
+			dr: diffResult{
+				Events: []Event{flags, newEvent(2, 5)},
+				New:    []mailstore.Summary{diffSummary(5, 0), diffSummary(6, 0)},
+			},
+			wantErr: "sync batch has 1 new events for 2 new messages",
+		},
+		{
+			name: "more new events than summaries",
+			dr: diffResult{
+				Events: []Event{newEvent(2, 5), newEvent(3, 6)},
+				New:    []mailstore.Summary{diffSummary(5, 0)},
+			},
+			wantErr: "sync batch has 2 new events for 1 new messages",
+		},
+		{
+			name: "events out of order",
+			dr: diffResult{
+				Events: []Event{newEvent(2, 6), newEvent(3, 5)},
+				New:    []mailstore.Summary{diffSummary(5, 0), diffSummary(6, 0)},
+			},
+			wantErr: fmt.Sprintf("new event 0 is for %s, not %s", diffRef(6, 0), diffRef(5, 0)),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			news, err := pairNewMail(tt.dr)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("pairNewMail = %v, %v; want error %q", news, err, tt.wantErr)
+				}
+				if news != nil {
+					t.Errorf("pairNewMail returned %v beside its error, want nil", news)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("pairNewMail: %v", err)
+			}
+			if len(news) != len(tt.dr.New) {
+				t.Fatalf("pairNewMail = %d pairs, want %d", len(news), len(tt.dr.New))
+			}
+			for i, n := range news {
+				if n.Event.ID != tt.want[i] || n.Event.Ref != n.Summary.Ref.String() || n.Summary.Ref != tt.dr.New[i].Ref {
+					t.Errorf("pair %d = event %d %s, summary %s; want event %d with summary %s",
+						i, n.Event.ID, n.Event.Ref, n.Summary.Ref, tt.want[i], tt.dr.New[i].Ref)
+				}
+			}
+		})
+	}
+}
