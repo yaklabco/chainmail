@@ -152,7 +152,7 @@ func TestEveryAccountItemHearsItsReply(t *testing.T) {
 			}
 
 			// 7. The task's view shows the thread with both messages.
-			waitLinkedThread(t, c, id, l.GetThreadKey())
+			waitLinkedThread(t, c, id, l.GetThreadKey(), token)
 
 			// 8. Soft-delete the task.
 			remove(t)
@@ -220,7 +220,13 @@ func liveTask(t *testing.T, c *client.Client, token string) (string, func(*testi
 // raise one too, when a copy of it, such as a Sent copy off Google, syncs
 // only after the link.
 func isReplyMail(e *chainmailv1.WatchEvent, token string) bool {
-	s := e.GetMessage().GetSubject().GetUntrusted()
+	return isReplyRow(e.GetMessage(), token)
+}
+
+// isReplyRow reports whether row is the test's reply: its subject holds token
+// and starts with Re:.
+func isReplyRow(row *chainmailv1.MessageRow, token string) bool {
+	s := row.GetSubject().GetUntrusted()
 	return strings.Contains(s, token) && strings.HasPrefix(strings.ToLower(s), "re:")
 }
 
@@ -336,9 +342,12 @@ func waitReplyCopies(t *testing.T, c *client.Client, account string, after int64
 }
 
 // waitLinkedThread waits up to searchTimeout for the task's view to show
-// the thread with key in state ok, with its anchor found and at least the
-// original and the reply. It logs where the view came from.
-func waitLinkedThread(t *testing.T, c *client.Client, itemID, key string) {
+// the thread with key in state ok, with its anchor found, at least two
+// messages, and the reply (its subject holds token) as the latest message.
+// Off Google the original's inbox and Sent copies already make two
+// messages, so only the latest message proves the reply is in the view. It
+// logs where the view came from.
+func waitLinkedThread(t *testing.T, c *client.Client, itemID, key, token string) {
 	t.Helper()
 	within := waitBudget(t, searchTimeout)
 	start := time.Now()
@@ -358,8 +367,8 @@ func waitLinkedThread(t *testing.T, c *client.Client, itemID, key string) {
 				if th.GetThreadKey() != key {
 					continue
 				}
-				last = fmt.Sprintf("state %s (%s), source %q, %d messages, anchor %q", th.GetState(), th.GetReason(), th.GetSource(), th.GetMessages(), th.GetAnchorRef())
-				if th.GetState() == "ok" && th.GetMessages() >= 2 && th.GetAnchorRef() != "" {
+				last = fmt.Sprintf("state %s (%s), source %q, %d messages, anchor %q, latest is the reply %v", th.GetState(), th.GetReason(), th.GetSource(), th.GetMessages(), th.GetAnchorRef(), isReplyRow(th.GetLatest(), token))
+				if th.GetState() == "ok" && th.GetMessages() >= 2 && th.GetAnchorRef() != "" && isReplyRow(th.GetLatest(), token) {
 					t.Logf("thread %s after %v: %s, latest %s", key, time.Since(start).Round(time.Second), last, th.GetLatest().GetRef())
 					return
 				}
