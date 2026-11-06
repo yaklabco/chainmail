@@ -286,3 +286,14 @@ func itemHead(ctx context.Context, q queryer, id, what string) (head, error) {
 	}
 	return head{typ: Type(typ), deleted: deleted != 0}, nil
 }
+
+// touch stamps the item in tx with revision and the actor, for a change to
+// its criteria, blockers or links.
+func touch(ctx context.Context, tx *sql.Tx, id string, revision int64, at time.Time, a Actor) error {
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE items SET revision = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+		revision, formatTime(at), a.String(), id); err != nil {
+		return fmt.Errorf("items: stamping an item: %w", err)
+	}
+	return nil
+}
