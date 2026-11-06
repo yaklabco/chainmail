@@ -173,7 +173,7 @@ func (m *messageService) serverRoute(acct config.ResolvedAccount, p *searchPlan,
 	route := routeInfo{Source: cache.SourceServer, Complete: true}
 	if !acct.Provider.Gmail {
 		if f, ok := cacheOnlyField(p.tree); ok {
-			plan, err := cache.Compile(p.tree, p.in, false, m.s.cacheClock.Now())
+			plan, err := cache.Compile(p.tree, p.in, false, m.s.cacheClock.Now(), p.itemThreads[acct.Name])
 			switch {
 			case err != nil:
 				// The cache refuses the query itself, as the server path would.
@@ -192,7 +192,7 @@ func (m *messageService) serverRoute(acct config.ResolvedAccount, p *searchPlan,
 // note 15), even without a cache. A query that does not compile for the
 // cache is the server's to refuse too.
 func (m *messageService) unsupported(acct config.ResolvedAccount, p *searchPlan) bool {
-	plan, err := cache.Compile(p.tree, p.in, acct.Provider.Gmail, m.s.cacheClock.Now())
+	plan, err := cache.Compile(p.tree, p.in, acct.Provider.Gmail, m.s.cacheClock.Now(), p.itemThreads[acct.Name])
 	return err != nil || plan.Unsupported
 }
 
@@ -224,7 +224,7 @@ type cacheVerdict struct {
 // of a cache that is catching up, since waiting would not help it.
 func (m *messageService) cacheCanAnswer(ctx context.Context, ca *cache.Account, server mailstore.Store, acct config.ResolvedAccount, p *searchPlan) cacheVerdict {
 	log := m.s.opts.Logger
-	plan, err := cache.Compile(p.tree, p.in, acct.Provider.Gmail, m.s.cacheClock.Now())
+	plan, err := cache.Compile(p.tree, p.in, acct.Provider.Gmail, m.s.cacheClock.Now(), p.itemThreads[acct.Name])
 	if err != nil {
 		// A user error the server path refuses alike; its text quotes the query.
 		log.Debug("a search did not compile for the cache; the server answers it", "account", acct.Name, "reason", apiReason(err))

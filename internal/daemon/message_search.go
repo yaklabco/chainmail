@@ -56,6 +56,10 @@ type searchPlan struct {
 	// cache.SourceServer. It is not part of the fingerprint, so a cursor
 	// continues on whichever source answers the next page.
 	source string
+	// itemThreads maps account, then item: value, to the thread keys the
+	// value matches on that account, as resolveItems fills it. Nil when the
+	// query has no item: term.
+	itemThreads map[string]map[string][]string
 }
 
 // resumePoint is one cursor source: where its folder continues, or that
@@ -289,17 +293,18 @@ func (m *messageService) searchAccount(ctx context.Context, a config.ResolvedAcc
 	// which resumeAt and narrow then apply to them, and so is whether the
 	// cache or the server answers them.
 	src, route := m.searcher(ctx, a, p, p.source)
-	o := runSearch(ctx, p, countOnly, src, route)
+	o := runSearch(ctx, p, a.Name, countOnly, src, route)
 	if m.cacheFailed(ctx, a, p, o.route, o.err) {
 		src, route = m.serverFallback(a, p)
-		o = runSearch(ctx, p, countOnly, src, route)
+		o = runSearch(ctx, p, a.Name, countOnly, src, route)
 	}
 	return o
 }
 
-// runSearch runs an account's Search on src.
-func runSearch(ctx context.Context, p *searchPlan, countOnly bool, src searchSource, route routeInfo) accountSearch {
-	res, err := src.Search(ctx, mailstore.SearchRequest{Query: p.tree, In: p.in, CountOnly: countOnly})
+// runSearch runs account's Search on src, with the account's item: thread
+// keys.
+func runSearch(ctx context.Context, p *searchPlan, account string, countOnly bool, src searchSource, route routeInfo) accountSearch {
+	res, err := src.Search(ctx, mailstore.SearchRequest{Query: p.tree, In: p.in, CountOnly: countOnly, ItemThreads: p.itemThreads[account]})
 	return accountSearch{src: src, route: route, results: res, err: err}
 }
 
@@ -497,7 +502,7 @@ func (m *messageService) refetchFailedCaches(ctx context.Context, p *searchPlan,
 		a := p.accounts[i]
 		wg.Go(func() {
 			src, route := m.serverFallback(a, p)
-			outcomes[i] = runSearch(ctx, p, false, src, route)
+			outcomes[i] = runSearch(ctx, p, a.Name, false, src, route)
 		})
 	}
 	wg.Wait()

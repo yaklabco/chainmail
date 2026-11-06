@@ -24,7 +24,7 @@ import (
 // is ErrRead.
 func (v *View) Search(ctx context.Context, req mailstore.SearchRequest) ([]mailstore.SourceResult, error) {
 	opts := v.a.o
-	plan, err := Compile(req.Query, req.In, opts.Account.Provider.Gmail, opts.Clock.Now())
+	plan, err := Compile(req.Query, req.In, opts.Account.Provider.Gmail, opts.Clock.Now(), req.ItemThreads)
 	if err != nil {
 		return nil, err
 	}
