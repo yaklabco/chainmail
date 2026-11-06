@@ -80,19 +80,3 @@ func TestItemTextStaysOutOfErrorsAuditAndLogs(t *testing.T) {
 		t.Errorf("the daemon logged item text:\n%s", logs.String())
 	}
 }
-
-// TestItemThreadRPCsWaitForTheLinkHandlers pins the three RPCs Task 12
-// writes as unimplemented until then. Task 12 deletes this test.
-func TestItemThreadRPCsWaitForTheLinkHandlers(t *testing.T) {
-	t.Parallel()
-	h := daemontest.Start(t, hostingerConfig, daemontest.Options{})
-	ctx := t.Context()
-	_, getErr := h.Client.Items.GetItem(ctx, connect.NewRequest(&chainmailv1.GetItemRequest{Id: "it_admin_work"}))
-	_, linkErr := h.Client.Items.LinkThread(ctx, connect.NewRequest(&chainmailv1.LinkThreadRequest{ItemId: "it_admin_work"}))
-	_, unlinkErr := h.Client.Items.UnlinkThread(ctx, connect.NewRequest(&chainmailv1.UnlinkThreadRequest{ItemId: "it_admin_work"}))
-	for name, err := range map[string]error{"GetItem": getErr, "LinkThread": linkErr, "UnlinkThread": unlinkErr} {
-		if connect.CodeOf(err) != connect.CodeUnimplemented {
-			t.Errorf("%s: %v, want Unimplemented", name, err)
-		}
-	}
-}
