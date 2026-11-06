@@ -218,8 +218,10 @@ func TestLinkThreadRefusals(t *testing.T) {
 		{name: "anchor without a Message-ID", req: &chainmailv1.LinkThreadRequest{ItemId: id, Ref: noID.String(), Anchor: true}, code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument, account: "gmail"},
 	}
 	for _, tt := range tests {
-		_, err := m.Client.Items.LinkThread(t.Context(), connect.NewRequest(tt.req))
-		wantItemErr(t, tt.name, err, tt.code, tt.reason, tt.hint)
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := m.Client.Items.LinkThread(t.Context(), connect.NewRequest(tt.req))
+			wantItemErr(t, tt.name, err, tt.code, tt.reason, tt.hint)
+		})
 	}
 	rows := itemAudit(t, m.Harness, "item.link")
 	if len(rows) != len(tests) {

@@ -20,21 +20,58 @@ type itemResolver interface {
 	LinkedThreadKeys(ctx context.Context, account string) ([]string, error)
 }
 
-// cacheNotReadyHint is the hint of every CACHE_NOT_READY refusal.
-const cacheNotReadyHint = "the cache has not caught up; run: chainmail cache status"
+const (
+	// cacheNotReadyHint is the hint of a CACHE_NOT_READY refusal that
+	// waiting can clear.
+	cacheNotReadyHint = "the cache has not caught up; run: chainmail cache status"
+	// cacheBoundHint answers text the cache holds no bodies for, which
+	// waiting does not change.
+	cacheBoundHint = "add a top-level newer_than: or after: inside the account's prefetch_bodies window, or drop the text terms; waiting does not change this; see the window with: chainmail cache status"
+	// cacheFailedHint answers a cache that failed a read.
+	cacheFailedHint = "the daemon log has the cause; see the cache with: chainmail cache status"
+)
 
 // errNotReady marks a search only the cache answers, on an account whose
 // cache cannot answer it completely yet. toConnectError maps it to
 // CACHE_NOT_READY.
 var errNotReady = errors.New("the cache cannot answer the search completely yet")
 
+// notReadyCause is errNotReady with a hint of its own, for a cache that
+// waiting does not bring to an answer.
+type notReadyCause struct{ hint string }
+
+func (c *notReadyCause) Error() string { return errNotReady.Error() }
+
+func (c *notReadyCause) Unwrap() error { return errNotReady }
+
+// notReadyHint is the hint of a CACHE_NOT_READY refusal: its cause's own,
+// or cacheNotReadyHint.
+func notReadyHint(err error) string {
+	if c, ok := errors.AsType[*notReadyCause](err); ok {
+		return c.hint
+	}
+	return cacheNotReadyHint
+}
+
 var (
 	// errItemCacheNotReady refuses item: on an account whose cache cannot
-	// answer the search completely, whatever the reason: no cache, a cache
-	// catching up, text outside its window, or folders it never holds.
+	// answer the search completely yet: no cache, a cache catching up, or
+	// folders it never holds.
 	errItemCacheNotReady = &fixedTextError{
 		msg: "item: is answered from the local cache, which cannot answer this account completely yet",
 		err: errNotReady,
+	}
+	// errItemCacheBound refuses item: with text outside the cache's body
+	// window, which waiting never brings in.
+	errItemCacheBound = &fixedTextError{
+		msg: "item: is answered from the local cache, which holds message text only for mail inside its body window",
+		err: &notReadyCause{hint: cacheBoundHint},
+	}
+	// errItemCacheFailed refuses item: on an account whose cache failed a
+	// read after the search was routed to it.
+	errItemCacheFailed = &fixedTextError{
+		msg: "item: is answered from the local cache, which failed reading this account",
+		err: &notReadyCause{hint: cacheFailedHint},
 	}
 	// errItemSourceServer refuses item: with source server, for every
 	// account at once.
@@ -142,8 +179,10 @@ func itemLookupErr(err error) error {
 // itemRefusal is why acct's page of an item: search cannot go to its mail
 // server, which never answers item:, Google's included: X-GM-RAW would
 // read the term as text. A query the cache refuses keeps the cache's
-// error, one it can never evaluate is an invalid argument, and anything
-// else is a cache that has not caught up.
+// error, and one it can never evaluate is an invalid argument. Text
+// outside the body window and a failed cache read are CACHE_NOT_READY
+// with their own text and hints, since waiting does not help them, and
+// anything else is a cache that has not caught up.
 func (m *messageService) itemRefusal(acct config.ResolvedAccount, p *searchPlan, miss cacheMiss) error {
 	if miss == missForced {
 		return errItemSourceServer
@@ -154,6 +193,10 @@ func (m *messageService) itemRefusal(acct config.ResolvedAccount, p *searchPlan,
 		return err
 	case plan.Unsupported:
 		return errItemUnsupported
+	case miss == missBound:
+		return errItemCacheBound
+	case miss == missFailed:
+		return errItemCacheFailed
 	default:
 		return errItemCacheNotReady
 	}

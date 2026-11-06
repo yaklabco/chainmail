@@ -59,14 +59,16 @@ func TestItemTextStaysOutOfErrorsAuditAndLogs(t *testing.T) {
 		},
 	}
 	for name, call := range calls {
-		err := call()
-		if err == nil {
-			t.Errorf("%s: no error", name)
-			continue
-		}
-		if text := err.Error() + " " + api.Detail(err).GetHint(); strings.Contains(text, itemMarker) {
-			t.Errorf("%s: the error repeats item text: %s", name, text)
-		}
+		t.Run(name, func(t *testing.T) {
+			err := call()
+			if err == nil {
+				t.Errorf("%s: no error", name)
+				return
+			}
+			if text := err.Error() + " " + api.Detail(err).GetHint(); strings.Contains(text, itemMarker) {
+				t.Errorf("%s: the error repeats item text: %s", name, text)
+			}
+		})
 	}
 	for _, r := range h.AuditRows(t) {
 		if strings.Contains(r.Targets, itemMarker) || strings.Contains(r.Reason, itemMarker) {

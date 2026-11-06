@@ -12,6 +12,7 @@ import (
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/api"
@@ -45,6 +46,105 @@ func TestWorkItemRowProto(t *testing.T) {
 	}
 }
 
+// TestWorkItemProto checks every field of the API form of an item: the
+// title wrapped on one line, the description with its line breaks, the
+// estimate only when set, and deleted_at set for a deleted item and unset
+// while it is live.
+func TestWorkItemProto(t *testing.T) {
+	t.Parallel()
+	created, updated := convertAt.Add(-48*time.Hour), convertAt.Add(-time.Hour)
+	deleted := items.Item{
+		ID: "it_01jbx", Type: items.TypeStory, Title: "Plan\tthe\nlaunch", Description: "line one\nline\x07 two",
+		State: items.StateInProgress, Area: items.AreaWork, Priority: items.PriorityP1,
+		EffectiveArea: items.AreaWork, EffectivePriority: items.PriorityP1,
+		StartDate: "2026-11-01", DueDate: "2026-12-01", Estimate: new(1.5), ParentID: "it_01jbw",
+		DeletedAt: convertAt, Revision: 7, CreatedAt: created, UpdatedAt: updated, CreatedBy: "1000/cli", UpdatedBy: "1000/mcp",
+	}
+	live := items.Item{ID: "it_admin_work", Type: items.TypeEpic, Title: "Admin", State: items.StateBacklog, EffectiveArea: items.AreaWork, Ongoing: true, Revision: 1, CreatedAt: created, UpdatedAt: created, CreatedBy: "daemon", UpdatedBy: "daemon"}
+	tests := []struct {
+		name string
+		it   items.Item
+		want *chainmailv1.WorkItem
+	}{
+		{
+			name: "deleted, every field set",
+			it:   deleted,
+			want: &chainmailv1.WorkItem{
+				Id: "it_01jbx", Type: "story", Title: &chainmailv1.Untrusted{Untrusted: render.CleanHeader("Plan\tthe\nlaunch")},
+				Description: &chainmailv1.Untrusted{Untrusted: render.CleanText("line one\nline\x07 two")},
+				State:       "in-progress", Area: "work", Priority: "p1", EffectiveArea: "work", EffectivePriority: "p1",
+				StartDate: "2026-11-01", DueDate: "2026-12-01", Estimate: proto.Float64(1.5), ParentId: "it_01jbw",
+				DeletedAt: timestamppb.New(convertAt), Revision: 7, CreatedAt: timestamppb.New(created), UpdatedAt: timestamppb.New(updated),
+				CreatedBy: "1000/cli", UpdatedBy: "1000/mcp",
+			},
+		},
+		{
+			name: "live, no estimate",
+			it:   live,
+			want: &chainmailv1.WorkItem{
+				Id: "it_admin_work", Type: "epic", Title: &chainmailv1.Untrusted{Untrusted: "Admin"}, Description: &chainmailv1.Untrusted{},
+				State: "backlog", EffectiveArea: "work", Ongoing: true, Revision: 1,
+				CreatedAt: timestamppb.New(created), UpdatedAt: timestamppb.New(created), CreatedBy: "daemon", UpdatedBy: "daemon",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := workItemProto(tt.it)
+			if !proto.Equal(got, tt.want) {
+				t.Errorf("workItemProto = %v, want %v", got, tt.want)
+			}
+			if (got.Estimate != nil) != (tt.it.Estimate != nil) {
+				t.Errorf("estimate set = %t, want %t", got.Estimate != nil, tt.it.Estimate != nil)
+			}
+			if (got.GetDeletedAt() != nil) != !tt.it.DeletedAt.IsZero() {
+				t.Errorf("deleted_at = %v, want it set only for a deleted item", got.GetDeletedAt())
+			}
+		})
+	}
+}
+
+// TestCriterionProto checks the API form of a criterion, ticked and not:
+// its text on one line, its evidence with its line breaks, and ticked_at
+// unset until it is ticked; criteriaProto keeps the order.
+func TestCriterionProto(t *testing.T) {
+	t.Parallel()
+	ticked := items.Criterion{ID: "cr_1", Position: 0, Text: "Tests\npass", Ticked: true, Evidence: "merged in\n#42\x1b[0m", TickedAt: convertAt, TickedBy: "1000/cli"}
+	open := items.Criterion{ID: "cr_2", Position: 1, Text: "Docs updated"}
+	tests := []struct {
+		name string
+		c    items.Criterion
+		want *chainmailv1.Criterion
+	}{
+		{
+			name: "ticked",
+			c:    ticked,
+			want: &chainmailv1.Criterion{
+				Id: "cr_1", Text: &chainmailv1.Untrusted{Untrusted: render.CleanHeader("Tests\npass")}, Ticked: true,
+				Evidence: &chainmailv1.Untrusted{Untrusted: render.CleanText("merged in\n#42\x1b[0m")}, TickedAt: timestamppb.New(convertAt), TickedBy: "1000/cli",
+			},
+		},
+		{
+			name: "not ticked",
+			c:    open,
+			want: &chainmailv1.Criterion{Id: "cr_2", Position: 1, Text: &chainmailv1.Untrusted{Untrusted: "Docs updated"}, Evidence: &chainmailv1.Untrusted{}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := criterionProto(tt.c); !proto.Equal(got, tt.want) {
+				t.Errorf("criterionProto = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	got := criteriaProto([]items.Criterion{open, ticked})
+	if len(got) != 2 || got[0].GetId() != "cr_2" || got[1].GetId() != "cr_1" {
+		t.Errorf("criteriaProto = %v, want cr_2 then cr_1", got)
+	}
+}
+
 // TestToConnectErrorItems checks the three item arms: a store refusal is
 // INVALID_ARGUMENT with its own hint, a reused key INVALID_ARGUMENT with a
 // fixed hint, and a missing item NOT_FOUND pointing at the item list.
@@ -63,10 +163,13 @@ func TestToConnectErrorItems(t *testing.T) {
 		{name: "missing", err: fmt.Errorf("%w: item", items.ErrNotFound), code: connect.CodeNotFound, reason: api.ReasonNotFound, hint: "run: chainmail item list"},
 	}
 	for _, tt := range tests {
-		got := toConnectError(tt.err)
-		if got.Code() != tt.code || api.Detail(got).GetReason() != tt.reason || api.Detail(got).GetHint() != tt.hint {
-			t.Errorf("%s: %v %s %q, want %v %s %q", tt.name, got.Code(), api.Detail(got).GetReason(), api.Detail(got).GetHint(), tt.code, tt.reason, tt.hint)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := toConnectError(tt.err)
+			if got.Code() != tt.code || api.Detail(got).GetReason() != tt.reason || api.Detail(got).GetHint() != tt.hint {
+				t.Errorf("%v %s %q, want %v %s %q", got.Code(), api.Detail(got).GetReason(), api.Detail(got).GetHint(), tt.code, tt.reason, tt.hint)
+			}
+		})
 	}
 }
 
@@ -77,23 +180,34 @@ func TestItemsErrFixesUnexpectedText(t *testing.T) {
 	s, _ := newTestServer(t)
 	refusal := &items.InvalidError{Msg: "m", Hint: "h"}
 	missing := fmt.Errorf("%w: parent", items.ErrNotFound)
-	for _, err := range []error{nil, refusal, missing, items.ErrKeyMismatch} {
-		if got := s.itemsErr(err); !errors.Is(got, err) || (err != nil && got.Error() != err.Error()) {
-			t.Errorf("itemsErr(%v) = %v, want it unchanged", err, got)
-		}
+	unchanged := []struct {
+		name string
+		err  error
+	}{{"nil", nil}, {"refusal", refusal}, {"missing", missing}, {"key reused", items.ErrKeyMismatch}}
+	for _, tt := range unchanged {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := s.itemsErr(tt.err); !errors.Is(got, tt.err) || (tt.err != nil && got.Error() != tt.err.Error()) {
+				t.Errorf("itemsErr(%v) = %v, want it unchanged", tt.err, got)
+			}
+		})
 	}
 	tests := []struct {
+		name   string
 		err    error
 		reason string
 	}{
-		{err: errors.New("sqlite: near " + "\"Secret plan\": syntax error"), reason: api.ReasonInternal},
-		{err: fmt.Errorf("listing: %w", context.DeadlineExceeded), reason: api.ReasonTimeout},
+		{name: "store text", err: errors.New("sqlite: near " + "\"Secret plan\": syntax error"), reason: api.ReasonInternal},
+		{name: "timeout", err: fmt.Errorf("listing: %w", context.DeadlineExceeded), reason: api.ReasonTimeout},
 	}
 	for _, tt := range tests {
-		got := s.itemsErr(tt.err)
-		if got.Error() != "the item store failed" || api.Detail(toConnectError(got)).GetReason() != tt.reason {
-			t.Errorf("itemsErr(%v) = %q reason %s, want fixed text and %s", tt.err, got, api.Detail(toConnectError(got)).GetReason(), tt.reason)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := s.itemsErr(tt.err)
+			if got.Error() != "the item store failed" || api.Detail(toConnectError(got)).GetReason() != tt.reason {
+				t.Errorf("itemsErr(%v) = %q reason %s, want fixed text and %s", tt.err, got, api.Detail(toConnectError(got)).GetReason(), tt.reason)
+			}
+		})
 	}
 }
 

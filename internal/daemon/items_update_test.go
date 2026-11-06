@@ -98,8 +98,10 @@ func TestUpdateItemRefusals(t *testing.T) {
 		{name: "done on the Admin item", req: &chainmailv1.UpdateItemRequest{Id: "it_admin_work", State: "done"}, paths: []string{"state"}, code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument, targets: []string{"item=it_admin_work", "fields=state"}},
 	}
 	for _, tt := range tests {
-		_, err := itemUpdate(t, h, tt.req, tt.paths...)
-		wantItemErr(t, tt.name, err, tt.code, tt.reason, tt.hint)
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := itemUpdate(t, h, tt.req, tt.paths...)
+			wantItemErr(t, tt.name, err, tt.code, tt.reason, tt.hint)
+		})
 	}
 	rows := itemAudit(t, h, "item.update")
 	if len(rows) != len(tests) {

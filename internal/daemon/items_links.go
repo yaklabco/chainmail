@@ -3,6 +3,7 @@ package daemon
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -187,8 +188,8 @@ func (s *Server) linkTarget(ctx context.Context, acct config.ResolvedAccount, r 
 
 // cachedLinkRow reads r's cached row, or off Google, when the cache has
 // none, the row recoveredRow finds. The bool is false when the cache
-// cannot say; a cache failure is noted and logged and leaves the read to
-// linkTarget's fallback.
+// cannot say; a cache failure is noted and logged with its fixed code,
+// never its text, and leaves the read to linkTarget's fallback.
 func (s *Server) cachedLinkRow(ctx context.Context, acct config.ResolvedAccount, r ref.Ref) (cache.Row, bool) {
 	row, ok, err := s.cache.Row(ctx, r)
 	if err == nil && !ok && !acct.Provider.Gmail {
@@ -196,7 +197,7 @@ func (s *Server) cachedLinkRow(ctx context.Context, acct config.ResolvedAccount,
 	}
 	if err != nil {
 		s.noteCacheErr(err)
-		s.opts.Logger.Warn("reading a message's cached row for a link failed", "account", acct.Name, "err", err)
+		s.opts.Logger.Warn("reading a message's cached row for a link failed", "account", acct.Name, "reason", cacheFaultCode(err))
 		return cache.Row{}, false
 	}
 	return row, ok
@@ -345,12 +346,18 @@ func (s *Server) resolveLink(ctx context.Context, l items.Link) resolvedLink {
 	return resolvedLink{link: out, latest: members[0].sum, rank: rankOK}
 }
 
-// markUnavailable marks a link unavailable with err's API reason. The
-// reason is logged; err's text, which can carry a mail server's words, is
-// not.
+// markUnavailable marks a link unavailable with err's API reason. An
+// account no longer configured is a routine state that every read of the
+// item meets again, so it is logged at Debug; any other failure is a
+// warning. The reason is logged; err's text, which can carry a mail
+// server's words, is not.
 func (s *Server) markUnavailable(out *chainmailv1.ThreadLink, err error) resolvedLink {
 	reason := apiReason(err)
-	s.opts.Logger.Warn("resolving a linked thread failed", "account", out.GetAccount(), "reason", reason)
+	if errors.Is(err, config.ErrUnknownAccount) {
+		s.opts.Logger.Debug("a linked thread's account is no longer configured", "account", out.GetAccount(), "reason", reason)
+	} else {
+		s.opts.Logger.Warn("resolving a linked thread failed", "account", out.GetAccount(), "reason", reason)
+	}
 	out.State, out.Reason = linkUnavailable, reason
 	return resolvedLink{link: out, rank: rankUnavailable}
 }
@@ -368,11 +375,15 @@ func (s *Server) linkMembers(ctx context.Context, acct config.ResolvedAccount, l
 }
 
 // cacheMembers answers a link from the cache as GetThread's cached thread
-// does: only when the account has a cache worker and every folder of its
-// default search scope is fresh, and then with the cached rows of the
-// thread key in those folders. The bool is false when the server must
-// answer. A folder list the server cannot give leaves it to the server,
-// which reports the failure; a cache failure is noted and logged.
+// does: only when the account has a cache worker, every folder of its
+// default search scope is fresh and none holds a message recorded as
+// unreadable, and then with the cached rows of the thread key in those
+// folders. The bool is false when the server must answer. The cache has
+// no row for an unreadable message, so it cannot tell whether one is in
+// the thread: the server can, and reports the link unavailable when one
+// is, as it does without a cache. A folder list the server cannot give
+// leaves it to the server, which reports the failure; a cache failure is
+// noted and logged with its fixed code, never its text.
 func (s *Server) cacheMembers(ctx context.Context, acct config.ResolvedAccount, st mailstore.Store, l items.Link) ([]linkMember, bool) {
 	ca := s.cacheAccount(acct.Name)
 	sc, ok := st.(mailstore.Scoper)
@@ -383,24 +394,36 @@ func (s *Server) cacheMembers(ctx context.Context, acct config.ResolvedAccount, 
 	if err != nil {
 		return nil, false
 	}
+	failed := func(err error) ([]linkMember, bool) {
+		s.noteCacheErr(err)
+		s.opts.Logger.Warn("reading a linked thread from the cache failed", "account", acct.Name, "reason", cacheFaultCode(err))
+		return nil, false
+	}
 	fresh, _, _, err := ca.Freshness(ctx, folders)
-	if err == nil && fresh {
-		var rows []cache.Row
-		if rows, err = s.cache.ThreadRows(ctx, acct.Name, l.ThreadKey); err == nil {
-			var out []linkMember
-			for _, r := range rows {
-				if slices.Contains(folders, r.Folder) {
-					out = append(out, linkMember{sum: r.Summary(), msgID: r.MessageID})
-				}
-			}
-			return out, true
+	if err != nil {
+		return failed(err)
+	}
+	if !fresh {
+		return nil, false
+	}
+	unreadable, err := ca.Unreadable(ctx, folders)
+	if err != nil {
+		return failed(err)
+	}
+	if unreadable {
+		return nil, false
+	}
+	rows, err := s.cache.ThreadRows(ctx, acct.Name, l.ThreadKey)
+	if err != nil {
+		return failed(err)
+	}
+	var out []linkMember
+	for _, r := range rows {
+		if slices.Contains(folders, r.Folder) {
+			out = append(out, linkMember{sum: r.Summary(), msgID: r.MessageID})
 		}
 	}
-	if err != nil {
-		s.noteCacheErr(err)
-		s.opts.Logger.Warn("reading a linked thread from the cache failed", "account", acct.Name, "err", err)
-	}
-	return nil, false
+	return out, true
 }
 
 // serverMembers finds a link's messages on the mail server: the thread's
