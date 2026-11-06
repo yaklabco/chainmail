@@ -892,10 +892,16 @@ var minDate = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
 
 const maxSize = math.MaxUint32
 
-// checkSupported refuses on standard accounts what imapstore's standard
+// checkSupported refuses item: on every account, which only the daemon's
+// cache answers, and on standard accounts what imapstore's standard
 // dialect refuses: the Gmail-only operators, sizes past 32 bits and dates
-// before 1970. Gmail takes them all.
+// before 1970. Gmail takes the rest.
 func (s *Store) checkSupported(n *query.Node) error {
+	for _, t := range n.Terms() {
+		if t.Field == query.FieldItem {
+			return fmt.Errorf("%w: item: is answered from the daemon's cache, never by a mail server", mailstore.ErrUnsupportedQuery)
+		}
+	}
 	if s.gmail {
 		return nil
 	}
