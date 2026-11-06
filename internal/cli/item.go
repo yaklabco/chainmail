@@ -73,6 +73,7 @@ func newItemCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		newItemMoveCmd(ctx, env, g),
 		newItemDeleteCmd(ctx, env, g),
 		newItemRestoreCmd(ctx, env, g),
+		newItemCriteriaCmd(ctx, env, g),
 	)
 	return cmd
 }
@@ -374,5 +375,90 @@ func newItemRestoreCmd(ctx context.Context, env Env, g *globals) *cobra.Command 
 		},
 	}
 	cmd.Flags().BoolVar(&cascade, "cascade", false, "also restore the items deleted with it")
+	return cmd
+}
+
+// newItemCriteriaCmd builds chainmail item criteria and its subcommands.
+func newItemCriteriaCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	cmd := newGroup("criteria", "Add, edit, remove, order and tick an item's acceptance criteria")
+	cmd.AddCommand(
+		newCriteriaEditCmd(ctx, env, g, "add <id> <text>...", "Add criteria to the end of an item's list, in order", minArgs(2),
+			func(a []string) *chainmailv1.EditCriteriaRequest {
+				return &chainmailv1.EditCriteriaRequest{ItemId: a[0], Add: a[1:]}
+			}),
+		newCriteriaEditCmd(ctx, env, g, "edit <id> <criterion-id> <text>", "Change the text of one criterion", exactArgs(3),
+			func(a []string) *chainmailv1.EditCriteriaRequest {
+				return &chainmailv1.EditCriteriaRequest{ItemId: a[0], Edit: []*chainmailv1.CriterionText{{Id: a[1], Text: a[2]}}}
+			}),
+		newCriteriaEditCmd(ctx, env, g, "remove <id> <criterion-id>...", "Remove criteria from an item", minArgs(2),
+			func(a []string) *chainmailv1.EditCriteriaRequest {
+				return &chainmailv1.EditCriteriaRequest{ItemId: a[0], Remove: a[1:]}
+			}),
+		newCriteriaEditCmd(ctx, env, g, "order <id> <criterion-id>...", "Put an item's criteria in a new order, naming every one once", minArgs(2),
+			func(a []string) *chainmailv1.EditCriteriaRequest {
+				return &chainmailv1.EditCriteriaRequest{ItemId: a[0], Order: a[1:]}
+			}),
+		newCriteriaTickCmd(ctx, env, g, true),
+		newCriteriaTickCmd(ctx, env, g, false),
+	)
+	return cmd
+}
+
+// newCriteriaEditCmd builds one item criteria command that sends the
+// EditCriteria request build makes from its arguments, and prints the
+// item's criteria as they are after it.
+func newCriteriaEditCmd(ctx context.Context, env Env, g *globals, use, short string, args cobra.PositionalArgs, build func([]string) *chainmailv1.EditCriteriaRequest) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: short,
+		Args:  args,
+		RunE: func(_ *cobra.Command, args []string) error {
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Items.EditCriteria(ctx, connect.NewRequest(build(args)))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			var b strings.Builder
+			criteriaText(&b, resp.Msg.GetCriteria())
+			fmt.Fprintf(&b, "revision %d\n", resp.Msg.GetRevision())
+			return writeString(env.Stdout, b.String())
+		},
+	}
+}
+
+// newCriteriaTickCmd builds item criteria tick, which needs --evidence, or
+// with tick false item criteria untick.
+func newCriteriaTickCmd(ctx context.Context, env Env, g *globals, tick bool) *cobra.Command {
+	var evidence string
+	cmd := &cobra.Command{
+		Use:   "tick <id> <criterion-id> --evidence <text>",
+		Short: "Tick a criterion, with evidence that it is met",
+		Args:  exactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if tick && strings.TrimSpace(evidence) == "" {
+				return usageError{err: errors.New("--evidence is required"), hint: helpHint(cmd)}
+			}
+			req := &chainmailv1.TickCriterionRequest{ItemId: args[0], CriterionId: args[1], Ticked: tick, Evidence: evidence}
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Items.TickCriterion(ctx, connect.NewRequest(req))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			return writeString(env.Stdout, tickedText(args[0], tick, resp.Msg))
+		},
+	}
+	if tick {
+		cmd.Flags().StringVar(&evidence, "evidence", "", "what shows the criterion is met, such as a ref or a link (required)")
+	} else {
+		cmd.Use, cmd.Short = "untick <id> <criterion-id>", "Untick a criterion and drop its evidence"
+	}
 	return cmd
 }

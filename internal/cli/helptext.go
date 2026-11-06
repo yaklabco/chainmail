@@ -63,6 +63,13 @@ var examples = map[string]string{
   # a chore under the work Admin initiative, with acceptance criteria
   chainmail item create task "File the expense report" --parent it_admin_work --criterion "Receipts attached" --criterion "Submitted"
   chainmail item create feature "Search by item" --parent it_01jcb7m2k9r8q3v4w5x6y7z8b0 --description-file spec.md`,
+	"chainmail item criteria add":    `  chainmail item criteria add it_01jcb7m2k9r8q3v4w5x6y7z8a9 "Receipts attached" "Submitted"`,
+	"chainmail item criteria edit":   `  chainmail item criteria edit it_01jcb7m2k9r8q3v4w5x6y7z8a9 cr_01jcb7m2k9r8q3v4w5x6y7z8c1 "Every receipt attached"`,
+	"chainmail item criteria remove": `  chainmail item criteria remove it_01jcb7m2k9r8q3v4w5x6y7z8a9 cr_01jcb7m2k9r8q3v4w5x6y7z8c1`,
+	"chainmail item criteria order": `  # name every criterion once, in the new order
+  chainmail item criteria order it_01jcb7m2k9r8q3v4w5x6y7z8a9 cr_01jcb7m2k9r8q3v4w5x6y7z8c2 cr_01jcb7m2k9r8q3v4w5x6y7z8c1`,
+	"chainmail item criteria tick":   `  chainmail item criteria tick it_01jcb7m2k9r8q3v4w5x6y7z8a9 cr_01jcb7m2k9r8q3v4w5x6y7z8c1 --evidence "receipt in cm1:work:INBOX:7:42"`,
+	"chainmail item criteria untick": `  chainmail item criteria untick it_01jcb7m2k9r8q3v4w5x6y7z8a9 cr_01jcb7m2k9r8q3v4w5x6y7z8c1`,
 	"chainmail item delete": `  chainmail item delete it_01jcb7m2k9r8q3v4w5x6y7z8a9
   # the item and every item below it
   chainmail item delete it_01jcb7m2k9r8q3v4w5x6y7z8b0 --cascade`,

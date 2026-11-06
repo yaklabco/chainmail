@@ -301,3 +301,12 @@ func idsText(verb string, ids []string, revision int64) string {
 	}
 	return fmt.Sprintf("%s %s, revision %d\n", verb, strings.Join(clean, " "), revision)
 }
+
+// tickedText is item criteria tick's and untick's line.
+func tickedText(item string, tick bool, r *chainmailv1.TickCriterionResponse) string {
+	verb := "ticked"
+	if !tick {
+		verb = "unticked"
+	}
+	return fmt.Sprintf("%s %s on %s, revision %d\n", verb, termText(r.GetCriterion().GetId()), termText(item), r.GetRevision())
+}

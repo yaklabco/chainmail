@@ -80,9 +80,19 @@ func (cp *completer) itemSpecs() map[string]compSpec {
 		"chainmail item update": {args: cp.items(1), flags: mergeFlagCompletions(itemFieldFlagSpecs(), map[string]cobra.CompletionFunc{
 			"type": fixed(itemTypes...), "title": noComplete, "clear": commaList(itemClearFields...),
 		})},
-		"chainmail item move":    {args: cp.items(2)},
-		"chainmail item delete":  {args: cp.items(1)},
-		"chainmail item restore": {args: cp.deletedItems(1)},
+		"chainmail item move":            {args: cp.items(2)},
+		"chainmail item delete":          {args: cp.items(1)},
+		"chainmail item restore":         {args: cp.deletedItems(1)},
+		"chainmail item criteria":        {args: noComplete},
+		"chainmail item criteria add":    {args: byPosition(noComplete, cp.items(0))},
+		"chainmail item criteria edit":   {args: byPosition(noComplete, cp.items(0), cp.criteria)},
+		"chainmail item criteria remove": {args: byPosition(cp.criteria, cp.items(0))},
+		"chainmail item criteria order":  {args: byPosition(cp.criteria, cp.items(0))},
+		"chainmail item criteria tick": {
+			args:  byPosition(noComplete, cp.items(0), cp.criteria),
+			flags: map[string]cobra.CompletionFunc{"evidence": noComplete},
+		},
+		"chainmail item criteria untick": {args: byPosition(noComplete, cp.items(0), cp.criteria)},
 	}
 }
 
@@ -107,4 +117,44 @@ func itemFieldFlagSpecs() map[string]cobra.CompletionFunc {
 
 func (cp *completer) deletedItems(maxArgs int) cobra.CompletionFunc {
 	return cp.itemIDs(maxArgs, true)
+}
+
+// getItem asks the daemon for one item's view.
+func (cp *completer) getItem(cmd *cobra.Command, id string) (*chainmailv1.GetItemResponse, bool) {
+	var view *chainmailv1.GetItemResponse
+	ok := cp.call(cmd, func(ctx context.Context, c *client.Client) error {
+		resp, err := c.Items.GetItem(ctx, connect.NewRequest(&chainmailv1.GetItemRequest{Id: id}))
+		if err != nil {
+			return err
+		}
+		view = resp.Msg
+		return nil
+	})
+	return view, ok
+}
+
+// criteria completes the criterion IDs of the item the first argument
+// names, leaving out those already among the arguments. Each is described
+// by its tick box and text.
+func (cp *completer) criteria(cmd *cobra.Command, args []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
+	if len(args) == 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	view, ok := cp.getItem(cmd, args[0])
+	if !ok {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	var out []cobra.Completion
+	for _, c := range view.GetCriteria() {
+		id := c.GetId()
+		if !safeValue(id) || !strings.HasPrefix(id, toComplete) || slices.Contains(args[1:], id) {
+			continue
+		}
+		box := "[ ] "
+		if c.GetTicked() {
+			box = "[x] "
+		}
+		out = append(out, cobra.CompletionWithDesc(id, completionText(box+c.GetText().GetUntrusted())))
+	}
+	return out, cobra.ShellCompDirectiveNoFileComp
 }

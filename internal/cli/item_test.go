@@ -681,3 +681,71 @@ func TestItemDeleteAndRestore(t *testing.T) {
 		{name: "restore offers deleted items", args: []string{"item", "restore", ""}, cands: []string{"it_gone"}},
 	})
 }
+
+func TestItemCriteria(t *testing.T) {
+	t.Parallel()
+	testItemRequests(t, []itemCase{
+		{name: "add", args: []string{"criteria", "add", "it_task1", "Invoice paid", "DNS checked"}, want: &chainmailv1.EditCriteriaRequest{ItemId: "it_task1", Add: []string{"Invoice paid", "DNS checked"}}},
+		{
+			name: "edit",
+			args: []string{"criteria", "edit", "it_task1", "cr_a", "Every invoice paid"},
+			want: &chainmailv1.EditCriteriaRequest{ItemId: "it_task1", Edit: []*chainmailv1.CriterionText{{Id: "cr_a", Text: "Every invoice paid"}}},
+		},
+		{name: "remove", args: []string{"criteria", "remove", "it_task1", "cr_a", "cr_b"}, want: &chainmailv1.EditCriteriaRequest{ItemId: "it_task1", Remove: []string{"cr_a", "cr_b"}}},
+		{name: "order", args: []string{"criteria", "order", "it_task1", "cr_b", "cr_a"}, want: &chainmailv1.EditCriteriaRequest{ItemId: "it_task1", Order: []string{"cr_b", "cr_a"}}},
+		{
+			name: "tick",
+			args: []string{"criteria", "tick", "it_task1", "cr_a", "--evidence", "receipt"},
+			want: &chainmailv1.TickCriterionRequest{ItemId: "it_task1", CriterionId: "cr_a", Ticked: true, Evidence: "receipt"},
+		},
+		{name: "untick", args: []string{"criteria", "untick", "it_task1", "cr_a"}, want: &chainmailv1.TickCriterionRequest{ItemId: "it_task1", CriterionId: "cr_a"}},
+	})
+	testItemUsage(t, []itemCase{
+		{name: "bare criteria", args: []string{"criteria"}, usage: "no command given"},
+		{name: "add without text", args: []string{"criteria", "add", "it_task1"}, usage: "requires at least 2 arg(s)"},
+		{name: "edit without text", args: []string{"criteria", "edit", "it_task1", "cr_a"}, usage: "accepts 3 arg(s)"},
+		{name: "remove without a criterion", args: []string{"criteria", "remove", "it_task1"}, usage: "requires at least 2 arg(s)"},
+		{name: "tick without evidence", args: []string{"criteria", "tick", "it_task1", "cr_a"}, usage: "--evidence is required"},
+		{name: "tick with blank evidence", args: []string{"criteria", "tick", "it_task1", "cr_a", "--evidence", "  "}, usage: "--evidence is required"},
+		{name: "untick takes no evidence", args: []string{"criteria", "untick", "it_task1", "cr_a", "--evidence", "x"}, usage: "unknown flag: --evidence"},
+	})
+	newFake := func() *fakeItems {
+		return &fakeItems{
+			criteria: func(*chainmailv1.EditCriteriaRequest) (*chainmailv1.EditCriteriaResponse, error) {
+				return &chainmailv1.EditCriteriaResponse{Criteria: []*chainmailv1.Criterion{
+					{Id: "cr_a", Text: ut("Invoice paid"), Ticked: true, Evidence: ut("receipt")},
+					{Id: "cr_b", Position: 1, Text: ut("DNS\x1b[2J checked\nnow")},
+				}, Revision: 48}, nil
+			},
+			tick: func(r *chainmailv1.TickCriterionRequest) (*chainmailv1.TickCriterionResponse, error) {
+				return &chainmailv1.TickCriterionResponse{Criterion: &chainmailv1.Criterion{Id: r.GetCriterionId(), Ticked: r.GetTicked()}, Revision: 49}, nil
+			},
+		}
+	}
+	testItemTable(t, newFake, []itemCase{
+		{
+			name: "criteria table", args: []string{"criteria", "add", "it_task1", "DNS checked"},
+			out: "criteria: 1 of 2 ticked\n  [x] cr_a Invoice paid\n      evidence: receipt\n  [ ] cr_b DNS[2J checked now\nrevision 48\n",
+		},
+		{name: "tick table", args: []string{"criteria", "tick", "it_task1", "cr_b", "--evidence", "dig output"}, out: "ticked cr_b on it_task1, revision 49\n"},
+		{name: "untick table", args: []string{"criteria", "untick", "it_task1", "cr_a"}, out: "unticked cr_a on it_task1, revision 49\n"},
+	})
+	testItemCompletion(t, []itemCase{
+		{name: "add item", args: []string{"item", "criteria", "add", ""}, cands: []string{"it_admin_work", "it_task1"}},
+		{name: "add text", args: []string{"item", "criteria", "add", "it_task1", ""}},
+		{name: "tick criterion", args: []string{"item", "criteria", "tick", "it_task1", ""}, cands: []string{"cr_a", "cr_b"}},
+		{name: "remove leaves out typed", args: []string{"item", "criteria", "remove", "it_task1", "cr_a", ""}, cands: []string{"cr_b"}},
+		{name: "order criterion", args: []string{"item", "criteria", "order", "it_task1", "cr_"}, cands: []string{"cr_a", "cr_b"}},
+		{name: "edit text", args: []string{"item", "criteria", "edit", "it_task1", "cr_a", ""}},
+	})
+}
+
+// A criterion's description is its tick box and untrusted text.
+func TestCompleteCriterionDescription(t *testing.T) {
+	t.Parallel()
+	env := sockEnv(startFakeItems(t, completionItems()))
+	cands, _ := completeArgs(t, env, "item", "criteria", "untick", "it_task1", "cr_a")
+	if want := []string{"cr_a\t[x] Invoice paid"}; !slices.Equal(cands, want) {
+		t.Errorf("candidates %q, want %q", cands, want)
+	}
+}
