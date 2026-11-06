@@ -27,13 +27,17 @@ func (s *Server) itemMail(ctx context.Context, tx *sql.Tx, account string, news 
 // entry too, as the event log's Run does: item_mail_seen rows older than
 // the watch retention, and idempotency rows past items.RequestRetention. A
 // failed trim is logged and retried at the next tick; one cut short by ctx
-// is not logged.
+// is not logged. The ticks come from s.itemsTrimTick when a test sets it.
 func (s *Server) runItemsTrim(ctx context.Context, interval, retention time.Duration) {
-	if interval <= 0 {
-		interval = time.Hour
+	tick := s.itemsTrimTick
+	if tick == nil {
+		if interval <= 0 {
+			interval = time.Hour
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		tick = ticker.C
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 	for {
 		if _, err := s.items.Trim(ctx, s.opts.Now().Add(-retention)); err != nil && ctx.Err() == nil {
 			s.opts.Logger.ErrorContext(ctx, "trimming the item tables failed", "err", err)
@@ -41,7 +45,7 @@ func (s *Server) runItemsTrim(ctx context.Context, interval, retention time.Dura
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-tick:
 		}
 	}
 }

@@ -73,37 +73,59 @@ func TestItemMailHook(t *testing.T) {
 }
 
 // TestStartBackgroundTrimsItemMailSeen checks that startBackground trims
-// item_mail_seen every trimInterval with the watch retention: a row older
-// than it goes and a newer one stays.
+// item_mail_seen with the watch retention once on start and again on each
+// tick: a row older than it goes and a newer one stays, and a row that
+// expired after the first trim goes at the next tick.
 func TestStartBackgroundTrimsItemMailSeen(t *testing.T) {
 	t.Parallel()
 	s, stateDB := newTestServer(t)
-	s.trimInterval = time.Millisecond
+	tick := make(chan time.Time)
+	s.itemsTrimTick = tick
 	retention := s.opts.Config.WatchSettings().Retention
-	at := func(age time.Duration) string {
-		return s.opts.Now().Add(-age).UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
-	}
-	for key, stamp := range map[string]string{"old": at(retention + time.Hour), "new": at(time.Hour)} {
+	insert := func(key string, age time.Duration) {
+		t.Helper()
+		stamp := s.opts.Now().Add(-age).UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
 		if _, err := stateDB.ExecContext(t.Context(), "INSERT INTO item_mail_seen (item_id, account, message_key, at) VALUES ('it_x', 'host', ?, ?)", key, stamp); err != nil {
 			t.Fatal(err)
 		}
 	}
 	count := func(key string) int {
+		t.Helper()
 		var n int
 		if err := stateDB.QueryRowContext(t.Context(), "SELECT count(*) FROM item_mail_seen WHERE message_key = ?", key).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
 		return n
 	}
+	waitGone := func(key, when string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for count(key) != 0 {
+			if time.Now().After(deadline) {
+				t.Fatalf("the expired item_mail_seen row %q is still there 5s %s", key, when)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	insert("old", retention+time.Hour)
+	insert("new", time.Hour)
 	stop := s.startBackground(t.Context())
 	defer stop()
-	deadline := time.Now().Add(5 * time.Second)
-	for count("old") != 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the expired item_mail_seen row is still there after 5s")
-		}
-		time.Sleep(5 * time.Millisecond)
+	waitGone("old", "after the start")
+
+	// The first trim's transaction has committed, so a row added now
+	// stays until the loop trims again. The tick channel is unbuffered: the
+	// send returns once the loop is waiting for it.
+	insert("later", retention+time.Hour)
+	if count("later") != 1 {
+		t.Fatal("a row added after the first trim went before any tick")
 	}
+	select {
+	case tick <- s.opts.Now():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the trim loop did not wait for a tick within 5s")
+	}
+	waitGone("later", "after a tick")
 	if count("new") != 1 {
 		t.Error("the trim removed a row inside the retention")
 	}
