@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -171,6 +173,7 @@ type itemCase struct {
 	name  string
 	args  []string
 	want  proto.Message // the one request it sends
+	out   string        // what it prints with table output
 	usage string        // text its usage error mentions
 	cands []string      // the completion candidates it offers
 }
@@ -480,4 +483,92 @@ func TestItemValuesMatchTheModel(t *testing.T) {
 			t.Errorf("priority %q: %v", v, err)
 		}
 	}
+}
+
+// testItemTable runs each case against the fake newFake returns, with
+// table output, and checks that it printed exactly the case's out.
+func testItemTable(t *testing.T, newFake func() *fakeItems, cases []itemCase) {
+	t.Helper()
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			args := append([]string{"--socket", startFakeItems(t, newFake()), "--output", "table", "item"}, tt.args...)
+			got := runCLI(t, Env{}, args...)
+			if got.code != 0 {
+				t.Fatalf("item %v: %+v", tt.args, got)
+			}
+			if got.stdout != tt.out {
+				t.Errorf("stdout = %q, want %q", got.stdout, tt.out)
+			}
+		})
+	}
+}
+
+// descriptionFile writes a description file holding "line one\nline two\n"
+// for the test and returns its path.
+func descriptionFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "description.md")
+	if err := os.WriteFile(path, []byte("line one\nline two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestItemCreateRequestsAndUsage(t *testing.T) {
+	t.Parallel()
+	desc := descriptionFile(t)
+	testItemRequests(t, []itemCase{
+		{name: "create", args: []string{"create", "task", "Renew the domain"}, want: &chainmailv1.CreateItemRequest{Type: "task", Title: "Renew the domain"}},
+		{
+			name: "create every flag",
+			args: []string{
+				"create", "task", "Renew the domain", "--description", "Pay it", "--parent", "it_admin_work", "--area", "work",
+				"--priority", "p1", "--state", "in-progress", "--start", "2026-11-07", "--due", "2026-11-20", "--estimate", "1.5",
+				"--criterion", "Invoice paid", "--criterion", "DNS checked", "--idempotency-key", "triage:42",
+			},
+			want: &chainmailv1.CreateItemRequest{
+				Type: "task", Title: "Renew the domain", Description: "Pay it", ParentId: "it_admin_work", Area: "work",
+				Priority: "p1", State: "in-progress", StartDate: "2026-11-07", DueDate: "2026-11-20", Estimate: proto.Float64(1.5),
+				Criteria: []string{"Invoice paid", "DNS checked"}, IdempotencyKey: "triage:42",
+			},
+		},
+		{name: "create zero estimate", args: []string{"create", "story", "Spike", "--estimate", "0"}, want: &chainmailv1.CreateItemRequest{Type: "story", Title: "Spike", Estimate: proto.Float64(0)}},
+		{name: "create description file", args: []string{"create", "feature", "Search", "--description-file", desc}, want: &chainmailv1.CreateItemRequest{Type: "feature", Title: "Search", Description: "line one\nline two\n"}},
+	})
+	testItemUsage(t, []itemCase{
+		{name: "create without a title", args: []string{"create", "task"}, usage: "accepts 2 arg(s)"},
+		{name: "create with both descriptions", args: []string{"create", "task", "T", "--description", "a", "--description-file", desc}, usage: "--description and --description-file"},
+		{name: "create with a missing file", args: []string{"create", "task", "T", "--description-file", "/nonexistent/x.md"}, usage: "no such file"},
+		{name: "create with a bad estimate", args: []string{"create", "task", "T", "--estimate", "soon"}, usage: "--estimate"},
+	})
+}
+
+func TestItemCreateTable(t *testing.T) {
+	t.Parallel()
+	newFake := func() *fakeItems {
+		return &fakeItems{create: func(r *chainmailv1.CreateItemRequest) (*chainmailv1.CreateItemResponse, error) {
+			item := &chainmailv1.WorkItem{Id: "it_task1", Type: r.GetType(), Revision: 43}
+			return &chainmailv1.CreateItemResponse{Item: item, Duplicate: r.GetIdempotencyKey() != ""}, nil
+		}}
+	}
+	testItemTable(t, newFake, []itemCase{
+		{name: "create", args: []string{"create", "task", "Renew the domain"}, out: "created task it_task1\n"},
+		{
+			name: "create again", args: []string{"create", "task", "Renew the domain", "--idempotency-key", "k1"},
+			out: "already created task it_task1 by an earlier call with this idempotency key\n",
+		},
+	})
+}
+
+func TestCompleteItemCreate(t *testing.T) {
+	t.Parallel()
+	testItemCompletion(t, []itemCase{
+		{name: "types", args: []string{"item", "create", ""}, cands: itemTypes},
+		{name: "type prefix", args: []string{"item", "create", "s"}, cands: []string{"story", "support-ticket"}},
+		{name: "title", args: []string{"item", "create", "task", ""}},
+		{name: "areas", args: []string{"item", "create", "task", "T", "--area", ""}, cands: itemAreas},
+		{name: "priorities", args: []string{"item", "create", "task", "T", "--priority", ""}, cands: itemPriorities},
+		{name: "parent", args: []string{"item", "create", "task", "T", "--parent", ""}, cands: []string{"it_admin_work", "it_task1"}},
+	})
 }

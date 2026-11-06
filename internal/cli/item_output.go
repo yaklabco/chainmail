@@ -270,3 +270,13 @@ func itemListTable(w io.Writer, r *chainmailv1.ListItemsResponse) error {
 // maxListDepth is the deepest indentation item list shows. The hierarchy
 // has seven levels, so only a corrupt depth reaches it.
 const maxListDepth = 10
+
+// createdText is item create's line: the new item, or the one an earlier
+// call with the same idempotency key made.
+func createdText(r *chainmailv1.CreateItemResponse) string {
+	it := r.GetItem()
+	if r.GetDuplicate() {
+		return fmt.Sprintf("already created %s %s by an earlier call with this idempotency key\n", termText(it.GetType()), termText(it.GetId()))
+	}
+	return fmt.Sprintf("created %s %s\n", termText(it.GetType()), termText(it.GetId()))
+}

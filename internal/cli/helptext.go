@@ -58,6 +58,11 @@ var examples = map[string]string{
 	"chainmail get": `  chainmail get cm1:work:INBOX:7:42
   chainmail get --full cm1:work:INBOX:7:42
   chainmail get --raw cm1:work:INBOX:7:42 > message.eml`,
+	"chainmail item create": `  # a task in the inbox, to sort later
+  chainmail item create task "Renew the domain" --area work --due 2026-11-20
+  # a chore under the work Admin initiative, with acceptance criteria
+  chainmail item create task "File the expense report" --parent it_admin_work --criterion "Receipts attached" --criterion "Submitted"
+  chainmail item create feature "Search by item" --parent it_01jcb7m2k9r8q3v4w5x6y7z8b0 --description-file spec.md`,
 	"chainmail item list": `  # the inbox: tasks not yet sorted
   chainmail item list --inbox
   chainmail item list --under it_admin_work --state in-progress

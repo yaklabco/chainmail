@@ -71,5 +71,30 @@ func (cp *completer) itemSpecs() map[string]compSpec {
 			"type": fixed(itemTypes...), "state": fixed(itemStates...), "area": fixed(itemAreas...), "under": cp.items(0),
 			"changed-since": noComplete, "limit": noComplete, "page-token": noComplete,
 		}},
+		"chainmail item create": {
+			args: byPosition(noComplete, fixed(itemTypes...)),
+			flags: mergeFlagCompletions(itemFieldFlagSpecs(), map[string]cobra.CompletionFunc{
+				"parent": cp.items(0), "criterion": noComplete, "idempotency-key": noComplete,
+			}),
+		},
+	}
+}
+
+// byPosition completes positional argument i with fns[i], and every
+// argument after the last of fns with rest.
+func byPosition(rest cobra.CompletionFunc, fns ...cobra.CompletionFunc) cobra.CompletionFunc {
+	return func(cmd *cobra.Command, args []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
+		if len(args) < len(fns) {
+			return fns[len(args)](cmd, args, toComplete)
+		}
+		return rest(cmd, args, toComplete)
+	}
+}
+
+// itemFieldFlagSpecs completes the field flags item create and item update share.
+func itemFieldFlagSpecs() map[string]cobra.CompletionFunc {
+	return map[string]cobra.CompletionFunc{
+		"description": noComplete, "description-file": files, "state": fixed(itemStates...), "area": fixed(itemAreas...),
+		"priority": fixed(itemPriorities...), "start": noComplete, "due": noComplete, "estimate": noComplete,
 	}
 }

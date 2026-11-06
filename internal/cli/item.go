@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -45,6 +46,7 @@ func newItemCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	cmd := newGroup("item", "Keep work items and file mail threads against them")
 	cmd.Long = itemHelp
 	cmd.AddCommand(
+		newItemCreateCmd(ctx, env, g),
 		newItemShowCmd(ctx, env, g),
 		newItemListCmd(ctx, env, g),
 	)
@@ -118,5 +120,72 @@ func newItemListCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	f.Int64Var(&changedSince, "changed-since", 0, "only items changed after this revision, deleted ones included, in revision order")
 	f.Int32Var(&req.Limit, "limit", 0, "rows per page, 1 to 500 (default 100)")
 	f.StringVar(&req.PageToken, "page-token", "", "continue from the previous page's token")
+	return cmd
+}
+
+// readDescription returns the description --description or
+// --description-file gives, and whether either was given. A file that is
+// not UTF-8 is a usage error.
+func readDescription(cmd *cobra.Command, text, file string) (string, bool, error) {
+	fromText, fromFile := cmd.Flags().Changed("description"), cmd.Flags().Changed("description-file")
+	switch {
+	case fromText && fromFile:
+		return "", false, usageError{err: errors.New("--description and --description-file cannot be used together"), hint: helpHint(cmd)}
+	case fromText:
+		return text, true, nil
+	case !fromFile:
+		return "", false, nil
+	}
+	b, err := readFile(file, "--description-file")
+	if err != nil {
+		return "", false, err
+	}
+	if !utf8.Valid(b) {
+		return "", false, usageError{err: errors.New("--description-file is not UTF-8"), hint: helpHint(cmd)}
+	}
+	return string(b), true, nil
+}
+
+func newItemCreateCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	req := &chainmailv1.CreateItemRequest{}
+	var description, descriptionFile string
+	var estimate float64
+	cmd := &cobra.Command{
+		Use:   "create <type> <title>",
+		Short: "Create a work item; a task with no --parent goes to the inbox",
+		Args:  exactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			desc, _, err := readDescription(cmd, description, descriptionFile)
+			if err != nil {
+				return err
+			}
+			req.Type, req.Title, req.Description = args[0], args[1], desc
+			if cmd.Flags().Changed("estimate") {
+				req.Estimate = proto.Float64(estimate)
+			}
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Items.CreateItem(ctx, connect.NewRequest(req))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			return writeString(env.Stdout, createdText(resp.Msg))
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&description, "description", "", "the description, as Markdown")
+	f.StringVar(&descriptionFile, "description-file", "", "read the description from this file")
+	f.StringVar(&req.ParentId, "parent", "", "the parent item's ID (default: none, and a task then goes to the inbox)")
+	f.StringVar(&req.Area, "area", "", "work or personal; required with no --parent, inherited otherwise")
+	f.StringVar(&req.Priority, "priority", "", "p0 to p3 (default: the parent's, or p2 with no parent)")
+	f.StringVar(&req.State, "state", "", "backlog, in-progress, in-review or done (default backlog)")
+	f.StringVar(&req.StartDate, "start", "", "the start date, YYYY-MM-DD")
+	f.StringVar(&req.DueDate, "due", "", "the due date, YYYY-MM-DD")
+	f.Float64Var(&estimate, "estimate", 0, "the estimate, a number in a unit of your choosing such as days")
+	f.StringArrayVar(&req.Criteria, "criterion", nil, "an acceptance criterion (repeatable, kept in order)")
+	f.StringVar(&req.IdempotencyKey, "idempotency-key", "", "a key that makes a retry return the first item instead of making a second")
 	return cmd
 }
