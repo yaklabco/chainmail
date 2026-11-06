@@ -536,12 +536,12 @@ Or, from a checkout, `nix develop -c go tool stave build` writes `bin/chainmail`
 
 ### 5.2 Take an online snapshot
 
-SQLite's backup command copies `state.db` consistently while the daemon runs. Run it as the `chainmail` user, which can write in the state directory:
+SQLite's backup command copies `state.db` consistently while the daemon runs. Run it as the `chainmail` user, which can write in the state directory: `'<backup-dir>'` must be a new directory, for example one named by the date and time. `mkdir` fails when it already exists: stop there and pick a new name. A reused directory can keep an older `state.db-wal` beside the new `state.db`, and a restore would apply that old log and bring back old data with no error.
 
 ```sh
 sudo -u chainmail $(nix build --no-link --print-out-paths nixpkgs#sqlite.bin)/bin/sqlite3 -readonly /var/lib/chainmail/state.db '.backup /var/lib/chainmail/state.db.snapshot'
 sudo -u chainmail $(nix build --no-link --print-out-paths nixpkgs#sqlite.bin)/bin/sqlite3 -readonly /var/lib/chainmail/state.db.snapshot 'PRAGMA user_version; PRAGMA integrity_check'
-sudo install -d -m 0700 '<backup-dir>'
+sudo mkdir -m 0700 '<backup-dir>'
 sudo install -m 0600 /var/lib/chainmail/state.db.snapshot '<backup-dir>'/state.db
 sudo install -m 0600 /var/lib/chainmail/vault.age '<backup-dir>'/vault.age
 sudo rm -f /var/lib/chainmail/state.db.snapshot /var/lib/chainmail/state.db.snapshot-wal /var/lib/chainmail/state.db.snapshot-shm
@@ -598,7 +598,7 @@ sudo install -o chainmail -g chainmail -m 0600 '<backup-dir>'/state.db /var/lib/
 sudo install -o chainmail -g chainmail -m 0600 '<backup-dir>'/vault.age /var/lib/chainmail/vault.age
 ```
 
-4. Only when the backup has a `state.db-wal`: copy it too, then fold it into `state.db` as the `chainmail` user. Good output is `0|0|0`, then `ok`. Do not copy a `state.db-shm` from the backup. SQLite rebuilds it from the log.
+4. Only when the backup has a `state.db-wal`: copy it too, then fold it into `state.db` as the `chainmail` user. Both backup procedures here make one-file backups, so a backup with a `state.db-wal` was made some other way. Restore that log only when you know it was copied together with that same `state.db`, at the same moment. A log left from an older backup brings back old data without any error. Good output is `0|0|0`, then `ok`. Do not copy a `state.db-shm` from the backup. SQLite rebuilds it from the log.
 
 ```sh
 sudo install -o chainmail -g chainmail -m 0600 '<backup-dir>'/state.db-wal /var/lib/chainmail/state.db-wal
@@ -639,10 +639,10 @@ sudo -u chainmail $(nix build --no-link --print-out-paths nixpkgs#sqlite.bin)/bi
 sudo ls -l /var/lib/chainmail
 ```
 
-Then copy the files and start the daemon:
+Then copy the files into a new backup directory and start the daemon. As in [5.2](#52-take-an-online-snapshot), `mkdir` fails when the directory already exists, and you pick a new name rather than reuse one:
 
 ```sh
-sudo install -d -m 0700 '<backup-dir>'
+sudo mkdir -m 0700 '<backup-dir>'
 sudo install -m 0600 /var/lib/chainmail/vault.age /var/lib/chainmail/state.db '<backup-dir>'/
 sudo systemctl start chainmail
 ```
