@@ -1,0 +1,96 @@
+# GoReleaser configuration for chainmail. `go tool stave release` runs it to
+# publish a tagged release, and `go tool stave snapshot` to build one locally
+# into dist/ without publishing. See https://goreleaser.com for the format.
+
+version: 2
+
+project_name: chainmail
+
+before:
+  hooks:
+    # The man page goes into the archives. It is generated into a hidden
+    # build cache, outside dist/, which --clean removes.
+    - mkdir -p .buildcache/man
+    - sh -c 'go run ./cmd/chainmail man > .buildcache/man/chainmail.1'
+
+builds:
+  - id: chainmail
+    main: ./cmd/chainmail
+    binary: chainmail
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/yaklabco/chainmail/internal/version.Version={{ .Version }}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    ids: [chainmail]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - src: .buildcache/man/chainmail.1
+        dst: man
+        strip_parent: true
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  # stave snapshot sets CHAINMAIL_SNAPSHOT_VERSION to the version the next
+  # release will get, so the archives match the release notes it writes.
+  version_template: '{{ envOrDefault "CHAINMAIL_SNAPSHOT_VERSION" (incpatch .Version) }}-snapshot'
+
+homebrew_casks:
+  - name: chainmail
+    repository:
+      owner: yaklabco
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    commit_author:
+      name: YakLabs
+      email: official@yaklab.org
+    homepage: "https://github.com/yaklabco/chainmail"
+    description: "Email for AI agents, behind a policy daemon"
+    license: "MIT"
+
+    binaries:
+      - chainmail
+
+    manpages:
+      - man/chainmail.1
+
+    generate_completions_from_executable:
+      executable: "chainmail"
+      shell_parameter_format: cobra
+
+    hooks:
+      post:
+        # The binaries are not signed or notarized, so macOS would quarantine
+        # them on first run.
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/chainmail"]
+          end
+
+    caveats: |
+      chainmail runs as a daemon that holds your mail account credentials.
+      To set up an account and start the daemon, follow the quick start:
+        https://github.com/yaklabco/chainmail/blob/main/docs/QUICKSTART.md
+
+release:
+  draft: false
+  github:
+    owner: yaklabco
+    name: chainmail
+
+force_token: github

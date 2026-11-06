@@ -4,6 +4,8 @@ This runbook is for whoever keeps a production chainmail daemon running. It cove
 
 The [README](../README.md) is the full reference. This runbook links to it rather than repeat it. For a first install, see the [quick start](QUICKSTART.md).
 
+Maintainers publishing a new version start at [13. Cutting a release](#13-cutting-a-release).
+
 ## Conventions
 
 ### Layout
@@ -40,6 +42,8 @@ Values you fill in are written as quoted placeholders, such as `'<account>'`. Re
 | `'<backup-dir>'` | A directory only root can read, on the volume you back up |
 | `'<label>'` | The label of your own launchd job, on macOS |
 | `'<chainmail-checkout>'` | A clone of the chainmail repository |
+| `'<version>'` | A release version without the `v`, such as `0.2.0`, in [13](#13-cutting-a-release) |
+| `'<run-id>'` | A GitHub Actions run ID, as `gh run list` shows it |
 
 ### sudo and the socket
 
@@ -1116,3 +1120,136 @@ docker ps -a --filter label=chainmail-test=dovecot
 ```
 
 Good output from the run is `ok` for `./internal/mailstore/imapstore/`, `./internal/daemon/` and `./internal/mcpserver/`. Run one heavy suite at a time on a shared machine.
+
+## 13. Cutting a release
+
+A release is a tag, a GitHub release with the binaries, and a Cask in the [yaklabco/homebrew-tap](https://github.com/yaklabco/homebrew-tap) tap, so that `brew install yaklabco/tap/chainmail` installs it. The `release` workflow does all three with `go tool stave release`. Releases are cut from `main`. `'<version>'` below is the new version without the `v`, such as `0.2.0`, and its tag is `'v<version>'`.
+
+```mermaid
+flowchart LR
+  A[Edit CHANGELOG.md] --> B[Open and merge the PR]
+  B --> C[Run the release workflow]
+  C --> D[Watch the run]
+  D --> E[Check the release assets]
+  E --> F[Check the tap's Cask]
+```
+
+### 13.1 One-time setup
+
+The workflow pushes the Cask to the tap with a token in the repository secret `HOMEBREW_TAP_TOKEN`. Make a fine-grained GitHub token with read and write access to the contents of `yaklabco/homebrew-tap`, then store it. The command prompts for the value:
+
+```sh
+gh secret set HOMEBREW_TAP_TOKEN --repo yaklabco/chainmail
+```
+
+`gh secret list --repo yaklabco/chainmail` shows `HOMEBREW_TAP_TOKEN` once it is set. The workflow stops early with a message naming the secret when it is empty. Set it again when the token expires.
+
+### 13.2 Edit the changelog
+
+The release target tags the next version that the commit messages since the last tag call for: a `fix` commit raises the patch number and a `feat` commit raises the minor number. It takes the release notes from that version's section of `CHANGELOG.md`, so the new heading must name that version.
+
+On a branch from an up-to-date `main`:
+
+```sh
+git switch main
+git pull --ff-only
+git switch -c 'release-<version>'
+```
+
+In `CHANGELOG.md`:
+
+1. Add a heading `## [<version>] - <date>` under `## [Unreleased]`, with today's date as `YYYY-MM-DD`.
+2. Move every entry from under `## [Unreleased]` to under the new heading, and leave `## [Unreleased]` empty.
+3. At the bottom, point `[Unreleased]` at `https://github.com/yaklabco/chainmail/compare/v<version>...HEAD`, and add a line `[<version>]: https://github.com/yaklabco/chainmail/compare/v<previous>...v<version>`, where `<previous>` is the last release.
+
+Check the file and commit it. `check` validates `CHANGELOG.md` along with the lint, tests and build:
+
+```sh
+nix develop -c go tool stave check
+git add CHANGELOG.md
+git commit -m 'docs: release <version>'
+git push -u origin 'release-<version>'
+gh pr create --repo yaklabco/chainmail --fill
+```
+
+Merge the pull request once CI passes. `go tool stave snapshot` runs the same preparation as a release on your checkout without tagging or publishing anything. Run it on `main` after the merge to see the version it picks, the notes it wrote to `.buildcache/release-notes.md` and the archives it built in `dist/`:
+
+```sh
+git switch main
+git pull --ff-only
+nix develop -c go tool stave snapshot
+```
+
+### 13.3 Run the release workflow
+
+The workflow takes no inputs and runs only from `main`. The release target refuses to tag when `GITHUB_TOKEN` or `HOMEBREW_TAP_TOKEN` is empty, when the tag already exists, when the tree is dirty, when `HEAD` is not `origin/main`, or when `goreleaser check` fails.
+
+```sh
+gh workflow run release --repo yaklabco/chainmail --ref main
+```
+
+Or from the web: open [the release workflow](https://github.com/yaklabco/chainmail/actions/workflows/release.yml), choose **Run workflow**, keep the branch at `main`, and choose **Run workflow** again.
+
+### 13.4 Watch the run
+
+Find the run's ID, then follow it until it ends. `--exit-status` makes the command fail when the run fails:
+
+```sh
+gh run list --repo yaklabco/chainmail --workflow release --limit 1
+gh run watch '<run-id>' --repo yaklabco/chainmail --exit-status
+```
+
+`gh run watch --repo yaklabco/chainmail` without an ID asks which run to follow. To read a failed run's log:
+
+```sh
+gh run view '<run-id>' --repo yaklabco/chainmail --log-failed
+```
+
+### 13.5 Check the release
+
+The release has five assets: an archive for each of `darwin_amd64`, `darwin_arm64`, `linux_amd64` and `linux_arm64`, named `chainmail_<version>_<os>_<arch>.tar.gz`, and `checksums.txt`.
+
+```sh
+gh release view 'v<version>' --repo yaklabco/chainmail --json assets --jq '.assets[].name'
+gh release download 'v<version>' --repo yaklabco/chainmail --pattern checksums.txt --output -
+```
+
+The release notes on the release page are the changelog section for `<version>`.
+
+### 13.6 Check the tap
+
+The workflow commits `Casks/chainmail.rb` to the tap. Read it and check that its `version` is `<version>` and that each `sha256` matches the archive's line in `checksums.txt`:
+
+```sh
+gh api -H 'Accept: application/vnd.github.raw' repos/yaklabco/homebrew-tap/contents/Casks/chainmail.rb
+```
+
+Then install or upgrade on a Mac and check the binary and the man page:
+
+```sh
+brew update
+brew upgrade yaklabco/tap/chainmail
+chainmail version
+man chainmail
+```
+
+Use `brew install yaklabco/tap/chainmail` instead of `brew upgrade` on a machine that does not have it yet.
+
+### 13.7 A release that fails halfway
+
+The release target pushes the tag before it runs goreleaser. If goreleaser fails after that, most often because a token has expired or lacks access to the tap, the tag is on `origin` with no complete release behind it, and a second run refuses because the tag exists. Look first for what the failed run left behind:
+
+```sh
+git fetch --tags origin
+gh release view 'v<version>' --repo yaklabco/chainmail
+```
+
+Delete a partial release if the second command finds one. Then delete the tag on `origin` and in your checkout:
+
+```sh
+gh release delete 'v<version>' --repo yaklabco/chainmail --yes
+git push origin --delete 'v<version>'
+git tag -d 'v<version>'
+```
+
+If the run got as far as the tap, its commit to `Casks/chainmail.rb` names checksums of archives that are gone. Leave it, because the rerun replaces it. Fix the cause through a pull request to `main`, then run the workflow again from [13.3](#133-run-the-release-workflow). A fix needs no changelog entry unless it changes what ships. A fix merged as a `feat` commit raises the version, so move the changelog heading to the new version in the same pull request.

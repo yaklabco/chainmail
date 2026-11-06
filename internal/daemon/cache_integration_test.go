@@ -365,6 +365,38 @@ func waitCacheReady(t *testing.T, h *daemontest.Harness) *chainmailv1.AccountCac
 	}
 }
 
+// waitCacheFresh polls a forced cache search until dove's cache answers it
+// completely. A folder whose IMAP connection drops is reconnecting until its
+// next pass, and the cache is rightly stale meanwhile, so a check that needs
+// the cache to answer waits out such a drop first. A cache that stays stale
+// past cacheRecoverWithin fails the test.
+func waitCacheFresh(t *testing.T, h *daemontest.Harness) {
+	t.Helper()
+	deadline := time.Now().Add(cacheRecoverWithin)
+	ctx, cancel := context.WithDeadline(t.Context(), deadline)
+	defer cancel()
+	reason := ""
+	for {
+		resp, err := searchPageCtx(ctx, h, &chainmailv1.SearchRequest{Accounts: []string{"dove"}, Limit: 1, Source: "cache"})
+		if err != nil {
+			t.Fatalf("the cache of dove is not fresh within %v: %v; last reason %q", cacheRecoverWithin, err, reason)
+		}
+		for _, ac := range resp.GetAccountCounts() {
+			if ac.GetAccount() != "dove" {
+				continue
+			}
+			if ac.GetComplete() {
+				return
+			}
+			reason = ac.GetIncompleteReason()
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the cache of dove is not fresh within %v: last reason %q", cacheRecoverWithin, reason)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // readyStatus returns account's status when it is ready and tracks exactly
 // cacheFolders, each backfilled with its window done, and nil otherwise.
 func readyStatus(resp *chainmailv1.GetCacheStatusResponse, account string) *chainmailv1.AccountCacheStatus {
@@ -513,6 +545,7 @@ func checkAnswered(t *testing.T, q, source string, p cachePage, want string) {
 // too.
 func checkSameAnswers(t *testing.T, h *daemontest.Harness) {
 	for _, q := range cacheDoveQueries {
+		waitCacheFresh(t, h)
 		server := searchDove(t, h, q, "server", cachePageRows, false, false)
 		if len(server.rows) == 0 {
 			t.Errorf("%q: the server finds nothing; every query must match part of cacheSeed", q)
@@ -537,6 +570,7 @@ func checkSameAnswers(t *testing.T, h *daemontest.Harness) {
 		{q: "newer_than:7d", snippets: true},
 		{q: "", threads: true},
 	} {
+		waitCacheFresh(t, h)
 		server := searchDove(t, h, tc.q, "server", 50, tc.snippets, tc.threads)
 		cache := searchDove(t, h, tc.q, "cache", 50, tc.snippets, tc.threads)
 		if !slices.Equal(cache.rows, server.rows) {
@@ -551,6 +585,7 @@ func checkSameAnswers(t *testing.T, h *daemontest.Harness) {
 func checkCursorAcrossSources(t *testing.T, h *daemontest.Harness) {
 	want := searchDove(t, h, "", "server", 3, false, false).rows
 	for _, tc := range []struct{ first, rest string }{{"cache", "server"}, {"server", "cache"}} {
+		waitCacheFresh(t, h)
 		resp := searchPage(t, h, &chainmailv1.SearchRequest{Accounts: []string{"dove"}, Limit: 3, Source: tc.first})
 		got := rowRefs(resp)
 		for page := 1; resp.GetNextCursor() != ""; page++ {
@@ -576,6 +611,7 @@ func checkServerOnly(t *testing.T, h *daemontest.Harness) {
 		{q: "invoice newer_than:60d", reason: "text_outside_window"},
 		{q: "in:trash", reason: "folder_not_synced"},
 	} {
+		waitCacheFresh(t, h)
 		server := searchDove(t, h, tc.q, "server", cachePageRows, false, false)
 		auto := searchDove(t, h, tc.q, "", cachePageRows, false, false)
 		if len(server.rows) == 0 || !slices.Equal(auto.rows, server.rows) {

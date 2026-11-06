@@ -1,4 +1,4 @@
-From: "James Ainslie" <james@example.com>
+From: "James Example" <james@example.com>
 To: "Ann Smith" <ann@example.org>
 Subject: Fwd: Plans
 Date: Fri, 30 Oct 2026 09:15:00 -0400
@@ -17,7 +17,7 @@ Hello **world**.
 From: Ann Smith <ann@example.org>
 Date: Thu, 29 Oct 2026 10:00:00 -0400
 Subject: Plans
-To: James Ainslie <james@example.com>
+To: James Example <james@example.com>
 
 The plans are attached.
 
@@ -48,7 +48,7 @@ pre { padding: 8px; }
 From: Ann Smith &lt;ann@example.org&gt;<br>
 Date: Thu, 29 Oct 2026 10:00:00 -0400<br>
 Subject: Plans<br>
-To: James Ainslie &lt;james@example.com&gt;</div>
+To: James Example &lt;james@example.com&gt;</div>
 <p>The plans are attached.</p>
 </div>
 </body>

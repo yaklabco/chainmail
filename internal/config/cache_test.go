@@ -331,7 +331,7 @@ func TestCacheAccountGlobalKeysReportedOnce(t *testing.T) {
 // turns it off. SyncFolders stays the watch list either way.
 func TestAccountSyncAuto(t *testing.T) {
 	t.Parallel()
-	const workspace = "[oauth_clients.ws]\nclient_id = \"id\"\n[accounts.w]\nprovider = \"google-workspace\"\naddress = \"me@ainslies.us\"\noauth_client = \"ws\"\n"
+	const workspace = "[oauth_clients.ws]\nclient_id = \"id\"\n[accounts.w]\nprovider = \"google-workspace\"\naddress = \"me@example.org\"\noauth_client = \"ws\"\n"
 	tests := []struct {
 		name        string
 		config      string

@@ -54,10 +54,13 @@ flowchart LR
 
 The CLI's styled help, settings file and shell completion shipped in [#11](https://github.com/yaklabco/chainmail/pull/11), and fixes since sub-project 7 in [#13](https://github.com/yaklabco/chainmail/pull/13), [#14](https://github.com/yaklabco/chainmail/pull/14) and [#15](https://github.com/yaklabco/chainmail/pull/15). Of the work deferred from sub-project 13, item due-date events ([#16](https://github.com/yaklabco/chainmail/issues/16)) and rules that file mail into items ([#17](https://github.com/yaklabco/chainmail/issues/17)) belong to sub-project 8, the agent skill's coverage of items ([#20](https://github.com/yaklabco/chainmail/issues/20)) to sub-project 11, item metrics and traces ([#21](https://github.com/yaklabco/chainmail/issues/21)) to sub-project 12, and the Lathe task type ([#18](https://github.com/yaklabco/chainmail/issues/18)) and two-way sync with Lathe ([#19](https://github.com/yaklabco/chainmail/issues/19)) to the Lathe work.
 
+Releases are published on [GitHub](https://github.com/yaklabco/chainmail/releases) and in the [yaklabco/homebrew-tap](https://github.com/yaklabco/homebrew-tap) tap. [CHANGELOG.md](CHANGELOG.md) lists what each release changed.
+
 ## Documentation
 
 - [docs/QUICKSTART.md](docs/QUICKSTART.md): building chainmail, then setting up and configuring a daemon, its accounts and its secrets.
-- [docs/RUNBOOK.md](docs/RUNBOOK.md): operating the daemon day to day, with commands that run in bash and fish.
+- [docs/RUNBOOK.md](docs/RUNBOOK.md): operating the daemon day to day, and cutting a release, with commands that run in bash and fish.
+- [CHANGELOG.md](CHANGELOG.md): what each release added, changed and fixed.
 - The reference sections below: [Security model](#security-model), [Build](#build), [Development](#development), [Provider setup](#provider-setup), [Configuration reference](#configuration-reference), [Commands](#commands), [CLI settings](#cli-settings), [Shell completion](#shell-completion), [Reading mail](#reading-mail), [Sending mail](#sending-mail), [Organizing mail](#organizing-mail), [Policy](#policy), [Reading the audit log](#reading-the-audit-log), [Agents over MCP](#agents-over-mcp), [Watching for mail](#watching-for-mail), [Local cache](#local-cache), [Items](#items), [NixOS deployment](#nixos-deployment), [Connection probing and pool sizing](#connection-probing-and-pool-sizing) and [Exit codes and error output](#exit-codes-and-error-output).
 
 ## Security model
@@ -73,7 +76,16 @@ The CLI's styled help, settings file and shell completion shipped in [#11](https
 
 ## Build
 
-With Nix:
+With Homebrew, on macOS and Linux:
+
+```sh
+brew install yaklabco/tap/chainmail
+chainmail version
+```
+
+This installs the released binary, its shell completions and its man page. Homebrew does not start the daemon. Start it as [docs/QUICKSTART.md](docs/QUICKSTART.md) describes.
+
+Or build from a checkout with Nix:
 
 ```fish
 nix build
@@ -222,18 +234,18 @@ client_id = "5678.apps.googleusercontent.com"
 provider = "google-workspace"    # auth defaults to oauth2, the only method it accepts
 address = "james@example.org"
 oauth_client = "workspace"       # refresh token stored as tokens/work by auth login
-display_name = "James Ainslie"   # the From name on mail this account sends
+display_name = "James Example"   # the From name on mail this account sends
 signature = "James\n[example.org](https://example.org)"   # Markdown
 
 [accounts.personal]
 provider = "gmail"
-address = "james@gmail.com"
+address = "you@gmail.com"
 auth = "oauth2"                  # gmail accepts two methods, so auth is required
 oauth_client = "gmail"
 
 [accounts.icloud]
 provider = "icloud"
-address = "james@icloud.com"     # app password in the vault as accounts/icloud
+address = "you@icloud.com"       # app password in the vault as accounts/icloud
 
 [accounts.site]
 provider = "hostinger"
@@ -752,7 +764,7 @@ The daemon checks every send against a policy before anything is transmitted, an
 
 ```toml
 [policy]
-send_allow = ["*@ainslies.us", "someone@example.com"]
+send_allow = ["*@example.org", "someone@example.com"]
 max_recipients = 10
 allow_expunge = false
 allow_folder_delete = false
@@ -768,7 +780,7 @@ The keys are listed in the [Configuration reference](#configuration-reference). 
 An entry in `send_allow` has one of two forms:
 
 - **A bare address**, such as `someone@example.com`: no display name, no angle brackets, exactly one `@`. It matches only that address.
-- **`*@domain`**, such as `*@ainslies.us`. It matches any address whose part after its last `@` is exactly that domain. Subdomains do not match, so `*@ainslies.us` does not allow `bob@mail.ainslies.us`.
+- **`*@domain`**, such as `*@example.org`. It matches any address whose part after its last `@` is exactly that domain. Subdomains do not match, so `*@example.org` does not allow `bob@mail.example.org`.
 
 Anything else, such as `*@*`, `*.example.com`, `@example.com` or `bob@*`, is a config error that names the table and the entry. Matching ignores case.
 
@@ -1334,16 +1346,16 @@ The flake exports a NixOS module as `nixosModules.default`. It runs the daemon a
   inputs.chainmail.url = "github:yaklabco/chainmail";
 
   outputs = { nixpkgs, chainmail, ... }: {
-    nixosConfigurations.incus = nixpkgs.lib.nixosSystem {
+    nixosConfigurations.mailhost = nixpkgs.lib.nixosSystem {
       modules = [
         chainmail.nixosModules.default
         {
           services.chainmail = {
             enable = true;
-            clientUsers = [ "jamesainslie" ];
+            clientUsers = [ "alice" ];
             vaultKeyCredential = ./chainmail-vault-key.cred;
             settings = {
-              policy.send_allow = [ "*@ainslies.us" ];
+              policy.send_allow = [ "*@example.org" ];
               accounts.site = {
                 provider = "hostinger";
                 address = "me@example.com";
@@ -1439,3 +1451,7 @@ Reasons and exit codes are a contract with agents and never change. They come fr
 Usage errors always exit 2 with `USAGE`. That covers a missing or extra argument, an unknown flag, a bad output format from `--output`, `CHAINMAIL_OUTPUT` or `cli.toml`, a group command such as `chainmail accounts` run on its own, an unknown subcommand, and `chainmail help <unknown>`. It also covers a `cli.toml` that cannot be read or parsed, is not a regular file, is larger than 64 KiB, holds an unknown key or holds a value that is not a string (see [CLI settings](#cli-settings)), a `CHAINMAIL_DEV` that is not a boolean (`true`, `false`, `1`, `0`, `t` or `f`) when `--dev` is not given, and `chainmail completion` without a shell or with one it does not know.
 
 Interrupting a prompt with Ctrl-C, such as the `secret set` prompt or the `auth login` paste, exits 1 with `INTERNAL` and a message containing `interrupted`.
+
+## License
+
+chainmail is released under the MIT license. See [LICENSE](LICENSE).
