@@ -45,6 +45,17 @@ var toolRPC = map[string]string{
 	"delete_folder":       chainmailv1connect.OrganizeServiceDeleteFolderProcedure,
 	"read_events":         chainmailv1connect.WatchServiceReadEventsProcedure,
 	"cache_status":        chainmailv1connect.CacheServiceGetCacheStatusProcedure,
+	"create_item":         chainmailv1connect.ItemsServiceCreateItemProcedure,
+	"update_item":         chainmailv1connect.ItemsServiceUpdateItemProcedure,
+	"get_item":            chainmailv1connect.ItemsServiceGetItemProcedure,
+	"list_items":          chainmailv1connect.ItemsServiceListItemsProcedure,
+	"delete_item":         chainmailv1connect.ItemsServiceDeleteItemProcedure,
+	"restore_item":        chainmailv1connect.ItemsServiceRestoreItemProcedure,
+	"edit_criteria":       chainmailv1connect.ItemsServiceEditCriteriaProcedure,
+	"tick_criterion":      chainmailv1connect.ItemsServiceTickCriterionProcedure,
+	"set_blocker":         chainmailv1connect.ItemsServiceSetBlockerProcedure,
+	"link_thread":         chainmailv1connect.ItemsServiceLinkThreadProcedure,
+	"unlink_thread":       chainmailv1connect.ItemsServiceUnlinkThreadProcedure,
 }
 
 // leftOut lists agent-facing RPCs with no tool, and why (spec section 4).
@@ -68,9 +79,6 @@ var ignored = map[string]string{
 	chainmailv1connect.ComposeServiceSendProcedure + " draft":      "create_draft saves a new message to Drafts",
 	chainmailv1connect.ComposeServiceReplyProcedure + " dry_run":   "as Send dry_run",
 	chainmailv1connect.ComposeServiceForwardProcedure + " dry_run": "as Send dry_run",
-	// Temporary: read_events gains an item input with the item tools,
-	// which replace this entry with a mapping.
-	chainmailv1connect.WatchServiceReadEventsProcedure + " filter.item": "read_events has no item input until the item tools arrive",
 }
 
 // agentServices are the services the coverage test holds to account.
@@ -81,6 +89,7 @@ var agentServices = []protoreflect.ServiceDescriptor{
 	chainmailv1.File_chainmail_v1_organize_proto.Services().ByName("OrganizeService"),
 	chainmailv1.File_chainmail_v1_watch_proto.Services().ByName("WatchService"),
 	chainmailv1.File_chainmail_v1_cache_proto.Services().ByName("CacheService"),
+	chainmailv1.File_chainmail_v1_items_proto.Services().ByName("ItemsService"),
 }
 
 func procedure(sd protoreflect.ServiceDescriptor, md protoreflect.MethodDescriptor) string {
@@ -201,10 +210,34 @@ func coverageSamples(file string) map[string][]map[string]any {
 		"expunge":             {{"refs": []string{testRef}}},
 		"delete_folder":       {{"account": "work", "name": "F", "force": true}},
 		"read_events": {
-			{"group": "triage", "kinds": []string{"new", "flags"}, "accounts": []string{"work"}, "in": "inbox", "wait_seconds": 1, "limit": 5},
+			{"group": "triage", "kinds": []string{"new", "flags"}, "accounts": []string{"work"}, "in": "inbox", "item": "it_a", "wait_seconds": 1, "limit": 5},
 			{"cursor": 7},
 		},
 		"cache_status": {{"accounts": []string{"work"}}},
+		"create_item": {{
+			"type": "task", "title": "t", "description": "d", "state": "backlog", "area": "work", "priority": "p1",
+			"start_date": "2026-11-01", "due_date": "2026-11-30", "estimate": 2.5, "parent_id": "it_admin_work",
+			"criteria": []string{"c"}, "idempotency_key": "k",
+		}},
+		"update_item": {{
+			"id": "it_a", "type": "story", "title": "t", "description": "d", "state": "in-progress", "area": "work",
+			"priority": "p1", "start_date": "2026-11-01", "due_date": "2026-11-30", "estimate": 2.5, "parent_id": "it_b",
+		}},
+		"get_item": {{"id": "it_a"}},
+		"list_items": {{
+			"type": "task", "state": "backlog", "area": "work", "under": "it_a", "inbox": true, "ongoing": false,
+			"include_deleted": true, "changed_since": 3, "limit": 10, "page_token": "p",
+		}},
+		"delete_item":  {{"id": "it_a", "cascade": true}},
+		"restore_item": {{"id": "it_a", "cascade": true}},
+		"edit_criteria": {{
+			"item_id": "it_a", "remove": []string{"cr_a"}, "edit": []map[string]string{{"id": "cr_b", "text": "t"}},
+			"order": []string{"cr_b"}, "add": []string{"n"},
+		}},
+		"tick_criterion": {{"item_id": "it_a", "criterion_id": "cr_a", "ticked": true, "evidence": "e"}},
+		"set_blocker":    {{"item_id": "it_a", "blocked_by_id": "it_b", "linked": true}},
+		"link_thread":    {{"item_id": "it_a", "ref": testRef, "anchor": true, "note": "n"}},
+		"unlink_thread":  {{"item_id": "it_a", "account": "work", "thread_key": "1a2b"}},
 	}
 }
 

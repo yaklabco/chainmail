@@ -29,7 +29,7 @@ type fakeCall struct {
 	Msg       proto.Message // the request; nil for UploadAttachment
 }
 
-// fakeDaemon serves the six agent-facing services on a Unix socket. Each
+// fakeDaemon serves the seven agent-facing services on a Unix socket. Each
 // RPC answers with the func a test set, or CodeUnimplemented when it is nil.
 // Set the funcs before startFake. To change an answer mid-test, close over
 // state the test guards with a mutex or an atomic.
@@ -77,6 +77,18 @@ type fakeDaemon struct {
 	GetCacheStatus unaryFn[chainmailv1.GetCacheStatusRequest, chainmailv1.GetCacheStatusResponse]
 	RebuildCache   unaryFn[chainmailv1.RebuildCacheRequest, chainmailv1.RebuildCacheResponse]
 	EvictCache     unaryFn[chainmailv1.EvictCacheRequest, chainmailv1.EvictCacheResponse]
+
+	CreateItem    unaryFn[chainmailv1.CreateItemRequest, chainmailv1.CreateItemResponse]
+	UpdateItem    unaryFn[chainmailv1.UpdateItemRequest, chainmailv1.UpdateItemResponse]
+	DeleteItem    unaryFn[chainmailv1.DeleteItemRequest, chainmailv1.DeleteItemResponse]
+	RestoreItem   unaryFn[chainmailv1.RestoreItemRequest, chainmailv1.RestoreItemResponse]
+	GetItem       unaryFn[chainmailv1.GetItemRequest, chainmailv1.GetItemResponse]
+	ListItems     unaryFn[chainmailv1.ListItemsRequest, chainmailv1.ListItemsResponse]
+	EditCriteria  unaryFn[chainmailv1.EditCriteriaRequest, chainmailv1.EditCriteriaResponse]
+	TickCriterion unaryFn[chainmailv1.TickCriterionRequest, chainmailv1.TickCriterionResponse]
+	SetBlocker    unaryFn[chainmailv1.SetBlockerRequest, chainmailv1.SetBlockerResponse]
+	LinkThread    unaryFn[chainmailv1.LinkThreadRequest, chainmailv1.LinkThreadResponse]
+	UnlinkThread  unaryFn[chainmailv1.UnlinkThreadRequest, chainmailv1.UnlinkThreadResponse]
 
 	mu    sync.Mutex
 	calls []fakeCall
@@ -132,6 +144,7 @@ type (
 	fakeOrganizeSvc struct{ f *fakeDaemon }
 	fakeWatchSvc    struct{ f *fakeDaemon }
 	fakeCacheSvc    struct{ f *fakeDaemon }
+	fakeItemsSvc    struct{ f *fakeDaemon }
 )
 
 func (a fakeAccountSvc) ListAccounts(ctx context.Context, req *connect.Request[chainmailv1.ListAccountsRequest]) (*connect.Response[chainmailv1.ListAccountsResponse], error) {
@@ -306,6 +319,50 @@ func (c fakeCacheSvc) EvictCache(ctx context.Context, req *connect.Request[chain
 	return fakeUnary(ctx, c.f, chainmailv1connect.CacheServiceEvictCacheProcedure, c.f.EvictCache, req)
 }
 
+func (i fakeItemsSvc) CreateItem(ctx context.Context, req *connect.Request[chainmailv1.CreateItemRequest]) (*connect.Response[chainmailv1.CreateItemResponse], error) {
+	return fakeUnary(ctx, i.f, chainmailv1connect.ItemsServiceCreateItemProcedure, i.f.CreateItem, req)
+}
+
+func (i fakeItemsSvc) UpdateItem(ctx context.Context, req *connect.Request[chainmailv1.UpdateItemRequest]) (*connect.Response[chainmailv1.UpdateItemResponse], error) {
+	return fakeUnary(ctx, i.f, chainmailv1connect.ItemsServiceUpdateItemProcedure, i.f.UpdateItem, req)
+}
+
+func (i fakeItemsSvc) DeleteItem(ctx context.Context, req *connect.Request[chainmailv1.DeleteItemRequest]) (*connect.Response[chainmailv1.DeleteItemResponse], error) {
+	return fakeUnary(ctx, i.f, chainmailv1connect.ItemsServiceDeleteItemProcedure, i.f.DeleteItem, req)
+}
+
+func (i fakeItemsSvc) RestoreItem(ctx context.Context, req *connect.Request[chainmailv1.RestoreItemRequest]) (*connect.Response[chainmailv1.RestoreItemResponse], error) {
+	return fakeUnary(ctx, i.f, chainmailv1connect.ItemsServiceRestoreItemProcedure, i.f.RestoreItem, req)
+}
+
+func (i fakeItemsSvc) GetItem(ctx context.Context, req *connect.Request[chainmailv1.GetItemRequest]) (*connect.Response[chainmailv1.GetItemResponse], error) {
+	return fakeUnary(ctx, i.f, chainmailv1connect.ItemsServiceGetItemProcedure, i.f.GetItem, req)
+}
+
+func (i fakeItemsSvc) ListItems(ctx context.Context, req *connect.Request[chainmailv1.ListItemsRequest]) (*connect.Response[chainmailv1.ListItemsResponse], error) {
+	return fakeUnary(ctx, i.f, chainmailv1connect.ItemsServiceListItemsProcedure, i.f.ListItems, req)
+}
+
+func (i fakeItemsSvc) EditCriteria(ctx context.Context, req *connect.Request[chainmailv1.EditCriteriaRequest]) (*connect.Response[chainmailv1.EditCriteriaResponse], error) {
+	return fakeUnary(ctx, i.f, chainmailv1connect.ItemsServiceEditCriteriaProcedure, i.f.EditCriteria, req)
+}
+
+func (i fakeItemsSvc) TickCriterion(ctx context.Context, req *connect.Request[chainmailv1.TickCriterionRequest]) (*connect.Response[chainmailv1.TickCriterionResponse], error) {
+	return fakeUnary(ctx, i.f, chainmailv1connect.ItemsServiceTickCriterionProcedure, i.f.TickCriterion, req)
+}
+
+func (i fakeItemsSvc) SetBlocker(ctx context.Context, req *connect.Request[chainmailv1.SetBlockerRequest]) (*connect.Response[chainmailv1.SetBlockerResponse], error) {
+	return fakeUnary(ctx, i.f, chainmailv1connect.ItemsServiceSetBlockerProcedure, i.f.SetBlocker, req)
+}
+
+func (i fakeItemsSvc) LinkThread(ctx context.Context, req *connect.Request[chainmailv1.LinkThreadRequest]) (*connect.Response[chainmailv1.LinkThreadResponse], error) {
+	return fakeUnary(ctx, i.f, chainmailv1connect.ItemsServiceLinkThreadProcedure, i.f.LinkThread, req)
+}
+
+func (i fakeItemsSvc) UnlinkThread(ctx context.Context, req *connect.Request[chainmailv1.UnlinkThreadRequest]) (*connect.Response[chainmailv1.UnlinkThreadResponse], error) {
+	return fakeUnary(ctx, i.f, chainmailv1connect.ItemsServiceUnlinkThreadProcedure, i.f.UnlinkThread, req)
+}
+
 // startFake serves f until the test ends and sets f.Socket. The socket
 // lives under a short os.MkdirTemp path: Unix socket paths stop at 108 bytes.
 func startFake(t *testing.T, f *fakeDaemon) {
@@ -327,6 +384,7 @@ func startFake(t *testing.T, f *fakeDaemon) {
 	mux.Handle(chainmailv1connect.NewOrganizeServiceHandler(fakeOrganizeSvc{f: f}))
 	mux.Handle(chainmailv1connect.NewWatchServiceHandler(fakeWatchSvc{f: f}))
 	mux.Handle(chainmailv1connect.NewCacheServiceHandler(fakeCacheSvc{f: f}))
+	mux.Handle(chainmailv1connect.NewItemsServiceHandler(fakeItemsSvc{f: f}))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)

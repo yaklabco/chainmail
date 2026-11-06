@@ -108,3 +108,14 @@ func TestSearchDescriptionNamesTheCache(t *testing.T) {
 		}
 	}
 }
+
+// TestSearchDescriptionNamesTheItemOperators: agents learn item:<id> and
+// item:none from the search description (SP13 amendment A8).
+func TestSearchDescriptionNamesTheItemOperators(t *testing.T) {
+	t.Parallel()
+	for _, want := range []string{"item:<id>", "item:none", "work item"} {
+		if !strings.Contains(searchDescription, want) {
+			t.Errorf("search description lacks %q: %q", want, searchDescription)
+		}
+	}
+}
