@@ -10,8 +10,9 @@ import (
 
 // Refusals of blockers. Their text never holds request values.
 var (
-	errSelfBlock  = &InvalidError{Msg: "an item cannot block itself", Hint: "name a different blocked_by_id"}
-	errBlockCycle = &InvalidError{Msg: "the blocker would close a cycle", Hint: "the blocker already waits on this item, directly or through others"}
+	errSelfBlock      = &InvalidError{Msg: "an item cannot block itself", Hint: "name a different blocked_by_id"}
+	errBlockCycle     = &InvalidError{Msg: "the blocker would close a cycle", Hint: "the blocker already waits on this item, directly or through others"}
+	errBlockerDeleted = &InvalidError{Msg: "the blocker is deleted", Hint: "restore the blocker first: chainmail item restore"}
 )
 
 // SetBlocker records that blockedByID blocks itemID when linked, and
@@ -50,8 +51,11 @@ func (s *Store) SetBlocker(ctx context.Context, a Actor, itemID, blockedByID str
 		}
 		stmt := "DELETE FROM item_blockers WHERE item_id = ? AND blocked_by_id = ?"
 		if linked {
-			if item.deleted || blocker.deleted {
+			switch {
+			case item.deleted:
 				return nil, errItemDeleted
+			case blocker.deleted:
+				return nil, errBlockerDeleted
 			}
 			cycle, err := waitsOn(ctx, tx, blockedByID, itemID)
 			if err != nil {

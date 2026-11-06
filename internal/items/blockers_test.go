@@ -80,6 +80,8 @@ func TestSetBlockerRefuses(t *testing.T) {
 	c := r.create(t, NewItem{Type: TypeTask, Title: "c", Area: AreaWork})
 	gone := r.create(t, NewItem{Type: TypeTask, Title: "gone", Area: AreaWork})
 	r.markDeleted(t, gone.ID)
+	goneToo := r.create(t, NewItem{Type: TypeTask, Title: "gone too", Area: AreaWork})
+	r.markDeleted(t, goneToo.ID)
 	for _, link := range [][2]string{{a.ID, b.ID}, {b.ID, c.ID}} { // a waits on b, b waits on c
 		if _, _, err := r.store.SetBlocker(t.Context(), testActor, link[0], link[1], true); err != nil {
 			t.Fatal(err)
@@ -96,7 +98,8 @@ func TestSetBlockerRefuses(t *testing.T) {
 		{"an unknown item", "it_nope", a.ID, ErrNotFound, "not found: item"},
 		{"an unknown blocker", a.ID, "it_nope", ErrNotFound, "not found: blocker"},
 		{"a deleted item", gone.ID, a.ID, errItemDeleted, ""},
-		{"a deleted blocker", a.ID, gone.ID, errItemDeleted, ""},
+		{"a deleted blocker", a.ID, gone.ID, errBlockerDeleted, "the blocker is deleted"},
+		{"both deleted", gone.ID, goneToo.ID, errItemDeleted, "the item is deleted"},
 	}
 	revision, tail := r.revision(t), r.tail(t)
 	for _, tt := range tests {
