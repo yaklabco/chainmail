@@ -158,6 +158,9 @@ type Summary struct {
 	// Elsewhere it is ThreadKey of the root Message-ID, or "" when the
 	// message has none.
 	ThreadID string
+	// MessageID is the message's Message-ID without angle brackets, or ""
+	// when it has none.
+	MessageID string
 	// Labels are Gmail labels, on Google accounts.
 	Labels []string
 	// Preview is the server's PREVIEW text, when snippets were asked for and
