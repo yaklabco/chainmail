@@ -72,8 +72,9 @@ func actorOf(c caller) items.Actor {
 // itemsErr is the error to report for a failed items store call. The
 // store's refusals pass unchanged: their text is fixed and never holds
 // item text. Anything else reads as fixed text and keeps its cause, so its
-// reason still maps (TIMEOUT for a deadline, else INTERNAL) and the cause
-// reaches the daemon's log.
+// reason still maps (TIMEOUT for a deadline, else INTERNAL). The cause
+// can quote item text, such as a driver error naming a value, so the log
+// line records only its type.
 func (s *Server) itemsErr(err error) error {
 	if err == nil {
 		return nil
@@ -85,7 +86,7 @@ func (s *Server) itemsErr(err error) error {
 		return err
 	}
 	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		s.opts.Logger.Error("an items store call failed", "err", err)
+		s.opts.Logger.Error("an items store call failed", "type", fmt.Sprintf("%T", err))
 	}
 	return &fixedTextError{msg: "the item store failed", err: err}
 }

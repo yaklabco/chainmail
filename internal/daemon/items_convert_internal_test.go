@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,5 +94,26 @@ func TestItemsErrFixesUnexpectedText(t *testing.T) {
 		if got.Error() != "the item store failed" || api.Detail(toConnectError(got)).GetReason() != tt.reason {
 			t.Errorf("itemsErr(%v) = %q reason %s, want fixed text and %s", tt.err, got, api.Detail(toConnectError(got)).GetReason(), tt.reason)
 		}
+	}
+}
+
+// TestItemsErrLogsNoCauseText checks that an unexpected store error is
+// logged with fixed text and its type only: item text the cause carries
+// never reaches the daemon's log.
+func TestItemsErrLogsNoCauseText(t *testing.T) {
+	t.Parallel()
+	const marker = "Secret plan"
+	var logs bytes.Buffer
+	s, _ := newTestServerOptions(t, passwordConfig, Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	cause := fmt.Errorf("creating: %w", errors.New("sqlite: near \""+marker+"\": syntax error"))
+	if got := s.itemsErr(cause); !errors.Is(got, cause) {
+		t.Errorf("itemsErr(%v) = %v, want it to keep its cause", cause, got)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "an items store call failed") || !strings.Contains(out, "*fmt.wrapError") {
+		t.Errorf("log = %q, want the fixed message and the error type", out)
+	}
+	if strings.Contains(out, marker) || strings.Contains(out, "syntax error") {
+		t.Errorf("log = %q, want no text from the cause", out)
 	}
 }
