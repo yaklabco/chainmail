@@ -994,7 +994,7 @@ func (s *Store) summaryLocked(m *Message, r ref.Ref, opts mailstore.SummaryOptio
 		Ref: r, Date: dateOf(m), InternalDate: m.InternalDate,
 		From: slices.Clone(m.From), To: slices.Clone(m.To), Subject: m.Subject,
 		Flags: slices.Clone(m.Flags), Size: int64(len(rawMessage(m, true))), HasAttachment: len(m.Attachments) > 0,
-		ThreadID: mailstore.ThreadKey(rootOf(m)),
+		ThreadID: mailstore.ThreadKey(rootOf(m)), MessageID: trimID(m.MessageID),
 	}
 	if s.gmail {
 		sum.ThreadID = strconv.FormatUint(m.GmailThreadID, 16)

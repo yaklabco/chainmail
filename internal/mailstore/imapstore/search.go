@@ -361,6 +361,9 @@ func (s *Store) summary(folder string, uidValidity uint32, b *imapclient.FetchMe
 			sum.Date = env.Date
 		}
 		sum.From, sum.To, sum.Subject = addresses(env.From), addresses(env.To), env.Subject
+		// The client parses the envelope's msg-id and drops the angle
+		// brackets, as for Header.MessageID; one it cannot parse is "".
+		sum.MessageID = env.MessageID
 	}
 	sum.HasAttachment = hasAttachment(b.BodyStructure)
 	if s.gmail() {

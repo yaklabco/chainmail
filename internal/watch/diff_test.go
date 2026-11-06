@@ -512,3 +512,73 @@ func TestDiffNewEventMessage(t *testing.T) {
 		})
 	}
 }
+
+// diff keeps the batch's new summaries in the order it builds their new
+// events, ascending UID, and none for a batch without new mail or a
+// rebased delta.
+func TestDiffKeepsNewSummaries(t *testing.T) {
+	t.Parallel()
+	seen := []string{`\Seen`}
+	tests := []struct {
+		name  string
+		delta mailstore.Delta
+		want  []uint32
+	}{
+		{
+			name: "new mail out of UID order",
+			delta: mailstore.Delta{State: diffState(8, 41, true), New: []mailstore.Summary{
+				diffSummary(7, 0), diffSummary(5, 905), diffSummary(6, 0),
+			}},
+			want: []uint32{5, 6, 7},
+		},
+		{
+			name: "new mail beside flags and unreadable mail",
+			delta: mailstore.Delta{
+				State:      diffState(8, 42, true),
+				New:        []mailstore.Summary{diffSummary(6, 0)},
+				Changed:    []mailstore.FlagState{{UID: 2, Flags: seen}},
+				Unreadable: []uint32{5, 7},
+			},
+			want: []uint32{6},
+		},
+		{
+			name:  "flags only",
+			delta: mailstore.Delta{State: diffState(5, 41, true), Changed: []mailstore.FlagState{{UID: 2, Flags: seen}}},
+		},
+		{
+			name:  "unreadable mail only",
+			delta: mailstore.Delta{State: diffState(6, 40, true), Unreadable: []uint32{5}},
+		},
+		{
+			name:  "rebased",
+			delta: mailstore.Delta{State: diffState(9, 41, true), Rebased: true, UIDs: []uint32{1, 2}, New: []mailstore.Summary{diffSummary(5, 0)}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := diff(diffCondRow(), nil, tt.delta, diffInput{Account: "host", Folder: "INBOX", At: diffAt})
+			var uids []uint32
+			for _, s := range got.New {
+				uids = append(uids, s.Ref.UID)
+			}
+			if !slices.Equal(uids, tt.want) {
+				t.Errorf("New UIDs = %v, want %v", uids, tt.want)
+			}
+			var newRefs []string
+			for _, e := range got.Events {
+				if e.Kind == KindNew {
+					newRefs = append(newRefs, e.Ref)
+				}
+			}
+			if len(newRefs) != len(got.New) {
+				t.Fatalf("%d new events for %d new summaries", len(newRefs), len(got.New))
+			}
+			for i, s := range got.New {
+				if newRefs[i] != s.Ref.String() {
+					t.Errorf("new event %d is %s, want the event of summary %s", i, newRefs[i], s.Ref)
+				}
+			}
+		})
+	}
+}

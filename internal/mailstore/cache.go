@@ -6,8 +6,8 @@ import "context"
 // summary a search row shows and the fields a summary leaves out.
 type Header struct {
 	// Summary has Ref, the dates, From, To, Subject, Flags, Size,
-	// HasAttachment, ThreadID and Labels, as FetchSummaries gives them.
-	// Preview and Sample are nil.
+	// HasAttachment, ThreadID, MessageID and Labels, as FetchSummaries gives
+	// them. Preview and Sample are nil.
 	Summary Summary
 	Cc      []Address
 	// Bcc is what a message in Sent or Drafts carries. A received message
