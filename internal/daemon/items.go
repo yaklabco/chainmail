@@ -404,3 +404,51 @@ func (i *itemsService) ListItems(ctx context.Context, req *connect.Request[chain
 		return &chainmailv1.ListItemsResponse{Items: workItemRows(rows), NextPageToken: next, Revision: revision}, nil
 	})
 }
+
+// cascade runs Delete or Restore on a valid ID, setting the audit targets:
+// the item, cascade=1 when set and, when it succeeds, how many items it
+// changed.
+func (i *itemsService) cascade(ctx context.Context, c caller, entry *audit.Entry, id string, cascade bool,
+	run func(context.Context, items.Actor, string, bool) ([]string, int64, error),
+) ([]string, int64, error) {
+	target, err := itemTarget("item", id)
+	entry.Targets = []string{target}
+	if cascade {
+		entry.Targets = append(entry.Targets, "cascade=1")
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	ids, revision, err := run(ctx, actorOf(c), id, cascade)
+	if err != nil {
+		return nil, 0, i.s.itemsErr(err)
+	}
+	entry.Targets = append(entry.Targets, tally("ids", len(ids)))
+	return ids, revision, nil
+}
+
+// DeleteItem implements chainmailv1connect.ItemsServiceHandler. It soft
+// deletes an item, and with cascade its live subtree, in one revision. It
+// is audited as item.delete.
+func (i *itemsService) DeleteItem(ctx context.Context, req *connect.Request[chainmailv1.DeleteItemRequest]) (*connect.Response[chainmailv1.DeleteItemResponse], error) {
+	return itemCall(ctx, i.s, req, "item.delete", func(ctx context.Context, c caller, entry *audit.Entry) (*chainmailv1.DeleteItemResponse, error) {
+		ids, revision, err := i.cascade(ctx, c, entry, req.Msg.GetId(), req.Msg.GetCascade(), i.s.items.Delete)
+		if err != nil {
+			return nil, err
+		}
+		return &chainmailv1.DeleteItemResponse{Ids: ids, Revision: revision}, nil
+	})
+}
+
+// RestoreItem implements chainmailv1connect.ItemsServiceHandler. It
+// restores a deleted item, and with cascade the items deleted with it, in
+// one revision. It is audited as item.restore.
+func (i *itemsService) RestoreItem(ctx context.Context, req *connect.Request[chainmailv1.RestoreItemRequest]) (*connect.Response[chainmailv1.RestoreItemResponse], error) {
+	return itemCall(ctx, i.s, req, "item.restore", func(ctx context.Context, c caller, entry *audit.Entry) (*chainmailv1.RestoreItemResponse, error) {
+		ids, revision, err := i.cascade(ctx, c, entry, req.Msg.GetId(), req.Msg.GetCascade(), i.s.items.Restore)
+		if err != nil {
+			return nil, err
+		}
+		return &chainmailv1.RestoreItemResponse{Ids: ids, Revision: revision}, nil
+	})
+}
