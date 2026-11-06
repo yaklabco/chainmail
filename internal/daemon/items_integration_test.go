@@ -206,9 +206,9 @@ func soleDoveThread(t *testing.T, h *daemontest.Harness, itemID string) *chainma
 // returns the task's ID.
 //
 // The archived root arrives in the watched Archive folder as a new
-// message on the linked thread. Whether that raises an item_mail event is
-// left open (see the plan's contract notes), so no step reads this task's
-// item_mail events.
+// message on the linked thread. IMAP keeps its INTERNALDATE across the
+// move, three days before the link, so it is old mail and raises no
+// item_mail event for the task (done when item 4).
 func checkDoveItemFallback(t *testing.T, h *daemontest.Harness, seed doveItemSeed) string {
 	id := createDoveTask(t, h, doveItemTitles[0])
 	l := linkDoveThread(t, h, id, seed.kickoff, true, doveItemNote)
@@ -225,6 +225,10 @@ func checkDoveItemFallback(t *testing.T, h *daemontest.Harness, seed doveItemSee
 		t.Errorf("new link note = %q, want %q", got, doveItemNote)
 	}
 
+	arrivals := subscribeDove(t, h, &chainmailv1.SubscribeRequest{
+		Filter: &chainmailv1.WatchFilter{Accounts: []string{"dove"}, Kinds: []string{"new"}},
+	})
+	start := arrivals.heartbeat(doveReadyWithin).GetPosition()
 	arch, err := h.Client.Organize.Archive(t.Context(), connect.NewRequest(&chainmailv1.ArchiveRequest{Refs: []string{seed.kickoff}}))
 	if err != nil {
 		t.Fatalf("Archive: %v", err)
@@ -237,6 +241,18 @@ func checkDoveItemFallback(t *testing.T, h *daemontest.Harness, seed doveItemSee
 	archived := outs[0].GetNewRef()
 	if archived == "" || parseRef(t, archived).Folder != "Archive" {
 		t.Fatalf("Archive new ref = %q, want a ref in Archive", archived)
+	}
+	// The item_mail events a batch makes commit with its new events, so by
+	// the heartbeat after the archived root's new event the log holds any
+	// item_mail the move raised.
+	arrivals.next("new", doveReadyWithin, func(ev *chainmailv1.WatchEvent) bool { return ev.GetRef() == archived })
+	arrivals.heartbeat(doveReadyWithin)
+	arrivals.close()
+	moved := readEvents(t, h, &chainmailv1.ReadEventsRequest{
+		Cursor: &start, Limit: 200, Filter: &chainmailv1.WatchFilter{Item: id, Kinds: []string{"item_mail"}},
+	})
+	for _, ev := range moved.GetEvents() {
+		t.Errorf("the archive of old mail raised item_mail event %d for %s, want none", ev.GetId(), ev.GetRef())
 	}
 
 	th := soleDoveThread(t, h, id)
@@ -324,8 +340,10 @@ func checkDoveItemCopies(t *testing.T, h *daemontest.Harness, dove *dovecot.Serv
 	}
 
 	var ops []string
+	// Heartbeats keep arriving, so the wait needs one deadline for the loop.
+	scopedDeadline := time.Now().Add(doveReadyWithin)
 	for got := false; !got; {
-		ev := scoped.item(doveReadyWithin, "the item's events").GetEvent()
+		ev := scoped.item(time.Until(scopedDeadline), "the item's item_mail event").GetEvent()
 		switch ev.GetKind() {
 		case "item":
 			if ev.GetItem().GetItemId() != id || ev.GetAccount() != "" || ev.GetItem().GetType() != "task" {

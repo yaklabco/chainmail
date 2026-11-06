@@ -706,14 +706,30 @@ func TestMCPItemsAgainstDovecot(t *testing.T) {
 	}
 
 	// 6. get_item shows the thread with the reply as its latest message.
-	var view struct {
+	// The daemon's pooled IMAP connection that resolved the link trusts its
+	// view of INBOX for up to a second (imapstore's freshFor) before it
+	// asks the server again, so a get_item that follows the event within
+	// that second can show the thread without the reply. The agent reads
+	// again until the view shows the reply, for up to 10 seconds, and the
+	// checks below run on the last view.
+	type itemView struct {
 		Item struct {
 			ID string `json:"id"`
 		} `json:"item"`
 		Threads      []doveThreadOut `json:"threads"`
 		ThreadsTotal int             `json:"threads_total"`
 	}
-	s.call("get_item", map[string]any{"id": id}, &view)
+	var view itemView
+	viewDeadline := time.Now().Add(10 * time.Second)
+	for {
+		view = itemView{}
+		s.call("get_item", map[string]any{"id": id}, &view)
+		if (len(view.Threads) == 1 && view.Threads[0].Latest.Ref == mailRef) || time.Now().After(viewDeadline) {
+			break
+		}
+		t.Logf("get_item does not show the reply %s yet, reading again", mailRef)
+		time.Sleep(50 * time.Millisecond)
+	}
 	if view.Item.ID != id || view.ThreadsTotal != 1 || len(view.Threads) != 1 {
 		t.Fatalf("get_item = %+v, want item %s with one thread", view, id)
 	}

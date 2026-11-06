@@ -14,6 +14,7 @@ import (
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/internal/client"
+	"github.com/jamesainslie/chainmail/internal/ref"
 )
 
 // maxEventPages bounds how far countReplyMail reads the event log.
@@ -139,10 +140,13 @@ func TestEveryAccountItemHearsItsReply(t *testing.T) {
 				t.Error("item_mail event: from_self is false for the account's own reply")
 			}
 
-			// 6. Exactly one item_mail event for the reply so far. Off
-			// Google the reply has an inbox copy and a Sent copy, and both
-			// sync, but they share a Message-ID.
-			sw.waitDelivered(t, reply.GetMessageId())
+			// 6. Exactly one item_mail event for the reply. Off Google the
+			// reply has an inbox copy and a Sent copy, and both sync, but
+			// they share a Message-ID. The count waits until every synced
+			// copy has its new event, so a duplicate from the later copy
+			// is in the log when it runs.
+			delivered := sw.waitDelivered(t, reply.GetMessageId())
+			waitReplyCopies(t, c, a.GetName(), hb.GetPosition(), token, replyFolders(t, c, a.GetName(), delivered, reply.GetSentRef()))
 			if n := countReplyMail(t, c, id, hb.GetPosition(), token); n != 1 {
 				t.Errorf("%d item_mail events for the reply, want 1", n)
 			}
@@ -241,14 +245,94 @@ func countReplyMail(t *testing.T, c *client.Client, itemID string, after int64, 
 				n++
 			}
 		}
+		// A read examines a bounded number of rows, so an empty page can
+		// still move the cursor. The log is read to its end only when the
+		// cursor stops moving.
 		next := resp.Msg.GetNextCursor()
-		if len(events) == 0 || next <= cursor {
+		if next <= cursor {
 			return n
 		}
 		cursor = next
 	}
 	t.Fatalf("ReadEvents: still more events after %d pages", maxEventPages)
 	return 0
+}
+
+// replyFolders returns the folders of the reply's copies, the delivered
+// ref and the Sent ref when there is one, that the daemon syncs for
+// account. A copy in a folder it does not sync makes no event.
+func replyFolders(t *testing.T, c *client.Client, account string, refs ...string) []string {
+	t.Helper()
+	resp, err := c.Watch.GetWatchStatus(t.Context(), connect.NewRequest(&chainmailv1.GetWatchStatusRequest{}))
+	if err != nil {
+		t.Fatalf("GetWatchStatus: %v (%s)", err, hint(err))
+	}
+	synced := map[string]bool{}
+	for _, f := range resp.Msg.GetFolders() {
+		if f.GetAccount() == account {
+			synced[f.GetFolder()] = true
+		}
+	}
+	var folders []string
+	for _, s := range refs {
+		if s == "" {
+			continue
+		}
+		r, err := ref.Parse(s)
+		if err != nil {
+			t.Fatalf("parsing the reply's ref %s: %v", s, err)
+		}
+		if synced[r.Folder] && !slices.Contains(folders, r.Folder) {
+			folders = append(folders, r.Folder)
+		}
+	}
+	t.Logf("reply copies in synced folders %q", folders)
+	return folders
+}
+
+// waitReplyCopies reads account's new events after the event ID after
+// until the test's reply has one in each of folders, then to the next
+// heartbeat. The item_mail events a sync batch makes commit with its new
+// events, so by that heartbeat the log holds every item_mail event the
+// copies raised. It waits up to searchTimeout, since a polled folder may
+// sync a copy only on its next poll.
+func waitReplyCopies(t *testing.T, c *client.Client, account string, after int64, token string, folders []string) {
+	t.Helper()
+	within := waitBudget(t, searchTimeout)
+	ctx, cancel := context.WithTimeout(t.Context(), within)
+	defer cancel()
+	stream, err := c.Watch.Subscribe(ctx, connect.NewRequest(&chainmailv1.SubscribeRequest{
+		Since:  &after,
+		Filter: &chainmailv1.WatchFilter{Accounts: []string{account}, Kinds: []string{"new"}},
+	}))
+	if err != nil {
+		t.Fatalf("Subscribe: %v (%s)", err, hint(err))
+	}
+	defer func() { _ = stream.Close() }() // cancelled by then; nothing left to report
+	missing := slices.Clone(folders)
+	for {
+		if !stream.Receive() {
+			if ctx.Err() != nil {
+				t.Fatalf("the reply's copies in %q had no new event within %v", missing, within)
+			}
+			t.Fatalf("waiting for the reply's copies: the stream ended: %v (%s)", stream.Err(), hint(stream.Err()))
+		}
+		msg := stream.Msg()
+		if msg.GetHeartbeat() != nil {
+			if len(missing) == 0 {
+				return
+			}
+			continue
+		}
+		e := msg.GetEvent()
+		if e.GetKind() != "new" || !isReplyMail(e, token) {
+			continue
+		}
+		if i := slices.Index(missing, e.GetFolder()); i >= 0 {
+			t.Logf("new event %d for the reply's copy %s in %q", e.GetId(), e.GetRef(), e.GetFolder())
+			missing = slices.Delete(missing, i, i+1)
+		}
+	}
 }
 
 // waitLinkedThread waits up to searchTimeout for the task's view to show
