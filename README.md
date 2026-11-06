@@ -1,8 +1,6 @@
 # chainmail
 
-Email for AI agents. chainmail is one Go binary that lets agents read, write and organize mail over IMAP and SMTP without ever holding a password or token. A long-running daemon owns every credential and every connection to the mail servers. Agents talk to it through the `chainmail` CLI or through `chainmail mcp`, an MCP server. Both are thin clients on a Unix socket. Every call except `admin status`, `audit`, `watch status`, `cache status` and the acknowledgements a watch sends is written to an audit log.
-
-Eight sub-projects exist today. Sub-project 1, the foundation, is the daemon and its socket, the vault, password and OAuth2 login, `secret set`, `auth login` and `accounts test`. Sub-project 2 reads mail: `folders`, `search`, `get`, `thread` and `attachment`. Sub-project 3 writes and organizes it: `send`, `send-raw`, `reply`, `forward` and `draft`, then `move`, `copy`, `archive`, `trash`, `expunge`, the flag and label commands, `folder`, and `accounts probe`. Sub-project 4 adds the send policy, which holds a send to anyone off an allowlist as a draft, the policy gates on `expunge` and `folder delete`, the `audit` command, and a NixOS module for NixOS hosts. Sub-project 5 adds `chainmail mcp`, which serves the same operations to AI agents as MCP tools (see [Agents over MCP](#agents-over-mcp)). Sub-project 6 watches for new mail: the daemon keeps a durable event log, which `chainmail watch` streams and the MCP tool `read_events` reads (see [Watching for mail](#watching-for-mail)). Sub-project 7 adds a local cache: the daemon keeps headers of every synced folder and recent bodies in `cache.db`, indexed for full-text search, and answers searches and reads from it when it is complete and fresh (see [Local cache](#local-cache)). Sub-project 13 adds work items in `state.db`, from objectives down to tasks. Agents link mail threads to them, find that mail with `item:` searches, and hear about replies through `item_mail` events (see [Items](#items)). Approvals arrive in a later sub-project.
+Email for AI agents. chainmail is one Go binary that lets agents read, send and organize mail over IMAP and SMTP without ever holding a password or token. A long-running daemon owns every credential and every connection to the mail servers, checks every send against a policy, and records nearly every call in an audit log. **Audit** under [Features](#features) names the few calls it leaves out. Agents talk to it through the `chainmail` CLI or through `chainmail mcp`, an MCP server. Both are thin clients on a Unix socket. chainmail runs on any Linux and on macOS. In production the daemon runs as its own system user, set up by the flake's NixOS module on NixOS (see [NixOS deployment](#nixos-deployment)) or by hand elsewhere (see [Security model](#security-model)).
 
 ```mermaid
 flowchart LR
@@ -23,9 +21,48 @@ flowchart LR
   D -- "OAuth2 token exchange and refresh" --> G[Google]
 ```
 
+## Features
+
+- **Accounts and auth.** Google Workspace and Gmail over OAuth2, Gmail with an app password, iCloud, Hostinger, and any other IMAP and SMTP server with a password (see [Provider setup](#provider-setup)). Secrets live in an age-encrypted vault that only the daemon reads. `secret set` stores a password or client secret, from a prompt, stdin or `pass`. `auth login` runs Google's consent flow. `accounts test` checks the logins, and `accounts probe` measures each account's connection limit and sizes its connection pool. A rejected credential is never retried: the account waits for a human, and the error says what to run.
+- **Reading.** `folders`, `search`, `get`, `thread` and `attachment` across every account. Search takes Gmail-style operators (see [The query language](#the-query-language)). Reading never marks mail read. Bodies come back as text, with quoted replies and signatures trimmed unless `--full`. Everything taken from a message is marked as untrusted.
+- **Sending and the policy.** `send`, `send-raw`, `reply`, `forward` and `draft`, with Markdown bodies rendered to HTML, attachments, inline images, signatures and dry runs. An idempotency key makes a repeated send go out once. A send to anyone off the allowlist is held: saved to Drafts, never transmitted, and the command exits 4. `expunge` and `folder delete` are refused unless the config turns them on (see [Policy](#policy)).
+- **Organizing.** `move`, `copy`, `archive`, `trash`, `expunge`, flags, Gmail labels, and folder create, rename and delete. The message commands take refs as arguments, or one per line on stdin when the only argument is `-`, so a search can feed them, as in `chainmail search from:acme --output json | jq -r '.rows[].ref' | chainmail archive -`. The CLI sends the refs in batches of 500. The folder commands take a folder name (see [Organizing mail](#organizing-mail)).
+- **Watching.** The daemon watches folders with IMAP IDLE, polls the rest, and writes new mail, flag changes and expunges to a durable event log. `chainmail watch` streams it and the MCP tool `read_events` reads it. A named group resumes where it left off across watcher and daemon restarts (see [Watching for mail](#watching-for-mail)).
+- **Local cache.** `cache.db` holds the headers of every synced folder and recent bodies, indexed with SQLite FTS5. Searches and reads are answered from it when it can answer completely and is fresh, and every answer says whether the cache or the server answered. `cache status`, `cache rebuild` and `cache evict` manage it (see [Local cache](#local-cache)).
+- **Work items.** A tree of work items in `state.db`, from objectives down to tasks, with a standing Admin initiative per area, an inbox of unsorted tasks, acceptance criteria and blockers. Agents link mail threads to items, find that mail with `item:` searches, and hear about replies through `item_mail` events (see [Items](#items)).
+- **CLI and MCP.** The CLI prints tables on a terminal and JSON when piped, with stable error reasons and exit codes (see [Exit codes and error output](#exit-codes-and-error-output)). It has completion for bash, zsh, fish and PowerShell, and a man page. `chainmail mcp` serves 38 tools to AI agents over stdio, through the same policy and audit (see [Agents over MCP](#agents-over-mcp)).
+- **Audit.** Every call except `admin status`, `audit`, `watch status`, `cache status` and the acknowledgements a watch sends is written to an append-only table in `state.db`. Rows never hold message content, recipients or secrets. `chainmail audit` reads them (see [Reading the audit log](#reading-the-audit-log)).
+
+## Status
+
+| Sub-project | Delivered | State |
+|---|---|---|
+| 1. Foundation | The daemon, its socket and peer check, the vault, password and OAuth2 login, `secret set`, `auth login` and `accounts test` | Shipped ([#1](https://github.com/jamesainslie/chainmail/pull/1)) |
+| 2. Read | `folders`, `search`, `get`, `thread` and `attachment`, refs and the untrusted envelope | Shipped ([#2](https://github.com/jamesainslie/chainmail/pull/2)) |
+| 3. Write and organize | `send`, `send-raw`, `reply`, `forward` and `draft`, every organize command, `folder` and `accounts probe` | Shipped ([#3](https://github.com/jamesainslie/chainmail/pull/3)) |
+| 4. Policy and deployment | The send policy and held drafts, the gates on `expunge` and `folder delete`, `audit`, and the NixOS module | Shipped ([#4](https://github.com/jamesainslie/chainmail/pull/4)) |
+| 5. MCP | `chainmail mcp` and its tools | Shipped ([#7](https://github.com/jamesainslie/chainmail/pull/7)) |
+| 6. Watch | IDLE and polling, the durable event log with groups, `chainmail watch` and `read_events` | Shipped ([#8](https://github.com/jamesainslie/chainmail/pull/8)) |
+| 7. Local cache | `cache.db`, full-text search, routing of searches and reads, and the `cache` commands | Shipped ([#12](https://github.com/jamesainslie/chainmail/pull/12)) |
+| 13. Work items | Items, criteria, blockers, thread links, `item:` search, and the `item` and `item_mail` events | In review ([#22](https://github.com/jamesainslie/chainmail/pull/22)). Deferred: [#16](https://github.com/jamesainslie/chainmail/issues/16), [#17](https://github.com/jamesainslie/chainmail/issues/17), [#18](https://github.com/jamesainslie/chainmail/issues/18), [#19](https://github.com/jamesainslie/chainmail/issues/19), [#20](https://github.com/jamesainslie/chainmail/issues/20), [#21](https://github.com/jamesainslie/chainmail/issues/21) |
+| Approvals | An approval queue for held sends, approved or rejected with a TOTP code. Sub-project 4 shipped the hold, not the queue. | Planned |
+| 8. Rules | A rules engine with Sieve and schedules, due-date and overdue events for items, and rules that file new mail into items | Planned |
+| 9. Calendar | Invite detection and RSVP through the policy | Planned |
+| 10. Remote clients | A mutual TLS listener with revocable client certificates | Planned |
+| 11. Agent skill | One skill that teaches an agent to use chainmail over MCP and the CLI | Planned |
+| 12. Observability | Logs, metrics and traces over OpenTelemetry through libo11y | Planned |
+
+The CLI's styled help, settings file and shell completion shipped in [#11](https://github.com/jamesainslie/chainmail/pull/11), and fixes since sub-project 7 in [#13](https://github.com/jamesainslie/chainmail/pull/13), [#14](https://github.com/jamesainslie/chainmail/pull/14) and [#15](https://github.com/jamesainslie/chainmail/pull/15). Of the work deferred from sub-project 13, item due-date events ([#16](https://github.com/jamesainslie/chainmail/issues/16)) and rules that file mail into items ([#17](https://github.com/jamesainslie/chainmail/issues/17)) belong to sub-project 8, the agent skill's coverage of items ([#20](https://github.com/jamesainslie/chainmail/issues/20)) to sub-project 11, item metrics and traces ([#21](https://github.com/jamesainslie/chainmail/issues/21)) to sub-project 12, and the Lathe task type ([#18](https://github.com/jamesainslie/chainmail/issues/18)) and two-way sync with Lathe ([#19](https://github.com/jamesainslie/chainmail/issues/19)) to the Lathe work.
+
+## Documentation
+
+- [docs/QUICKSTART.md](docs/QUICKSTART.md): building chainmail, then setting up and configuring a daemon, its accounts and its secrets.
+- [docs/RUNBOOK.md](docs/RUNBOOK.md): operating the daemon day to day, with commands that run in bash and fish.
+- The reference sections below: [Security model](#security-model), [Build](#build), [Development](#development), [Provider setup](#provider-setup), [Configuration reference](#configuration-reference), [Commands](#commands), [CLI settings](#cli-settings), [Shell completion](#shell-completion), [Reading mail](#reading-mail), [Sending mail](#sending-mail), [Organizing mail](#organizing-mail), [Policy](#policy), [Reading the audit log](#reading-the-audit-log), [Agents over MCP](#agents-over-mcp), [Watching for mail](#watching-for-mail), [Local cache](#local-cache), [Items](#items), [NixOS deployment](#nixos-deployment), [Connection probing and pool sizing](#connection-probing-and-pool-sizing) and [Exit codes and error output](#exit-codes-and-error-output).
+
 ## Security model
 
-- **The daemon owns the credentials.** Passwords, OAuth client secrets and refresh tokens live in the daemon's vault and nowhere else. The CLI and `chainmail mcp` hold no secrets and no mail logic. In production the daemon runs as its own system user, such as `chainmail`, with its state in `--state-dir`, `/var/lib/chainmail` by default (mode `0700`), which your user can't read. That directory also holds `cache.db`, which keeps copies of message headers and recent bodies. It is not encrypted, so it is protected by file modes and the daemon's user. The daemon keeps `cache.db` and its `-wal` and `-shm` files at mode `0600` whatever the umask, and sets a wider one back to `0600` when it starts. `[cache] dir` can move it; the daemon creates that directory with mode `0700` too, and leaves the mode of one that already exists as it is. The NixOS module sets up the user, the client group and the state directory (see [NixOS deployment](#nixos-deployment)). On other Linux hosts and on macOS you create them yourself, then run `chainmail daemon` as that user with `--config`, `--state-dir` and `--vault-key-file` as needed. The client group is `daemon.client_group` (default `chainmail-clients`), and the daemon refuses to start when it does not exist. A `--dev` daemon runs as your own user and is for development: anything running as you can read a dev vault's key.
+- **The daemon owns the credentials.** Passwords, OAuth client secrets and refresh tokens live in the daemon's vault and nowhere else. The CLI and `chainmail mcp` hold no secrets and no mail logic. In production the daemon runs as its own system user, such as `chainmail`, with its state in `--state-dir`, `/var/lib/chainmail` by default (mode `0700`), which your user can't read. That directory also holds `cache.db`, which keeps copies of message headers and recent bodies. It is not encrypted, so it is protected by file modes and the daemon's user. The daemon keeps `cache.db` and its `-wal` and `-shm` files at mode `0600` whatever the umask, and sets a wider one back to `0600` when it starts. `[cache] dir` can move it; the daemon creates that directory with mode `0700` too, and leaves the mode of one that already exists as it is. The NixOS module sets up the user, the client group and the state directory (see [NixOS deployment](#nixos-deployment)). On other Linux hosts and on macOS you create them yourself, then run `chainmail daemon` as that user with `--config`, `--state-dir` and `--vault-key-file` as needed. macOS has no `/run`, so there the config must set `daemon.socket` to a path in a directory the daemon owns, and clients need `--socket`, `CHAINMAIL_SOCKET` or `socket` in `cli.toml`. The client group is `daemon.client_group` (default `chainmail-clients`), and the daemon refuses to start when it does not exist. A `--dev` daemon runs as your own user and is for development: anything running as you can read a dev vault's key.
 - **Secrets go in and never come out.** `chainmail secret set` and `chainmail auth login` write secrets. No API call returns one. `chainmail admin status` lists secret names only.
 - **The vault is encrypted at rest.** `vault.age` is an [age](https://age-encryption.org) file. Under systemd, as the NixOS module sets it up, its key arrives through `LoadCredentialEncrypted=`, sealed to the host's TPM2, at `$CREDENTIALS_DIRECTORY/vault-key`. Elsewhere, and in development, it is a file passed with `--vault-key-file`. The daemon refuses a key file that others can access. The file must either be owned by the daemon's user with no group or other bits (`0600` or `0400`), or be owned by `root:root` with no other bits and at most group read. The second form exists because systemd delivers a `LoadCredential` file as `0440 root:root` and grants the service user read access through an ACL.
 - **The socket has a group and a peer check.** The daemon creates its socket with mode `0660`. Without `--dev` it sets the socket's group to `client_group` (default `chainmail-clients`). On every connection it reads the peer's credentials, with `SO_PEERCRED` on Linux and `LOCAL_PEERCRED` on macOS, and allows only its own user and members of the client group. Membership is looked up per request, so adding a user to the group takes effect without a restart. Release builds are pure Go (`CGO_ENABLED=0`), so on Linux users, groups and memberships are read from `/etc/passwd` and `/etc/group`, not through NSS. A user or membership that exists only in NSS, such as one from LDAP or SSSD, is refused. A dev daemon allows only your own user. A refused peer gets `FORBIDDEN` (exit 3).
@@ -43,7 +80,7 @@ nix build
 ./result/bin/chainmail version
 ```
 
-`result/share` holds the shell completion scripts and the man page (see [Shell completion](#shell-completion)).
+`result/share` holds the shell completion scripts and the man page (see [Shell completion](#shell-completion)). The flake builds the package for `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`. On other systems, such as an Intel Mac, build with Go.
 
 Or inside the dev shell, which provides Go, buf, golangci-lint, gotestsum and age:
 
@@ -64,7 +101,29 @@ nix develop -c go tool stave test:integration
 
 CI also runs the unit tests on macOS and cross-builds the binary for macOS and Linux, on arm64 and amd64, so a change that only works on Linux fails the pull request. The Dovecot tests need Docker, so they run on Linux only.
 
-`test:live` runs against real accounts (see the [Dev quickstart](#dev-quickstart)). Among its write tests, a watch test opens a live stream of each account's `new` events, as `chainmail watch --account <account> --kind new` does, sends a message to the account's own address and requires the event for the delivered copy within 30 seconds. On Google that event is for the one All Mail message and must carry the `\Sent` label. Whether it also carries `\Inbox` is logged, not required. An items test creates an inbox task for each account, sends a message to the account's own address, links the message's thread to the task, and replies to the message from the account. It requires the reply's `item_mail` event within 30 seconds, exactly one of them, and `item show` to list the thread with both messages and its anchor found. Then it soft-deletes the task, so each run leaves one deleted task in `state.db`. A cache test, which only reads, waits up to 30 minutes for every account's cache to report ready, then requires 10 header queries per account to return the same refs from the cache and from the server, a default search to be answered by the cache, and a second read of a message to come from the cache. An account whose cache is still not ready after the wait is skipped with the reason. It changes no mail, so it can run against the production daemon:
+### Live tests
+
+`test:live` runs against real accounts through a running daemon, such as the dev daemon that [docs/QUICKSTART.md](docs/QUICKSTART.md) sets up (see [Dev quickstart](#dev-quickstart)). Its read tests talk to every configured account through the daemon at `$CHAINMAIL_SOCKET`. It fails if any IMAP or SMTP check fails, if an account has no inbox or no mail, or if listing folders, searching, or reading the newest message and its thread fails. It then reads one unread message per account with `get`, `thread`, `get --raw` and, when the message has one, `attachment`, and fails if any of those marks it read. It prefers an unread message with an attachment. An account with no unread mail skips that check, so mark a message unread in another client first. The read tests never change a flag, and the log holds counts and refs, never subjects, addresses or bodies. It talks to real servers, so it never runs in CI or in `go test ./...`. It only builds with the `live` tag.
+
+```fish
+nix develop -c go tool stave test:live
+```
+
+The same run holds the write tests, which send real mail and probe connection limits, so they skip unless `CHAINMAIL_LIVE_WRITES=1` is set too. Each account sends only to its own address. For each account they send a message, check that sending it again with the same idempotency key sends nothing, reply to it, forward it, and create, update, send and delete drafts. They take another message through a `chainmail-test-<random>` folder, a label on Google: copy, flag, unflag, labels on Google, move, archive, trash and expunge, then delete the folder. Archive is skipped on an account with no archive folder. After an archive the test checks that the message left the test folder for a folder other than the inbox or Trash, since `archive_folder` can name any folder. Last, they probe each account's connection limit. Every message they make has a random token in its subject, and they touch no other message. They clean up after themselves even when a test fails. Each step waits for the delivered copy of what it sent: the copy in the inbox, except on Google. Gmail files a message an account sends to its own address once, in Sent, and adds no inbox copy, so on Google the one All Mail message with the token counts as delivered, and the reply, forward and draft steps run against it. The test finds the delivered copy by searching, and Gmail's search, served from its search index, can trail a change by several minutes, so each step waits up to 6 minutes for it, searching less often as the wait goes on. Where the test already knows a message's ref, as after copy, move, archive and trash, it reads that ref instead of searching and checks the message is where the call should have left it. It searches only where it knows no ref, as for the copy a server without COPYUID made. On Hostinger and other servers that keep folders under a personal namespace prefix, the test folder is created as `INBOX.chainmail-test-<random>`, and the test uses the name the server gave it. If the create fails or its answer is lost, cleanup lists the account's folders and deletes the one with the generated name, with or without the namespace prefix, and no other. Cleanup first waits for the delivered copy of every send, for up to 8 minutes after the last send, then expunges every message with the token, in the inbox, Sent, Drafts and every other folder, and deletes the folder. It expunges both the messages the test knows by ref and those a search for the token finds, so a message Gmail's search does not list yet is still removed. It reads each known ref first and expunges only a message whose subject holds the token, and a ref that no longer names a message counts as already removed. A send whose delivered copy never shows fails the cleanup, because it may still arrive afterwards. If a cleanup fails, its error names the token, so you can find what is left with `chainmail search subject:<token> in:anywhere`. A full run against four accounts has taken about 17 minutes, and takes longer when Gmail is slow, so `test:live` gives `go test` a 2 hour timeout in place of its default 10 minutes. The waits, searches and sends stop early enough to keep 28 minutes of that for cleanup, the most the cleanups of one test can take: when only that much is left, a test fails as out of time instead of sending or searching more, and its cleanups still run. The write tests expunge messages and delete their test folder, so the daemon they run against needs both destructive actions turned on in its config:
+
+```toml
+[policy]
+allow_expunge = true
+allow_folder_delete = true
+```
+
+Use that config for the live run only, on a dev daemon, and set both back to `false` afterwards. With either off, the expunge and folder steps and the cleanup fail with `POLICY_DENIED`. The sends go to each account's own address, which the policy always allows, so no `send_allow` entry is needed. Run them only when you mean to send and probe:
+
+```fish
+CHAINMAIL_LIVE_WRITES=1 nix develop -c go tool stave test:live
+```
+
+Among the write tests, a watch test opens a live stream of each account's `new` events, as `chainmail watch --account <account> --kind new` does, sends a message to the account's own address and requires the event for the delivered copy within 30 seconds. On Google that event is for the one All Mail message and must carry the `\Sent` label. Whether it also carries `\Inbox` is logged, not required. An items test creates an inbox task for each account, sends a message to the account's own address, links the message's thread to the task, and replies to the message from the account. It requires the reply's `item_mail` event within 30 seconds, exactly one of them, and `item show` to list the thread with both messages and its anchor found. Then it soft-deletes the task, so each run leaves one deleted task per account in `state.db`. A cache test, which only reads, waits up to 30 minutes for every account's cache to report ready, then requires 10 header queries per account to return the same refs from the cache and from the server, a default search to be answered by the cache, and a second read of a message to come from the cache. An account whose cache is still not ready after the wait is skipped with the reason. It changes no mail, so it can run against the production daemon:
 
 ```fish
 CHAINMAIL_SOCKET=/run/chainmail/chainmail.sock nix develop -c go test -tags live -count=1 -timeout 60m -v -run TestCacheMatchesServer ./internal/live/
@@ -232,7 +291,7 @@ prefetch_bodies = "30d"          # any [cache] key but max_size and dir, for one
 
 | Key | Required | Default | Meaning |
 |---|---|---|---|
-| `daemon.socket` | no | `/run/chainmail/chainmail.sock` | Socket path for a production daemon. A dev daemon ignores it (see the quickstart). `--socket` overrides it. |
+| `daemon.socket` | no | `/run/chainmail/chainmail.sock` | Socket path for a production daemon. A dev daemon ignores it (see [Dev quickstart](#dev-quickstart)). `--socket` overrides it. |
 | `daemon.client_group` | no | `chainmail-clients` | Group that owns the socket and whose members may use the daemon. Production only. |
 | `daemon.body_limit` | no | `64KiB` | Longest message body `get` and `thread` return before cutting it and setting `truncated`. A number of bytes, optionally followed by `B`, `KiB` or `MiB`, between `1KiB` and `8MiB`. `--full` ignores it. |
 | `oauth_clients.<name>` | | | An OAuth2 client registration. `<name>` matches `^[a-z0-9][a-z0-9-]{0,62}$`. Its secret goes in the vault as `oauth_clients/<name>`. |
@@ -251,7 +310,7 @@ prefetch_bodies = "30d"          # any [cache] key but max_size and dir, for one
 | `accounts.<name>.display_name` | no | none | The display name in the From of mail the account sends. From's address is always `address`. |
 | `accounts.<name>.signature` | no | none | Markdown added under the body of every message the account writes, after `-- ` in the text part. `--no-signature` leaves it out. |
 | `accounts.<name>.archive_folder` | no | the folder with the `\Archive` attribute | Where `archive` moves mail on accounts other than Google. Google archives by removing the Inbox label. |
-| `accounts.<name>.pool` | no | from the probe, else the preset | IMAP connections the daemon keeps for the account, 1 to 12. Set it to override the probed size. See [Connection probing and pool sizing](#connection-probing-and-pool-sizing). |
+| `accounts.<name>.pool` | no | from the probe, else the preset | IMAP connections the daemon keeps for the account, 1 to 12, or 0, the same as leaving it out. Set it to override the probed size. See [Connection probing and pool sizing](#connection-probing-and-pool-sizing). |
 | `accounts.<name>.max_message_size` | no | `25MiB` for Google and custom servers, `35MiB` for iCloud and Hostinger | The largest message the account sends, attachments included, between `1KiB` and `1024MiB`. Also caps each upload. Whatever it is set to, a `send-raw` message, a body or HTML file, and a dry run's output are limited to 40 MiB, the most one API request or response holds. |
 | `accounts.<name>.watch` | no | `["INBOX"]` | Folders watched with IDLE, each on a connection of its own. `[]` watches nothing. A folder may not be listed twice or be empty. Not allowed on the Google presets, which always watch All Mail. See [Watching for mail](#watching-for-mail). |
 | `accounts.<name>.sync.folders` | no | every folder a default search covers: each selectable folder except Trash, Junk and a virtual All folder, listed again every `watch.expunge_sweep` | Folders synced as well as the watched ones. Every watched folder is synced. A synced folder that is not watched is polled every `sync.poll`. Setting it limits syncing, and so the cache, to the watch list and these folders, and `[]` syncs the watch list alone. Not allowed on the Google presets. |
@@ -294,78 +353,7 @@ Keys from the full design, such as `rules`, belong to later sub-projects. This v
 
 ## Dev quickstart
 
-These commands are fish, run inside `nix develop` or with a built `chainmail` and `age-keygen` on your `PATH`.
-
-Create a vault key and a config. `age-keygen -o` writes the key with mode `0600`, which the daemon requires.
-
-```fish
-mkdir -p ~/.config/chainmail-dev ~/.local/state/chainmail-dev
-age-keygen -o ~/.config/chainmail-dev/vault-key
-$EDITOR ~/.config/chainmail-dev/config.toml
-```
-
-Point the CLI at the dev socket, then start the daemon in its own terminal. Set the variable in that terminal too, or start the daemon without it and let it use its default.
-
-```fish
-set -gx CHAINMAIL_SOCKET $XDG_RUNTIME_DIR/chainmail-dev.sock
-chainmail daemon --dev \
-    --config ~/.config/chainmail-dev/config.toml \
-    --state-dir ~/.local/state/chainmail-dev \
-    --vault-key-file ~/.config/chainmail-dev/vault-key
-```
-
-The daemon logs JSON lines to stderr and stops cleanly on Ctrl-C. `--dev` refuses `/var/lib/chainmail` as its state directory, including through a symlink. It replaces a stale socket left by a crashed daemon, and refuses to start if another daemon is listening on the path.
-
-A dev daemon picks its socket from `--socket`, then `CHAINMAIL_SOCKET`, then `$XDG_RUNTIME_DIR/chainmail-dev.sock`. Clients pick theirs from `--socket`, then `CHAINMAIL_SOCKET`, then `cli.toml` (see [CLI settings](#cli-settings)), then `/run/chainmail/chainmail.sock`. The daemon never reads `cli.toml`. Clients never look at `XDG_RUNTIME_DIR`, so export `CHAINMAIL_SOCKET` (or pass `--socket`) wherever you run the CLI. Where `XDG_RUNTIME_DIR` is not set, as on macOS, the daemon needs `--socket` or `CHAINMAIL_SOCKET` as well.
-
-To point every client at the dev socket without exporting anything, set `socket` in `cli.toml` to the socket's full path, such as `socket = "/run/user/1000/chainmail-dev.sock"`. The file takes a literal path: `$XDG_RUNTIME_DIR` is not expanded there.
-
-The daemon also reads its other flags from the environment: `CHAINMAIL_CONFIG`, `CHAINMAIL_STATE_DIR`, `CHAINMAIL_VAULT_KEY_FILE` and `CHAINMAIL_DEV`. A flag on the command line wins over its variable. The same dev daemon as above:
-
-```fish
-set -gx CHAINMAIL_CONFIG ~/.config/chainmail-dev/config.toml
-set -gx CHAINMAIL_STATE_DIR ~/.local/state/chainmail-dev
-set -gx CHAINMAIL_VAULT_KEY_FILE ~/.config/chainmail-dev/vault-key
-set -gx CHAINMAIL_DEV true
-chainmail daemon
-```
-
-Store the secrets. `secret set` takes the value from `--from-pass`, from a no-echo prompt when stdin is a terminal, or from stdin. A secret is one line: a trailing newline is dropped, and a value with more than one line is refused, as is a password (`accounts/<account>`) containing a NUL byte. Setting a secret clears the auth-required state of every account that uses it.
-
-```fish
-chainmail secret set oauth_clients/workspace --from-pass chainmail/oauth-workspace
-chainmail secret set accounts/site
-```
-
-`--from-pass <entry>` requires `<store>/<entry>.gpg` to exist, where the store is `$PASSWORD_STORE_DIR` or `~/.password-store`, so a folder or a typo fails with `NOT_FOUND` instead of storing a tree listing. It refuses entries containing a `..` segment or starting with `-`. It runs `pass show` through a pipe and keeps only the first line. gpg asks for its passphrase through pinentry as usual.
-
-Log in to the OAuth2 accounts, then check every account:
-
-```fish
-chainmail auth login work
-chainmail accounts list --output table
-chainmail accounts test work --output table
-```
-
-Finally, run the live smoke test. Its read tests talk to every configured account through the daemon at `$CHAINMAIL_SOCKET`. It fails if any IMAP or SMTP check fails, if an account has no inbox or no mail, or if listing folders, searching, or reading the newest message and its thread fails. It then reads one unread message per account with `get`, `thread`, `get --raw` and, when the message has one, `attachment`, and fails if any of those marks it read. It prefers an unread message with an attachment. An account with no unread mail skips that check, so mark a message unread in another client first. The read tests never change a flag, and the log holds counts and refs, never subjects, addresses or bodies. It talks to real servers, so it never runs in CI or in `go test ./...`. It only builds with the `live` tag.
-
-```fish
-nix develop -c go tool stave test:live
-```
-
-The same run holds the write tests, which send real mail and probe connection limits, so they skip unless `CHAINMAIL_LIVE_WRITES=1` is set too. Each account sends only to its own address. For each account they send a message, check that sending it again with the same idempotency key sends nothing, reply to it, forward it, and create, update, send and delete drafts. They take another message through a `chainmail-test-<random>` folder, a label on Google: copy, flag, unflag, labels on Google, move, archive, trash and expunge, then delete the folder. Archive is skipped on an account with no archive folder. After an archive the test checks that the message left the test folder for a folder other than the inbox or Trash, since `archive_folder` can name any folder. Last, they probe each account's connection limit. Every message they make has a random token in its subject, and they touch no other message. They clean up after themselves even when a test fails. Each step waits for the delivered copy of what it sent: the copy in the inbox, except on Google. Gmail files a message an account sends to its own address once, in Sent, and adds no inbox copy, so on Google the one All Mail message with the token counts as delivered, and the reply, forward and draft steps run against it. The test finds the delivered copy by searching, and Gmail's search, served from its search index, can trail a change by several minutes, so each step waits up to 6 minutes for it, searching less often as the wait goes on. Where the test already knows a message's ref, as after copy, move, archive and trash, it reads that ref instead of searching and checks the message is where the call should have left it. It searches only where it knows no ref, as for the copy a server without COPYUID made. On Hostinger and other servers that keep folders under a personal namespace prefix, the test folder is created as `INBOX.chainmail-test-<random>`, and the test uses the name the server gave it. If the create fails or its answer is lost, cleanup lists the account's folders and deletes the one with the generated name, with or without the namespace prefix, and no other. Cleanup first waits for the delivered copy of every send, for up to 8 minutes after the last send, then expunges every message with the token, in the inbox, Sent, Drafts and every other folder, and deletes the folder. It expunges both the messages the test knows by ref and those a search for the token finds, so a message Gmail's search does not list yet is still removed. It reads each known ref first and expunges only a message whose subject holds the token, and a ref that no longer names a message counts as already removed. A send whose delivered copy never shows fails the cleanup, because it may still arrive afterwards. If a cleanup fails, its error names the token, so you can find what is left with `chainmail search subject:<token> in:anywhere`. A full run against four accounts has taken about 17 minutes, and takes longer when Gmail is slow, so `test:live` gives `go test` a 2 hour timeout in place of its default 10 minutes. The waits, searches and sends stop early enough to keep 28 minutes of that for cleanup, the most the cleanups of one test can take: when only that much is left, a test fails as out of time instead of sending or searching more, and its cleanups still run. The write tests expunge messages and delete their test folder, so the daemon they run against needs both destructive actions turned on in its config:
-
-```toml
-[policy]
-allow_expunge = true
-allow_folder_delete = true
-```
-
-Use that config for the live run only, on a dev daemon, and set both back to `false` afterwards. With either off, the expunge and folder steps and the cleanup fail with `POLICY_DENIED`. The sends go to each account's own address, which the policy always allows, so no `send_allow` entry is needed. Run them only when you mean to send and probe:
-
-```fish
-CHAINMAIL_LIVE_WRITES=1 nix develop -c go tool stave test:live
-```
+A development daemon runs as your own user with `--dev`, a vault key and config under your home directory, a `--state-dir` other than `/var/lib/chainmail`, and by default a socket at `$XDG_RUNTIME_DIR/chainmail-dev.sock`. [docs/QUICKSTART.md](docs/QUICKSTART.md) walks through building chainmail, creating the key and the config, starting the daemon, storing secrets, logging in and checking each account. A dev daemon picks its socket from `--socket`, then `CHAINMAIL_SOCKET`, then `$XDG_RUNTIME_DIR/chainmail-dev.sock`, while clients never read `XDG_RUNTIME_DIR`, so point them at it with `--socket`, `CHAINMAIL_SOCKET` or `socket` in `cli.toml` (see [CLI settings](#cli-settings)).
 
 ## Commands
 
@@ -418,10 +406,15 @@ Every command accepts `--socket <path>` and `--output json|table`. Both can also
 | `chainmail audit [--since 24h] [--account <account>] [--action <action>] [--limit N] [--before-id N]` | Lists audit rows, newest first. See [Reading the audit log](#reading-the-audit-log). | `{"entries":[...],"next_before_id":...}` |
 | `chainmail help [command]` | Prints help: the commands in groups, and examples for each command. It is styled on a terminal and plain otherwise. `--help` on any command does the same. | help text |
 | `chainmail completion <bash\|zsh\|fish\|powershell>` | Prints a shell completion script. See [Shell completion](#shell-completion). | the script |
+| `chainmail man` | Prints the man page `chainmail(1)` in roff. Needs no daemon. It is left out of the help's command list. | roff text |
 
 Each check in `accounts test` has `ok`, `reason` (`AUTH_REJECTED`, `SERVER_UNAVAILABLE` or `TIMEOUT` when it failed), `error`, `capabilities` (IMAP only) and `latency_ms`. When a check fails, the command still prints the full result on stdout, then reports the failure on stderr and exits with its code: 5 if any server rejected the credentials, otherwise the code of the first failed check. If the account is missing a secret or already needs a human, no check runs. The command prints nothing on stdout and fails with `AUTH_REQUIRED` (exit 5).
 
 `auth login` writes its instructions to stderr before the outcome, and `secret set` writes its prompt there when stdin is a terminal. An agent driving either, with stderr not a terminal, should parse only the last line of stderr as the error.
+
+`secret set` takes the value from `--from-pass <entry>`, from a no-echo prompt when stdin is a terminal, or from stdin. A secret is one line: a trailing newline is dropped, and a value with more than one line is refused, as is a password (`accounts/<account>`) containing a NUL byte. Setting a secret clears the auth-required state of every account that uses it. `--from-pass` requires `<store>/<entry>.gpg` to exist, where the store is `$PASSWORD_STORE_DIR` or `~/.password-store`, so a folder or a typo fails with `NOT_FOUND` instead of storing a tree listing. It refuses entries containing a `..` segment or starting with `-`. It runs `pass show` through a pipe and keeps only the first line, and gpg asks for its passphrase through pinentry as usual.
+
+`chainmail daemon` logs JSON lines to stderr and stops cleanly on Ctrl-C or `SIGTERM`. It replaces a stale socket left by a crashed daemon, and refuses to start if another daemon is listening on the path. `--dev` refuses `/var/lib/chainmail` as its state directory, including through a symlink, so a dev daemon needs `--state-dir` or `CHAINMAIL_STATE_DIR`.
 
 ## CLI settings
 
@@ -430,7 +423,7 @@ Two settings apply to every client command: `socket`, the daemon socket, and `ou
     socket = "/run/user/1000/chainmail-dev.sock"
     output = "table"
 
-A missing file holds no settings. The file is a usage error (exit 2) naming it when it cannot be read, is not a regular file (such as a directory or a FIFO), is larger than 64 KiB, does not parse, holds a key other than `socket` and `output`, or holds a value that is not a string. An `output` other than `json` or `table` is a usage error too, naming where it came from, such as `--output must be json or table, got "yaml" from CHAINMAIL_OUTPUT`.
+`socket` takes a literal path: neither `$XDG_RUNTIME_DIR` nor `~` is expanded there, so write the full path, such as a dev daemon's socket at `/run/user/1000/chainmail-dev.sock`. A missing file holds no settings. The file is a usage error (exit 2) naming it when it cannot be read, is not a regular file (such as a directory or a FIFO), is larger than 64 KiB, does not parse, holds a key other than `socket` and `output`, or holds a value that is not a string. An `output` other than `json` or `table` is a usage error too, naming where it came from, such as `--output must be json or table, got "yaml" from CHAINMAIL_OUTPUT`.
 
 Every client command, `chainmail mcp` included, checks the settings before it runs. `help`, `completion`, `man` and `daemon` do not, so a bad `cli.toml` or `CHAINMAIL_OUTPUT` never stops them. The daemon never reads `cli.toml`. Its own config file is separate, and no environment variable can change it.
 
@@ -903,7 +896,7 @@ If the daemon is down or the user cannot reach the socket, `chainmail mcp` still
 | `link_thread` | Links a message's thread to an item, anchored on the message when `anchor` is set, with an optional note. |
 | `unlink_thread` | Removes a thread link, named by the `account` and `thread_key` that `get_item` lists. |
 
-Inputs take refs, addresses and folder names as plain strings. Outputs give dates in RFC 3339. A message's `flags` are the system flags by short name: `seen`, `flagged`, `answered`, `draft` and `deleted`. Every other flag, such as `$Forwarded`, is in `keywords`, as untrusted. The send and draft tools take `attachments` and `inline[].path` as absolute file paths. The batch tools take 1 to 500 refs. Every tool sets the four MCP annotations: the read and file tools are read-only, and `expunge` and `delete_folder` are destructive. `get_item` and `list_items` are read-only and idempotent. `create_item` and `edit_criteria` are neither, since a retry without a key makes a second item and a retried add appends again. The other item tools are idempotent and not destructive, since deletes are soft. No item tool is open world. `read_events` changes no mail, but it is neither read-only nor idempotent, since a read with a group moves the group's acknowledged position. It is not destructive. `update_draft`, `send_draft` and `delete_draft` are destructive while the policy allows expunge on at least one account, since the daemon then expunges the old draft instead of moving it to Trash, and are not destructive otherwise. No other annotation depends on the policy.
+Inputs take refs, addresses and folder names as plain strings. Outputs give dates in RFC 3339. A message's `flags` are the system flags by short name: `seen`, `flagged`, `answered`, `draft` and `deleted`. Every other flag, such as `$Forwarded`, is in `keywords`, as untrusted. The send and draft tools take `attachments` and `inline[].path` as absolute file paths. Their `body_format` is `markdown` (the default), `text` or `html`, as `--text` and `--html-file` choose on the CLI, and with `html` the `body` holds the HTML and the optional `html_text` gives the plain-text part, which is otherwise converted from the HTML. They also take `headers`, extra headers for the message: `Reply-To` and headers starting with `X-` only. Any other name, a value with a line break, or the same name twice in different case fails with `INVALID_ARGUMENT`. The CLI has no flag for extra headers. The batch tools take 1 to 500 refs. Every tool sets the four MCP annotations: the read and file tools are read-only, and `expunge` and `delete_folder` are destructive. `get_item` and `list_items` are read-only and idempotent. `create_item` and `edit_criteria` are neither, since a retry without a key makes a second item and a retried add appends again. The other item tools are idempotent and not destructive, since deletes are soft. No item tool is open world. `read_events` changes no mail, but it is neither read-only nor idempotent, since a read with a group moves the group's acknowledged position. It is not destructive. `update_draft`, `send_draft` and `delete_draft` are destructive while the policy allows expunge on at least one account, since the daemon then expunges the old draft instead of moving it to Trash, and are not destructive otherwise. No other annotation depends on the policy.
 
 `expunge` and `delete_folder` are listed only while the policy allows them on at least one account, as `list_accounts` reports. The server asks the daemon at start, and again before a `tools/list` once its last check is 60 seconds old. It runs no timer, so an idle session writes no audit rows. Each check is one `accounts.list` row. The same check sets the draft tools' `destructiveHint`. When the answer changes the list or that hint, the server sends `notifications/tools/list_changed`. While the daemon cannot be reached, the two tools are not listed and the draft tools are not marked destructive. A check cut short because the client cancelled its `tools/list` changes nothing, and the next `tools/list` checks again. The daemon still checks the policy on every call, so a stale list leads at worst to a `POLICY_DENIED` result.
 
@@ -1016,7 +1009,7 @@ chainmail watch groups delete <name>
 
 Where a read starts:
 
-- `--group <name>` resumes after the group's acknowledged event. A group is created the first time it is used, at the newest event, so a new group sees only what comes after. Group names match `^[a-z0-9][a-z0-9._-]{0,63}$`.
+- `--group <name>` resumes after the group's acknowledged event. A group is created the first time it is used, at the newest event, so a new group sees only what comes after. Group names match `^[a-z0-9][a-z0-9._-]{0,63}$` and may not start with `cache.`, which names the groups the daemon's cache reads the log through.
 - `--since <id>` resumes after that event ID, or after a heartbeat's position.
 - Neither starts with the events that arrive from now on.
 
@@ -1024,7 +1017,7 @@ Where a read starts:
 
 A start older than the oldest event kept, after a trim, first gets a `trimmed` gap, then goes on from the oldest event. A start past the newest event, as when `state.db` was reset under a watcher, gets one `trimmed` gap and goes on from the newest event, and a group acknowledged past it is reset there.
 
-The daemon trims the log when it starts and every hour after. It removes events older than `watch.retention` or beyond `watch.max_events`, oldest first, whatever any group has acknowledged. A group that falls further behind than that gets a gap. A group not used for longer than `watch.retention` is removed with the events. `chainmail watch groups` lists the groups with the event each has acknowledged and how many events lie past it, and `chainmail watch groups delete <name>` removes one.
+The daemon trims the log when it starts and every hour after. It removes events older than `watch.retention` or beyond `watch.max_events`, oldest first, whatever any group has acknowledged. A group that falls further behind than that gets a gap. A group not used for longer than `watch.retention` is removed with the events, except the cache's own `cache.` groups, which never expire. `chainmail watch groups` lists the groups, leaving out the cache's, with the event each has acknowledged and how many events lie past it, and `chainmail watch groups delete <name>` removes one.
 
 ### Delivery
 
@@ -1382,11 +1375,11 @@ Seal the vault key to the host's TPM on the host itself, then commit the `.cred`
 sudo systemd-creds encrypt --with-key=tpm2 --name=vault-key ~/.config/chainmail-dev/vault-key chainmail-vault-key.cred
 ```
 
-The first start creates `/var/lib/chainmail` with an empty vault. To move a dev daemon's state over, stop the dev daemon first, so SQLite folds its write-ahead log into `state.db` and no settled send is lost. If a `state.db-wal` file is still there afterwards, copy it along with `state.db`. Then stop `chainmail.service`, copy `vault.age` and `state.db` into `/var/lib/chainmail/` owned by `chainmail:chainmail` with mode `0600`, and start it again. Client users then reach it through the default socket, so `chainmail accounts list` needs no `--socket`.
+The first start creates `/var/lib/chainmail` with an empty vault. To move a dev daemon's state over, stop the dev daemon first, so SQLite folds its write-ahead log into `state.db` and no settled send is lost. If a `state.db-wal` file is still there afterwards, fold it in with `sqlite3 state.db 'PRAGMA wal_checkpoint(TRUNCATE)'` while the dev daemon is still stopped, so `state.db` is one complete file. A `state.db` copied without its log loses what the log held, idempotency keys included. Then stop `chainmail.service`, delete any `state.db-wal` and `state.db-shm` already in `/var/lib/chainmail/` (left there, SQLite could apply the old database's log to the copied file), copy `vault.age` and `state.db` into `/var/lib/chainmail/` owned by `chainmail:chainmail` with mode `0600`, and start it again. The [runbook](docs/RUNBOOK.md#56-move-a-dev-daemons-state-to-production) has the full procedure with checks. Client users reach it through the default socket, `/run/chainmail/chainmail.sock`. A `socket` line in `cli.toml` and `CHAINMAIL_SOCKET` both win over that default, so remove the dev `socket` line from each client user's `cli.toml` and any `CHAINMAIL_SOCKET` setting. Check the move with an explicit socket, which works either way: `chainmail accounts list --socket /run/chainmail/chainmail.sock`.
 
 The cache needs no NixOS settings. `cache.db` is created in the service's state directory, `/var/lib/chainmail`, beside `state.db`. To tune it, set `services.chainmail.settings.cache` (for example `cache.prefetch_bodies = "30d";`), or per account `settings.accounts.<name>.cache`. `cache.db` need not move with the rest of the state: a new daemon builds its own.
 
-On x86_64-linux, `nix flake check` also runs a NixOS VM test of the module, which starts the service and checks its user, directories, socket permissions, the policy table in the config, and that only client users can connect.
+On x86_64-linux, `nix flake check` also runs a NixOS VM test of the module, which starts the service and checks its user, directories, socket permissions, the policy table in the config, and that only client users can connect. A second check evaluates the module with another client group and with a socket outside `/run/chainmail/`, and requires both to fail evaluation. The module also refuses a `vaultKeyCredential` that is neither a Nix path nor an absolute path.
 
 ## Connection probing and pool sizing
 
