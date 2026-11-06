@@ -49,6 +49,13 @@ var toolRPC = map[string]string{
 	"update_item":         chainmailv1connect.ItemsServiceUpdateItemProcedure,
 	"get_item":            chainmailv1connect.ItemsServiceGetItemProcedure,
 	"list_items":          chainmailv1connect.ItemsServiceListItemsProcedure,
+	"delete_item":         chainmailv1connect.ItemsServiceDeleteItemProcedure,
+	"restore_item":        chainmailv1connect.ItemsServiceRestoreItemProcedure,
+	"edit_criteria":       chainmailv1connect.ItemsServiceEditCriteriaProcedure,
+	"tick_criterion":      chainmailv1connect.ItemsServiceTickCriterionProcedure,
+	"set_blocker":         chainmailv1connect.ItemsServiceSetBlockerProcedure,
+	"link_thread":         chainmailv1connect.ItemsServiceLinkThreadProcedure,
+	"unlink_thread":       chainmailv1connect.ItemsServiceUnlinkThreadProcedure,
 }
 
 // leftOut lists agent-facing RPCs with no tool, and why (spec section 4).
@@ -63,14 +70,6 @@ var leftOut = map[string]string{
 	chainmailv1connect.WatchServiceDeleteGroupProcedure:        "group administration for operators",
 	chainmailv1connect.CacheServiceRebuildCacheProcedure:       "an operator action that drops cached mail and downloads it again",
 	chainmailv1connect.CacheServiceEvictCacheProcedure:         "an operator action; the daemon evicts bodies on its own",
-	// Temporary: the later cycles of T11 add these tools and delete the entries.
-	chainmailv1connect.ItemsServiceDeleteItemProcedure:    "T11 cycle D adds delete_item",
-	chainmailv1connect.ItemsServiceRestoreItemProcedure:   "T11 cycle D adds restore_item",
-	chainmailv1connect.ItemsServiceEditCriteriaProcedure:  "T11 cycle D adds edit_criteria",
-	chainmailv1connect.ItemsServiceTickCriterionProcedure: "T11 cycle D adds tick_criterion",
-	chainmailv1connect.ItemsServiceSetBlockerProcedure:    "T11 cycle D adds set_blocker",
-	chainmailv1connect.ItemsServiceLinkThreadProcedure:    "T11 cycle D adds link_thread",
-	chainmailv1connect.ItemsServiceUnlinkThreadProcedure:  "T11 cycle D adds unlink_thread",
 }
 
 // ignored lists request fields no tool sets, keyed "<procedure> <field path>", and why.
@@ -232,6 +231,16 @@ func coverageSamples(file string) map[string][]map[string]any {
 			"type": "task", "state": "backlog", "area": "work", "under": "it_a", "inbox": true, "ongoing": false,
 			"include_deleted": true, "changed_since": 3, "limit": 10, "page_token": "p",
 		}},
+		"delete_item":  {{"id": "it_a", "cascade": true}},
+		"restore_item": {{"id": "it_a", "cascade": true}},
+		"edit_criteria": {{
+			"item_id": "it_a", "remove": []string{"cr_a"}, "edit": []map[string]string{{"id": "cr_b", "text": "t"}},
+			"order": []string{"cr_b"}, "add": []string{"n"},
+		}},
+		"tick_criterion": {{"item_id": "it_a", "criterion_id": "cr_a", "ticked": true, "evidence": "e"}},
+		"set_blocker":    {{"item_id": "it_a", "blocked_by_id": "it_b", "linked": true}},
+		"link_thread":    {{"item_id": "it_a", "ref": testRef, "anchor": true, "note": "n"}},
+		"unlink_thread":  {{"item_id": "it_a", "account": "work", "thread_key": "1a2b"}},
 	}
 }
 

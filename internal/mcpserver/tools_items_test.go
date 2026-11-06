@@ -2,11 +2,13 @@ package mcpserver
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -500,5 +502,410 @@ func TestListItemsOutput(t *testing.T) {
 				t.Errorf("text = %q, want the summary %q first", text, tt.summary)
 			}
 		})
+	}
+}
+
+// itemsAnswering fakes every ItemsService RPC, with text in every item text
+// field of every answer.
+func itemsAnswering(text string) *fakeDaemon {
+	return &fakeDaemon{
+		CreateItem: func(context.Context, *chainmailv1.CreateItemRequest) (*chainmailv1.CreateItemResponse, error) {
+			return &chainmailv1.CreateItemResponse{Item: itemAnswer(text), Criteria: criteriaAnswer(text, text)}, nil
+		},
+		UpdateItem: func(context.Context, *chainmailv1.UpdateItemRequest) (*chainmailv1.UpdateItemResponse, error) {
+			return &chainmailv1.UpdateItemResponse{Item: itemAnswer(text)}, nil
+		},
+		GetItem: func(context.Context, *chainmailv1.GetItemRequest) (*chainmailv1.GetItemResponse, error) {
+			return getItemAnswer(text), nil
+		},
+		ListItems: func(context.Context, *chainmailv1.ListItemsRequest) (*chainmailv1.ListItemsResponse, error) {
+			return &chainmailv1.ListItemsResponse{Items: []*chainmailv1.WorkItemRow{
+				itemRowAnswer("it_admin_work", "initiative", text, 0), itemRowAnswer("it_01jc0story", "story", text, 1),
+			}, NextPageToken: "dDoy", Revision: 41}, nil
+		},
+		DeleteItem: func(context.Context, *chainmailv1.DeleteItemRequest) (*chainmailv1.DeleteItemResponse, error) {
+			return &chainmailv1.DeleteItemResponse{Ids: []string{"it_01jc0story", "it_01jc0task"}, Revision: 13}, nil
+		},
+		RestoreItem: func(context.Context, *chainmailv1.RestoreItemRequest) (*chainmailv1.RestoreItemResponse, error) {
+			return &chainmailv1.RestoreItemResponse{Ids: []string{"it_01jc0story", "it_01jc0task"}, Revision: 14}, nil
+		},
+		EditCriteria: func(context.Context, *chainmailv1.EditCriteriaRequest) (*chainmailv1.EditCriteriaResponse, error) {
+			return &chainmailv1.EditCriteriaResponse{Criteria: criteriaAnswer(text, text), Revision: 15}, nil
+		},
+		TickCriterion: func(context.Context, *chainmailv1.TickCriterionRequest) (*chainmailv1.TickCriterionResponse, error) {
+			return &chainmailv1.TickCriterionResponse{Criterion: criteriaAnswer(text, text)[0], Revision: 16}, nil
+		},
+		SetBlocker: func(context.Context, *chainmailv1.SetBlockerRequest) (*chainmailv1.SetBlockerResponse, error) {
+			return &chainmailv1.SetBlockerResponse{Changed: true, Revision: 17}, nil
+		},
+		LinkThread: func(context.Context, *chainmailv1.LinkThreadRequest) (*chainmailv1.LinkThreadResponse, error) {
+			return &chainmailv1.LinkThreadResponse{Link: linkAnswer(text), Created: true, Revision: 18}, nil
+		},
+		UnlinkThread: func(context.Context, *chainmailv1.UnlinkThreadRequest) (*chainmailv1.UnlinkThreadResponse, error) {
+			return &chainmailv1.UnlinkThreadResponse{Revision: 19}, nil
+		},
+	}
+}
+
+// itemsFailing fakes every ItemsService RPC as failing with err.
+func itemsFailing(err error) *fakeDaemon {
+	return &fakeDaemon{
+		CreateItem: func(context.Context, *chainmailv1.CreateItemRequest) (*chainmailv1.CreateItemResponse, error) {
+			return nil, err
+		},
+		UpdateItem: func(context.Context, *chainmailv1.UpdateItemRequest) (*chainmailv1.UpdateItemResponse, error) {
+			return nil, err
+		},
+		GetItem: func(context.Context, *chainmailv1.GetItemRequest) (*chainmailv1.GetItemResponse, error) {
+			return nil, err
+		},
+		ListItems: func(context.Context, *chainmailv1.ListItemsRequest) (*chainmailv1.ListItemsResponse, error) {
+			return nil, err
+		},
+		DeleteItem: func(context.Context, *chainmailv1.DeleteItemRequest) (*chainmailv1.DeleteItemResponse, error) {
+			return nil, err
+		},
+		RestoreItem: func(context.Context, *chainmailv1.RestoreItemRequest) (*chainmailv1.RestoreItemResponse, error) {
+			return nil, err
+		},
+		EditCriteria: func(context.Context, *chainmailv1.EditCriteriaRequest) (*chainmailv1.EditCriteriaResponse, error) {
+			return nil, err
+		},
+		TickCriterion: func(context.Context, *chainmailv1.TickCriterionRequest) (*chainmailv1.TickCriterionResponse, error) {
+			return nil, err
+		},
+		SetBlocker: func(context.Context, *chainmailv1.SetBlockerRequest) (*chainmailv1.SetBlockerResponse, error) {
+			return nil, err
+		},
+		LinkThread: func(context.Context, *chainmailv1.LinkThreadRequest) (*chainmailv1.LinkThreadResponse, error) {
+			return nil, err
+		},
+		UnlinkThread: func(context.Context, *chainmailv1.UnlinkThreadRequest) (*chainmailv1.UnlinkThreadResponse, error) {
+			return nil, err
+		},
+	}
+}
+
+// itemCalls is a valid call of every item tool.
+var itemCalls = map[string]map[string]any{
+	"create_item":    {"type": "task", "title": "Pay invoice", "area": "work"},
+	"update_item":    {"id": "it_01jc0story", "title": "Paid"},
+	"get_item":       {"id": "it_01jc0story"},
+	"list_items":     {},
+	"delete_item":    {"id": "it_01jc0story", "cascade": true},
+	"restore_item":   {"id": "it_01jc0story", "cascade": true},
+	"edit_criteria":  {"item_id": "it_01jc0story", "add": []string{"Receipt filed"}},
+	"tick_criterion": {"item_id": "it_01jc0story", "criterion_id": "cr_01a", "ticked": true, "evidence": "Bank ref 991"},
+	"set_blocker":    {"item_id": "it_01jc0story", "blocked_by_id": "it_01jc0other", "linked": true},
+	"link_thread":    {"item_id": "it_01jc0story", "ref": testRef},
+	"unlink_thread":  {"item_id": "it_01jc0story", "account": "work", "thread_key": "18c0ffee"},
+}
+
+func TestWriteItemToolRequests(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		tool string
+		args map[string]any
+		proc string
+		want proto.Message
+	}{
+		{
+			name: "delete one", tool: "delete_item", args: map[string]any{"id": "it_a"},
+			proc: chainmailv1connect.ItemsServiceDeleteItemProcedure, want: &chainmailv1.DeleteItemRequest{Id: "it_a"},
+		},
+		{
+			name: "delete a subtree", tool: "delete_item", args: map[string]any{"id": "it_a", "cascade": true},
+			proc: chainmailv1connect.ItemsServiceDeleteItemProcedure, want: &chainmailv1.DeleteItemRequest{Id: "it_a", Cascade: true},
+		},
+		{
+			name: "restore a subtree", tool: "restore_item", args: map[string]any{"id": "it_a", "cascade": true},
+			proc: chainmailv1connect.ItemsServiceRestoreItemProcedure, want: &chainmailv1.RestoreItemRequest{Id: "it_a", Cascade: true},
+		},
+		{
+			name: "every criteria edit", tool: "edit_criteria",
+			args: map[string]any{
+				"item_id": "it_a", "remove": []string{"cr_1"}, "edit": []map[string]any{{"id": "cr_2", "text": "Reworded"}},
+				"order": []string{"cr_3", "cr_2"}, "add": []string{"New one"},
+			},
+			proc: chainmailv1connect.ItemsServiceEditCriteriaProcedure,
+			want: &chainmailv1.EditCriteriaRequest{
+				ItemId: "it_a", Remove: []string{"cr_1"}, Edit: []*chainmailv1.CriterionText{{Id: "cr_2", Text: "Reworded"}},
+				Order: []string{"cr_3", "cr_2"}, Add: []string{"New one"},
+			},
+		},
+		{
+			name: "add criteria only", tool: "edit_criteria", args: map[string]any{"item_id": "it_a", "add": []string{"x", "y"}},
+			proc: chainmailv1connect.ItemsServiceEditCriteriaProcedure, want: &chainmailv1.EditCriteriaRequest{ItemId: "it_a", Add: []string{"x", "y"}},
+		},
+		{
+			name: "tick", tool: "tick_criterion",
+			args: map[string]any{"item_id": "it_a", "criterion_id": "cr_1", "ticked": true, "evidence": "Paid on 2026-11-05"},
+			proc: chainmailv1connect.ItemsServiceTickCriterionProcedure,
+			want: &chainmailv1.TickCriterionRequest{ItemId: "it_a", CriterionId: "cr_1", Ticked: true, Evidence: "Paid on 2026-11-05"},
+		},
+		{
+			name: "untick", tool: "tick_criterion", args: map[string]any{"item_id": "it_a", "criterion_id": "cr_1", "ticked": false},
+			proc: chainmailv1connect.ItemsServiceTickCriterionProcedure,
+			want: &chainmailv1.TickCriterionRequest{ItemId: "it_a", CriterionId: "cr_1"},
+		},
+		{
+			name: "add a blocker", tool: "set_blocker", args: map[string]any{"item_id": "it_a", "blocked_by_id": "it_b", "linked": true},
+			proc: chainmailv1connect.ItemsServiceSetBlockerProcedure,
+			want: &chainmailv1.SetBlockerRequest{ItemId: "it_a", BlockedById: "it_b", Linked: true},
+		},
+		{
+			name: "remove a blocker", tool: "set_blocker", args: map[string]any{"item_id": "it_a", "blocked_by_id": "it_b", "linked": false},
+			proc: chainmailv1connect.ItemsServiceSetBlockerProcedure,
+			want: &chainmailv1.SetBlockerRequest{ItemId: "it_a", BlockedById: "it_b"},
+		},
+		{
+			name: "link with an anchor and a note", tool: "link_thread",
+			args: map[string]any{"item_id": "it_a", "ref": testRef, "anchor": true, "note": "the quote"},
+			proc: chainmailv1connect.ItemsServiceLinkThreadProcedure,
+			want: &chainmailv1.LinkThreadRequest{ItemId: "it_a", Ref: testRef, Anchor: true, Note: "the quote"},
+		},
+		{
+			name: "link alone", tool: "link_thread", args: map[string]any{"item_id": "it_a", "ref": testRef},
+			proc: chainmailv1connect.ItemsServiceLinkThreadProcedure, want: &chainmailv1.LinkThreadRequest{ItemId: "it_a", Ref: testRef},
+		},
+		{
+			name: "unlink", tool: "unlink_thread", args: map[string]any{"item_id": "it_a", "account": "work", "thread_key": "18c0ffee"},
+			proc: chainmailv1connect.ItemsServiceUnlinkThreadProcedure,
+			want: &chainmailv1.UnlinkThreadRequest{ItemId: "it_a", Account: "work", ThreadKey: "18c0ffee"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnv(t, &fakeDaemon{}, latest)
+			e.call(t, tt.tool, tt.args)
+			if got := e.fake.lastCall(t, tt.proc).Msg; !proto.Equal(got, tt.want) {
+				t.Errorf("request = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWriteItemToolOutputs(t *testing.T) {
+	t.Parallel()
+	const text = "Pay invoice"
+	tests := []struct {
+		tool string
+		want any
+	}{
+		{tool: "delete_item", want: itemIDsOut{IDs: []string{"it_01jc0story", "it_01jc0task"}, Revision: 13}},
+		{tool: "restore_item", want: itemIDsOut{IDs: []string{"it_01jc0story", "it_01jc0task"}, Revision: 14}},
+		{tool: "edit_criteria", want: editCriteriaOut{Criteria: criteriaOut(text, text), Revision: 15}},
+		{tool: "tick_criterion", want: tickCriterionOut{Criterion: criteriaOut(text, text)[0], Revision: 16}},
+		{tool: "set_blocker", want: setBlockerOut{Changed: true, Revision: 17}},
+		{tool: "link_thread", want: linkThreadOut{Link: linkOut(text), Created: true, Revision: 18}},
+		{tool: "unlink_thread", want: unlinkThreadOut{Revision: 19}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.tool, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnv(t, itemsAnswering(text), latest)
+			res := e.call(t, tt.tool, itemCalls[tt.tool])
+			wantOK(t, res)
+			got := reflect.New(reflect.TypeOf(tt.want))
+			decode(t, res, got.Interface())
+			if !reflect.DeepEqual(got.Elem().Interface(), tt.want) {
+				t.Errorf("%s =\n%+v\nwant\n%+v", tt.tool, got.Elem().Interface(), tt.want)
+			}
+		})
+	}
+}
+
+// TestItemToolSummaries pins each tool's first line. Tools whose output
+// holds no item text answer in plain text, without untrusted markers.
+func TestItemToolSummaries(t *testing.T) {
+	t.Parallel()
+	unchanged := &fakeDaemon{SetBlocker: func(context.Context, *chainmailv1.SetBlockerRequest) (*chainmailv1.SetBlockerResponse, error) {
+		return &chainmailv1.SetBlockerResponse{Revision: 17}, nil
+	}}
+	relinked := &fakeDaemon{LinkThread: func(context.Context, *chainmailv1.LinkThreadRequest) (*chainmailv1.LinkThreadResponse, error) {
+		return &chainmailv1.LinkThreadResponse{Link: linkAnswer("x"), Revision: 18}, nil
+	}}
+	tests := []struct {
+		name    string
+		fake    *fakeDaemon // nil means itemsAnswering
+		tool    string
+		args    map[string]any
+		summary string
+		plain   bool
+	}{
+		{name: "create", tool: "create_item", summary: "created story it_01jc0story at revision 12"},
+		{name: "update", tool: "update_item", summary: "updated story it_01jc0story at revision 12"},
+		{name: "get", tool: "get_item", summary: "story it_01jc0story: 2 criteria, 1 of 3 children, 3 of 3 threads"},
+		{name: "list", tool: "list_items", summary: "2 items at revision 41; pass next_page_token as page_token for the next page"},
+		{name: "delete", tool: "delete_item", summary: "deleted 2 items at revision 13", plain: true},
+		{name: "restore", tool: "restore_item", summary: "restored 2 items at revision 14", plain: true},
+		{name: "edit criteria", tool: "edit_criteria", summary: "it_01jc0story has 2 criteria at revision 15"},
+		{name: "tick", tool: "tick_criterion", summary: "ticked criterion cr_01a of it_01jc0story at revision 16"},
+		{
+			name: "untick", tool: "tick_criterion", args: map[string]any{"item_id": "it_01jc0story", "criterion_id": "cr_01a", "ticked": false},
+			summary: "unticked criterion cr_01a of it_01jc0story at revision 16",
+		},
+		{name: "block", tool: "set_blocker", summary: "it_01jc0story is now blocked by it_01jc0other at revision 17", plain: true},
+		{
+			name: "unblock", tool: "set_blocker", args: map[string]any{"item_id": "it_01jc0story", "blocked_by_id": "it_01jc0other", "linked": false},
+			summary: "it_01jc0story is no longer blocked by it_01jc0other at revision 17", plain: true,
+		},
+		{name: "blocker unchanged", fake: unchanged, tool: "set_blocker", summary: "nothing changed; the revision is still 17", plain: true},
+		{name: "link", tool: "link_thread", summary: "linked a thread of work to it_01jc0story at revision 18"},
+		{name: "relink", fake: relinked, tool: "link_thread", summary: "the thread was already linked to it_01jc0story; anchor and note applied at revision 18"},
+		{name: "unlink", tool: "unlink_thread", summary: "unlinked thread 18c0ffee of work from it_01jc0story at revision 19", plain: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := tt.fake
+			if f == nil {
+				f = itemsAnswering("Pay invoice")
+			}
+			args := tt.args
+			if args == nil {
+				args = itemCalls[tt.tool]
+			}
+			e := newTestEnv(t, f, latest)
+			res := e.call(t, tt.tool, args)
+			wantOK(t, res)
+			text := textOf(res)
+			if !strings.HasPrefix(text, tt.summary+"\n") {
+				t.Errorf("text = %q, want the summary %q first", text, tt.summary)
+			}
+			if marked := strings.Contains(text, "<<<chainmail-untrusted "); marked == tt.plain {
+				t.Errorf("untrusted markers present = %t, want %t: %q", marked, !tt.plain, text)
+			}
+		})
+	}
+}
+
+// TestItemToolsWrapItemText: item text reaches the client only as
+// untrusted data, in the structured content and between the markers, and
+// so does the newest message of a link.
+func TestItemToolsWrapItemText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		tool string
+		want int
+	}{
+		{tool: "create_item", want: 4},    // title, description, criterion text, evidence
+		{tool: "update_item", want: 2},    // title, description
+		{tool: "get_item", want: 10},      // title, description, criterion, evidence, ancestor, child, blocked_by, blocks, note, subject
+		{tool: "list_items", want: 2},     // two row titles
+		{tool: "edit_criteria", want: 2},  // criterion text, evidence
+		{tool: "tick_criterion", want: 2}, // criterion text, evidence
+		{tool: "link_thread", want: 2},    // note, subject
+	}
+	for _, tt := range tests {
+		t.Run(tt.tool, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnv(t, itemsAnswering(readHostile), latest)
+			res := e.call(t, tt.tool, itemCalls[tt.tool])
+			wantOK(t, res)
+			if n := readWrappedOnly(t, res.StructuredContent, readHostile); n != tt.want {
+				t.Errorf("%d enveloped hostile strings, want %d", n, tt.want)
+			}
+			readInsideMarkers(t, textOf(res), readHostile)
+		})
+	}
+}
+
+func TestItemToolsPassDaemonErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                      string
+		err                       error
+		reason, inMessage, inHint string
+	}{
+		{
+			name:   "the daemon's detail is kept",
+			err:    api.New(connect.CodeNotFound, api.ReasonNotFound, "run: chainmail item list", errors.New("item not found")),
+			reason: api.ReasonNotFound, inMessage: "item not found", inHint: "run: chainmail item list",
+		},
+		{
+			name:   "a refused rule keeps its hint",
+			err:    api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, "use a new idempotency_key for a different item", errors.New("idempotency key already used for a different request")),
+			reason: api.ReasonInvalidArgument, inMessage: "idempotency key already used", inHint: "new idempotency_key",
+		},
+		{
+			name:   "a bare error gets fixed text",
+			err:    errors.New("disk I/O error at /var/lib/chainmail/state.db"),
+			reason: api.ReasonInternal, inMessage: "internal error", inHint: "tell James",
+		},
+	}
+	for tool, args := range itemCalls {
+		for _, tt := range tests {
+			t.Run(tool+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				e := newTestEnv(t, itemsFailing(tt.err), latest)
+				res := e.call(t, tool, args)
+				body := wantError(t, res, tt.reason)
+				if !strings.Contains(body.Message, tt.inMessage) || !strings.Contains(body.Hint, tt.inHint) {
+					t.Errorf("error = %+v, want a message with %q and a hint with %q", body, tt.inMessage, tt.inHint)
+				}
+				if strings.Contains(textOf(res), "/var/lib/chainmail") {
+					t.Errorf("the daemon's own error text leaked: %q", textOf(res))
+				}
+			})
+		}
+	}
+}
+
+// TestItemToolAnnotations pins each item tool's title and hints (C11), and
+// that every tool whose output holds item text says it is untrusted.
+func TestItemToolAnnotations(t *testing.T) {
+	t.Parallel()
+	type want struct {
+		title     string
+		h         hints
+		untrusted bool
+	}
+	read := hints{readOnly: true, idempotent: true}
+	write := hints{idempotent: true}
+	table := map[string]want{
+		"create_item":    {"Create a work item", hints{}, true},
+		"update_item":    {"Update a work item", write, true},
+		"get_item":       {"Show a work item", read, true},
+		"list_items":     {"List work items", read, true},
+		"delete_item":    {"Delete a work item", write, false},
+		"restore_item":   {"Restore a work item", write, false},
+		"edit_criteria":  {"Edit acceptance criteria", hints{}, true},
+		"tick_criterion": {"Tick a criterion", write, true},
+		"set_blocker":    {"Set a blocker", write, false},
+		"link_thread":    {"Link a thread to an item", write, true},
+		"unlink_thread":  {"Unlink a thread from an item", write, false},
+	}
+	e := newTestEnv(t, &fakeDaemon{}, latest)
+	res, err := e.cs.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, tl := range res.Tools {
+		w, ok := table[tl.Name]
+		if !ok {
+			continue
+		}
+		seen[tl.Name] = true
+		a := tl.Annotations
+		if a == nil || a.DestructiveHint == nil || a.OpenWorldHint == nil {
+			t.Errorf("%s: annotations %+v leave a hint unset", tl.Name, a)
+			continue
+		}
+		got := hints{a.ReadOnlyHint, *a.DestructiveHint, a.IdempotentHint, *a.OpenWorldHint}
+		if got != w.h || tl.Title != w.title || a.Title != w.title {
+			t.Errorf("%s: title %q, hints %+v; want %q, %+v", tl.Name, tl.Title, got, w.title, w.h)
+		}
+		if w.untrusted && !strings.Contains(tl.Description, "untrusted") {
+			t.Errorf("%s: description does not say item text is untrusted: %q", tl.Name, tl.Description)
+		}
+	}
+	for name := range table {
+		if !seen[name] {
+			t.Errorf("%s is not listed", name)
+		}
 	}
 }

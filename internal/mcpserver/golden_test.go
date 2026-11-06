@@ -59,8 +59,8 @@ func TestToolsListGolden(t *testing.T) {
 // not idempotent either. cache_status, added in SP7, reads only the
 // daemon's own state, so like list_accounts it is not open world.
 // The SP13 item tools change only the daemon's own state, so none is open
-// world; deletes are soft, so none is destructive; create_item alone is not
-// idempotent.
+// world; deletes are soft, so none is destructive; create_item and
+// edit_criteria, whose retried add appends again, are not idempotent.
 func TestAnnotationsMatchTheSpec(t *testing.T) {
 	t.Parallel()
 	type h struct{ readOnly, destructive, idempotent, openWorld bool }
@@ -81,6 +81,10 @@ func TestAnnotationsMatchTheSpec(t *testing.T) {
 		"create_item":  {false, false, false, false},
 		"update_item":  {false, false, true, false},
 		"get_item":     {true, false, true, false}, "list_items": {true, false, true, false},
+		"delete_item": {false, false, true, false}, "restore_item": {false, false, true, false},
+		"edit_criteria": {false, false, false, false}, "tick_criterion": {false, false, true, false},
+		"set_blocker": {false, false, true, false}, "link_thread": {false, false, true, false},
+		"unlink_thread": {false, false, true, false},
 	}
 	for name, st := range map[string]struct {
 		policy  *gatePolicy
