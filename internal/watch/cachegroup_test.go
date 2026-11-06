@@ -11,15 +11,15 @@ import (
 // client groups. No name is both.
 func TestCacheGroupNames(t *testing.T) {
 	t.Parallel()
-	if got := CacheGroup("ainslies"); got != "cache.ainslies" {
-		t.Errorf("CacheGroup(ainslies) = %q, want cache.ainslies", got)
+	if got := CacheGroup("personal"); got != "cache.personal" {
+		t.Errorf("CacheGroup(personal) = %q, want cache.personal", got)
 	}
 	long := strings.Repeat("a", 63)
 	tests := []struct {
 		name          string
 		cache, client bool
 	}{
-		{"cache.ainslies", true, false},
+		{"cache.personal", true, false},
 		{"cache.a", true, false},
 		{"cache.0", true, false},
 		{"cache.work-2", true, false},
@@ -56,13 +56,13 @@ func TestCacheGroupNames(t *testing.T) {
 func TestCacheGroupInLog(t *testing.T) {
 	t.Parallel()
 	l, _, clock := newLog(t)
-	name := CacheGroup("ainslies")
-	publish(t, l, newEvent("ainslies", "INBOX", 1), newEvent("ainslies", "INBOX", 2), newEvent("ainslies", "INBOX", 3))
+	name := CacheGroup("personal")
+	publish(t, l, newEvent("personal", "INBOX", 1), newEvent("personal", "INBOX", 2), newEvent("personal", "INBOX", 3))
 	acked, created, err := l.Group(t.Context(), name)
 	if err != nil || acked != 3 || !created {
 		t.Fatalf("Group(%s) = %d, %v, %v, want 3, true, nil", name, acked, created, err)
 	}
-	publish(t, l, newEvent("ainslies", "INBOX", 4))
+	publish(t, l, newEvent("personal", "INBOX", 4))
 	if err := l.Ack(t.Context(), name, 4); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}

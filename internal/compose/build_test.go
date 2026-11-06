@@ -42,7 +42,7 @@ func (r *seqReader) Read(p []byte) (int, error) {
 
 func baseSpec() Spec {
 	return Spec{
-		From:      mail.Address{Name: "James Ainslie", Address: "james@example.com"},
+		From:      mail.Address{Name: "James Example", Address: "james@example.com"},
 		To:        []mail.Address{{Name: "Ann Smith", Address: "ann@example.org"}},
 		Subject:   "Hello",
 		Body:      Body{Kind: Markdown, Source: "Hello **world**.\n"},
@@ -62,7 +62,7 @@ func replyQuote() *Quote {
 
 func forwardQuote() *Quote {
 	return &Quote{
-		Header:  "---------- Forwarded message ---------\nFrom: Ann Smith <ann@example.org>\nDate: Thu, 29 Oct 2026 10:00:00 -0400\nSubject: Plans\nTo: James Ainslie <james@example.com>",
+		Header:  "---------- Forwarded message ---------\nFrom: Ann Smith <ann@example.org>\nDate: Thu, 29 Oct 2026 10:00:00 -0400\nSubject: Plans\nTo: James Example <james@example.com>",
 		Text:    "The plans are attached.\n",
 		HTML:    "<p>The plans are attached.</p>",
 		Forward: true,
@@ -681,7 +681,7 @@ func TestBuildQuote(t *testing.T) {
 			name:       "forward",
 			kind:       Markdown,
 			quote:      forwardQuote,
-			wantText:   "Thanks.\n\n-- \nJames\n\n---------- Forwarded message ---------\nFrom: Ann Smith <ann@example.org>\nDate: Thu, 29 Oct 2026 10:00:00 -0400\nSubject: Plans\nTo: James Ainslie <james@example.com>\n\nThe plans are attached.\n",
+			wantText:   "Thanks.\n\n-- \nJames\n\n---------- Forwarded message ---------\nFrom: Ann Smith <ann@example.org>\nDate: Thu, 29 Oct 2026 10:00:00 -0400\nSubject: Plans\nTo: James Example <james@example.com>\n\nThe plans are attached.\n",
 			wantHTML:   []string{"---------- Forwarded message ---------<br>", "<p>The plans are attached.</p>"},
 			unwantHTML: []string{"<blockquote type=\"cite\">"},
 		},

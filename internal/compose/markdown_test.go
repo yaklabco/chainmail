@@ -20,13 +20,13 @@ func TestRenderMarkdown(t *testing.T) {
 		},
 		{
 			name: "link",
-			src:  "see [chainmail](https://ainslies.us/chainmail)",
-			want: []string{`<a href="https://ainslies.us/chainmail">chainmail</a>`},
+			src:  "see [chainmail](https://example.org/chainmail)",
+			want: []string{`<a href="https://example.org/chainmail">chainmail</a>`},
 		},
 		{
 			name: "autolink",
-			src:  "see https://ainslies.us today",
-			want: []string{`<a href="https://ainslies.us">https://ainslies.us</a>`},
+			src:  "see https://example.org today",
+			want: []string{`<a href="https://example.org">https://example.org</a>`},
 		},
 		{
 			name: "strikethrough",

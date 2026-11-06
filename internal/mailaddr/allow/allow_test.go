@@ -10,7 +10,7 @@ func TestValid(t *testing.T) {
 	}{
 		{"a@b.com", true},
 		{"First.Last+tag@sub.example.org", true},
-		{"*@ainslies.us", true},
+		{"*@example.org", true},
 		{"*@xn--bcher-kva.example", true},
 		{"", false},
 		{"*", false},
