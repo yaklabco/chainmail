@@ -16,6 +16,7 @@ import (
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/gen/chainmail/v1/chainmailv1connect"
 	"github.com/jamesainslie/chainmail/internal/api"
+	"github.com/jamesainslie/chainmail/internal/items"
 )
 
 // itemAt is the time the item fixtures report.
@@ -360,5 +361,123 @@ func TestCompleteItemIDsReadAFullPage(t *testing.T) {
 	want := []proto.Message{&chainmailv1.ListItemsRequest{Limit: itemCompletionLimit}}
 	if reqs := f.requests(); !slices.EqualFunc(reqs, want, proto.Equal) {
 		t.Errorf("requests = %v, want %v", reqs, want)
+	}
+}
+
+// itemListFixture is a page of three rows in tree order: Admin, a task
+// under it, and a deleted inbox task whose title holds an escape sequence
+// and a line break.
+func itemListFixture() *chainmailv1.ListItemsResponse {
+	return &chainmailv1.ListItemsResponse{
+		Items: []*chainmailv1.WorkItemRow{
+			{Id: "it_admin_work", Type: "initiative", Title: ut("Admin"), State: "backlog", EffectiveArea: "work", EffectivePriority: "p2", Ongoing: true, Children: 1, Revision: 1},
+			{
+				Id: "it_task1", Type: "task", Title: ut("Renew the domain"), State: "in-progress", EffectiveArea: "work", EffectivePriority: "p1",
+				DueDate: "2026-11-20", ParentId: "it_admin_work", Depth: 1, CriteriaTotal: 2, CriteriaTicked: 1, Links: 2, Revision: 42,
+			},
+			{Id: "it_task2", Type: "task", Title: ut("Call the \x1b[2Jplumber\nnow"), State: "backlog", EffectiveArea: "personal", EffectivePriority: "p2", Deleted: true, Revision: 57},
+		},
+		NextPageToken: "dDoz", Revision: 57,
+	}
+}
+
+func TestItemListGolden(t *testing.T) {
+	t.Parallel()
+	f := &fakeItems{list: func(*chainmailv1.ListItemsRequest) (*chainmailv1.ListItemsResponse, error) {
+		return itemListFixture(), nil
+	}}
+	socket := startFakeItems(t, f)
+	for _, tt := range []struct{ output, golden string }{
+		{output: "json", golden: "item_list_json"},
+		{output: "table", golden: "item_list_table"},
+	} {
+		t.Run(tt.golden, func(t *testing.T) {
+			t.Parallel()
+			got := runCLI(t, Env{}, "--socket", socket, "--output", tt.output, "item", "list")
+			if got.code != 0 {
+				t.Fatalf("item list: %+v", got)
+			}
+			golden(t, tt.golden, got.stdout)
+		})
+	}
+}
+
+func TestItemListRequestsAndUsage(t *testing.T) {
+	t.Parallel()
+	testItemRequests(t, []itemCase{
+		{name: "list", args: []string{"list"}, want: &chainmailv1.ListItemsRequest{}},
+		{
+			name: "list every flag",
+			args: []string{
+				"list", "--type", "task", "--state", "backlog", "--area", "work", "--under", "it_admin_work", "--inbox",
+				"--ongoing", "--deleted", "--changed-since", "0", "--limit", "200", "--page-token", "dDoz",
+			},
+			want: &chainmailv1.ListItemsRequest{
+				Type: "task", State: "backlog", Area: "work", Under: "it_admin_work", Inbox: true, Ongoing: proto.Bool(true),
+				IncludeDeleted: true, ChangedSince: proto.Int64(0), Limit: 200, PageToken: "dDoz",
+			},
+		},
+		{name: "list not ongoing", args: []string{"list", "--no-ongoing"}, want: &chainmailv1.ListItemsRequest{Ongoing: proto.Bool(false)}},
+	})
+	testItemUsage(t, []itemCase{
+		{name: "list ongoing both ways", args: []string{"list", "--ongoing", "--no-ongoing"}, usage: "--ongoing and --no-ongoing"},
+		{name: "list negative revision", args: []string{"list", "--changed-since", "-1"}, usage: "--changed-since must not be negative"},
+		{name: "list argument", args: []string{"list", "extra"}, usage: "accepts 0 arg(s)"},
+		{name: "list bad limit", args: []string{"list", "--limit", "many"}, usage: "--limit"},
+	})
+}
+
+func TestCompleteItemList(t *testing.T) {
+	t.Parallel()
+	testItemCompletion(t, []itemCase{
+		{name: "under", args: []string{"item", "list", "--under", "it_a"}, cands: []string{"it_admin_work"}},
+		{name: "states", args: []string{"item", "list", "--state", ""}, cands: itemStates},
+		{name: "type prefix", args: []string{"item", "list", "--type", "b"}, cands: []string{"bug"}},
+		{name: "areas", args: []string{"item", "list", "--area", ""}, cands: itemAreas},
+	})
+}
+
+// TestItemValuesMatchTheModel keeps the values help and completion offer
+// in step with the item rules: each parses, in the model's order, and none
+// is missing.
+func TestItemValuesMatchTheModel(t *testing.T) {
+	t.Parallel()
+	wantTypes := []items.Type{
+		items.TypeObjective, items.TypeKeyResult, items.TypeInitiative, items.TypeEpic, items.TypeFeature,
+		items.TypeStory, items.TypeBug, items.TypeSupportTicket, items.TypeTask,
+	}
+	if len(itemTypes) != len(wantTypes) {
+		t.Errorf("itemTypes has %d values, want %d", len(itemTypes), len(wantTypes))
+	}
+	for i, v := range itemTypes {
+		if got, err := items.ParseType(v); err != nil || i >= len(wantTypes) || got != wantTypes[i] {
+			t.Errorf("itemTypes[%d] = %q parses as %q, %v", i, v, got, err)
+		}
+	}
+	wantStates := []string{string(items.StateBacklog), string(items.StateInProgress), string(items.StateInReview), string(items.StateDone)}
+	if !slices.Equal(itemStates, wantStates) {
+		t.Errorf("itemStates = %q, want %q", itemStates, wantStates)
+	}
+	if want := []string{string(items.AreaWork), string(items.AreaPersonal)}; !slices.Equal(itemAreas, want) {
+		t.Errorf("itemAreas = %q, want %q", itemAreas, want)
+	}
+	wantPriorities := []string{string(items.PriorityP0), string(items.PriorityP1), string(items.PriorityP2), string(items.PriorityP3)}
+	if !slices.Equal(itemPriorities, wantPriorities) {
+		t.Errorf("itemPriorities = %q, want %q", itemPriorities, wantPriorities)
+	}
+	for _, v := range itemStates {
+		if _, err := items.ParseState(v); err != nil {
+			t.Errorf("state %q: %v", v, err)
+		}
+	}
+	for _, v := range itemAreas {
+		if _, err := items.ParseArea(v); err != nil {
+			t.Errorf("area %q: %v", v, err)
+		}
+	}
+	for _, v := range itemPriorities {
+		if _, err := items.ParsePriority(v); err != nil {
+			t.Errorf("priority %q: %v", v, err)
+		}
 	}
 }

@@ -1,0 +1,5 @@
+ID             TYPE        STATE        AREA      PRI  DUE         CRITERIA  LINKS  TITLE
+it_admin_work  initiative  backlog      work      p2   -           -         0      Admin (ongoing)
+it_task1       task        in-progress  work      p1   2026-11-20  1/2       2        Renew the domain
+it_task2       task        backlog      personal  p2   -           -         0      Call the [2Jplumber now (deleted)
+more: --page-token dDoz

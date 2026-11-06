@@ -58,6 +58,11 @@ var examples = map[string]string{
 	"chainmail get": `  chainmail get cm1:work:INBOX:7:42
   chainmail get --full cm1:work:INBOX:7:42
   chainmail get --raw cm1:work:INBOX:7:42 > message.eml`,
+	"chainmail item list": `  # the inbox: tasks not yet sorted
+  chainmail item list --inbox
+  chainmail item list --under it_admin_work --state in-progress
+  # everything changed after revision 120, deleted items included
+  chainmail item list --changed-since 120 --output json`,
 	"chainmail item show": `  chainmail item show it_admin_work
   chainmail item show it_01jcb7m2k9r8q3v4w5x6y7z8a9 --output json`,
 	"chainmail label": `  chainmail label cm1:gmail:INBOX:3:17:g1790000000000000001 --add Receipts --remove Todo`,

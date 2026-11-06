@@ -235,3 +235,38 @@ func itemViewText(w io.Writer, loc *time.Location, r *chainmailv1.GetItemRespons
 	}
 	return threadsSection(w, loc, countHeading("threads", len(links), r.GetThreadsTotal()), links)
 }
+
+// criteriaCount shows a row's ticked and total criteria, or "-" with none.
+func criteriaCount(r *chainmailv1.WorkItemRow) string {
+	if r.GetCriteriaTotal() == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d/%d", r.GetCriteriaTicked(), r.GetCriteriaTotal())
+}
+
+// itemListTable prints item list's rows in the order the daemon sent them,
+// each title indented two spaces per level below the top of the listed
+// scope, then the next page's token when there is one.
+func itemListTable(w io.Writer, r *chainmailv1.ListItemsResponse) error {
+	tw := newTable(w)
+	_, _ = fmt.Fprintln(tw, "ID\tTYPE\tSTATE\tAREA\tPRI\tDUE\tCRITERIA\tLINKS\tTITLE")
+	for _, row := range r.GetItems() {
+		depth := int(min(max(row.GetDepth(), 0), maxListDepth))
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s%s\n",
+			termText(row.GetId()), termText(row.GetType()), termText(row.GetState()),
+			orDash(termText(row.GetEffectiveArea())), orDash(termText(row.GetEffectivePriority())),
+			orDash(termText(row.GetDueDate())), criteriaCount(row), row.GetLinks(),
+			strings.Repeat("  ", depth), rowTitle(row))
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if next := r.GetNextPageToken(); next != "" {
+		return writeString(w, "more: --page-token "+termText(next)+"\n")
+	}
+	return nil
+}
+
+// maxListDepth is the deepest indentation item list shows. The hierarchy
+// has seven levels, so only a corrupt depth reaches it.
+const maxListDepth = 10

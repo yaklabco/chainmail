@@ -67,5 +67,9 @@ func (cp *completer) itemSpecs() map[string]compSpec {
 	return map[string]compSpec{
 		"chainmail item":      {args: noComplete},
 		"chainmail item show": {args: cp.items(1)},
+		"chainmail item list": {args: noComplete, flags: map[string]cobra.CompletionFunc{
+			"type": fixed(itemTypes...), "state": fixed(itemStates...), "area": fixed(itemAreas...), "under": cp.items(0),
+			"changed-since": noComplete, "limit": noComplete, "page-token": noComplete,
+		}},
 	}
 }
