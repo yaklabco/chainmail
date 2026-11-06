@@ -541,6 +541,7 @@ var cases = []testCase{
 	{"FetchMessages reads headers and attachments", both, fetchMessages},
 	{"StreamPart streams the message and its parts", both, streamPart},
 	{"Thread", both, thread},
+	{"FindThread finds a thread by its key", both, findThread},
 	{"FetchHeaders keeps order, drops gone UIDs and never sets \\Seen", both, fetchHeaders},
 	{"SearchFolders names the folders Search uses", both, searchFolders},
 }
@@ -1459,6 +1460,51 @@ func thread(e *env) {
 	if err != nil || len(single) != 1 {
 		e.t.Errorf("Thread of a lone message = %v, %v", single, err)
 	}
+}
+
+// findThread: FindThread finds a thread by the key and root a link stores,
+// with no seed message: every member in the default search scope, Trash
+// left out, sorted by folder then UID, and nothing for a key or root no
+// thread has. It never sets \Seen.
+func findThread(e *env) {
+	tf, ok := e.s.(mailstore.ThreadFinder)
+	if !ok {
+		e.t.Fatalf("%T does not implement mailstore.ThreadFinder", e.s)
+	}
+	root := e.msg("CfFindRoot")
+	root.MessageID = "find-root@conformance.test"
+	reply := e.in(e.msg("CfFindReply"), pick(e.gmail, GmailSent, "Sent"))
+	if e.gmail {
+		reply.Labels = []string{`\Sent`}
+	}
+	reply.Date, reply.InReplyTo, reply.References = day(21), root.MessageID, []string{root.MessageID}
+	binned := e.in(e.msg("CfFindBinned"), e.trash())
+	binned.Date, binned.InReplyTo, binned.References = day(22), root.MessageID, []string{root.MessageID}
+	e.seed(e.t, root, reply, binned, e.msg("CfFindOther"))
+	rootSum := e.only("", "CfFindRoot")
+	if rootSum.ThreadID == "" {
+		e.t.Fatal("CfFindRoot has no thread key")
+	}
+	want := []ref.Ref{rootSum.Ref, e.ref("CfFindReply")}
+	sortRefs(want)
+	got, err := tf.FindThread(e.ctx, rootSum.ThreadID, root.MessageID)
+	if err != nil {
+		e.t.Fatalf("FindThread(%s, %s): %v", rootSum.ThreadID, root.MessageID, err)
+	}
+	if !slices.Equal(got, want) {
+		e.t.Errorf("FindThread(%s, %s) = %v, want %v", rootSum.ThreadID, root.MessageID, got, want)
+	}
+	for _, miss := range []struct{ key, root string }{
+		{"ffffffffffff", "find-missing@conformance.test"},
+		{"not-hex", "find-missing@conformance.test"},
+		{"", ""},
+	} {
+		got, err := tf.FindThread(e.ctx, miss.key, miss.root)
+		if err != nil || got == nil || len(got) != 0 {
+			e.t.Errorf("FindThread(%q, %q) = %#v, %v; want an empty slice", miss.key, miss.root, got, err)
+		}
+	}
+	e.unread("CfFindRoot")
 }
 
 func fetchHeaders(e *env) {
