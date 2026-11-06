@@ -126,13 +126,8 @@ var (
 
 // Changelog validates CHANGELOG.md against the Keep a Changelog format.
 func Changelog() error {
-	skipped, err := validateChangelog(changelogFile)
-	if err != nil {
+	if err := validateChangelog(changelogFile); err != nil {
 		return err
-	}
-	if skipped {
-		fmt.Println(changelogFile + " not found, skipping changelog validation")
-		return nil
 	}
 	fmt.Println(changelogFile + " is valid")
 	return nil
@@ -331,16 +326,16 @@ func extractSection(path, out, version string) error {
 	return nil
 }
 
-// validateChangelog validates the changelog at path. It reports skipped,
-// with no error, when there is no file at path.
-func validateChangelog(path string) (skipped bool, err error) {
+// validateChangelog validates the changelog at path. A missing file is an
+// error, since Release takes its notes from the changelog.
+func validateChangelog(path string) error {
 	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
-		return true, nil
+		return fmt.Errorf("%s not found, Release takes its notes from it", path)
 	}
 	if err := changelog.ValidateFile(path); err != nil {
-		return false, fmt.Errorf("changelog validation failed: %w", err)
+		return fmt.Errorf("changelog validation failed: %w", err)
 	}
-	return false, nil
+	return nil
 }
 
 // goreleaserParallelism is STAVE_NUM_PROCESSORS when it is set, otherwise a

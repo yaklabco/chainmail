@@ -271,17 +271,16 @@ func TestWriteSnapshotNotesFallsBackToLatestRelease(t *testing.T) {
 	}
 }
 
-func TestValidateChangelogSkipsMissingFile(t *testing.T) {
-	skipped, err := validateChangelog(filepath.Join(t.TempDir(), "CHANGELOG.md"))
-	if err != nil || !skipped {
-		t.Fatalf("validateChangelog = %v, %v, want skipped with no error", skipped, err)
+func TestValidateChangelogRefusesMissingFile(t *testing.T) {
+	err := validateChangelog(filepath.Join(t.TempDir(), "CHANGELOG.md"))
+	if err == nil || !strings.Contains(err.Error(), "CHANGELOG.md") {
+		t.Fatalf("err = %v, want an error naming CHANGELOG.md", err)
 	}
 }
 
 func TestValidateChangelogAcceptsValidFile(t *testing.T) {
-	skipped, err := validateChangelog(writeSampleChangelog(t))
-	if err != nil || skipped {
-		t.Fatalf("validateChangelog = %v, %v, want validated with no error", skipped, err)
+	if err := validateChangelog(writeSampleChangelog(t)); err != nil {
+		t.Fatalf("validateChangelog: %v", err)
 	}
 }
 
@@ -290,7 +289,7 @@ func TestValidateChangelogRejectsInvalidFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("no title here\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := validateChangelog(path); err == nil {
+	if err := validateChangelog(path); err == nil {
 		t.Fatal("validateChangelog accepted a changelog with no title")
 	}
 }
