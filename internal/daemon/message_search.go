@@ -382,6 +382,13 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 		return nil, entry, err
 	}
 	entry.Account = singleAccount(p.named)
+	// A search with item: is audited as such, failed or not, never with the
+	// item's ID.
+	itemOp := itemTargets(p.tree)
+	entry.Targets = itemOp
+	if err := m.resolveItems(ctx, p); err != nil {
+		return nil, entry, err
+	}
 	resp := &chainmailv1.SearchResponse{Source: sourceServer, FetchedAt: timestamppb.New(m.s.opts.Now())}
 
 	outcomes := make([]accountSearch, len(p.accounts))
@@ -446,7 +453,7 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 	}
 	resp.Source = cache.CombineSource(answered...)
 	if req.GetCountOnly() {
-		entry.Targets = []string{tally("accounts", len(p.named)), tally("matches", int(resp.GetCount())), "source=" + resp.GetSource()}
+		entry.Targets = append([]string{tally("accounts", len(p.named)), tally("matches", int(resp.GetCount())), "source=" + resp.GetSource()}, itemOp...)
 		return resp, entry, nil
 	}
 
@@ -475,7 +482,7 @@ func (m *messageService) search(ctx context.Context, req *chainmailv1.SearchRequ
 		}
 	}
 	resp.NextCursor = nextCursor(p, states, carried)
-	entry.Targets = []string{tally("accounts", len(p.named)), tally("rows", len(resp.GetRows())), "source=" + resp.GetSource()}
+	entry.Targets = append([]string{tally("accounts", len(p.named)), tally("rows", len(resp.GetRows())), "source=" + resp.GetSource()}, itemOp...)
 	return resp, entry, nil
 }
 

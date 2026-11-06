@@ -84,9 +84,9 @@ func (noSource) FetchSummaries(context.Context, mailstore.Source, []uint32, mail
 	return nil, nil
 }
 
-// refusal refuses the search with err: has:, filename: and label: on an
-// account other than Google, which only its cache answers, when the cache
-// cannot.
+// refusal refuses the search with err: item: on any account, and has:,
+// filename: and label: on an account other than Google, which only the
+// cache answers, when the cache cannot.
 type refusal struct{ err error }
 
 func (r refusal) Search(context.Context, mailstore.SearchRequest) ([]mailstore.SourceResult, error) {
@@ -165,12 +165,16 @@ const (
 	missFailed
 )
 
-// serverRoute sends acct's page to its mail server. On an account other
-// than Google, has:, filename: and label: are refused here instead, with
-// the cause miss, or the query's own cause when the cache refuses or
-// cannot evaluate it: the server cannot search them.
+// serverRoute sends acct's page to its mail server. A query with item: is
+// refused here on every account, and on an account other than Google so
+// are has:, filename: and label:, with the cause miss, or the query's own
+// cause when the cache refuses or cannot evaluate it: the server cannot
+// search them.
 func (m *messageService) serverRoute(acct config.ResolvedAccount, p *searchPlan, miss cacheMiss) (searchSource, routeInfo) {
 	route := routeInfo{Source: cache.SourceServer, Complete: true}
+	if hasItemTerm(p.tree) {
+		return refusal{m.itemRefusal(acct, p, miss)}, route
+	}
 	if !acct.Provider.Gmail {
 		if f, ok := cacheOnlyField(p.tree); ok {
 			plan, err := cache.Compile(p.tree, p.in, false, m.s.cacheClock.Now(), p.itemThreads[acct.Name])
