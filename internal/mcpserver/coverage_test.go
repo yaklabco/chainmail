@@ -79,9 +79,6 @@ var ignored = map[string]string{
 	chainmailv1connect.ComposeServiceSendProcedure + " draft":      "create_draft saves a new message to Drafts",
 	chainmailv1connect.ComposeServiceReplyProcedure + " dry_run":   "as Send dry_run",
 	chainmailv1connect.ComposeServiceForwardProcedure + " dry_run": "as Send dry_run",
-	// Temporary: read_events gains an item input with the item tools,
-	// which replace this entry with a mapping.
-	chainmailv1connect.WatchServiceReadEventsProcedure + " filter.item": "read_events has no item input until the item tools arrive",
 }
 
 // agentServices are the services the coverage test holds to account.
@@ -213,7 +210,7 @@ func coverageSamples(file string) map[string][]map[string]any {
 		"expunge":             {{"refs": []string{testRef}}},
 		"delete_folder":       {{"account": "work", "name": "F", "force": true}},
 		"read_events": {
-			{"group": "triage", "kinds": []string{"new", "flags"}, "accounts": []string{"work"}, "in": "inbox", "wait_seconds": 1, "limit": 5},
+			{"group": "triage", "kinds": []string{"new", "flags"}, "accounts": []string{"work"}, "in": "inbox", "item": "it_a", "wait_seconds": 1, "limit": 5},
 			{"cursor": 7},
 		},
 		"cache_status": {{"accounts": []string{"work"}}},

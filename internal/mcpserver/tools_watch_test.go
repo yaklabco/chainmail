@@ -61,6 +61,21 @@ func TestReadEventsRequests(t *testing.T) {
 			Filter: &chainmailv1.WatchFilter{Kinds: []string{"new", "flags", "expunged", "status", "gap"}}, Limit: 50,
 		}},
 		{name: "limit 1", args: map[string]any{"limit": 1}, want: &chainmailv1.ReadEventsRequest{Limit: 1}},
+		{name: "item filter alone", args: map[string]any{"item": "it_admin_work"}, want: &chainmailv1.ReadEventsRequest{
+			Filter: &chainmailv1.WatchFilter{Item: "it_admin_work"}, Limit: 50,
+		}},
+		{name: "item kinds", args: map[string]any{"kinds": []string{"item", "item_mail"}}, want: &chainmailv1.ReadEventsRequest{
+			Filter: &chainmailv1.WatchFilter{Kinds: []string{"item", "item_mail"}}, Limit: 50,
+		}},
+		{
+			name: "item with a kind and an account",
+			args: map[string]any{"group": "items", "item": "it_01jc0story", "kinds": []string{"item_mail"}, "accounts": []string{"work"}},
+			want: &chainmailv1.ReadEventsRequest{
+				Group:  "items",
+				Filter: &chainmailv1.WatchFilter{Accounts: []string{"work"}, Kinds: []string{"item_mail"}, Item: "it_01jc0story"},
+				Limit:  50,
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -89,6 +104,7 @@ func TestReadEventsRejectsBadInput(t *testing.T) {
 		{name: "limit above 200", args: map[string]any{"limit": 201}, inMessage: "limit must be 1 to 200"},
 		{name: "unknown kind", args: map[string]any{"kinds": []string{"new", "bounced"}}, inMessage: `unknown kind "bounced"`},
 		{name: "kinds are lowercase", args: map[string]any{"kinds": []string{"New"}}, inMessage: `unknown kind "New"`},
+		{name: "the error names the item kinds", args: map[string]any{"kinds": []string{"items"}}, inMessage: `unknown kind "items"; kinds are new, flags, expunged, status, gap, item and item_mail`},
 		{name: "cache group", args: map[string]any{"group": "cache.work"}, inMessage: `"cache." are reserved`},
 	}
 	for _, tt := range tests {
@@ -335,7 +351,7 @@ func TestReadEventsAnnotations(t *testing.T) {
 	case a.ReadOnlyHint || a.IdempotentHint || a.DestructiveHint == nil || *a.DestructiveHint || a.OpenWorldHint == nil || !*a.OpenWorldHint:
 		t.Errorf("hints %+v, want not read-only, not destructive, not idempotent, open world: a group read moves the group", a)
 	}
-	for _, want := range []string{`read_events(group: "<name>", wait_seconds: 60)`, "untrusted", "acknowledges what it returns", "auth_required", "James"} {
+	for _, want := range []string{`read_events(group: "<name>", wait_seconds: 60)`, "untrusted", "acknowledges what it returns", "auth_required", "James", "item_mail", "opt-in", "never holds item text"} {
 		if !strings.Contains(tl.Description, want) {
 			t.Errorf("description lacks %q: %q", want, tl.Description)
 		}
@@ -372,4 +388,67 @@ func TestReadEventsDeadlineCoversTheWait(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReadEventsItemEvents checks the two item kinds: an item event carries
+// the change and nothing of the item's text, and an item_mail event carries
+// the linked item, from_self and the message row, untrusted as in new.
+func TestReadEventsItemEvents(t *testing.T) {
+	t.Parallel()
+	ts := timestamppb.New(watchAt)
+	f := &fakeDaemon{ReadEvents: func(context.Context, *chainmailv1.ReadEventsRequest) (*chainmailv1.ReadEventsResponse, error) {
+		return &chainmailv1.ReadEventsResponse{NextCursor: 202, Events: []*chainmailv1.WatchEvent{
+			{Id: 201, At: ts, Kind: "item", Item: &chainmailv1.WorkItemChange{
+				ItemId: "it_01jc0story", Type: "story", Revision: 12, Op: "updated", Fields: []string{"state", "due_date"},
+			}},
+			{
+				Id: 202, At: ts, Kind: "item_mail", Account: "work", Folder: "INBOX", Ref: testRef, ItemId: "it_01jc0story", FromSelf: true,
+				Message: &chainmailv1.MessageRow{
+					Ref: testRef, Account: "work", Folder: "INBOX", Date: ts,
+					From: []*chainmailv1.Address{{Email: readU("me@work.test")}}, Subject: readU(readHostile), ThreadId: "18c0ffee",
+				},
+			},
+		}}, nil
+	}}
+	e := newTestEnv(t, f, latest)
+	res := e.call(t, "read_events", map[string]any{"group": "items", "item": "it_01jc0story"})
+	wantOK(t, res)
+
+	var out readEventsOut
+	decode(t, res, &out)
+	const at = "2026-11-02T09:30:00Z"
+	row := rowOut{
+		Ref: testRef, Account: "work", Folder: serverName("INBOX"), Date: at,
+		From: []untrusted{serverName("me@work.test")}, To: []untrusted{}, Subject: serverName(readHostile),
+		Flags: []string{}, ThreadID: "18c0ffee",
+	}
+	want := readEventsOut{NextCursor: 202, Events: []eventOut{
+		{ID: 201, At: at, Kind: "item", Item: &itemChangeOut{ItemID: "it_01jc0story", Type: "story", Revision: 12, Op: "updated", Fields: []string{"state", "due_date"}}},
+		{ID: 202, At: at, Kind: "item_mail", Account: "work", Folder: serverNamePtr("INBOX"), Ref: testRef, Message: &row, ItemID: "it_01jc0story", FromSelf: true},
+	}}
+	if !reflect.DeepEqual(out, want) {
+		t.Errorf("output =\n%+v\nwant\n%+v", out, want)
+	}
+
+	var raw struct {
+		Events []map[string]any `json:"events"`
+	}
+	decode(t, res, &raw)
+	wantKeys := [][]string{
+		{"at", "id", "item", "kind"},
+		{"account", "at", "folder", "from_self", "id", "item_id", "kind", "message", "ref"},
+	}
+	if len(raw.Events) != len(wantKeys) {
+		t.Fatalf("%d events, want %d", len(raw.Events), len(wantKeys))
+	}
+	for i, keys := range wantKeys {
+		if got := slices.Sorted(maps.Keys(raw.Events[i])); !slices.Equal(got, keys) {
+			t.Errorf("event %d keys = %v, want %v", i, got, keys)
+		}
+	}
+	// The item_mail message subject is the only hostile string: wrapped once.
+	if n := readWrappedOnly(t, res.StructuredContent, readHostile); n != 1 {
+		t.Errorf("%d enveloped hostile strings, want 1", n)
+	}
+	readInsideMarkers(t, textOf(res), readHostile)
 }
