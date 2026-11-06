@@ -1,2 +1,4 @@
 /bin/
 /result
+/.buildcache/
+/dist/
