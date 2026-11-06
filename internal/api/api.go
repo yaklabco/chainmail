@@ -36,6 +36,10 @@ const (
 	// chainmail cannot read, such as a message in a form its parser does
 	// not know. Asking again gets the same response.
 	ReasonMalformedResponse = "MALFORMED_RESPONSE"
+	// ReasonCacheNotReady means a search needs the local cache, which
+	// cannot answer completely yet for the account, such as item: while
+	// the cache is backfilling or stale. Trying again later can succeed.
+	ReasonCacheNotReady = "CACHE_NOT_READY"
 )
 
 // CLI exit codes.
@@ -65,7 +69,7 @@ func ExitCode(reason string) int {
 		return ExitAuth
 	case ReasonNotFound, ReasonStaleRef:
 		return ExitNotFound
-	case ReasonServerUnavailable, ReasonTimeout, ReasonDaemonUnreachable:
+	case ReasonServerUnavailable, ReasonTimeout, ReasonDaemonUnreachable, ReasonCacheNotReady:
 		return ExitUnavailable
 	case ReasonSendOutcomeUnknown:
 		return ExitSendUnknown

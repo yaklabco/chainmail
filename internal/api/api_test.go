@@ -23,6 +23,7 @@ func TestExitCode(t *testing.T) {
 		ReasonMalformedResponse:  ExitInternal,
 		ReasonTimeout:            ExitUnavailable,
 		ReasonDaemonUnreachable:  ExitUnavailable,
+		ReasonCacheNotReady:      ExitUnavailable,
 		ReasonSendOutcomeUnknown: ExitSendUnknown,
 		ReasonTOTPInvalid:        ExitTOTP,
 		ReasonTOTPLocked:         ExitTOTP,
@@ -60,5 +61,18 @@ func TestDetailWithoutErrorDetail(t *testing.T) {
 	}
 	if got := Detail(errors.New("plain")).GetReason(); got != ReasonInternal {
 		t.Errorf("plain error reason = %s", got)
+	}
+}
+
+// TestCacheNotReadyIsStable pins the new reason's text, which agents match
+// on, and its exit code: trying again later can succeed, as with
+// SERVER_UNAVAILABLE.
+func TestCacheNotReadyIsStable(t *testing.T) {
+	t.Parallel()
+	if ReasonCacheNotReady != "CACHE_NOT_READY" {
+		t.Errorf("ReasonCacheNotReady = %q, want CACHE_NOT_READY", ReasonCacheNotReady)
+	}
+	if got := ExitCode("CACHE_NOT_READY"); got != 7 {
+		t.Errorf("ExitCode(CACHE_NOT_READY) = %d, want 7", got)
 	}
 }
