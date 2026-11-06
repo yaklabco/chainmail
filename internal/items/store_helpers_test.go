@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/db"
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/db"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // testActor makes every test write unless a test names another actor.

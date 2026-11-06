@@ -8,10 +8,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/query"
-	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/query"
+	"github.com/yaklabco/chainmail/internal/testutil/daemontest"
 )
 
 func TestCompleteWatchGroups(t *testing.T) {

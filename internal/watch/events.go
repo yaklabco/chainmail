@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // Kind is an event kind.

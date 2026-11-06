@@ -1320,9 +1320,9 @@ const file_chainmail_v1_watch_proto_rawDesc = "" +
 	"\x0eGetWatchStatus\x12#.chainmail.v1.GetWatchStatusRequest\x1a$.chainmail.v1.GetWatchStatusResponse\x12O\n" +
 	"\n" +
 	"ListGroups\x12\x1f.chainmail.v1.ListGroupsRequest\x1a .chainmail.v1.ListGroupsResponse\x12R\n" +
-	"\vDeleteGroup\x12 .chainmail.v1.DeleteGroupRequest\x1a!.chainmail.v1.DeleteGroupResponseB\xaf\x01\n" +
+	"\vDeleteGroup\x12 .chainmail.v1.DeleteGroupRequest\x1a!.chainmail.v1.DeleteGroupResponseB\xab\x01\n" +
 	"\x10com.chainmail.v1B\n" +
-	"WatchProtoP\x01Z>github.com/jamesainslie/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
+	"WatchProtoP\x01Z:github.com/yaklabco/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
 
 var (
 	file_chainmail_v1_watch_proto_rawDescOnce sync.Once

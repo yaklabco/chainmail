@@ -94,8 +94,8 @@ const file_chainmail_v1_errors_proto_rawDesc = "" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\x12\x12\n" +
 	"\x04hint\x18\x02 \x01(\tR\x04hint\x12\x1f\n" +
 	"\vapproval_id\x18\x03 \x01(\tR\n" +
-	"approvalIdB\xb0\x01\n" +
-	"\x10com.chainmail.v1B\vErrorsProtoP\x01Z>github.com/jamesainslie/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
+	"approvalIdB\xac\x01\n" +
+	"\x10com.chainmail.v1B\vErrorsProtoP\x01Z:github.com/yaklabco/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
 
 var (
 	file_chainmail_v1_errors_proto_rawDescOnce sync.Once

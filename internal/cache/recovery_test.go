@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 func TestMessageIDOf(t *testing.T) {

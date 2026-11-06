@@ -23,9 +23,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/query"
-	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/query"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 // Attachment is an attachment part of a fake message.

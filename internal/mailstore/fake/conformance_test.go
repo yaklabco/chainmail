@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
-	"github.com/jamesainslie/chainmail/internal/mailstore/storetest"
-	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore/fake"
+	"github.com/yaklabco/chainmail/internal/mailstore/storetest"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 // TestConformance runs the shared mailstore conformance suite against the

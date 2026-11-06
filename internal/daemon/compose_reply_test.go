@@ -14,13 +14,13 @@ import (
 	"connectrpc.com/connect"
 	"github.com/emersion/go-smtp"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/api"
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
-	"github.com/jamesainslie/chainmail/internal/ref"
-	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
-	"github.com/jamesainslie/chainmail/internal/testutil/smtptest"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore/fake"
+	"github.com/yaklabco/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/testutil/daemontest"
+	"github.com/yaklabco/chainmail/internal/testutil/smtptest"
 )
 
 func (e sendEnv) reply(t *testing.T, req *chainmailv1.ReplyRequest) (*chainmailv1.ComposeResult, error) {

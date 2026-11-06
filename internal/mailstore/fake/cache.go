@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 var (

@@ -9,7 +9,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 )
 
 // itemTextNote ends the description of every item tool whose result holds

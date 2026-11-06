@@ -2535,9 +2535,9 @@ const file_chainmail_v1_items_proto_rawDesc = "" +
 	"SetBlocker\x12\x1f.chainmail.v1.SetBlockerRequest\x1a .chainmail.v1.SetBlockerResponse\x12O\n" +
 	"\n" +
 	"LinkThread\x12\x1f.chainmail.v1.LinkThreadRequest\x1a .chainmail.v1.LinkThreadResponse\x12U\n" +
-	"\fUnlinkThread\x12!.chainmail.v1.UnlinkThreadRequest\x1a\".chainmail.v1.UnlinkThreadResponseB\xaf\x01\n" +
+	"\fUnlinkThread\x12!.chainmail.v1.UnlinkThreadRequest\x1a\".chainmail.v1.UnlinkThreadResponseB\xab\x01\n" +
 	"\x10com.chainmail.v1B\n" +
-	"ItemsProtoP\x01Z>github.com/jamesainslie/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
+	"ItemsProtoP\x01Z:github.com/yaklabco/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
 
 var (
 	file_chainmail_v1_items_proto_rawDescOnce sync.Once

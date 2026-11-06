@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/items"
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/items"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 func TestLinkThreadCreatesALink(t *testing.T) {

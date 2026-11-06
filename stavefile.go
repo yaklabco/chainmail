@@ -91,5 +91,5 @@ func ldflags() string {
 	if err != nil || strings.TrimSpace(v) == "" {
 		v = "dev"
 	}
-	return "-s -w -X github.com/jamesainslie/chainmail/internal/version.Version=" + strings.TrimSpace(v)
+	return "-s -w -X github.com/yaklabco/chainmail/internal/version.Version=" + strings.TrimSpace(v)
 }

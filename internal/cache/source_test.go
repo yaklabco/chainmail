@@ -3,7 +3,7 @@ package cache_test
 import (
 	"testing"
 
-	"github.com/jamesainslie/chainmail/internal/cache"
+	"github.com/yaklabco/chainmail/internal/cache"
 )
 
 // TestCombineSource checks the source of an answer built from parts: the

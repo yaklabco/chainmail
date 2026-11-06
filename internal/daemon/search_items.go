@@ -5,10 +5,10 @@ import (
 	"errors"
 	"slices"
 
-	"github.com/jamesainslie/chainmail/internal/cache"
-	"github.com/jamesainslie/chainmail/internal/config"
-	"github.com/jamesainslie/chainmail/internal/items"
-	"github.com/jamesainslie/chainmail/internal/query"
+	"github.com/yaklabco/chainmail/internal/cache"
+	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/items"
+	"github.com/yaklabco/chainmail/internal/query"
 )
 
 // itemResolver turns item: values into thread keys, from the item store.

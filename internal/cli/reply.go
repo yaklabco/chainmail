@@ -8,8 +8,8 @@ import (
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/proto"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/client"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/client"
 )
 
 // The keyInput modes of reply and forward.

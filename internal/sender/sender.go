@@ -12,8 +12,8 @@ import (
 
 	"github.com/emersion/go-smtp"
 
-	"github.com/jamesainslie/chainmail/internal/auth"
-	"github.com/jamesainslie/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/auth"
+	"github.com/yaklabco/chainmail/internal/provider"
 )
 
 const defaultTimeout = 30 * time.Second

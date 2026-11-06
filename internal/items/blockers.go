@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // Refusals of blockers. Their text never holds request values.

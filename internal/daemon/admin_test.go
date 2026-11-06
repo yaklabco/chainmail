@@ -14,13 +14,13 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/api"
-	"github.com/jamesainslie/chainmail/internal/audit"
-	"github.com/jamesainslie/chainmail/internal/auth"
-	"github.com/jamesainslie/chainmail/internal/daemon"
-	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
-	"github.com/jamesainslie/chainmail/internal/testutil/oauthtest"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/audit"
+	"github.com/yaklabco/chainmail/internal/auth"
+	"github.com/yaklabco/chainmail/internal/daemon"
+	"github.com/yaklabco/chainmail/internal/testutil/daemontest"
+	"github.com/yaklabco/chainmail/internal/testutil/oauthtest"
 )
 
 const hostingerConfig = `

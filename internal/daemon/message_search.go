@@ -13,13 +13,13 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/audit"
-	"github.com/jamesainslie/chainmail/internal/cache"
-	"github.com/jamesainslie/chainmail/internal/config"
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/query"
-	"github.com/jamesainslie/chainmail/internal/ref"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/audit"
+	"github.com/yaklabco/chainmail/internal/cache"
+	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/query"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 // Search implements chainmailv1connect.MessageServiceHandler.

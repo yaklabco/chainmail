@@ -5,10 +5,10 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
-	"github.com/jamesainslie/chainmail/internal/ref"
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore/fake"
+	"github.com/yaklabco/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // Rebuild of one folder drops its rows without keeping Message-IDs and

@@ -6,7 +6,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 )
 
 func newAdminCmd(ctx context.Context, env Env, g *globals) *cobra.Command {

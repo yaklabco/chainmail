@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // waiters returns how many foreground calls are blocked in p.get.

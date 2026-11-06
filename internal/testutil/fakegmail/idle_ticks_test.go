@@ -8,7 +8,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 
-	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
+	"github.com/yaklabco/chainmail/internal/testutil/tlstest"
 )
 
 // TestFakeGmailIdlePollsOnInjectedTicks drives an idling session's polling

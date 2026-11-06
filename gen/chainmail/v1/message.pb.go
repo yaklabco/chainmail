@@ -2313,8 +2313,8 @@ const file_chainmail_v1_message_proto_rawDesc = "" +
 	"\x03Get\x12\x18.chainmail.v1.GetRequest\x1a\x19.chainmail.v1.GetResponse\x12E\n" +
 	"\x06GetRaw\x12\x1b.chainmail.v1.GetRawRequest\x1a\x1c.chainmail.v1.GetRawResponse0\x01\x12L\n" +
 	"\tGetThread\x12\x1e.chainmail.v1.GetThreadRequest\x1a\x1f.chainmail.v1.GetThreadResponse\x12i\n" +
-	"\x12DownloadAttachment\x12'.chainmail.v1.DownloadAttachmentRequest\x1a(.chainmail.v1.DownloadAttachmentResponse0\x01B\xb1\x01\n" +
-	"\x10com.chainmail.v1B\fMessageProtoP\x01Z>github.com/jamesainslie/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
+	"\x12DownloadAttachment\x12'.chainmail.v1.DownloadAttachmentRequest\x1a(.chainmail.v1.DownloadAttachmentResponse0\x01B\xad\x01\n" +
+	"\x10com.chainmail.v1B\fMessageProtoP\x01Z:github.com/yaklabco/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
 
 var (
 	file_chainmail_v1_message_proto_rawDescOnce sync.Once

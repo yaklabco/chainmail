@@ -1182,8 +1182,8 @@ const file_chainmail_v1_organize_proto_rawDesc = "" +
 	"\tSetLabels\x12\x1e.chainmail.v1.SetLabelsRequest\x1a\x1f.chainmail.v1.SetLabelsResponse\x12U\n" +
 	"\fCreateFolder\x12!.chainmail.v1.CreateFolderRequest\x1a\".chainmail.v1.CreateFolderResponse\x12U\n" +
 	"\fRenameFolder\x12!.chainmail.v1.RenameFolderRequest\x1a\".chainmail.v1.RenameFolderResponse\x12U\n" +
-	"\fDeleteFolder\x12!.chainmail.v1.DeleteFolderRequest\x1a\".chainmail.v1.DeleteFolderResponseB\xb2\x01\n" +
-	"\x10com.chainmail.v1B\rOrganizeProtoP\x01Z>github.com/jamesainslie/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
+	"\fDeleteFolder\x12!.chainmail.v1.DeleteFolderRequest\x1a\".chainmail.v1.DeleteFolderResponseB\xae\x01\n" +
+	"\x10com.chainmail.v1B\rOrganizeProtoP\x01Z:github.com/yaklabco/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
 
 var (
 	file_chainmail_v1_organize_proto_rawDescOnce sync.Once

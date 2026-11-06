@@ -9,7 +9,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 )
 
 var markerRE = regexp.MustCompile(`<<<chainmail-untrusted ([0-9a-f]{16})>>>\n(?s:(.*))\n<<<end chainmail-untrusted ([0-9a-f]{16})>>>\n$`)

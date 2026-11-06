@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/fang"
 	"github.com/spf13/cobra"
 
-	"github.com/jamesainslie/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/api"
 )
 
 // flat lowercases s and collapses its whitespace, so styled output that

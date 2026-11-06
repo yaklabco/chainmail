@@ -4,7 +4,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // errStoredTime is the fixed error for a stored time column that does not

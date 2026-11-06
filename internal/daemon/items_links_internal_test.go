@@ -7,15 +7,15 @@ import (
 	"strings"
 	"testing"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/api"
-	"github.com/jamesainslie/chainmail/internal/audit"
-	"github.com/jamesainslie/chainmail/internal/cache"
-	"github.com/jamesainslie/chainmail/internal/config"
-	"github.com/jamesainslie/chainmail/internal/items"
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
-	"github.com/jamesainslie/chainmail/internal/ref"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/audit"
+	"github.com/yaklabco/chainmail/internal/cache"
+	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/items"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore/fake"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 // linkServer is a daemon that is never served, over routeConfig's fake

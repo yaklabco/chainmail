@@ -9,12 +9,12 @@ import (
 
 	"connectrpc.com/connect"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/gen/chainmail/v1/chainmailv1connect"
-	"github.com/jamesainslie/chainmail/internal/api"
-	"github.com/jamesainslie/chainmail/internal/audit"
-	"github.com/jamesainslie/chainmail/internal/config"
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/gen/chainmail/v1/chainmailv1connect"
+	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/audit"
+	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 const (

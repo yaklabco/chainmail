@@ -16,9 +16,9 @@ import (
 
 	"golang.org/x/oauth2"
 
-	"github.com/jamesainslie/chainmail/internal/config"
-	"github.com/jamesainslie/chainmail/internal/provider"
-	"github.com/jamesainslie/chainmail/internal/vault"
+	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/vault"
 )
 
 // LoginRedirectURL is where the provider sends the browser after consent.

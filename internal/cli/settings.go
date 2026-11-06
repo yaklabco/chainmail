@@ -17,7 +17,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 
-	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/config"
 )
 
 // binding ties a setting to its flag and environment variable.

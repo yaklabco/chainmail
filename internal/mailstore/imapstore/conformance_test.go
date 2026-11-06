@@ -8,10 +8,10 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/mailstore/storetest"
-	"github.com/jamesainslie/chainmail/internal/testutil/fakegmail"
-	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore/storetest"
+	"github.com/yaklabco/chainmail/internal/testutil/fakegmail"
+	"github.com/yaklabco/chainmail/internal/testutil/tlstest"
 )
 
 // TestConformanceFakeGmail runs the shared mailstore conformance suite

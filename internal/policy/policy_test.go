@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/config"
 )
 
 // accounts configures two accounts and no policy.

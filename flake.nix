@@ -15,10 +15,10 @@
           pname = "chainmail";
           inherit version;
           src = ./.;
-          vendorHash = "sha256-WO0VlMgMQWaZ5tLtC8CuYYScAWihuFaD9TNOrDcLaEw=";
+          vendorHash = "sha256-crow6bZNRrYX6PdhV6yPkE/ob5+7gWBfCv7GHxAqh/E=";
           subPackages = [ "cmd/chainmail" ];
           env.CGO_ENABLED = 0;
-          ldflags = [ "-s" "-w" "-X github.com/jamesainslie/chainmail/internal/version.Version=${version}" ];
+          ldflags = [ "-s" "-w" "-X github.com/yaklabco/chainmail/internal/version.Version=${version}" ];
           nativeBuildInputs = [ pkgs.installShellFiles ];
           # Generating the scripts runs the built binary, which a cross build cannot.
           postInstall = pkgs.lib.optionalString (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) ''

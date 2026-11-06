@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // readAllWithin reads r to the end and fails the test if that takes longer

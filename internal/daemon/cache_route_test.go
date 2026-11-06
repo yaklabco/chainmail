@@ -7,11 +7,11 @@ import (
 
 	"connectrpc.com/connect"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/config"
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
-	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore/fake"
+	"github.com/yaklabco/chainmail/internal/testutil/daemontest"
 )
 
 // cacheSearchWait bounds the wait for a test daemon's caches to warm. A

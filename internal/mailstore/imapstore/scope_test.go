@@ -8,10 +8,10 @@ import (
 
 	"github.com/emersion/go-imap/v2/imapclient"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/provider"
-	"github.com/jamesainslie/chainmail/internal/testutil/imaptest"
-	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/testutil/imaptest"
+	"github.com/yaklabco/chainmail/internal/testutil/tlstest"
 )
 
 // searchedFolders returns the folders Search ran in for in.

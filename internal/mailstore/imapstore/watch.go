@@ -9,7 +9,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // FolderState implements mailstore.Watcher with STATUS on a pooled

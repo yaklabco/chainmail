@@ -16,7 +16,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapserver"
 	"github.com/emersion/go-message/textproto"
 
-	"github.com/jamesainslie/chainmail/internal/query"
+	"github.com/yaklabco/chainmail/internal/query"
 )
 
 // errExamined answers a write in a folder opened with EXAMINE.

@@ -10,8 +10,8 @@ import (
 
 	"connectrpc.com/connect"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/testutil/daemontest"
 )
 
 const hostConfig = `

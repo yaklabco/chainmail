@@ -8,11 +8,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/api"
-	"github.com/jamesainslie/chainmail/internal/auth"
-	"github.com/jamesainslie/chainmail/internal/config"
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/auth"
+	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // MailStore is what the cache needs of an account's mail store: the read

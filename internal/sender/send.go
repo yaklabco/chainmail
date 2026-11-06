@@ -12,9 +12,9 @@ import (
 
 	"github.com/emersion/go-smtp"
 
-	"github.com/jamesainslie/chainmail/internal/auth"
-	"github.com/jamesainslie/chainmail/internal/mailaddr"
-	"github.com/jamesainslie/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/auth"
+	"github.com/yaklabco/chainmail/internal/mailaddr"
+	"github.com/yaklabco/chainmail/internal/provider"
 )
 
 // Outcome says what a failed Send means for the message.

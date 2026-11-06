@@ -8,7 +8,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // Item is one work item as stored, with its effective area and priority:

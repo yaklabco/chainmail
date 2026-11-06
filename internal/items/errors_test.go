@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/jamesainslie/chainmail/internal/idempotency"
+	"github.com/yaklabco/chainmail/internal/idempotency"
 )
 
 func TestInvalidErrorText(t *testing.T) {

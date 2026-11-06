@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // FolderIncomplete counts one folder's messages the cache could not read

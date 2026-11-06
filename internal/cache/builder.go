@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/ref"
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // builderPage is how many of the account's events one builder read takes.

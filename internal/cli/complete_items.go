@@ -8,8 +8,8 @@ import (
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/client"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/client"
 )
 
 // itemCompletionLimit is how many items an item ID completion reads: the

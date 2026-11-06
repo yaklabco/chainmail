@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // fetchedRow is what the malformed-response tests check of a header or a

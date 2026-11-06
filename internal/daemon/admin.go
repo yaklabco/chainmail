@@ -11,12 +11,12 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/audit"
-	"github.com/jamesainslie/chainmail/internal/auth"
-	"github.com/jamesainslie/chainmail/internal/provider"
-	"github.com/jamesainslie/chainmail/internal/vault"
-	"github.com/jamesainslie/chainmail/internal/version"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/audit"
+	"github.com/yaklabco/chainmail/internal/auth"
+	"github.com/yaklabco/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/vault"
+	"github.com/yaklabco/chainmail/internal/version"
 )
 
 type adminService struct {

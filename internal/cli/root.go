@@ -10,9 +10,9 @@ import (
 	"github.com/charmbracelet/fang"
 	"github.com/spf13/cobra"
 
-	"github.com/jamesainslie/chainmail/internal/api"
-	"github.com/jamesainslie/chainmail/internal/client"
-	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/client"
+	"github.com/yaklabco/chainmail/internal/config"
 )
 
 // Execute runs chainmail with args and returns the process exit code. On a

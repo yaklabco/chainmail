@@ -2075,8 +2075,8 @@ const file_chainmail_v1_compose_proto_rawDesc = "" +
 	"\vUpdateDraft\x12 .chainmail.v1.UpdateDraftRequest\x1a!.chainmail.v1.UpdateDraftResponse\x12L\n" +
 	"\tSendDraft\x12\x1e.chainmail.v1.SendDraftRequest\x1a\x1f.chainmail.v1.SendDraftResponse\x12R\n" +
 	"\vDeleteDraft\x12 .chainmail.v1.DeleteDraftRequest\x1a!.chainmail.v1.DeleteDraftResponse\x12c\n" +
-	"\x10UploadAttachment\x12%.chainmail.v1.UploadAttachmentRequest\x1a&.chainmail.v1.UploadAttachmentResponse(\x01B\xb1\x01\n" +
-	"\x10com.chainmail.v1B\fComposeProtoP\x01Z>github.com/jamesainslie/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
+	"\x10UploadAttachment\x12%.chainmail.v1.UploadAttachmentRequest\x1a&.chainmail.v1.UploadAttachmentResponse(\x01B\xad\x01\n" +
+	"\x10com.chainmail.v1B\fComposeProtoP\x01Z:github.com/yaklabco/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
 
 var (
 	file_chainmail_v1_compose_proto_rawDescOnce sync.Once

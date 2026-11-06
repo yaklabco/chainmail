@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/db"
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/db"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 // stubWatcher records the one SyncFolder call storeSource makes.

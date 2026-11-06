@@ -6,7 +6,7 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // knownCodes are the response codes a log line may name. A code is an atom

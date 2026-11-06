@@ -3,8 +3,8 @@ package fake
 import (
 	"fmt"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 // Malformation is how the fake answers a fetch of one message, for tests of

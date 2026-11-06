@@ -13,9 +13,9 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/gen/chainmail/v1/chainmailv1connect"
-	"github.com/jamesainslie/chainmail/internal/api"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/gen/chainmail/v1/chainmailv1connect"
+	"github.com/yaklabco/chainmail/internal/api"
 )
 
 // watchAt is when the scripted events happen.

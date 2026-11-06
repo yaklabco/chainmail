@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // The cache's reads, FetchHeaders and SearchFolders, honor SetBusy and

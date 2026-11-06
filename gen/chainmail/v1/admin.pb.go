@@ -726,9 +726,9 @@ const file_chainmail_v1_admin_proto_rawDesc = "" +
 	"\x0eBeginAuthLogin\x12#.chainmail.v1.BeginAuthLoginRequest\x1a$.chainmail.v1.BeginAuthLoginResponse\x12^\n" +
 	"\x0fFinishAuthLogin\x12$.chainmail.v1.FinishAuthLoginRequest\x1a%.chainmail.v1.FinishAuthLoginResponse\x12L\n" +
 	"\tGetStatus\x12\x1e.chainmail.v1.GetStatusRequest\x1a\x1f.chainmail.v1.GetStatusResponse\x12L\n" +
-	"\tReadAudit\x12\x1e.chainmail.v1.ReadAuditRequest\x1a\x1f.chainmail.v1.ReadAuditResponseB\xaf\x01\n" +
+	"\tReadAudit\x12\x1e.chainmail.v1.ReadAuditRequest\x1a\x1f.chainmail.v1.ReadAuditResponseB\xab\x01\n" +
 	"\x10com.chainmail.v1B\n" +
-	"AdminProtoP\x01Z>github.com/jamesainslie/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
+	"AdminProtoP\x01Z:github.com/yaklabco/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
 
 var (
 	file_chainmail_v1_admin_proto_rawDescOnce sync.Once

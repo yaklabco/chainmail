@@ -8,7 +8,7 @@ import (
 	connect "connectrpc.com/connect"
 	context "context"
 	errors "errors"
-	v1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	v1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 	http "net/http"
 	strings "strings"
 )

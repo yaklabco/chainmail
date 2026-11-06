@@ -10,8 +10,8 @@ import (
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 
-	"github.com/jamesainslie/chainmail/internal/provider"
-	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
+	"github.com/yaklabco/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/testutil/tlstest"
 )
 
 var tester = User{Username: "me@example.com", Password: "pw"}

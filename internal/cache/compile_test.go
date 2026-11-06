@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/cache"
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/query"
+	"github.com/yaklabco/chainmail/internal/cache"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/query"
 )
 
 // compileNow is the clock the compile tests run at, the one imapstore's

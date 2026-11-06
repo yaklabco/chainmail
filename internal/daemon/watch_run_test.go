@@ -8,12 +8,12 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/config"
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
-	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
-	"github.com/jamesainslie/chainmail/internal/watch"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore/fake"
+	"github.com/yaklabco/chainmail/internal/testutil/daemontest"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // watchRunWait bounds every wait on the daemon's watchers in these tests.

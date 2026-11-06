@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jamesainslie/chainmail/internal/cache"
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/query"
+	"github.com/yaklabco/chainmail/internal/cache"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/query"
 )
 
 // FuzzCompile checks that every tree query.Parse accepts, split as the

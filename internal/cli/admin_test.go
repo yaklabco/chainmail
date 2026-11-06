@@ -7,7 +7,7 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 )
 
 // statusAt is a time on 2026-11-02 in UTC.

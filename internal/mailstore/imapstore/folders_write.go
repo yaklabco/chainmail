@@ -16,8 +16,8 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 // CreateFolder implements mailstore.Writer. The name is written as the

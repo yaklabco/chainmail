@@ -9,9 +9,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/jamesainslie/chainmail/internal/config"
-	"github.com/jamesainslie/chainmail/internal/mailaddr"
-	"github.com/jamesainslie/chainmail/internal/mailaddr/allow"
+	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/mailaddr"
+	"github.com/yaklabco/chainmail/internal/mailaddr/allow"
 )
 
 // SendDecision is the outcome of checking a send's recipients.

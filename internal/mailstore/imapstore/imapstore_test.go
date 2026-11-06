@@ -14,10 +14,10 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 
-	"github.com/jamesainslie/chainmail/internal/auth"
-	"github.com/jamesainslie/chainmail/internal/provider"
-	"github.com/jamesainslie/chainmail/internal/testutil/imaptest"
-	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
+	"github.com/yaklabco/chainmail/internal/auth"
+	"github.com/yaklabco/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/testutil/imaptest"
+	"github.com/yaklabco/chainmail/internal/testutil/tlstest"
 )
 
 var user = imaptest.User{Username: "me@example.com", Password: "pw", Token: "tok"}

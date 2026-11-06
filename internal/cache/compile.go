@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/query"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/query"
 )
 
 // Plan is a search compiled for the cache: the condition to run, and what

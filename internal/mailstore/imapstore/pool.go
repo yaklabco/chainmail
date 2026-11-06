@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // errPoolClosed is returned by get once the store has closed.

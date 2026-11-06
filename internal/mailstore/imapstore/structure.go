@@ -18,7 +18,7 @@ import (
 	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-message/textproto"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 var (

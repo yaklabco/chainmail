@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 // Body is a cached message body: mailstore.Message.Raw (the original header

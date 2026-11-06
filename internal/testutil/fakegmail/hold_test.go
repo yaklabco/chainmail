@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
+	"github.com/yaklabco/chainmail/internal/testutil/tlstest"
 )
 
 // TestFakeGmailHoldReads holds a command the client sent after HoldReads:

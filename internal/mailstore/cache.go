@@ -3,7 +3,7 @@ package mailstore
 import (
 	"context"
 
-	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 // Header is what the local cache keeps of a message without its body: the

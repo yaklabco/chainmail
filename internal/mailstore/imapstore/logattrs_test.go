@@ -10,7 +10,7 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // TestLogAttrsKeepServerTextOut logs errors from partial writes, dropped

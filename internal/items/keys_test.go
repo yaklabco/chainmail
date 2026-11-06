@@ -6,7 +6,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/jamesainslie/chainmail/internal/items"
+	"github.com/yaklabco/chainmail/internal/items"
 )
 
 func TestThreadKeys(t *testing.T) {

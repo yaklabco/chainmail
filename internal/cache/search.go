@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // Where is a compiled search condition over messages aliased m. FTS is a

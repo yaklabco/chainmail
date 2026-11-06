@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/provider"
 )
 
 const validConfig = `

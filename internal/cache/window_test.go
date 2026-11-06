@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/config"
-	"github.com/jamesainslie/chainmail/internal/mailstore/fake"
+	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/mailstore/fake"
 )
 
 // acctWindow is the prefetch window the window tests run with.

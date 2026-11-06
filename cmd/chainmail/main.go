@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/jamesainslie/chainmail/internal/cli"
+	"github.com/yaklabco/chainmail/internal/cli"
 )
 
 func main() {

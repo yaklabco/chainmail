@@ -3,7 +3,7 @@ package cache
 import (
 	"strconv"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // RowFromHeader is the cache row of a fetched header. GmailThrID is the

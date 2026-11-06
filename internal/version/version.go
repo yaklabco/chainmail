@@ -2,5 +2,5 @@
 package version
 
 // Version is set at build time with
-// -ldflags "-X github.com/jamesainslie/chainmail/internal/version.Version=<v>".
+// -ldflags "-X github.com/yaklabco/chainmail/internal/version.Version=<v>".
 var Version = "dev"

@@ -3,7 +3,7 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/jamesainslie/chainmail/internal/version"
+	"github.com/yaklabco/chainmail/internal/version"
 )
 
 func newVersionCmd(env Env, g *globals) *cobra.Command {

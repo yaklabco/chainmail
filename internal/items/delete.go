@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // Refusals of delete and restore. Their text never holds request values.

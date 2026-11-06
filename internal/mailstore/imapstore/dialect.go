@@ -11,8 +11,8 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/query"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/query"
 )
 
 // compileGmail turns a query tree, with in: and account: split off, into an

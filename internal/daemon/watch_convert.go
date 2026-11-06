@@ -1,8 +1,8 @@
 package daemon
 
 import (
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/watch"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // eventToProto builds the API form of an event. An item event carries its

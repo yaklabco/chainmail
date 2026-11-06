@@ -21,11 +21,11 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/provider"
-	"github.com/jamesainslie/chainmail/internal/ref"
-	"github.com/jamesainslie/chainmail/internal/testutil/imaptest"
-	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/testutil/imaptest"
+	"github.com/yaklabco/chainmail/internal/testutil/tlstest"
 )
 
 // writeServer is a scripted IMAP server for the write paths, over implicit

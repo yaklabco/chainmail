@@ -8,7 +8,7 @@ import (
 
 	"connectrpc.com/connect"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 )
 
 // HeaderClient names the kind of client, such as "cli" or "mcp", for the audit log.

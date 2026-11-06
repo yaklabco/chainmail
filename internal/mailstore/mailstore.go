@@ -11,8 +11,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/query"
-	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/query"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 // Errors a Store returns, wrapped with detail. The daemon maps them to API reasons.

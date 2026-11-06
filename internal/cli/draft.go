@@ -10,9 +10,9 @@ import (
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/proto"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/client"
-	"github.com/jamesainslie/chainmail/internal/ref"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/client"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 // modeDraftSend is the keyInput mode of draft send.

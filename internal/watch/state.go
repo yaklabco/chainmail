@@ -12,7 +12,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // Mode is how a folder is synced, as sync_folders records it. The API

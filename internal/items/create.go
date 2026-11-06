@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"math"
 
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // Item fields, as UpdateItem mask paths and as the field names item events list.

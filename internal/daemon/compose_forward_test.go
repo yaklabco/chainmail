@@ -12,12 +12,12 @@ import (
 	"connectrpc.com/connect"
 	"github.com/emersion/go-message"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/provider"
-	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
-	"github.com/jamesainslie/chainmail/internal/testutil/imaptest"
-	"github.com/jamesainslie/chainmail/internal/testutil/smtptest"
-	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/testutil/daemontest"
+	"github.com/yaklabco/chainmail/internal/testutil/imaptest"
+	"github.com/yaklabco/chainmail/internal/testutil/smtptest"
+	"github.com/yaklabco/chainmail/internal/testutil/tlstest"
 )
 
 // Parts of inlineOriginal.

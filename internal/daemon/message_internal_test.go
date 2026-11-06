@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/api"
-	"github.com/jamesainslie/chainmail/internal/auth"
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/query"
-	"github.com/jamesainslie/chainmail/internal/ref"
-	"github.com/jamesainslie/chainmail/internal/render"
+	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/auth"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/query"
+	"github.com/yaklabco/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/render"
 )
 
 func summaryAt(account, folder string, uid uint32, at time.Time, thread string) mailstore.Summary {

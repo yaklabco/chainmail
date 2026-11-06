@@ -3,7 +3,7 @@ package cache
 import (
 	"testing"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 func TestSearchUIDs(t *testing.T) {

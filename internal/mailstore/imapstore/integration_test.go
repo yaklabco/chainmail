@@ -19,10 +19,10 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/ref"
-	"github.com/jamesainslie/chainmail/internal/render"
-	"github.com/jamesainslie/chainmail/internal/testutil/dovecot"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/render"
+	"github.com/yaklabco/chainmail/internal/testutil/dovecot"
 )
 
 // TestMain runs one Dovecot container for every test in this package and

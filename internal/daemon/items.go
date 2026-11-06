@@ -13,10 +13,10 @@ import (
 
 	"connectrpc.com/connect"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/gen/chainmail/v1/chainmailv1connect"
-	"github.com/jamesainslie/chainmail/internal/audit"
-	"github.com/jamesainslie/chainmail/internal/items"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/gen/chainmail/v1/chainmailv1connect"
+	"github.com/yaklabco/chainmail/internal/audit"
+	"github.com/yaklabco/chainmail/internal/items"
 )
 
 // adminTimeout bounds creating the Admin items when the daemon starts.

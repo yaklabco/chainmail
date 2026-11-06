@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/db"
+	"github.com/yaklabco/chainmail/internal/db"
 )
 
 func openDB(t *testing.T) *sql.DB {
