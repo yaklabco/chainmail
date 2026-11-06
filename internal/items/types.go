@@ -1,6 +1,9 @@
 package items
 
-import "time"
+import (
+	"strconv"
+	"time"
+)
 
 // Type is the kind of an item, from the Lathe roadmap hierarchy plus task.
 type Type string
@@ -119,3 +122,30 @@ func ParseDate(s string) (string, error) {
 	}
 	return s, nil
 }
+
+// Actor is who made a change: the caller's Unix user ID and client kind, as
+// the audit log records them.
+type Actor struct {
+	UID    uint32
+	Client string
+}
+
+// String renders a as "<uid>/<client>", the form the created_by,
+// updated_by and ticked_by columns store.
+func (a Actor) String() string {
+	return strconv.FormatUint(uint64(a.UID), 10) + "/" + a.Client
+}
+
+// Ops say what an item event records, in watch.ItemChange.Op. They are
+// stored, so their values never change.
+const (
+	OpCreated  = "created"
+	OpUpdated  = "updated"
+	OpMoved    = "moved"
+	OpDeleted  = "deleted"
+	OpRestored = "restored"
+	OpLinked   = "linked"
+	OpUnlinked = "unlinked"
+	OpCriteria = "criteria"
+	OpBlockers = "blockers"
+)

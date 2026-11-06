@@ -175,3 +175,43 @@ func TestParseDate(t *testing.T) {
 		{in: modelMarker, wantMsg: bad},
 	})
 }
+
+func TestActorString(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		a    Actor
+		want string
+	}{
+		{Actor{UID: 1000, Client: "cli"}, "1000/cli"},
+		{Actor{UID: 0, Client: "daemon"}, "0/daemon"},
+		{Actor{UID: 4294967295, Client: "mcp"}, "4294967295/mcp"},
+		{Actor{UID: 501}, "501/"},
+	}
+	for _, tt := range tests {
+		if got := tt.a.String(); got != tt.want {
+			t.Errorf("%+v.String() = %q, want %q", tt.a, got, tt.want)
+		}
+	}
+}
+
+// The ops are stored in item events and read by the Lathe sync, so their
+// values never change.
+func TestOps(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ got, want string }{
+		{OpCreated, "created"},
+		{OpUpdated, "updated"},
+		{OpMoved, "moved"},
+		{OpDeleted, "deleted"},
+		{OpRestored, "restored"},
+		{OpLinked, "linked"},
+		{OpUnlinked, "unlinked"},
+		{OpCriteria, "criteria"},
+		{OpBlockers, "blockers"},
+	}
+	for _, tt := range tests {
+		if tt.got != tt.want {
+			t.Errorf("op = %q, want %q", tt.got, tt.want)
+		}
+	}
+}
