@@ -163,8 +163,7 @@ func itemTextPtr(u *chainmailv1.Untrusted) *untrusted {
 func workItemFrom(w *chainmailv1.WorkItem) workItemOut {
 	var estimate *float64
 	if w != nil && w.Estimate != nil {
-		v := w.GetEstimate()
-		estimate = &v
+		estimate = new(w.GetEstimate())
 	}
 	return workItemOut{
 		ID: w.GetId(), Type: w.GetType(), Title: wrap(w.GetTitle()), Description: itemTextPtr(w.GetDescription()),
