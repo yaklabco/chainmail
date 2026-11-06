@@ -121,6 +121,7 @@ var (
 	errDirtyTree          = errors.New("working tree is not clean")
 	errNotOriginMain      = errors.New("HEAD is not origin/main")
 	errNoChangelogSection = errors.New("changelog has no section for the version")
+	errMissingToken       = errors.New("release token not set")
 )
 
 // Changelog validates CHANGELOG.md against the Keep a Changelog format.
@@ -141,7 +142,13 @@ func Changelog() error {
 // release and the Homebrew Cask. The version comes from the conventional
 // commits since the last tag and must have a section in CHANGELOG.md, which
 // becomes the release notes. It needs GITHUB_TOKEN and HOMEBREW_TAP_TOKEN.
+//
+// Every check runs before the tag is created. A pushed tag whose release
+// goreleaser cannot publish blocks every later run until it is deleted.
 func Release() error {
+	if err := checkReleaseEnv(); err != nil {
+		return err
+	}
 	tag, err := nextReleaseTag()
 	if err != nil {
 		return err
@@ -152,14 +159,41 @@ func Release() error {
 	if err := writeReleaseNotes(changelogFile, releaseNotesFile, tag); err != nil {
 		return err
 	}
+	// This also fails when goreleaser is not on PATH.
+	if err := sh.RunV("goreleaser", "check"); err != nil {
+		return fmt.Errorf("goreleaser check: %w", err)
+	}
 	if err := sh.RunV("git", "tag", "-a", tag, "-m", "chainmail "+tag); err != nil {
 		return fmt.Errorf("creating tag %s: %w", tag, err)
 	}
 	if err := sh.RunV("git", "push", "origin", "refs/tags/"+tag); err != nil {
 		return fmt.Errorf("pushing tag %s: %w", tag, err)
 	}
-	return sh.RunV("goreleaser", "release", "--clean",
+	// Without GORELEASER_CURRENT_TAG goreleaser picks the highest tag at
+	// HEAD, which need not be the one just made.
+	return sh.RunWithV(map[string]string{"GORELEASER_CURRENT_TAG": tag}, "",
+		"goreleaser", "release", "--clean",
 		"--release-notes", releaseNotesFile, "--parallelism", goreleaserParallelism())
+}
+
+// releaseTokens are the variables goreleaser publishes with: GITHUB_TOKEN
+// for the GitHub release and HOMEBREW_TAP_TOKEN for the Cask.
+var releaseTokens = []string{"GITHUB_TOKEN", "HOMEBREW_TAP_TOKEN"}
+
+// checkReleaseEnv refuses a release when a token goreleaser needs is empty.
+// goreleaser reads HOMEBREW_TAP_TOKEN only when it publishes the Cask, after
+// the GitHub release exists, so the check cannot be left to goreleaser.
+func checkReleaseEnv() error {
+	var missing []string
+	for _, name := range releaseTokens {
+		if os.Getenv(name) == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("%w: set %s before releasing", errMissingToken, strings.Join(missing, " and "))
+	}
+	return nil
 }
 
 // Snapshot builds the release archives and the Cask into dist/ as Release

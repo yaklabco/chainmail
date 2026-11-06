@@ -305,3 +305,35 @@ func TestGoreleaserParallelism(t *testing.T) {
 		t.Errorf("without STAVE_NUM_PROCESSORS, goreleaserParallelism() = %q, want %q", got, parallelism())
 	}
 }
+
+func TestCheckReleaseEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name, github, tap string
+		missing           []string
+	}{
+		{name: "both set", github: "gh-token", tap: "tap-token"},
+		{name: "no GitHub token", tap: "tap-token", missing: []string{"GITHUB_TOKEN"}},
+		{name: "no tap token", github: "gh-token", missing: []string{"HOMEBREW_TAP_TOKEN"}},
+		{name: "neither", missing: []string{"GITHUB_TOKEN", "HOMEBREW_TAP_TOKEN"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GITHUB_TOKEN", tc.github)
+			t.Setenv("HOMEBREW_TAP_TOKEN", tc.tap)
+			err := checkReleaseEnv()
+			if len(tc.missing) == 0 {
+				if err != nil {
+					t.Fatalf("checkReleaseEnv: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, errMissingToken) {
+				t.Fatalf("err = %v, want errMissingToken", err)
+			}
+			for _, name := range tc.missing {
+				if !strings.Contains(err.Error(), name) {
+					t.Errorf("error %q does not name %s", err, name)
+				}
+			}
+		})
+	}
+}
