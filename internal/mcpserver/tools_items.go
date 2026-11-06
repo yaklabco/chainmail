@@ -61,11 +61,12 @@ const linkThreadDescription = `Link the mail thread of a message to a work item.
 
 const unlinkThreadDescription = `Remove the link between a mail thread and a work item. Take account and thread_key from get_item's threads.`
 
-// itemCreate is create_item's hints. Items live in the daemon's own state,
-// not on a mail server, so no item tool is open world; create_item makes a
-// new item on every call without an idempotency_key, so it is not
-// idempotent. Neither is edit_criteria, whose retried add appends again.
-var itemCreate = hints{}
+// itemAppend is the hints of create_item and edit_criteria. Items live in
+// the daemon's own state, not on a mail server, so no item tool is open
+// world; create_item makes a new item on every call without an
+// idempotency_key, and a retried edit_criteria add appends again, so
+// neither is idempotent.
+var itemAppend = hints{}
 
 // itemWrite is the hints of every item write but create_item and
 // edit_criteria: repeating one leaves the item as the first call did, and
@@ -80,13 +81,13 @@ const listItemsMaxLimit = 500
 
 // registerItemTools adds the work item tools.
 func (s *Server) registerItemTools() {
-	addTool(s, "create_item", "Create a work item", createItemDescription, itemCreate, s.createItem)
+	addTool(s, "create_item", "Create a work item", createItemDescription, itemAppend, s.createItem)
 	addTool(s, "update_item", "Update a work item", updateItemDescription, itemWrite, s.updateItem)
 	addTool(s, "get_item", "Show a work item", getItemDescription, itemRead, s.getItem)
 	addTool(s, "list_items", "List work items", listItemsDescription, itemRead, s.listItems)
 	addTool(s, "delete_item", "Delete a work item", deleteItemDescription, itemWrite, s.deleteItem)
 	addTool(s, "restore_item", "Restore a work item", restoreItemDescription, itemWrite, s.restoreItem)
-	addTool(s, "edit_criteria", "Edit acceptance criteria", editCriteriaDescription, hints{}, s.editCriteria) // a retried add appends again, so not idempotent
+	addTool(s, "edit_criteria", "Edit acceptance criteria", editCriteriaDescription, itemAppend, s.editCriteria)
 	addTool(s, "tick_criterion", "Tick a criterion", tickCriterionDescription, itemWrite, s.tickCriterion)
 	addTool(s, "set_blocker", "Set a blocker", setBlockerDescription, itemWrite, s.setBlocker)
 	addTool(s, "link_thread", "Link a thread to an item", linkThreadDescription, itemWrite, s.linkThread)

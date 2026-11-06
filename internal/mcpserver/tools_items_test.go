@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -410,12 +411,15 @@ func TestReadItemToolRequests(t *testing.T) {
 func TestListItemsRejectsBadLimit(t *testing.T) {
 	t.Parallel()
 	for _, limit := range []int{-1, 501} {
-		e := newTestEnv(t, &fakeDaemon{}, latest)
-		body := wantError(t, e.call(t, "list_items", map[string]any{"limit": limit}), api.ReasonInvalidArgument)
-		if !strings.Contains(body.Message, "limit must be 1 to 500") {
-			t.Errorf("limit %d: message %q", limit, body.Message)
-		}
-		itemNoCall(t, e.fake)
+		t.Run(fmt.Sprintf("limit %d", limit), func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnv(t, &fakeDaemon{}, latest)
+			body := wantError(t, e.call(t, "list_items", map[string]any{"limit": limit}), api.ReasonInvalidArgument)
+			if !strings.Contains(body.Message, "limit must be 1 to 500") {
+				t.Errorf("limit %d: message %q", limit, body.Message)
+			}
+			itemNoCall(t, e.fake)
+		})
 	}
 }
 
