@@ -22,6 +22,9 @@ import (
 // adminTimeout bounds creating the Admin items when the daemon starts.
 const adminTimeout = 10 * time.Second
 
+// maxListLimit is the largest ListItems page.
+const maxListLimit = 500
+
 // itemsService implements chainmailv1connect.ItemsServiceHandler. Every
 // call is audited, and no audit target, error message, hint or log line
 // holds item text: only IDs, types, field names and counts. Error text
@@ -92,10 +95,12 @@ func (s *Server) itemsErr(err error) error {
 var updatePaths = []string{"type", "title", "description", "state", "area", "priority", "start_date", "due_date", "estimate", "parent_id"}
 
 var (
-	errItemID     = &argError{msg: "invalid item ID", hint: "item IDs start with it_; " + itemListHint}
-	errEstimate   = &argError{msg: "estimate must be a number, 0 or more", hint: "pass an estimate such as 1.5, or clear it"}
-	errUpdateMask = &argError{msg: "update_mask must name one or more fields", hint: updateMaskHint}
-	errUpdatePath = &argError{msg: "update_mask names an unknown field", hint: updateMaskHint}
+	errItemID       = &argError{msg: "invalid item ID", hint: "item IDs start with it_; " + itemListHint}
+	errEstimate     = &argError{msg: "estimate must be a number, 0 or more", hint: "pass an estimate such as 1.5, or clear it"}
+	errUpdateMask   = &argError{msg: "update_mask must name one or more fields", hint: updateMaskHint}
+	errUpdatePath   = &argError{msg: "update_mask names an unknown field", hint: updateMaskHint}
+	errItemLimit    = &argError{msg: "limit must be 0 to 500", hint: "0 means 100"}
+	errChangedSince = &argError{msg: "changed_since must be 0 or more", hint: "pass the revision of an earlier ListItems response"}
 )
 
 // itemTarget is the audit target key=id, and the error when id cannot be an
@@ -329,4 +334,73 @@ func (i *itemsService) update(ctx context.Context, a items.Actor, m *chainmailv1
 	}
 	it, err := i.s.items.Update(ctx, a, m.GetId(), items.Patch{Fields: fields, Values: v})
 	return it, i.s.itemsErr(err)
+}
+
+// listQuery validates a ListItems request into the store's query, with the
+// audit targets of the filters it sets, in field order. A value that fails
+// validation is recorded as invalidTarget. The first failure, in field
+// order, is returned. A malformed page token is the store's refusal.
+func listQuery(m *chainmailv1.ListItemsRequest) (items.ListQuery, []string, error) {
+	q := items.ListQuery{
+		Inbox: m.GetInbox(), Ongoing: m.Ongoing, IncludeDeleted: m.GetIncludeDeleted(),
+		ChangedSince: m.ChangedSince, Limit: int(m.GetLimit()), PageToken: m.GetPageToken(),
+	}
+	var (
+		targets []string
+		errs    []error
+	)
+	if s := m.GetType(); s != "" {
+		v, err := items.ParseType(s)
+		q.Type = v
+		targets, errs = append(targets, enumTarget("type", v, err)), append(errs, err)
+	}
+	if s := m.GetState(); s != "" {
+		v, err := items.ParseState(s)
+		q.State = v
+		targets, errs = append(targets, enumTarget("state", v, err)), append(errs, err)
+	}
+	if s := m.GetArea(); s != "" {
+		v, err := items.ParseArea(s)
+		q.Area = v
+		targets, errs = append(targets, enumTarget("area", v, err)), append(errs, err)
+	}
+	if s := m.GetUnder(); s != "" {
+		target, err := itemTarget("under", s)
+		q.Under = s
+		targets, errs = append(targets, target), append(errs, err)
+	}
+	if q.Inbox {
+		targets = append(targets, "inbox=1")
+	}
+	if v := m.ChangedSince; v != nil {
+		targets = append(targets, fmt.Sprintf("changed_since=%d", *v))
+		if *v < 0 {
+			errs = append(errs, errChangedSince)
+		}
+	}
+	if q.Limit < 0 || q.Limit > maxListLimit {
+		errs = append(errs, errItemLimit)
+	}
+	return q, targets, cmp.Or(errs...)
+}
+
+// ListItems implements chainmailv1connect.ItemsServiceHandler. Rows come in
+// tree order, or in revision order with changed_since, with the global
+// revision at the time of the read. It is audited as item.list with the
+// filters it sets and the number of rows.
+func (i *itemsService) ListItems(ctx context.Context, req *connect.Request[chainmailv1.ListItemsRequest]) (*connect.Response[chainmailv1.ListItemsResponse], error) {
+	return itemCall(ctx, i.s, req, "item.list", func(ctx context.Context, _ caller, entry *audit.Entry) (*chainmailv1.ListItemsResponse, error) {
+		q, targets, err := listQuery(req.Msg)
+		entry.Targets = targets
+		entry.Targets = append(entry.Targets, tally("rows", 0))
+		if err != nil {
+			return nil, err
+		}
+		rows, next, revision, err := i.s.items.List(ctx, q)
+		if err != nil {
+			return nil, i.s.itemsErr(err)
+		}
+		entry.Targets[len(entry.Targets)-1] = tally("rows", len(rows))
+		return &chainmailv1.ListItemsResponse{Items: workItemRows(rows), NextPageToken: next, Revision: revision}, nil
+	})
 }
