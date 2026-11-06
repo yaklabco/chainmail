@@ -68,22 +68,39 @@ func newCriteria(texts []string, from int, now time.Time, rnd io.Reader) []Crite
 	return out
 }
 
+// errCriterionTaken is putCriteria's error for a criterion ID another item
+// already holds. New IDs are random, so it means a collision or a bug; it is
+// fixed text and never names the ID.
+var errCriterionTaken = errors.New("items: a criterion ID belongs to another item")
+
 // putCriteria writes list as the item's criteria in tx: new IDs are
-// inserted, unticked, and known ones get the position and text in list.
+// inserted, unticked, and known ones get the position and text in list. An
+// ID that another item holds is errCriterionTaken, and that item's
+// criterion is left as it was.
 func putCriteria(ctx context.Context, tx *sql.Tx, itemID string, list []Criterion) error {
 	if len(list) == 0 {
 		return nil
 	}
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO item_criteria (id, item_id, position, text) VALUES (?, ?, ?, ?)
-		 ON CONFLICT (id) DO UPDATE SET position = excluded.position, text = excluded.text`)
+		 ON CONFLICT (id) DO UPDATE SET position = excluded.position, text = excluded.text
+		 WHERE item_criteria.item_id = excluded.item_id`)
 	if err != nil {
 		return fmt.Errorf("items: preparing a criteria write: %w", err)
 	}
 	defer func() { _ = stmt.Close() }() // closing a prepared statement only frees it
 	for _, c := range list {
-		if _, err := stmt.ExecContext(ctx, c.ID, itemID, c.Position, c.Text); err != nil {
+		res, err := stmt.ExecContext(ctx, c.ID, itemID, c.Position, c.Text)
+		if err != nil {
 			return fmt.Errorf("items: writing a criterion: %w", err)
+		}
+		// The guarded upsert changes no row only when another item holds the ID.
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("items: writing a criterion: %w", err)
+		}
+		if n == 0 {
+			return errCriterionTaken
 		}
 	}
 	return nil

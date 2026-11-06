@@ -254,3 +254,33 @@ func TestDoneNeedsEveryCriterionTicked(t *testing.T) {
 		t.Errorf("done after every tick = %+v, %v", got, err)
 	}
 }
+
+// A criterion ID already held by another item is never rewritten: the
+// write fails and the other item's criterion stays as it was.
+func TestPutCriteriaRefusesAnotherItemsID(t *testing.T) {
+	t.Parallel()
+	r := newStoreRig(t)
+	owner, ownerCrit := withCriteria(t, r, "owner's")
+	other, _ := withCriteria(t, r)
+	tx, err := r.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }() // the test reads the store after rolling back
+	taken := []Criterion{{ID: ownerCrit[0].ID, Position: 5, Text: "stolen"}}
+	if err := putCriteria(t.Context(), tx, other.ID, taken); err == nil {
+		t.Fatal("putCriteria with another item's criterion ID succeeded, want an error")
+	} else if strings.Contains(err.Error(), ownerCrit[0].ID) || strings.Contains(err.Error(), "stolen") {
+		t.Errorf("err = %q, want fixed text", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	stored, err := r.store.Criteria(t.Context(), owner.ID)
+	if err != nil || !reflect.DeepEqual(stored, ownerCrit) {
+		t.Errorf("owner's criteria = %+v, %v; want %+v unchanged", stored, err, ownerCrit)
+	}
+	if got, err := r.store.Criteria(t.Context(), other.ID); err != nil || len(got) != 0 {
+		t.Errorf("other's criteria = %+v, %v; want none", got, err)
+	}
+}
