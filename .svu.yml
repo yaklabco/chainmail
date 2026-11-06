@@ -1,0 +1,6 @@
+# changelog.NextTag, which stave release uses, reads this file to compute the
+# next version from the conventional commits since the last tag.
+# always: bump the patch version even when no commit is a feat or a fix.
+# v0: a breaking change before 1.0.0 bumps the minor version, not the major.
+always: true
+v0: true
