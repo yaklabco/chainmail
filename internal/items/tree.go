@@ -196,3 +196,64 @@ func nodeIDs(nodes []*node) []string {
 	}
 	return out
 }
+
+// counts are the per-item numbers rows show, keyed by item ID.
+type counts struct {
+	criteria, ticked, links map[string]int
+}
+
+// loadCounts reads the criteria and link counts of every item through q.
+func loadCounts(ctx context.Context, q queryer) (counts, error) {
+	c := counts{criteria: map[string]int{}, ticked: map[string]int{}, links: map[string]int{}}
+	if err := countBy(ctx, q,
+		"SELECT item_id, COUNT(*), COALESCE(SUM(ticked), 0) FROM item_criteria GROUP BY item_id",
+		c.criteria, c.ticked); err != nil {
+		return counts{}, err
+	}
+	if err := countBy(ctx, q, "SELECT item_id, COUNT(*) FROM item_links GROUP BY item_id", c.links); err != nil {
+		return counts{}, err
+	}
+	return c, nil
+}
+
+// countBy runs a query that returns an item ID and then one count per map
+// in into, and stores each count in its map. It closes its rows before
+// returning.
+func countBy(ctx context.Context, q queryer, query string, into ...map[string]int) error {
+	rows, err := q.QueryContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("items: counting: %w", err)
+	}
+	defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
+	for rows.Next() {
+		var id string
+		values := make([]int, len(into))
+		dest := []any{&id}
+		for i := range values {
+			dest = append(dest, &values[i])
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return fmt.Errorf("items: counting: %w", err)
+		}
+		for i, m := range into {
+			m[id] = values[i]
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("items: counting: %w", err)
+	}
+	return nil
+}
+
+// row is n as a list row at depth.
+func row(n *node, depth int, c counts) Row {
+	id := n.item.ID
+	return Row{
+		Item:           n.item,
+		Depth:          depth,
+		Children:       len(n.liveChildren()),
+		CriteriaTotal:  c.criteria[id],
+		CriteriaTicked: c.ticked[id],
+		Links:          c.links[id],
+	}
+}
