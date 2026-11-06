@@ -10,6 +10,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/items"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/query"
 	"github.com/jamesainslie/chainmail/internal/ref"
@@ -78,6 +79,10 @@ func toConnectError(err error) *connect.Error {
 	case errors.As(err, &noFolder):
 		return api.New(connect.CodeNotFound, api.ReasonNotFound, folderHint,
 			&fixedTextError{msg: folderMissingText(noFolder), err: err})
+	case errors.Is(err, errNotReady):
+		return api.New(connect.CodeFailedPrecondition, api.ReasonCacheNotReady, cacheNotReadyHint, err)
+	case errors.Is(err, items.ErrNotFound):
+		return api.New(connect.CodeNotFound, api.ReasonNotFound, "run: chainmail item list", err)
 	case errors.Is(err, mailstore.ErrNotFound):
 		return api.New(connect.CodeNotFound, api.ReasonNotFound, "", err)
 	case errors.Is(err, context.DeadlineExceeded):
