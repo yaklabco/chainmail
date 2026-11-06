@@ -136,7 +136,7 @@ message WorkItemRow {
 
 // Criterion is one acceptance criterion of an item.
 message Criterion {
-  // cr_ followed by lowercase letters and digits.
+  // cr_ followed by 1 to 60 lowercase letters, digits and underscores.
   string id = 1;
   // 0-based place in the item's list.
   int32 position = 2;
@@ -380,8 +380,8 @@ message TickCriterionRequest {
   string criterion_id = 2;
   // True ticks, false unticks.
   bool ticked = 3;
-  // Required when ticking: 1 to 1000 characters. Ignored when unticking,
-  // which clears it.
+  // Required when ticking: 1 to 1000 characters. Must be empty when
+  // unticking, which clears the stored evidence.
   string evidence = 4;
 }
 

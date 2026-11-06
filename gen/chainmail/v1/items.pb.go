@@ -422,7 +422,7 @@ func (x *WorkItemRow) GetRevision() int64 {
 // Criterion is one acceptance criterion of an item.
 type Criterion struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// cr_ followed by lowercase letters and digits.
+	// cr_ followed by 1 to 60 lowercase letters, digits and underscores.
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// 0-based place in the item's list.
 	Position int32 `protobuf:"varint,2,opt,name=position,proto3" json:"position,omitempty"`
@@ -1829,8 +1829,8 @@ type TickCriterionRequest struct {
 	CriterionId string                 `protobuf:"bytes,2,opt,name=criterion_id,json=criterionId,proto3" json:"criterion_id,omitempty"`
 	// True ticks, false unticks.
 	Ticked bool `protobuf:"varint,3,opt,name=ticked,proto3" json:"ticked,omitempty"`
-	// Required when ticking: 1 to 1000 characters. Ignored when unticking,
-	// which clears it.
+	// Required when ticking: 1 to 1000 characters. Must be empty when
+	// unticking, which clears the stored evidence.
 	Evidence      string `protobuf:"bytes,4,opt,name=evidence,proto3" json:"evidence,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
