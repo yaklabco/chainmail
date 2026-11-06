@@ -1,0 +1,53 @@
+name: release
+# Cuts a release: the next version from the commits since the last tag, its
+# notes from that version's CHANGELOG.md section. Run it from main once the
+# changelog for the version is merged.
+on:
+  workflow_dispatch:
+concurrency:
+  group: release
+  cancel-in-progress: false
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Require the Homebrew tap token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN is not set. Add a token that can push to yaklabco/homebrew-tap with: gh secret set HOMEBREW_TAP_TOKEN --repo yaklabco/chainmail"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          install-only: true
+      # The same goreleaser version the Nix dev shell gives local runs.
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: v2.17.1
+          install-only: true
+      - name: Configure git user
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - run: go tool stave check
+      - run: go tool stave release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
