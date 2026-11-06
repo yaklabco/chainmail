@@ -3,6 +3,7 @@ package items
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"slices"
 )
 
@@ -117,4 +118,63 @@ func (s *Store) Subtree(ctx context.Context, id string) ([]string, error) {
 		return nil, err
 	}
 	return ids, nil
+}
+
+// Blockers returns the live items that block id, then the live items id
+// blocks, each in creation order. Rows have Depth 0.
+func (s *Store) Blockers(ctx context.Context, id string) ([]Row, []Row, error) {
+	var blockedBy, blocks []Row
+	err := s.treeRead(ctx, id, func(tx *sql.Tx, f *forest, _ *node, c counts) error {
+		by, err := relatedIDs(ctx, tx,
+			`SELECT b.blocked_by_id FROM item_blockers b JOIN items i ON i.id = b.blocked_by_id
+			 WHERE b.item_id = ? ORDER BY i.created_at, i.id`, id)
+		if err != nil {
+			return err
+		}
+		bl, err := relatedIDs(ctx, tx,
+			`SELECT b.item_id FROM item_blockers b JOIN items i ON i.id = b.item_id
+			 WHERE b.blocked_by_id = ? ORDER BY i.created_at, i.id`, id)
+		if err != nil {
+			return err
+		}
+		blockedBy, blocks = liveRows(f, by, c), liveRows(f, bl, c)
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return blockedBy, blocks, nil
+}
+
+// relatedIDs runs a query for item IDs with one argument. It closes its
+// rows before returning.
+func relatedIDs(ctx context.Context, q queryer, query, id string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, query, id)
+	if err != nil {
+		return nil, fmt.Errorf("items: reading blockers: %w", err)
+	}
+	defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, fmt.Errorf("items: reading blockers: %w", err)
+		}
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("items: reading blockers: %w", err)
+	}
+	return out, nil
+}
+
+// liveRows returns rows, at Depth 0, for the live items among ids, in order.
+func liveRows(f *forest, ids []string, c counts) []Row {
+	var out []Row
+	for _, id := range ids {
+		if n, ok := f.byID[id]; ok && n.live() {
+			out = append(out, row(n, 0, c))
+		}
+	}
+	return out
 }
