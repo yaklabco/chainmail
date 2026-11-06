@@ -57,7 +57,7 @@ var itemClearFields = []string{"area", "priority", "start", "due", "estimate", "
 // itemFlagPaths maps each item update flag, and so each --clear name, to
 // the UpdateItem mask path it changes.
 var itemFlagPaths = map[string]string{
-	"type": "type", "title": "title", "description": "description", "description-file": "description",
+	"type": "type", "title": "title", "description": "description",
 	"state": "state", "area": "area", "priority": "priority", "start": "start_date", "due": "due_date", "estimate": "estimate",
 }
 

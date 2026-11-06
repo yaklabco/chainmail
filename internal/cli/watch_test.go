@@ -1280,12 +1280,12 @@ func TestEventLineItemKinds(t *testing.T) {
 		{
 			name: "item update",
 			e:    &chainmailv1.WatchEvent{Id: 7, Kind: "item", Item: &chainmailv1.WorkItemChange{ItemId: "it_task1", Type: "task", Revision: 42, Op: "updated", Fields: []string{"state", "due_date"}}},
-			want: "10:00:00 item     - - it_task1 task updated state,due_date revision 42\n",
+			want: "10:00:00 item      - - it_task1 task updated state,due_date revision 42\n",
 		},
 		{
 			name: "item created",
 			e:    &chainmailv1.WatchEvent{Id: 6, Kind: "item", Item: &chainmailv1.WorkItemChange{ItemId: "it_task1", Type: "task", Revision: 41, Op: "created"}},
-			want: "10:00:00 item     - - it_task1 task created revision 41\n",
+			want: "10:00:00 item      - - it_task1 task created revision 41\n",
 		},
 		{
 			name: "item mail",
@@ -1324,7 +1324,7 @@ func TestWatchHelpSaysItemKindsAreOptIn(t *testing.T) {
 	for _, want := range []string{
 		"come when --kind names them or --item is given",
 		"--item string",
-		"(default: all but item and item_mail)",
+		"(default: all but item and item_mail; with --item: item, item_mail, status and gap)",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("watch help lacks %q:\n%s", want, got.stdout)
