@@ -137,3 +137,8 @@ func withDescription(ctx context.Context, q queryer, it Item) (Item, error) {
 	}
 	return it, nil
 }
+
+// live reports whether n's item is not deleted.
+func (n *node) live() bool {
+	return n.item.DeletedAt.IsZero()
+}

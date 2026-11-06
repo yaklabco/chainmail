@@ -187,3 +187,56 @@ func sameItem(t *testing.T, got, want Item) {
 		t.Errorf("item %s =\n%+v\nwant\n%+v", want.ID, got, want)
 	}
 }
+
+// create creates n as testActor and fails the test on error.
+func (r *storeRig) create(t *testing.T, n NewItem) Item {
+	t.Helper()
+	it, _, _, err := r.store.Create(t.Context(), testActor, n)
+	if err != nil {
+		t.Fatalf("Create %s: %v", n.Type, err)
+	}
+	return it
+}
+
+// markDeleted soft-deletes id behind the Store's back, for tests that need a
+// deleted item without going through Delete.
+func (r *storeRig) markDeleted(t *testing.T, id string) {
+	t.Helper()
+	if _, err := r.db.ExecContext(t.Context(),
+		"UPDATE items SET deleted_at = ? WHERE id = ?", formatTime(r.clock.Now()), id); err != nil {
+		t.Fatalf("marking %s deleted: %v", id, err)
+	}
+}
+
+// wantErr fails the test unless err is want.
+func wantErr(t *testing.T, err, want error) {
+	t.Helper()
+	if !errors.Is(err, want) {
+		t.Fatalf("err = %v, want %v", err, want)
+	}
+}
+
+// wantInvalid fails the test unless err is an *InvalidError.
+func wantInvalid(t *testing.T, err error) {
+	t.Helper()
+	var invalid *InvalidError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("err = %v, want an *InvalidError", err)
+	}
+}
+
+// wantRefusal checks a refused call: err is want, or any *InvalidError when
+// want is nil, and its text is exactly text when text is set.
+func wantRefusal(t *testing.T, err, want error, text string) {
+	t.Helper()
+	if want == nil {
+		wantInvalid(t, err)
+	} else {
+		wantErr(t, err, want)
+	}
+	if text != "" && err.Error() != text {
+		t.Fatalf("err = %q, want %q", err, text)
+	}
+}
+
+func floatp(v float64) *float64 { return &v }

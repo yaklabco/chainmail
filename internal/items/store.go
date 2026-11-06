@@ -264,3 +264,25 @@ func sqlBool(b bool) int {
 	}
 	return 0
 }
+
+// head is what a check needs to know about one item without loading the tree.
+type head struct {
+	typ     Type
+	deleted bool
+}
+
+// itemHead reads the head of id through q, or ErrNotFound naming what.
+func itemHead(ctx context.Context, q queryer, id, what string) (head, error) {
+	var (
+		typ     string
+		deleted int
+	)
+	err := q.QueryRowContext(ctx, "SELECT type, deleted_at IS NOT NULL FROM items WHERE id = ?", id).Scan(&typ, &deleted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return head{}, errMissing(what)
+	}
+	if err != nil {
+		return head{}, fmt.Errorf("items: reading an item: %w", err)
+	}
+	return head{typ: Type(typ), deleted: deleted != 0}, nil
+}

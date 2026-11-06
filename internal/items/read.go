@@ -18,3 +18,20 @@ func (s *Store) Get(ctx context.Context, id string) (Item, error) {
 	}
 	return it, nil
 }
+
+// Criteria returns the item's criteria in position order, deleted item or not.
+func (s *Store) Criteria(ctx context.Context, id string) ([]Criterion, error) {
+	var out []Criterion
+	err := s.read(ctx, func(tx *sql.Tx) error {
+		if _, err := itemHead(ctx, tx, id, "item"); err != nil {
+			return err
+		}
+		var err error
+		out, err = criteriaOf(ctx, tx, id)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
