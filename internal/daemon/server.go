@@ -24,6 +24,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/cache"
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/idempotency"
+	"github.com/jamesainslie/chainmail/internal/items"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/mailstore/imapstore"
 	"github.com/jamesainslie/chainmail/internal/policy"
@@ -151,6 +152,9 @@ type Server struct {
 	shutdown <-chan struct{}
 	// engine turns sync passes into events and checkpoints.
 	engine *watch.Engine
+	// items keeps the work items, their criteria, blockers and thread
+	// links in state.db, and appends their events to watchLog.
+	items *items.Store
 	// supervisors watch and sync the accounts while Serve runs.
 	supervisors supervisorSet
 	// trimInterval is how often the event log is trimmed. Tests shorten it.
@@ -231,6 +235,10 @@ func New(opts Options) (*Server, error) {
 	}
 	s.stores = &storeSet{build: s.buildStore, buildSized: s.buildSized, firstUse: s.probeIfStale, logger: opts.Logger}
 	s.engine = watch.NewEngine(opts.StateDB, s.watchLog, s.watchState, watch.EngineOptions{Now: opts.Now, Snippet: snippetOf})
+	s.items = items.NewStore(opts.StateDB, s.watchLog, opts.Now)
+	if err := s.ensureAdmin(); err != nil {
+		return nil, err
+	}
 	if err := s.openSendState(); err != nil {
 		return nil, err
 	}
@@ -247,6 +255,7 @@ func New(opts Options) (*Server, error) {
 	mux.Handle(chainmailv1connect.NewOrganizeServiceHandler(&organizeService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewWatchServiceHandler(&watchService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewCacheServiceHandler(&cacheService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
+	mux.Handle(chainmailv1connect.NewItemsServiceHandler(&itemsService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
