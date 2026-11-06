@@ -1,7 +1,9 @@
 package items
 
 import (
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -64,5 +66,22 @@ func TestParseTime(t *testing.T) {
 		if _, err := parseTime(bad); err == nil {
 			t.Errorf("parseTime(%q) succeeded, want an error", bad)
 		}
+	}
+}
+
+// A stored time that does not parse gives a fixed error, so the column value
+// never travels in error text.
+func TestParseTimeErrorHoldsNoInput(t *testing.T) {
+	t.Parallel()
+	const marker = "marker-7f3a"
+	_, err := parseTime(marker)
+	if err == nil {
+		t.Fatal("parseTime succeeded, want an error")
+	}
+	if strings.Contains(err.Error(), marker) {
+		t.Errorf("parseTime error %q repeats its input", err)
+	}
+	if !errors.Is(err, errStoredTime) {
+		t.Errorf("parseTime error = %v, want errStoredTime", err)
 	}
 }

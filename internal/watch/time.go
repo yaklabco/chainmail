@@ -30,3 +30,12 @@ func parseTime(s string) (time.Time, error) {
 	}
 	return t.UTC(), nil
 }
+
+// FormatTime renders t in the stored time layout, in UTC, with "" for the
+// zero time. Packages that keep times in state.db beside the event log, such
+// as internal/items, use it so every table shares one encoding.
+func FormatTime(t time.Time) string { return formatTime(t) }
+
+// ParseTime reads a time written by FormatTime. "" reads as the zero time.
+// Its error repeats the input.
+func ParseTime(s string) (time.Time, error) { return parseTime(s) }
