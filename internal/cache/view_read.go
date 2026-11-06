@@ -339,35 +339,19 @@ func (v *View) logReadError(msg string, err error) {
 }
 
 // recoverRef finds where the message r named lives now, on an account
-// other than Google: r's Message-ID, from its cached row or from
-// ref_recovery after a UIDVALIDITY rebuild, matched against the account's
-// cached rows other than r's own. Exactly one match is the answer; none or
-// several are not. Google accounts recover by X-GM-MSGID in the store.
+// other than Google, by the cache's Message-ID rule (Store.RecoverRef).
+// Google accounts recover by X-GM-MSGID in the store.
 func (v *View) recoverRef(ctx context.Context, r ref.Ref) (ref.Ref, bool) {
 	store, account := v.a.o.Store, v.a.o.Account
 	if account.Provider.Gmail || r.Account != account.Name {
 		return ref.Ref{}, false
 	}
-	id, ok, err := store.MessageIDOf(ctx, r)
+	moved, ok, err := store.RecoverRef(ctx, account.Name, r)
 	if err != nil {
-		v.logReadError("looking up a Message-ID for recovery failed", err)
+		v.logReadError("recovering a ref by Message-ID failed", err)
 		return ref.Ref{}, false
 	}
-	if !ok || id == "" {
-		return ref.Ref{}, false
-	}
-	found, err := store.FindByMessageID(ctx, account.Name, id)
-	if err != nil {
-		v.logReadError("finding a message by Message-ID failed", err)
-		return ref.Ref{}, false
-	}
-	found = slices.DeleteFunc(found, func(c ref.Ref) bool {
-		return c.Folder == r.Folder && c.UIDValidity == r.UIDValidity && c.UID == r.UID
-	})
-	if len(found) != 1 {
-		return ref.Ref{}, false
-	}
-	return found[0], true
+	return moved, ok
 }
 
 // Thread implements mailstore.Store's Thread through the cache, as

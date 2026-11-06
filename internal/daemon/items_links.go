@@ -202,25 +202,15 @@ func (s *Server) cachedLinkRow(ctx context.Context, acct config.ResolvedAccount,
 	return row, ok
 }
 
-// recoveredRow is the cached row of the one other message with r's
-// Message-ID, by the rule of the cache view's ref recovery: none or
-// several matches find nothing.
+// recoveredRow is the cached row of the message r was recovered to by the
+// cache view's ref recovery rule (cache.Store.RecoverRef): none or several
+// matches find nothing.
 func (s *Server) recoveredRow(ctx context.Context, acct config.ResolvedAccount, r ref.Ref) (cache.Row, bool, error) {
-	id, ok, err := s.cache.MessageIDOf(ctx, r)
+	moved, ok, err := s.cache.RecoverRef(ctx, acct.Name, r)
 	if err != nil || !ok {
 		return cache.Row{}, false, err
 	}
-	found, err := s.cache.FindByMessageID(ctx, acct.Name, id)
-	if err != nil {
-		return cache.Row{}, false, err
-	}
-	found = slices.DeleteFunc(found, func(c ref.Ref) bool {
-		return c.Folder == r.Folder && c.UIDValidity == r.UIDValidity && c.UID == r.UID
-	})
-	if len(found) != 1 {
-		return cache.Row{}, false, nil
-	}
-	return s.cache.Row(ctx, found[0])
+	return s.cache.Row(ctx, moved)
 }
 
 // UnlinkThread implements chainmailv1connect.ItemsServiceHandler. It
