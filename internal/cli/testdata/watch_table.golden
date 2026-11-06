@@ -1,7 +1,7 @@
-11:00:01 new      host INBOX Hello
-11:00:02 flags    host INBOX cm1:host:INBOX:1:1 \Seen,Work
-11:00:03 expunged host INBOX cm1:host:INBOX:1:2
-11:00:04 status   host - auth_required run: chainmail auth login host
-11:00:05 gap      - - trimmed, next id 9
-11:00:05 new      host INBOX Bad[31m news line
+11:00:01 new       host INBOX Hello
+11:00:02 flags     host INBOX cm1:host:INBOX:1:1 \Seen,Work
+11:00:03 expunged  host INBOX cm1:host:INBOX:1:2
+11:00:04 status    host - auth_required run: chainmail auth login host
+11:00:05 gap       - - trimmed, next id 9
+11:00:05 new       host INBOX Bad[31m news line
 11:00:30 heartbeat position 5

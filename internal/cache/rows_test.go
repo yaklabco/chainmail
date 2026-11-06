@@ -156,6 +156,7 @@ func TestRowViews(t *testing.T) {
 	wantSum := mailstore.Summary{
 		Ref: wantRef, Date: r.Date, InternalDate: r.InternalDate, From: r.From, To: r.To,
 		Subject: r.Subject, Flags: r.Flags, Size: r.Size, HasAttachment: true, ThreadID: r.ThreadID, Labels: r.Labels,
+		MessageID: "inv77@acme.example",
 	}
 	if got := r.Summary(); !reflect.DeepEqual(got, wantSum) {
 		t.Errorf("Summary =\n%+v\nwant\n%+v", got, wantSum)

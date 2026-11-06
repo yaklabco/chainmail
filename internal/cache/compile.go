@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -64,9 +65,11 @@ var normColumns = map[query.Field]string{
 // Compile turns a query (in: and account: already split off, as the
 // daemon's plan does) into a Plan. in is the in: value; gmail selects label
 // semantics. now is the clock ages count back from, the one the server
-// path's dialect uses, so both pick the same day.
-func Compile(n *query.Node, in string, gmail bool, now time.Time) (Plan, error) {
-	c := &compiler{gmail: gmail, now: now}
+// path's dialect uses, so both pick the same day. items is the searched
+// account's mailstore.SearchRequest.ItemThreads: an item: term whose value
+// has no entry is an error, never a silent match.
+func Compile(n *query.Node, in string, gmail bool, now time.Time, items map[string][]string) (Plan, error) {
+	c := &compiler{gmail: gmail, now: now, items: items}
 	var (
 		conds     []string
 		args      []any
@@ -161,6 +164,8 @@ var gmailLabelFolder = strings.NewReplacer(" ", "-", "/", "-")
 type compiler struct {
 	gmail bool
 	now   time.Time
+	// items maps each item: value to the account's thread keys.
+	items map[string][]string
 	// unsupported is set when a term the cache cannot evaluate compiled
 	// to 0.
 	unsupported bool
@@ -359,6 +364,8 @@ func (c *compiler) term(n *query.Node) (string, []any, error) {
 		return c.cannot()
 	case query.FieldLabel:
 		return c.label(n)
+	case query.FieldItem:
+		return c.item(n)
 	case query.FieldNewerThan, query.FieldOlderThan, query.FieldAfter, query.FieldBefore:
 		return c.date(n)
 	case query.FieldLarger, query.FieldSmaller:
@@ -418,6 +425,29 @@ func (c *compiler) label(n *query.Node) (string, []any, error) {
 		sql, args := likeElement("m.flags_norm", n.Value)
 		return sql, args, nil
 	}
+}
+
+// item compiles item:<id> to the messages in the threads linked to the
+// item, and item:none to those in no linked thread, rows with no thread
+// key included, from the thread keys the daemon resolved for the account.
+// The keys go in as one JSON array, so any number of them takes one
+// argument. It reads only headers, so the cache answers it like from:.
+func (c *compiler) item(n *query.Node) (string, []any, error) {
+	keys, ok := c.items[n.Value]
+	if !ok {
+		return "", nil, fmt.Errorf("item:%s reached the cache without its thread keys", n.Value)
+	}
+	if keys == nil {
+		keys = []string{} // json_each('null') is not an empty list
+	}
+	list, err := json.Marshal(keys)
+	if err != nil {
+		return "", nil, fmt.Errorf("encoding the thread keys of item:%s: %w", n.Value, err)
+	}
+	if n.Value == query.ItemNone {
+		return "m.thread_id NOT IN (SELECT value FROM json_each(?))", []any{string(list)}, nil
+	}
+	return "m.thread_id IN (SELECT value FROM json_each(?))", []any{string(list)}, nil
 }
 
 // likeContains matches value as a case-insensitive substring of column.

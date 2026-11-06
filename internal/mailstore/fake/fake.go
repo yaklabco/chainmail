@@ -610,6 +610,61 @@ func (s *Store) inThreadLocked(seed *Message, root string, m *Message) bool {
 	return trimID(m.MessageID) == root || slices.Contains(mailstore.MessageIDs(m.References), root)
 }
 
+var _ mailstore.ThreadFinder = (*Store)(nil)
+
+// FindThread implements mailstore.ThreadFinder. On Gmail it lists All Mail
+// by the thread ID threadKey names, in lowercase hexadecimal as
+// Summary.ThreadID gives it; any other key finds nothing. Elsewhere it lists
+// the messages in the default search folders whose Message-ID is
+// rootMessageID or whose References or In-Reply-To contain it, as
+// imapstore's server search does. The refs are sorted by folder, then UID.
+func (s *Store) FindThread(ctx context.Context, threadKey, rootMessageID string) ([]ref.Ref, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.beginRead(ctx, "FindThread"); err != nil {
+		return nil, err
+	}
+	sources, err := s.sourcesLocked("")
+	if err != nil {
+		return nil, err
+	}
+	out := []ref.Ref{}
+	match, ok := threadMatcher(s.gmail, threadKey, rootMessageID)
+	if !ok {
+		return out, nil
+	}
+	for _, m := range s.msgs {
+		if slices.Contains(sources, m.Folder) && match(m) {
+			out = append(out, s.refLocked(m))
+		}
+	}
+	slices.SortFunc(out, func(a, b ref.Ref) int {
+		return cmp.Or(cmp.Compare(a.Folder, b.Folder), cmp.Compare(a.UID, b.UID))
+	})
+	return out, nil
+}
+
+// threadMatcher returns the test FindThread applies to each message, or
+// false when the key or root can match nothing.
+func threadMatcher(gmail bool, threadKey, rootMessageID string) (func(*Message) bool, bool) {
+	if gmail {
+		id, err := strconv.ParseUint(threadKey, 16, 64)
+		if err != nil || id == 0 || strconv.FormatUint(id, 16) != threadKey {
+			return nil, false
+		}
+		return func(m *Message) bool { return m.GmailThreadID == id }, true
+	}
+	root := trimID(rootMessageID)
+	if root == "" {
+		return nil, false
+	}
+	return func(m *Message) bool {
+		return trimID(m.MessageID) == root ||
+			slices.Contains(mailstore.MessageIDs(m.References), root) ||
+			slices.Contains(mailstore.MessageIDs(m.InReplyTo), root)
+	}, true
+}
+
 // Close implements mailstore.Store. It closes every open watch connection
 // without waiting for its owner, so a watcher sees ErrUnavailable and
 // reconnects through a replacement store.
@@ -837,10 +892,16 @@ var minDate = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
 
 const maxSize = math.MaxUint32
 
-// checkSupported refuses on standard accounts what imapstore's standard
+// checkSupported refuses item: on every account, which only the daemon's
+// cache answers, and on standard accounts what imapstore's standard
 // dialect refuses: the Gmail-only operators, sizes past 32 bits and dates
-// before 1970. Gmail takes them all.
+// before 1970. Gmail takes the rest.
 func (s *Store) checkSupported(n *query.Node) error {
+	for _, t := range n.Terms() {
+		if t.Field == query.FieldItem {
+			return fmt.Errorf("%w: item: is answered from the daemon's cache, never by a mail server", mailstore.ErrUnsupportedQuery)
+		}
+	}
 	if s.gmail {
 		return nil
 	}
@@ -994,7 +1055,7 @@ func (s *Store) summaryLocked(m *Message, r ref.Ref, opts mailstore.SummaryOptio
 		Ref: r, Date: dateOf(m), InternalDate: m.InternalDate,
 		From: slices.Clone(m.From), To: slices.Clone(m.To), Subject: m.Subject,
 		Flags: slices.Clone(m.Flags), Size: int64(len(rawMessage(m, true))), HasAttachment: len(m.Attachments) > 0,
-		ThreadID: mailstore.ThreadKey(rootOf(m)),
+		ThreadID: mailstore.ThreadKey(rootOf(m)), MessageID: trimID(m.MessageID),
 	}
 	if s.gmail {
 		sum.ThreadID = strconv.FormatUint(m.GmailThreadID, 16)

@@ -15,6 +15,10 @@ import (
 // import config, which would pull the config parser into the index later.
 var accountRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
+// itemIDRE matches item IDs, as internal/items ValidID does. query cannot
+// import items, which would pull state.db code into the parser.
+var itemIDRE = regexp.MustCompile(`^it_[0-9a-z_]{1,60}$`)
+
 var (
 	ageRE  = regexp.MustCompile(`^([0-9]{1,4})([dwmyDWMY])$`)
 	sizeRE = regexp.MustCompile(`^([0-9]{1,12})([kKmM]?)$`)
@@ -104,6 +108,10 @@ func (v *validator) term(n *Node, constrained bool) error {
 		if !strings.EqualFold(n.Value, "attachment") {
 			return invalid
 		}
+	case FieldItem:
+		if n.Value != ItemNone && !itemIDRE.MatchString(n.Value) {
+			return invalid
+		}
 	case FieldIn, FieldAccount:
 		if constrained {
 			return &SyntaxError{
@@ -170,6 +178,8 @@ func expected(f Field) string {
 		return "part of a file name, such as filename:pdf"
 	case FieldLabel:
 		return "a Gmail label, such as label:receipts"
+	case FieldItem:
+		return "an item ID, such as item:it_admin_work, or item:none for mail in no linked thread"
 	case FieldIn:
 		return "inbox, sent, drafts, archive, trash, spam, anywhere or a folder name"
 	case FieldAccount:

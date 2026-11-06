@@ -158,6 +158,9 @@ type Summary struct {
 	// Elsewhere it is ThreadKey of the root Message-ID, or "" when the
 	// message has none.
 	ThreadID string
+	// MessageID is the message's Message-ID without angle brackets, or ""
+	// when it has none.
+	MessageID string
 	// Labels are Gmail labels, on Google accounts.
 	Labels []string
 	// Preview is the server's PREVIEW text, when snippets were asked for and
@@ -230,6 +233,13 @@ type SearchRequest struct {
 	// On Google accounts In still filters within All Mail. A stale bound is a
 	// per-source ErrStaleRef, not an error for the whole search.
 	Bounds map[string]Bound
+	// ItemThreads maps each item: value of Query, "none" or an item ID, to
+	// the thread keys of the account being searched: the threads linked to
+	// the item or any live item below it, or for "none" the threads linked
+	// to any live item. The daemon fills it for every item: term before
+	// calling a store. Only the cache reads it; a mail server never sees
+	// item:.
+	ItemThreads map[string][]string
 }
 
 // SourceResult is what one folder of a search found.

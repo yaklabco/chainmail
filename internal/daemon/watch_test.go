@@ -953,6 +953,10 @@ func TestSubscribeBacklogCrossesPages(t *testing.T) {
 func TestFilteredReadsCrossTheScanCap(t *testing.T) {
 	t.Parallel()
 	h := startWatch(t, 0)
+	// The publish below holds the state database's one connection for a
+	// long write. Serve's startup needs it too, within its own timeouts,
+	// so the publish waits until the daemon serves.
+	served(t, h)
 	events := make([]watch.Event, 5004)
 	for i := range events {
 		events[i] = watchNew("host", "INBOX", uint32(i+1), "m")

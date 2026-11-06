@@ -18,6 +18,7 @@ func FuzzParse(f *testing.F) {
 		`subject:"say \"hi\""`, "((((a))))", "-in:inbox", "a OR in:inbox", "label:x has:attachment filename:pdf",
 		"café ü", "\x00", strings.Repeat("(", 40) + "a" + strings.Repeat(")", 40),
 		`a\b "c\\d"`, "e-mail -x --y", `from:a"b"`, "\u00a0a\u00a0", "is:UNREAD", "in:\"Sent Items\"",
+		"item:none", "item:it_admin_work", "-item:none OR item:it_x", "item:", "item:NONE", "(item:it_a OR from:x) -item:none", "item:none newer_than:7d invoice",
 	}
 	for _, s := range seeds {
 		f.Add(s)

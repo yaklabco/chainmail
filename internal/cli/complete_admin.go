@@ -151,6 +151,7 @@ var searchOperators = []cobra.Completion{
 	cobra.CompletionWithDesc("has:", "has:attachment, Google accounts"),
 	cobra.CompletionWithDesc("filename:", "attachment name, Google accounts"),
 	cobra.CompletionWithDesc("label:", "Gmail label, Google accounts"),
+	cobra.CompletionWithDesc("item:", "linked to this item or one below it; item:none"),
 	cobra.CompletionWithDesc("in:", "a role or folder name"),
 	cobra.CompletionWithDesc("account:", "only this account"),
 }
@@ -201,6 +202,15 @@ func (cp *completer) searchTerms(cmd *cobra.Command, _ []string, toComplete stri
 		vals = append(slices.Clone(inRoles), cp.searchFolders(cmd, anyAccount, nil)...)
 	case "label":
 		vals = cp.searchFolders(cmd, cp.googleAccounts, labelFolder)
+	case "item":
+		vals = []string{"none"}
+		// A failed lookup leaves rows empty, which offers only none.
+		rows, _ := cp.listItemRows(cmd, false)
+		for _, r := range rows {
+			if querySafe(r.GetId()) {
+				vals = append(vals, r.GetId())
+			}
+		}
 	}
 	slices.Sort(vals)
 	var out []cobra.Completion

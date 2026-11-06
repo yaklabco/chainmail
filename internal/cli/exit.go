@@ -54,6 +54,16 @@ func minArgs(n int) cobra.PositionalArgs {
 	}
 }
 
+// rangeArgs is cobra.RangeArgs, reported as a usage error.
+func rangeArgs(lo, hi int) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := cobra.RangeArgs(lo, hi)(cmd, args); err != nil {
+			return usageError{err: err, hint: helpHint(cmd)}
+		}
+		return nil
+	}
+}
+
 // classification is how a failure is reported: its exit code, reason, message and hint.
 type classification struct {
 	code    int

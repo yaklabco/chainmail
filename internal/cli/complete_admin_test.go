@@ -67,7 +67,7 @@ func TestCompleteSearchTerms(t *testing.T) {
 		{toComplete: "in:in", want: []string{"in:inbox"}},
 		{toComplete: "label:[Gm", want: []string{}},
 		// in: and account: choose where to search and cannot be negated.
-		{toComplete: "-i", want: []string{"-is:"}},
+		{toComplete: "-i", want: []string{"-is:", "-item:"}},
 		{toComplete: "-a", want: []string{"-after:"}},
 		{toComplete: "-in:in", want: []string{}},
 		{toComplete: "-account:", want: []string{}},

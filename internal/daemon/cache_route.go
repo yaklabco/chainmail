@@ -84,9 +84,9 @@ func (noSource) FetchSummaries(context.Context, mailstore.Source, []uint32, mail
 	return nil, nil
 }
 
-// refusal refuses the search with err: has:, filename: and label: on an
-// account other than Google, which only its cache answers, when the cache
-// cannot.
+// refusal refuses the search with err: item: on any account, and has:,
+// filename: and label: on an account other than Google, which only the
+// cache answers, when the cache cannot.
 type refusal struct{ err error }
 
 func (r refusal) Search(context.Context, mailstore.SearchRequest) ([]mailstore.SourceResult, error) {
@@ -165,15 +165,19 @@ const (
 	missFailed
 )
 
-// serverRoute sends acct's page to its mail server. On an account other
-// than Google, has:, filename: and label: are refused here instead, with
-// the cause miss, or the query's own cause when the cache refuses or
-// cannot evaluate it: the server cannot search them.
+// serverRoute sends acct's page to its mail server. A query with item: is
+// refused here on every account, and on an account other than Google so
+// are has:, filename: and label:, with the cause miss, or the query's own
+// cause when the cache refuses or cannot evaluate it: the server cannot
+// search them.
 func (m *messageService) serverRoute(acct config.ResolvedAccount, p *searchPlan, miss cacheMiss) (searchSource, routeInfo) {
 	route := routeInfo{Source: cache.SourceServer, Complete: true}
+	if hasItemTerm(p.tree) {
+		return refusal{m.itemRefusal(acct, p, miss)}, route
+	}
 	if !acct.Provider.Gmail {
 		if f, ok := cacheOnlyField(p.tree); ok {
-			plan, err := cache.Compile(p.tree, p.in, false, m.s.cacheClock.Now())
+			plan, err := cache.Compile(p.tree, p.in, false, m.s.cacheClock.Now(), p.itemThreads[acct.Name])
 			switch {
 			case err != nil:
 				// The cache refuses the query itself, as the server path would.
@@ -192,7 +196,7 @@ func (m *messageService) serverRoute(acct config.ResolvedAccount, p *searchPlan,
 // note 15), even without a cache. A query that does not compile for the
 // cache is the server's to refuse too.
 func (m *messageService) unsupported(acct config.ResolvedAccount, p *searchPlan) bool {
-	plan, err := cache.Compile(p.tree, p.in, acct.Provider.Gmail, m.s.cacheClock.Now())
+	plan, err := cache.Compile(p.tree, p.in, acct.Provider.Gmail, m.s.cacheClock.Now(), p.itemThreads[acct.Name])
 	return err != nil || plan.Unsupported
 }
 
@@ -224,7 +228,7 @@ type cacheVerdict struct {
 // of a cache that is catching up, since waiting would not help it.
 func (m *messageService) cacheCanAnswer(ctx context.Context, ca *cache.Account, server mailstore.Store, acct config.ResolvedAccount, p *searchPlan) cacheVerdict {
 	log := m.s.opts.Logger
-	plan, err := cache.Compile(p.tree, p.in, acct.Provider.Gmail, m.s.cacheClock.Now())
+	plan, err := cache.Compile(p.tree, p.in, acct.Provider.Gmail, m.s.cacheClock.Now(), p.itemThreads[acct.Name])
 	if err != nil {
 		// A user error the server path refuses alike; its text quotes the query.
 		log.Debug("a search did not compile for the cache; the server answers it", "account", acct.Name, "reason", apiReason(err))
@@ -321,7 +325,7 @@ func errNeedsCache(field query.Field, miss cacheMiss) error {
 	case missBound:
 		return &argError{
 			msg:  lead + ", and the cache holds message text only for mail inside its body window",
-			hint: "add a top-level newer_than: or after: inside the account's prefetch_bodies window, or drop the text terms; waiting does not change this; see the window with: chainmail cache status",
+			hint: cacheBoundHint,
 		}
 	case missPrefetch:
 		return &argError{
@@ -341,7 +345,7 @@ func errNeedsCache(field query.Field, miss cacheMiss) error {
 	case missFailed:
 		return &argError{
 			msg:  lead + ", and the cache failed reading it",
-			hint: "the daemon log has the cause; see the cache with: chainmail cache status",
+			hint: cacheFailedHint,
 		}
 	default:
 		return &argError{

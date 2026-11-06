@@ -10,6 +10,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/api"
 	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/items"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/query"
 	"github.com/jamesainslie/chainmail/internal/ref"
@@ -26,13 +27,14 @@ var invalidArgument = []error{
 // toConnectError maps a Go error to a Connect error with a stable reason.
 func toConnectError(err error) *connect.Error {
 	var (
-		required  *auth.RequiredError
-		rejected  *auth.RejectedError
-		badName   *secretNameError
-		badArg    *argError
-		denied    *deniedError
-		syntaxErr *query.SyntaxError
-		noFolder  *mailstore.FolderNotFoundError
+		required    *auth.RequiredError
+		rejected    *auth.RejectedError
+		badName     *secretNameError
+		badArg      *argError
+		denied      *deniedError
+		syntaxErr   *query.SyntaxError
+		noFolder    *mailstore.FolderNotFoundError
+		invalidItem *items.InvalidError
 	)
 	switch {
 	case errors.As(err, &required):
@@ -50,6 +52,10 @@ func toConnectError(err error) *connect.Error {
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, badName.hint, err)
 	case errors.As(err, &badArg):
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, badArg.hint, err)
+	case errors.As(err, &invalidItem):
+		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, invalidItem.Hint, err)
+	case errors.Is(err, items.ErrKeyMismatch):
+		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, "use a new idempotency_key for a different item", err)
 	case errors.As(err, &denied):
 		return api.New(connect.CodePermissionDenied, api.ReasonPolicyDenied, denied.hint, err)
 	case errors.As(err, &syntaxErr):
@@ -78,6 +84,10 @@ func toConnectError(err error) *connect.Error {
 	case errors.As(err, &noFolder):
 		return api.New(connect.CodeNotFound, api.ReasonNotFound, folderHint,
 			&fixedTextError{msg: folderMissingText(noFolder), err: err})
+	case errors.Is(err, errNotReady):
+		return api.New(connect.CodeFailedPrecondition, api.ReasonCacheNotReady, notReadyHint(err), err)
+	case errors.Is(err, items.ErrNotFound):
+		return api.New(connect.CodeNotFound, api.ReasonNotFound, itemListHint, err)
 	case errors.Is(err, mailstore.ErrNotFound):
 		return api.New(connect.CodeNotFound, api.ReasonNotFound, "", err)
 	case errors.Is(err, context.DeadlineExceeded):

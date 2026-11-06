@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/jamesainslie/chainmail/internal/ref"
@@ -42,6 +43,30 @@ func (s *Store) FindByMessageID(ctx context.Context, account, messageID string) 
 		return nil, s.fail("finding a Message-ID", err)
 	}
 	return refs, nil
+}
+
+// RecoverRef finds where the message r named lives now, by Message-ID: r's
+// Message-ID, from its row or from ref_recovery after a UIDVALIDITY
+// rebuild, matched against account's cached rows other than r's own.
+// Exactly one match is the answer; none or several are not. It is the
+// recovery rule for accounts other than Google, which recover by
+// X-GM-MSGID instead; the caller checks the provider and logs a failure.
+func (s *Store) RecoverRef(ctx context.Context, account string, r ref.Ref) (ref.Ref, bool, error) {
+	id, ok, err := s.MessageIDOf(ctx, r)
+	if err != nil || !ok {
+		return ref.Ref{}, false, err
+	}
+	found, err := s.FindByMessageID(ctx, account, id)
+	if err != nil {
+		return ref.Ref{}, false, err
+	}
+	found = slices.DeleteFunc(found, func(c ref.Ref) bool {
+		return c.Folder == r.Folder && c.UIDValidity == r.UIDValidity && c.UID == r.UID
+	})
+	if len(found) != 1 {
+		return ref.Ref{}, false, nil
+	}
+	return found[0], true, nil
 }
 
 // PruneRecovery deletes ref_recovery rows removed before before.

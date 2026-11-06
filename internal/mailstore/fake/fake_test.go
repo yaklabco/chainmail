@@ -78,6 +78,20 @@ func TestFakeRefusesGmailOnlyOperators(t *testing.T) {
 	}
 }
 
+// TestFakeRefusesItemTerms checks that both fake kinds refuse item:, as no
+// mail server can answer it, so a daemon test that leaks item: to a server
+// fails instead of reading as an empty answer.
+func TestFakeRefusesItemTerms(t *testing.T) {
+	t.Parallel()
+	for _, q := range []string{"item:none", "from:a -item:it_a", "a OR item:it_b"} {
+		for _, gmail := range []bool{false, true} {
+			if _, err := New("acct", gmail).Search(t.Context(), mailstore.SearchRequest{Query: mustParse(t, q)}); !errors.Is(err, mailstore.ErrUnsupportedQuery) {
+				t.Errorf("%s, gmail %v: %v, want ErrUnsupportedQuery", q, gmail, err)
+			}
+		}
+	}
+}
+
 func TestFakeStreamPart(t *testing.T) {
 	t.Parallel()
 	s := New("host", false)
@@ -779,4 +793,116 @@ func TestFakeHostRefusesOutOfRange(t *testing.T) {
 			t.Errorf("%s on a standard account: %v", q, err)
 		}
 	}
+}
+
+// Every summary carries the Message-ID without angle brackets or spaces,
+// the value the header gives, and "" for a message without one.
+func TestFakeSummaryMessageID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		stored string
+		want   string
+	}{
+		{"plain@example.net", "plain@example.net"},
+		{"<bracketed@example.net>", "bracketed@example.net"},
+		{" <spaced@example.net> ", "spaced@example.net"},
+		{"", ""},
+	}
+	for _, gmail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("gmail=%v", gmail), func(t *testing.T) {
+			t.Parallel()
+			folder := "INBOX"
+			if gmail {
+				folder = allMail
+			}
+			s := New("host", gmail)
+			var uids []uint32
+			var src mailstore.Source
+			for _, tt := range tests {
+				r := s.Add(Message{Folder: folder, Subject: "s", MessageID: tt.stored})
+				uids = append(uids, r.UID)
+				src = mailstore.Source{Folder: r.Folder, UIDValidity: r.UIDValidity}
+			}
+			sums, err := s.FetchSummaries(t.Context(), src, uids, mailstore.SummaryOptions{})
+			if err != nil || len(sums) != len(tests) {
+				t.Fatalf("FetchSummaries = %d summaries, %v; want %d", len(sums), err, len(tests))
+			}
+			hs, err := s.FetchHeaders(t.Context(), src, uids)
+			if err != nil || len(hs) != len(tests) {
+				t.Fatalf("FetchHeaders = %d headers, %v; want %d", len(hs), err, len(tests))
+			}
+			for i, tt := range tests {
+				if sums[i].MessageID != tt.want {
+					t.Errorf("summary of %q: MessageID = %q, want %q", tt.stored, sums[i].MessageID, tt.want)
+				}
+				if hs[i].Summary.MessageID != tt.want || hs[i].MessageID != tt.want {
+					t.Errorf("header of %q: Summary.MessageID = %q, MessageID = %q; want %q for both",
+						tt.stored, hs[i].Summary.MessageID, hs[i].MessageID, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestFakeFindThread(t *testing.T) {
+	t.Parallel()
+	t.Run("standard", func(t *testing.T) {
+		t.Parallel()
+		s := New("host", false)
+		s.AddFolder("All", mailstore.RoleAll)
+		root := s.Add(Message{Folder: "INBOX", Date: day(1), Subject: "root", MessageID: "r@x"})
+		s.Add(Message{Folder: "INBOX", Date: day(1), Subject: "other", MessageID: "o@x"})
+		reply := s.Add(Message{Folder: "Sent", Date: day(2), Subject: "reply", MessageID: "r1@x", References: []string{"<r@x>"}})
+		// late names the root in In-Reply-To only, which the server search
+		// matches too.
+		late := s.Add(Message{Folder: "Archive", Date: day(3), Subject: "late", MessageID: "r2@x", InReplyTo: []string{"<r@x>"}})
+		s.Add(Message{Folder: "Trash", Date: day(4), Subject: "binned", MessageID: "r3@x", References: []string{"<r@x>"}})
+		s.Add(Message{Folder: "Junk", Date: day(4), Subject: "junk", MessageID: "r4@x", References: []string{"<r@x>"}})
+		s.Add(Message{Folder: "All", Date: day(1), Subject: "root", MessageID: "r@x"})
+		want := []ref.Ref{late, root, reply}
+		for _, r := range []string{"r@x", "<r@x>", " <r@x> "} {
+			got, err := s.FindThread(t.Context(), "ignored", r)
+			if err != nil || !slices.Equal(got, want) {
+				t.Errorf("FindThread(%q) = %v, %v; want %v", r, got, err, want)
+			}
+		}
+		for _, r := range []string{"", "missing@x"} {
+			if got, err := s.FindThread(t.Context(), "", r); err != nil || got == nil || len(got) != 0 {
+				t.Errorf("FindThread(%q) = %#v, %v; want an empty slice", r, got, err)
+			}
+		}
+	})
+	t.Run("gmail", func(t *testing.T) {
+		t.Parallel()
+		s := New("gmail", true)
+		root := s.Add(Message{Folder: allMail, Date: day(1), Subject: "root", MessageID: "r@x"})
+		reply := s.Add(Message{Folder: allMail, Date: day(2), Subject: "reply", MessageID: "r1@x", References: []string{"<r@x>"}})
+		s.Add(Message{Folder: allMail, Date: day(3), Subject: "other", MessageID: "o@x"})
+		key := summary(t, s, root).ThreadID
+		tid, err := strconv.ParseUint(key, 16, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Add(Message{Folder: "[Gmail]/Trash", Date: day(4), Subject: "trashed", GmailThreadID: tid})
+		got, err := s.FindThread(t.Context(), key, "ignored@x")
+		if want := []ref.Ref{root, reply}; err != nil || !slices.Equal(got, want) {
+			t.Errorf("FindThread(%s) = %v, %v; want %v", key, got, err, want)
+		}
+		for _, k := range []string{"", "zz", "0", "0" + key, "ffffffff"} {
+			if got, err := s.FindThread(t.Context(), k, "r@x"); err != nil || got == nil || len(got) != 0 {
+				t.Errorf("FindThread(%q) = %#v, %v; want an empty slice", k, got, err)
+			}
+		}
+	})
+	t.Run("a failure", func(t *testing.T) {
+		t.Parallel()
+		s := New("host", false)
+		s.Fail("FindThread", mailstore.ErrUnavailable)
+		if _, err := s.FindThread(t.Context(), "", "r@x"); !errors.Is(err, mailstore.ErrUnavailable) {
+			t.Errorf("FindThread = %v, want ErrUnavailable", err)
+		}
+		if n := s.Calls("FindThread"); n != 1 {
+			t.Errorf("Calls(FindThread) = %d, want 1", n)
+		}
+	})
 }

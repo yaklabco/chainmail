@@ -541,6 +541,7 @@ var cases = []testCase{
 	{"FetchMessages reads headers and attachments", both, fetchMessages},
 	{"StreamPart streams the message and its parts", both, streamPart},
 	{"Thread", both, thread},
+	{"FindThread finds a thread by its key", both, findThread},
 	{"FetchHeaders keeps order, drops gone UIDs and never sets \\Seen", both, fetchHeaders},
 	{"SearchFolders names the folders Search uses", both, searchFolders},
 }
@@ -1461,6 +1462,59 @@ func thread(e *env) {
 	}
 }
 
+// findThread: FindThread finds a thread by the key and root a link stores,
+// with no seed message: every member in the default search scope, Trash
+// left out, sorted by folder then UID, and nothing for a key or root no
+// thread has. It never sets \Seen.
+func findThread(e *env) {
+	tf, ok := e.s.(mailstore.ThreadFinder)
+	if !ok {
+		e.t.Fatalf("%T does not implement mailstore.ThreadFinder", e.s)
+	}
+	root := e.msg("CfFindRoot")
+	root.MessageID = "find-root@conformance.test"
+	reply := e.in(e.msg("CfFindReply"), pick(e.gmail, GmailSent, "Sent"))
+	if e.gmail {
+		reply.Labels = []string{`\Sent`}
+	}
+	reply.Date, reply.InReplyTo, reply.References = day(21), root.MessageID, []string{root.MessageID}
+	binned := e.in(e.msg("CfFindBinned"), e.trash())
+	binned.Date, binned.InReplyTo, binned.References = day(22), root.MessageID, []string{root.MessageID}
+	e.seed(e.t, root, reply, binned, e.msg("CfFindOther"))
+	rootSum := e.only("", "CfFindRoot")
+	if rootSum.ThreadID == "" {
+		e.t.Fatal("CfFindRoot has no thread key")
+	}
+	want := []ref.Ref{rootSum.Ref, e.ref("CfFindReply")}
+	sortRefs(want)
+	got, err := tf.FindThread(e.ctx, rootSum.ThreadID, root.MessageID)
+	if err != nil {
+		e.t.Fatalf("FindThread(%s, %s): %v", rootSum.ThreadID, root.MessageID, err)
+	}
+	if !slices.Equal(got, want) {
+		e.t.Errorf("FindThread(%s, %s) = %v, want %v", rootSum.ThreadID, root.MessageID, got, want)
+	}
+	// A Google thread key is lowercase hexadecimal with no leading zero, as
+	// Summary.ThreadID writes it: the same number written any other way is no
+	// key. Off Google the key is ignored and the root misses.
+	misses := []struct{ key, root string }{
+		{"ffffffffffff", "find-missing@conformance.test"},
+		{"not-hex", "find-missing@conformance.test"},
+		{"", ""},
+		{"0" + rootSum.ThreadID, "find-missing@conformance.test"},
+	}
+	if upper := strings.ToUpper(rootSum.ThreadID); upper != rootSum.ThreadID {
+		misses = append(misses, struct{ key, root string }{upper, "find-missing@conformance.test"})
+	}
+	for _, miss := range misses {
+		got, err := tf.FindThread(e.ctx, miss.key, miss.root)
+		if err != nil || got == nil || len(got) != 0 {
+			e.t.Errorf("FindThread(%q, %q) = %#v, %v; want an empty slice", miss.key, miss.root, got, err)
+		}
+	}
+	e.unread("CfFindRoot")
+}
+
 func fetchHeaders(e *env) {
 	hf, ok := e.s.(mailstore.HeaderFetcher)
 	if !ok {
@@ -1500,6 +1554,10 @@ func fetchHeaders(e *env) {
 	}
 	if h.MessageID != want.MessageID {
 		e.t.Errorf("MessageID = %q, want %q without angle brackets", h.MessageID, want.MessageID)
+	}
+	if sums[1].MessageID != want.MessageID || h.Summary.MessageID != want.MessageID {
+		e.t.Errorf("summary MessageIDs = %q (FetchSummaries), %q (FetchHeaders); want %q without angle brackets",
+			sums[1].MessageID, h.Summary.MessageID, want.MessageID)
 	}
 	if got := mailstore.MessageIDs(h.InReplyTo); !slices.Equal(got, []string{want.InReplyTo}) {
 		e.t.Errorf("In-Reply-To = %q", h.InReplyTo)
@@ -1591,7 +1649,7 @@ func SameSummary(a, b mailstore.Summary) bool {
 		slices.Equal(a.From, b.From) && slices.Equal(a.To, b.To) && a.Subject == b.Subject &&
 		slices.Equal(a.Flags, b.Flags) && a.Size == b.Size && a.HasAttachment == b.HasAttachment &&
 		a.AttachmentsUnknown == b.AttachmentsUnknown &&
-		a.ThreadID == b.ThreadID && slices.Equal(a.Labels, b.Labels)
+		a.ThreadID == b.ThreadID && slices.Equal(a.Labels, b.Labels) && a.MessageID == b.MessageID
 }
 
 func sortRefs(refs []ref.Ref) {

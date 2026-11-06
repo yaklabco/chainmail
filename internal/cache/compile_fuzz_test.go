@@ -32,6 +32,7 @@ func FuzzCompile(f *testing.F) {
 		"in:trash invoice", "in:anywhere", "in:archive is:unread", `label:\Seen`, "from:% subject:_",
 		`subject:\o/`, "larger:0 smaller:0", "larger:4294967296", "older_than:9999y", "after:0001-01-01",
 		"a -b -c", "a (b OR -c)", "!!!", `"a""b"`, "-(-(-a))", "a OR -b OR (c d)",
+		"item:none", "item:it_admin_work", "-item:none OR item:it_x", "(item:it_a OR from:x) -item:none", "item:none newer_than:7d invoice", "item:it_a in:trash",
 	}
 	for _, s := range seeds {
 		f.Add(s)
@@ -43,8 +44,15 @@ func FuzzCompile(f *testing.F) {
 			return
 		}
 		scope, rest := query.Split(n)
+		// The daemon resolves every item: value before it compiles.
+		items := map[string][]string{}
+		for _, term := range rest.Terms() {
+			if term.Field == query.FieldItem {
+				items[term.Value] = []string{"aaaa", "' OR 1=1 --"}
+			}
+		}
 		for _, gmail := range []bool{false, true} {
-			p, err := cache.Compile(rest, scope.In, gmail, compileNow)
+			p, err := cache.Compile(rest, scope.In, gmail, compileNow, items)
 			if err != nil {
 				if gmail || !errors.Is(err, mailstore.ErrUnsupportedQuery) {
 					t.Fatalf("Compile(%q, gmail %v): %v", q, gmail, err)

@@ -24,6 +24,7 @@ import (
 	"github.com/jamesainslie/chainmail/internal/cache"
 	"github.com/jamesainslie/chainmail/internal/config"
 	"github.com/jamesainslie/chainmail/internal/idempotency"
+	"github.com/jamesainslie/chainmail/internal/items"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/mailstore/imapstore"
 	"github.com/jamesainslie/chainmail/internal/policy"
@@ -151,10 +152,16 @@ type Server struct {
 	shutdown <-chan struct{}
 	// engine turns sync passes into events and checkpoints.
 	engine *watch.Engine
+	// items keeps the work items, their criteria, blockers and thread
+	// links in state.db, and appends their events to watchLog.
+	items *items.Store
 	// supervisors watch and sync the accounts while Serve runs.
 	supervisors supervisorSet
 	// trimInterval is how often the event log is trimmed. Tests shorten it.
 	trimInterval time.Duration
+	// itemsTrimTick, when set, replaces the ticker that runs the item
+	// trim every trimInterval, so a test can trigger each trim.
+	itemsTrimTick <-chan time.Time
 	// cache is cache.db, or nil when the cache is off or did not open.
 	// Serve opens it before any handler, background loop or supervisor
 	// runs, and closes it after all of them have stopped.
@@ -181,6 +188,9 @@ type Server struct {
 	// housekeeping: Options.Now, the time cache.db stamps rows with, and
 	// time.After. Internal tests replace it before the cache opens.
 	cacheClock watch.Clock
+	// itemThreads resolves item: search terms into thread keys. Nil when
+	// the daemon has no item store, which makes item: an invalid argument.
+	itemThreads itemResolver
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -230,7 +240,10 @@ func New(opts Options) (*Server, error) {
 		s.newStore = func(acct config.ResolvedAccount, _ storeParams) mailstore.Store { return opts.NewStore(acct) }
 	}
 	s.stores = &storeSet{build: s.buildStore, buildSized: s.buildSized, firstUse: s.probeIfStale, logger: opts.Logger}
-	s.engine = watch.NewEngine(opts.StateDB, s.watchLog, s.watchState, watch.EngineOptions{Now: opts.Now, Snippet: snippetOf})
+	s.engine = watch.NewEngine(opts.StateDB, s.watchLog, s.watchState, watch.EngineOptions{Now: opts.Now, Snippet: snippetOf, OnNew: s.itemMail})
+	s.items = items.NewStore(opts.StateDB, s.watchLog, opts.Now)
+	// item: searches resolve item IDs to thread keys through the store.
+	s.itemThreads = s.items
 	if err := s.openSendState(); err != nil {
 		return nil, err
 	}
@@ -247,6 +260,7 @@ func New(opts Options) (*Server, error) {
 	mux.Handle(chainmailv1connect.NewOrganizeServiceHandler(&organizeService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewWatchServiceHandler(&watchService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewCacheServiceHandler(&cacheService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
+	mux.Handle(chainmailv1connect.NewItemsServiceHandler(&itemsService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
@@ -269,7 +283,16 @@ func New(opts Options) (*Server, error) {
 // cancels every request in flight, so mail server probes stop and report
 // TIMEOUT while their audit rows are still written. Serve returns only once
 // every handler has returned, so the caller can close the state database.
+// Before it accepts a connection it creates the Admin items that are
+// missing, then recovers interrupted sends; either failing ends Serve.
 func (s *Server) Serve(ctx context.Context) error {
+	if err := s.ensureAdmin(ctx); err != nil {
+		_ = s.opts.Listener.Close() // the Admin items error is the one to report
+		if ctx.Err() != nil {
+			return nil // stopped before serving: a shutdown, not a failure
+		}
+		return err
+	}
 	if err := s.recoverSends(ctx); err != nil {
 		_ = s.opts.Listener.Close() // the recovery error is the one to report
 		if ctx.Err() != nil {

@@ -51,7 +51,7 @@ const (
 
 var (
 	errGroupName = &argError{msg: "invalid group name", hint: groupHint}
-	errWatchKind = &argError{msg: "kinds must be new, flags, expunged, status or gap", hint: "leave kinds empty for every kind"}
+	errWatchKind = &argError{msg: "kinds must be new, flags, expunged, status, gap, item or item_mail", hint: "leave kinds empty for every kind but item and item_mail"}
 	errReadWait  = &argError{msg: "wait_seconds must be 0 to 60", hint: "0 returns at once"}
 	errReadLimit = &argError{msg: "limit must be 0 to 200", hint: "0 means 50"}
 	errAckID     = &argError{msg: "id must be 0 or more", hint: "acknowledge an event ID or a heartbeat position"}
@@ -64,6 +64,8 @@ var kindNames = map[string]watch.Kind{
 	string(watch.KindExpunged): watch.KindExpunged,
 	string(watch.KindStatus):   watch.KindStatus,
 	string(watch.KindGap):      watch.KindGap,
+	string(watch.KindItem):     watch.KindItem,
+	string(watch.KindItemMail): watch.KindItemMail,
 }
 
 // watchService implements chainmailv1connect.WatchServiceHandler.
@@ -75,17 +77,22 @@ var _ chainmailv1connect.WatchServiceHandler = (*watchService)(nil)
 
 // watchQuery is a validated Subscribe or ReadEvents request.
 type watchQuery struct {
-	group  string
-	since  *int64
+	group string
+	since *int64
+	// item is the filter's item ID, which itemFilter resolves into
+	// filter.Items when the read starts.
+	item   string
 	filter watch.Filter
 }
 
 // parse validates a request's start and filter, and returns the audit
 // entry that describes them, without its action. after names the request's
 // ID field, since or cursor, in error messages. The entry records an
-// invalid group or kind as invalidTarget and never the in value, which can
-// be a label name. A cursor is recorded as since=<n>, since it means the
-// same start. The first failure, in field order, is returned.
+// invalid group, kind or item as invalidTarget and never the in value,
+// which can be a label name. A cursor is recorded as since=<n>, since it
+// means the same start, and an item filter as item=<id> after the others.
+// The first failure, in field order, is returned. The item filter itself
+// is resolved later, by itemFilter.
 func (w *watchService) parse(after, group string, since *int64, f *chainmailv1.WatchFilter) (watchQuery, audit.Entry, error) {
 	start, startErr := startTarget(after, group, since)
 	names := slices.Compact(slices.Sorted(slices.Values(f.GetAccounts())))
@@ -96,11 +103,35 @@ func (w *watchService) parse(after, group string, since *int64, f *chainmailv1.W
 		in = "set"
 	}
 	entry := audit.Entry{Targets: []string{start, tally("accounts", len(names)), "kinds=" + kindTarget, "in=" + in}}
+	var itemErr error
+	if item := f.GetItem(); item != "" {
+		var target string
+		target, itemErr = itemTarget("item", item)
+		entry.Targets = append(entry.Targets, target)
+	}
 	if len(accounts) == 1 {
 		entry.Account = accounts[0]
 	}
-	q := watchQuery{group: group, since: since, filter: watch.Filter{Accounts: accounts, Kinds: kinds, In: f.GetIn()}}
-	return q, entry, cmp.Or(startErr, accountErr, kindErr)
+	q := watchQuery{group: group, since: since, item: f.GetItem(), filter: watch.Filter{Accounts: accounts, Kinds: kinds, In: f.GetIn()}}
+	return q, entry, cmp.Or(startErr, accountErr, kindErr, itemErr)
+}
+
+// itemFilter resolves a request's item filter, when it has one, into
+// q.filter.Items: the item and every live item below it, read once as the
+// read starts. An unknown or deleted item is NOT_FOUND.
+func (w *watchService) itemFilter(ctx context.Context, q *watchQuery) error {
+	if q.item == "" {
+		return nil
+	}
+	ids, err := w.s.items.Subtree(ctx, q.item)
+	if err != nil {
+		return w.s.itemsErr(err)
+	}
+	q.filter.Items = make(map[string]bool, len(ids))
+	for _, id := range ids {
+		q.filter.Items[id] = true
+	}
+	return nil
 }
 
 // startTarget is the audit target of a request's start, and the error when
@@ -245,6 +276,9 @@ func (w *watchService) Subscribe(ctx context.Context, req *connect.Request[chain
 	m := req.Msg
 	q, entry, parseErr := w.parse("since", m.GetGroup(), m.Since, m.GetFilter())
 	entry.Action = "watch.subscribe"
+	if parseErr == nil {
+		parseErr = w.itemFilter(ctx, &q)
+	}
 	if err := w.s.record(ctx, c, entry, messageErr(parseErr)); err != nil {
 		return err
 	}
@@ -369,6 +403,9 @@ func (w *watchService) ReadEvents(ctx context.Context, req *connect.Request[chai
 	entry.Action = "watch.read"
 	wait, limit, boundsErr := readBounds(m.GetWaitSeconds(), m.GetLimit(), w.s.watchWaitUnit)
 	argErr := cmp.Or(parseErr, boundsErr)
+	if argErr == nil {
+		argErr = w.itemFilter(ctx, &q)
+	}
 	for range staleReadTries {
 		resp, done, err := w.readOnce(ctx, c, q, entry, argErr, wait, limit)
 		if done || err != nil {
