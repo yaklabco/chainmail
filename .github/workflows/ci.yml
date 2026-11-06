@@ -65,6 +65,9 @@ jobs:
     # before release day.
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # goreleaser's --parallelism. Without it a 4-core runner gets 1.
+      STAVE_NUM_PROCESSORS: "2"
     steps:
       - uses: actions/checkout@v4
         with:
