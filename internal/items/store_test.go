@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -92,19 +93,37 @@ func TestWriteWithoutChange(t *testing.T) {
 	}
 }
 
-// A committed write wakes readers waiting on the log.
+// A committed write wakes readers waiting on the log. The test parks Wait
+// before the write without sleeping: it holds state.db's one connection,
+// starts Wait, and lets go once the pool shows Wait queued for it. Wait has
+// then taken the log's notify channel, and the pool hands the connection
+// to Wait's Tail read before the write can begin, so Wait reads an empty
+// log and parks. Only the write's Notify can wake it before ctx ends.
 func TestWriteNotifiesTheLog(t *testing.T) {
 	t.Parallel()
 	r := newStoreRig(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
+	hold, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("holding the connection: %v", err)
+	}
+	queued := r.db.Stats().WaitCount
 	var (
 		wg      sync.WaitGroup
 		waitErr error
 	)
 	wg.Go(func() { waitErr = r.log.Wait(ctx, 0) })
-	time.Sleep(20 * time.Millisecond) // let Wait block on the empty log first
-	err := r.store.write(t.Context(), func(_ *sql.Tx, rev func() (int64, error)) ([]watch.Event, error) {
+	for r.db.Stats().WaitCount == queued {
+		if ctx.Err() != nil {
+			t.Fatal("Wait never asked for the connection")
+		}
+		runtime.Gosched()
+	}
+	if err := hold.Rollback(); err != nil {
+		t.Fatalf("releasing the connection: %v", err)
+	}
+	err = r.store.write(t.Context(), func(_ *sql.Tx, rev func() (int64, error)) ([]watch.Event, error) {
 		n, err := rev()
 		if err != nil {
 			return nil, err
