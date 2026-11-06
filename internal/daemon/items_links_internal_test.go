@@ -241,3 +241,119 @@ func TestLinkThreadRecoversAMovedAnchorFromTheCache(t *testing.T) {
 		t.Errorf("audit targets = %q, want %q", entry.Targets, want)
 	}
 }
+
+// TestCachedLinkWithAnUnreadableMessage links a thread on a fresh cache,
+// adds a reply the cache could not read, recorded as unreadable with no
+// cached row, and checks that the link is not answered from the cache with
+// a short count and a wrong latest row: the server resolves it, so a reply
+// that is still unreadable makes the link unavailable with the reason the
+// server path gives, and an unreadable message of another thread leaves
+// the link ok from the server.
+func TestCachedLinkWithAnUnreadableMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// inThread puts the unreadable message in the linked thread.
+		inThread bool
+	}{
+		{name: "reply in the thread", inThread: true},
+		{name: "message of another thread"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newRouteFixture(t)
+			f.s.cache = f.store
+			host := f.fakes["host"]
+			root := host.Add(fake.Message{Folder: "INBOX", Date: routeDaysAgo(3), Subject: "plan", MessageID: "root@x"})
+			f.warm(t, "host")
+			f.install(t, "host")
+			l := linkTo(t, f.s, root)
+			if got := f.s.resolveLink(t.Context(), l); got.link.GetState() != linkOK || got.link.GetSource() != cache.SourceCache || got.link.GetMessages() != 1 {
+				t.Fatalf("before the unreadable message: link = %v, want ok with one message from the cache", got.link)
+			}
+
+			// The cache stays fresh with no row for the new message, as a
+			// backfill that could not parse it leaves it.
+			msg := fake.Message{Folder: "INBOX", Date: routeDaysAgo(1), Subject: "lunch", MessageID: "lunch@x"}
+			if tt.inThread {
+				msg = fake.Message{Folder: "INBOX", Date: routeDaysAgo(1), Subject: "re: plan", MessageID: "reply@x", InReplyTo: []string{"root@x"}, References: []string{"root@x"}}
+			}
+			bad := host.Add(msg)
+			host.Malform(bad.Folder, bad.UID, fake.BadEnvelope)
+			if err := f.store.MarkUnreadable(t.Context(), "host", mailstore.Source{Folder: bad.Folder, UIDValidity: bad.UIDValidity}, []uint32{bad.UID}); err != nil {
+				t.Fatal(err)
+			}
+
+			got := f.s.resolveLink(t.Context(), l).link
+			if tt.inThread {
+				if got.GetState() != linkUnavailable || got.GetReason() != api.ReasonMalformedResponse || got.GetMessages() != 0 || got.GetLatest() != nil {
+					t.Errorf("link = %v, want it unavailable with %s", got, api.ReasonMalformedResponse)
+				}
+				return
+			}
+			if got.GetState() != linkOK || got.GetSource() != cache.SourceServer || got.GetMessages() != 1 || got.GetLatest().GetRef() != root.String() {
+				t.Errorf("link = %v, want ok with the root from the server", got)
+			}
+		})
+	}
+}
+
+// TestCachedLinkFailureLogs checks that a cache failure while linking a
+// thread or resolving a link leaves both to the server and logs a warning
+// with the account and a fixed reason, never the error's text.
+func TestCachedLinkFailureLogs(t *testing.T) {
+	t.Parallel()
+	f := newRouteFixture(t)
+	f.s.cache = f.store
+	host := f.fakes["host"]
+	root := host.Add(fake.Message{Folder: "INBOX", Date: routeDaysAgo(3), Subject: "plan", MessageID: "root@x"})
+	f.warm(t, "host")
+	f.install(t, "host")
+	var logs syncBuffer
+	f.s.opts.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	l := linkTo(t, f.s, root)
+	if got := f.s.resolveLink(t.Context(), l).link; got.GetState() != linkOK || got.GetSource() != cache.SourceServer || got.GetMessages() != 1 {
+		t.Errorf("link = %v, want ok with one message from the server", got)
+	}
+	out := logs.String()
+	for _, msg := range []string{"reading a message's cached row for a link failed", "reading a linked thread from the cache failed"} {
+		if want := fmt.Sprintf("level=WARN msg=%q account=host reason=%s", msg, api.ReasonInternal); !strings.Contains(out, want) {
+			t.Errorf("log = %q, want a line with %q", out, want)
+		}
+	}
+	if strings.Contains(out, "err=") || strings.Contains(out, "closed") {
+		t.Errorf("log = %q, want no error text", out)
+	}
+}
+
+// TestCachedLinkUnreadableReadFailure checks that a link whose cache is
+// fresh but cannot say whether its folders hold unreadable messages is
+// resolved on the server and the failure logged with a fixed reason.
+func TestCachedLinkUnreadableReadFailure(t *testing.T) {
+	t.Parallel()
+	f := newRouteFixture(t)
+	f.s.cache = f.store
+	root := f.fakes["host"].Add(fake.Message{Folder: "INBOX", Date: routeDaysAgo(3), Subject: "plan", MessageID: "root@x"})
+	f.warm(t, "host")
+	f.install(t, "host")
+	l := linkTo(t, f.s, root)
+	var logs syncBuffer
+	f.s.opts.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	f.damage(t, "DROP TABLE unreadable")
+
+	if got := f.s.resolveLink(t.Context(), l).link; got.GetState() != linkOK || got.GetSource() != cache.SourceServer || got.GetMessages() != 1 {
+		t.Errorf("link = %v, want ok with one message from the server", got)
+	}
+	out := logs.String()
+	if want := fmt.Sprintf("level=WARN msg=%q account=host reason=", "reading a linked thread from the cache failed"); !strings.Contains(out, want) {
+		t.Errorf("log = %q, want a line with %q", out, want)
+	}
+	if strings.Contains(out, "err=") || strings.Contains(out, "unreadable") {
+		t.Errorf("log = %q, want no error text", out)
+	}
+}
