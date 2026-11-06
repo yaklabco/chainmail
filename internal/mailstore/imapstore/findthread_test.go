@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/jamesainslie/chainmail/internal/mailstore"
@@ -81,6 +82,9 @@ func TestGmailFindThread(t *testing.T) {
 	t.Parallel()
 	f := newGmailFixture(t)
 	key := func(i int) string { return strconv.FormatUint(f.srv.ThreadID(i), 16) }
+	if strings.ToUpper(key(0)) == key(0) {
+		t.Fatalf("thread key %q has no hex letters, so the uppercase case would test nothing", key(0))
+	}
 	tests := []struct {
 		name      string
 		threadKey string
@@ -93,6 +97,7 @@ func TestGmailFindThread(t *testing.T) {
 		{"an unknown thread", "ffffffffff", "inv@example.com", nil},
 		{"not hex", "zz", "inv@example.com", nil},
 		{"a leading zero", "0" + key(0), "", nil},
+		{"uppercase hex", strings.ToUpper(key(0)), "", nil},
 		{"thread 0", "0", "", nil},
 		{"no key", "", "inv@example.com", nil},
 	}
