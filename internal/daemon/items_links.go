@@ -3,7 +3,6 @@ package daemon
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -417,7 +416,9 @@ func (s *Server) cacheMembers(ctx context.Context, acct config.ResolvedAccount, 
 // serverMembers finds a link's messages on the mail server: the thread's
 // refs by key and root (mailstore.ThreadFinder), then their headers, one
 // fetch per folder, for the dates, the latest row and the Message-IDs. A
-// message the server sends in a form chainmail cannot read is left out.
+// message the server sends in a form chainmail cannot read fails the link
+// with the fetch's *mailstore.UnreadableError, so the link is unavailable
+// rather than shown with a short count, a wrong latest row or as empty.
 func serverMembers(ctx context.Context, st mailstore.Store, l items.Link) ([]linkMember, error) {
 	tf, canFind := st.(mailstore.ThreadFinder)
 	hf, canFetch := st.(mailstore.HeaderFetcher)
@@ -440,7 +441,7 @@ func serverMembers(ctx context.Context, st mailstore.Store, l items.Link) ([]lin
 	var out []linkMember
 	for _, src := range order {
 		hs, err := hf.FetchHeaders(ctx, src, uids[src])
-		if _, unreadable := errors.AsType[*mailstore.UnreadableError](err); err != nil && !unreadable {
+		if err != nil {
 			return nil, err
 		}
 		for _, h := range hs {

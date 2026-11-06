@@ -104,6 +104,47 @@ func TestGetItemResolvesLinksFromTheServer(t *testing.T) {
 	}
 }
 
+// TestGetItemReportsAnUnreadableThreadUnavailable links a thread of two
+// messages on an account with no cache, makes the server send one or both
+// of them in a form chainmail cannot read, and checks that the link is
+// unavailable with MALFORMED_RESPONSE rather than ok with a short count or
+// empty.
+func TestGetItemReportsAnUnreadableThreadUnavailable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		unreadable func(root, reply ref.Ref) []ref.Ref
+	}{
+		{name: "partly", unreadable: func(_, reply ref.Ref) []ref.Ref { return []ref.Ref{reply} }},
+		{name: "wholly", unreadable: func(root, reply ref.Ref) []ref.Ref { return []ref.Ref{root, reply} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := startFakeMail(t)
+			root := m.host.Add(fake.Message{Folder: "INBOX", Date: daysAgo(3), From: itemAnn, Subject: "plan", MessageID: "root@example.com"})
+			reply := m.host.Add(fake.Message{
+				Folder: "Sent", Date: daysAgo(1), From: itemAnn, Subject: "re: plan", MessageID: "reply@example.com",
+				InReplyTo: []string{"root@example.com"}, References: []string{"root@example.com"},
+			})
+			id := itemTask(t, m.Harness, "Ship the plan")
+			key := itemLink(t, m.Harness, &chainmailv1.LinkThreadRequest{ItemId: id, Ref: root.String(), Note: "plan"}).GetLink().GetThreadKey()
+			for _, r := range tt.unreadable(root, reply) {
+				m.host.Malform(r.Folder, r.UID, fake.BadEnvelope)
+			}
+
+			th := itemGet(t, m.Harness, id).GetThreads()
+			if len(th) != 1 {
+				t.Fatalf("threads = %v, want the one link", th)
+			}
+			if g := th[0]; g.GetThreadKey() != key || g.GetState() != "unavailable" || g.GetReason() != api.ReasonMalformedResponse ||
+				g.GetMessages() != 0 || g.GetLatest() != nil || g.GetAnchorRef() != "" || g.GetNote().GetUntrusted() != "plan" {
+				t.Errorf("link = %v, want it unavailable with %s", g, api.ReasonMalformedResponse)
+			}
+		})
+	}
+}
+
 // TestGetItemReportsAnAccountGoneFromConfig links a thread on each of two
 // accounts, restarts the daemon without one of them, and checks that its
 // link is reported unavailable with NOT_FOUND and listed last, its key and
