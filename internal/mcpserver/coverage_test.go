@@ -46,6 +46,7 @@ var toolRPC = map[string]string{
 	"read_events":         chainmailv1connect.WatchServiceReadEventsProcedure,
 	"cache_status":        chainmailv1connect.CacheServiceGetCacheStatusProcedure,
 	"create_item":         chainmailv1connect.ItemsServiceCreateItemProcedure,
+	"update_item":         chainmailv1connect.ItemsServiceUpdateItemProcedure,
 }
 
 // leftOut lists agent-facing RPCs with no tool, and why (spec section 4).
@@ -61,7 +62,6 @@ var leftOut = map[string]string{
 	chainmailv1connect.CacheServiceRebuildCacheProcedure:       "an operator action that drops cached mail and downloads it again",
 	chainmailv1connect.CacheServiceEvictCacheProcedure:         "an operator action; the daemon evicts bodies on its own",
 	// Temporary: the later cycles of T11 add these tools and delete the entries.
-	chainmailv1connect.ItemsServiceUpdateItemProcedure:    "T11 cycle B adds update_item",
 	chainmailv1connect.ItemsServiceGetItemProcedure:       "T11 cycle C adds get_item",
 	chainmailv1connect.ItemsServiceListItemsProcedure:     "T11 cycle C adds list_items",
 	chainmailv1connect.ItemsServiceDeleteItemProcedure:    "T11 cycle D adds delete_item",
@@ -222,6 +222,10 @@ func coverageSamples(file string) map[string][]map[string]any {
 			"type": "task", "title": "t", "description": "d", "state": "backlog", "area": "work", "priority": "p1",
 			"start_date": "2026-11-01", "due_date": "2026-11-30", "estimate": 2.5, "parent_id": "it_admin_work",
 			"criteria": []string{"c"}, "idempotency_key": "k",
+		}},
+		"update_item": {{
+			"id": "it_a", "type": "story", "title": "t", "description": "d", "state": "in-progress", "area": "work",
+			"priority": "p1", "start_date": "2026-11-01", "due_date": "2026-11-30", "estimate": 2.5, "parent_id": "it_b",
 		}},
 	}
 }

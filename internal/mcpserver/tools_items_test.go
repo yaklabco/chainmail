@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 	"github.com/jamesainslie/chainmail/gen/chainmail/v1/chainmailv1connect"
+	"github.com/jamesainslie/chainmail/internal/api"
 )
 
 // itemAt is the time every faked item carries, and itemAtText how the tools
@@ -136,5 +138,135 @@ func TestCreateItemOutput(t *testing.T) {
 				t.Errorf("text is not wrapped once: %q", text)
 			}
 		})
+	}
+}
+
+// itemNoCall fails the test if the fake daemon received any ItemsService call.
+func itemNoCall(t *testing.T, f *fakeDaemon) {
+	t.Helper()
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Procedure, "/chainmail.v1.ItemsService/") {
+			t.Errorf("the request reached the daemon: %s %v", c.Procedure, c.Msg)
+		}
+	}
+}
+
+func TestUpdateItemRequests(t *testing.T) {
+	t.Parallel()
+	mask := func(paths ...string) *fieldmaskpb.FieldMask { return &fieldmaskpb.FieldMask{Paths: paths} }
+	tests := []struct {
+		name string
+		args map[string]any
+		want *chainmailv1.UpdateItemRequest
+	}{
+		{
+			name: "title and state",
+			args: map[string]any{"id": "it_a", "state": "done", "title": "Paid"},
+			want: &chainmailv1.UpdateItemRequest{Id: "it_a", UpdateMask: mask("title", "state"), Title: "Paid", State: "done"},
+		},
+		{
+			name: "every field, in mask order",
+			args: map[string]any{
+				"id": "it_a", "parent_id": "it_b", "estimate": 2.5, "due_date": "2026-12-01", "start_date": "2026-11-02",
+				"priority": "p0", "area": "personal", "state": "in-review", "description": "d", "title": "t", "type": "feature",
+			},
+			want: &chainmailv1.UpdateItemRequest{
+				Id:         "it_a",
+				UpdateMask: mask("type", "title", "description", "state", "area", "priority", "start_date", "due_date", "estimate", "parent_id"),
+				Type:       "feature", Title: "t", Description: "d", State: "in-review", Area: "personal", Priority: "p0",
+				StartDate: "2026-11-02", DueDate: "2026-12-01", Estimate: proto.Float64(2.5), ParentId: "it_b",
+			},
+		},
+		{
+			name: "clear sends the path with no value",
+			args: map[string]any{"id": "it_a", "clear": []string{"due_date", "area", "description"}},
+			want: &chainmailv1.UpdateItemRequest{Id: "it_a", UpdateMask: mask("description", "area", "due_date")},
+		},
+		{
+			name: "clearing parent_id moves to the root",
+			args: map[string]any{"id": "it_a", "clear": []string{"parent_id"}},
+			want: &chainmailv1.UpdateItemRequest{Id: "it_a", UpdateMask: mask("parent_id")},
+		},
+		{
+			name: "parent_id moves",
+			args: map[string]any{"id": "it_a", "parent_id": "it_admin_personal"},
+			want: &chainmailv1.UpdateItemRequest{Id: "it_a", UpdateMask: mask("parent_id"), ParentId: "it_admin_personal"},
+		},
+		{
+			name: "given and cleared fields together",
+			args: map[string]any{"id": "it_a", "priority": "p0", "clear": []string{"estimate"}},
+			want: &chainmailv1.UpdateItemRequest{Id: "it_a", UpdateMask: mask("priority", "estimate"), Priority: "p0"},
+		},
+		{
+			name: "estimate 0 is a value",
+			args: map[string]any{"id": "it_a", "estimate": 0},
+			want: &chainmailv1.UpdateItemRequest{Id: "it_a", UpdateMask: mask("estimate"), Estimate: proto.Float64(0)},
+		},
+		{
+			name: "an empty string is sent as given",
+			args: map[string]any{"id": "it_a", "description": ""},
+			want: &chainmailv1.UpdateItemRequest{Id: "it_a", UpdateMask: mask("description")},
+		},
+		{
+			name: "a repeated clear is named once",
+			args: map[string]any{"id": "it_a", "clear": []string{"area", "area"}},
+			want: &chainmailv1.UpdateItemRequest{Id: "it_a", UpdateMask: mask("area")},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnv(t, &fakeDaemon{}, latest)
+			e.call(t, "update_item", tt.args)
+			if got := e.fake.lastCall(t, chainmailv1connect.ItemsServiceUpdateItemProcedure).Msg; !proto.Equal(got, tt.want) {
+				t.Errorf("request = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUpdateItemRejectsBadInput(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		args      map[string]any
+		inMessage string
+	}{
+		{name: "nothing to change", args: map[string]any{"id": "it_a"}, inMessage: "give at least one field"},
+		{name: "an empty clear", args: map[string]any{"id": "it_a", "clear": []string{}}, inMessage: "give at least one field"},
+		{name: "an unknown field", args: map[string]any{"id": "it_a", "clear": []string{"colour"}}, inMessage: `clear cannot name "colour"`},
+		{name: "title is never cleared", args: map[string]any{"id": "it_a", "clear": []string{"title"}}, inMessage: `clear cannot name "title"`},
+		{name: "state is never cleared", args: map[string]any{"id": "it_a", "clear": []string{"state"}}, inMessage: `clear cannot name "state"`},
+		{name: "type is never cleared", args: map[string]any{"id": "it_a", "clear": []string{"type"}}, inMessage: `clear cannot name "type"`},
+		{name: "given and cleared", args: map[string]any{"id": "it_a", "area": "work", "clear": []string{"area"}}, inMessage: "area is both given and cleared"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnv(t, &fakeDaemon{}, latest)
+			body := wantError(t, e.call(t, "update_item", tt.args), api.ReasonInvalidArgument)
+			if !strings.Contains(body.Message, tt.inMessage) {
+				t.Errorf("message %q lacks %q", body.Message, tt.inMessage)
+			}
+			itemNoCall(t, e.fake)
+		})
+	}
+}
+
+func TestUpdateItemOutput(t *testing.T) {
+	t.Parallel()
+	f := &fakeDaemon{UpdateItem: func(context.Context, *chainmailv1.UpdateItemRequest) (*chainmailv1.UpdateItemResponse, error) {
+		return &chainmailv1.UpdateItemResponse{Item: itemAnswer("Paid")}, nil
+	}}
+	e := newTestEnv(t, f, latest)
+	res := e.call(t, "update_item", map[string]any{"id": "it_01jc0story", "title": "Paid"})
+	wantOK(t, res)
+	var out updateItemOut
+	decode(t, res, &out)
+	if want := (updateItemOut{Item: itemOut("Paid")}); !reflect.DeepEqual(out, want) {
+		t.Errorf("update_item =\n%+v\nwant\n%+v", out, want)
+	}
+	if text := textOf(res); !strings.HasPrefix(text, "updated story it_01jc0story at revision 12\n") {
+		t.Errorf("text = %q", text)
 	}
 }
