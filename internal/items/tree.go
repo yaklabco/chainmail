@@ -163,3 +163,36 @@ func (n *node) liveChildren() []*node {
 	}
 	return out
 }
+
+// liveSubtree returns n and its live descendants in tree order. Nothing
+// live sits under a deleted item, so a deleted child is skipped whole.
+func liveSubtree(n *node) []*node {
+	out := []*node{n}
+	for _, c := range n.children {
+		if c.live() {
+			out = append(out, liveSubtree(c)...)
+		}
+	}
+	return out
+}
+
+// deletedWith returns n and the descendants deleted at the same instant as
+// n, in tree order: the subtree that one cascade delete took.
+func deletedWith(n *node) []*node {
+	out := []*node{n}
+	for _, c := range n.children {
+		if !c.live() && c.item.DeletedAt.Equal(n.item.DeletedAt) {
+			out = append(out, deletedWith(c)...)
+		}
+	}
+	return out
+}
+
+// nodeIDs lists the item IDs of nodes, in order.
+func nodeIDs(nodes []*node) []string {
+	out := make([]string, len(nodes))
+	for i, n := range nodes {
+		out[i] = n.item.ID
+	}
+	return out
+}
