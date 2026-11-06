@@ -101,6 +101,7 @@ var (
 	errUpdatePath   = &argError{msg: "update_mask names an unknown field", hint: updateMaskHint}
 	errItemLimit    = &argError{msg: "limit must be 0 to 500", hint: "0 means 100"}
 	errChangedSince = &argError{msg: "changed_since must be 0 or more", hint: "pass the revision of an earlier ListItems response"}
+	errCriterionID  = &argError{msg: "invalid criterion ID", hint: "criterion IDs start with cr_; run: chainmail item show <id>"}
 )
 
 // itemTarget is the audit target key=id, and the error when id cannot be an
@@ -450,5 +451,85 @@ func (i *itemsService) RestoreItem(ctx context.Context, req *connect.Request[cha
 			return nil, err
 		}
 		return &chainmailv1.RestoreItemResponse{Ids: ids, Revision: revision}, nil
+	})
+}
+
+// criterionTarget is the audit target criterion=id, and the error when id
+// cannot be a criterion ID.
+func criterionTarget(id string) (string, error) {
+	if !items.ValidCriterionID(id) {
+		return "criterion=" + invalidTarget, errCriterionID
+	}
+	return "criterion=" + id, nil
+}
+
+// criteriaEdit is an EditCriteria request in the store's form.
+func criteriaEdit(m *chainmailv1.EditCriteriaRequest) items.CriteriaEdit {
+	edits := make([]items.CriterionText, len(m.GetEdit()))
+	for i, e := range m.GetEdit() {
+		edits[i] = items.CriterionText{ID: e.GetId(), Text: e.GetText()}
+	}
+	return items.CriteriaEdit{Remove: m.GetRemove(), Edit: edits, Order: m.GetOrder(), Add: m.GetAdd()}
+}
+
+// EditCriteria implements chainmailv1connect.ItemsServiceHandler. It
+// removes, edits, reorders and adds criteria in that order, in one
+// revision. It is audited as item.criteria with the item and, when it
+// succeeds, the number of criteria after the edit.
+func (i *itemsService) EditCriteria(ctx context.Context, req *connect.Request[chainmailv1.EditCriteriaRequest]) (*connect.Response[chainmailv1.EditCriteriaResponse], error) {
+	return itemCall(ctx, i.s, req, "item.criteria", func(ctx context.Context, c caller, entry *audit.Entry) (*chainmailv1.EditCriteriaResponse, error) {
+		m := req.Msg
+		target, err := itemTarget("item", m.GetItemId())
+		entry.Targets = []string{target}
+		if err != nil {
+			return nil, err
+		}
+		crit, revision, err := i.s.items.EditCriteria(ctx, actorOf(c), m.GetItemId(), criteriaEdit(m))
+		if err != nil {
+			return nil, i.s.itemsErr(err)
+		}
+		entry.Targets = append(entry.Targets, tally("criteria", len(crit)))
+		return &chainmailv1.EditCriteriaResponse{Criteria: criteriaProto(crit), Revision: revision}, nil
+	})
+}
+
+// TickCriterion implements chainmailv1connect.ItemsServiceHandler. Ticking
+// needs evidence; unticking clears it. It is audited as item.tick with the
+// item and the criterion.
+func (i *itemsService) TickCriterion(ctx context.Context, req *connect.Request[chainmailv1.TickCriterionRequest]) (*connect.Response[chainmailv1.TickCriterionResponse], error) {
+	return itemCall(ctx, i.s, req, "item.tick", func(ctx context.Context, c caller, entry *audit.Entry) (*chainmailv1.TickCriterionResponse, error) {
+		m := req.Msg
+		itemT, itemErr := itemTarget("item", m.GetItemId())
+		critT, critErr := criterionTarget(m.GetCriterionId())
+		entry.Targets = []string{itemT, critT}
+		if err := cmp.Or(itemErr, critErr); err != nil {
+			return nil, err
+		}
+		crit, revision, err := i.s.items.TickCriterion(ctx, actorOf(c), m.GetItemId(), m.GetCriterionId(), m.GetTicked(), m.GetEvidence())
+		if err != nil {
+			return nil, i.s.itemsErr(err)
+		}
+		return &chainmailv1.TickCriterionResponse{Criterion: criterionProto(crit), Revision: revision}, nil
+	})
+}
+
+// SetBlocker implements chainmailv1connect.ItemsServiceHandler. linked adds
+// the blocker and false removes it; a call that changes nothing reports
+// changed false at the current revision. It is audited as item.block with
+// the item and its blocker.
+func (i *itemsService) SetBlocker(ctx context.Context, req *connect.Request[chainmailv1.SetBlockerRequest]) (*connect.Response[chainmailv1.SetBlockerResponse], error) {
+	return itemCall(ctx, i.s, req, "item.block", func(ctx context.Context, c caller, entry *audit.Entry) (*chainmailv1.SetBlockerResponse, error) {
+		m := req.Msg
+		itemT, itemErr := itemTarget("item", m.GetItemId())
+		byT, byErr := itemTarget("blocked_by", m.GetBlockedById())
+		entry.Targets = []string{itemT, byT}
+		if err := cmp.Or(itemErr, byErr); err != nil {
+			return nil, err
+		}
+		changed, revision, err := i.s.items.SetBlocker(ctx, actorOf(c), m.GetItemId(), m.GetBlockedById(), m.GetLinked())
+		if err != nil {
+			return nil, i.s.itemsErr(err)
+		}
+		return &chainmailv1.SetBlockerResponse{Changed: changed, Revision: revision}, nil
 	})
 }
