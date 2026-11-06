@@ -42,6 +42,7 @@ func (s *Store) OpenWatch(ctx context.Context, folder string) (mailstore.WatchCo
 		return nil, s.watchError(err)
 	}
 	w.c = c
+	w.idle = c.client().Caps().Has(imap.CapIdle)
 	s.mu.Lock()
 	closed := s.watchesClosed
 	s.watches[w] = struct{}{}
@@ -118,6 +119,11 @@ type watchConn struct {
 	s      *Store
 	folder string
 	c      *conn
+	// idle is whether the server advertised IDLE when the connection opened.
+	// Capabilities hold for the whole session, and asking the client again
+	// after the connection drops gets none, which would read as a server
+	// without IDLE.
+	idle bool
 
 	mu sync.Mutex
 	// pending is what the server reported since Idle last took it.
@@ -245,7 +251,7 @@ func unannouncedExpunge(prev, now passView) bool {
 }
 
 // IdleSupported implements mailstore.WatchConn.
-func (w *watchConn) IdleSupported() bool { return w.c.client().Caps().Has(imap.CapIdle) }
+func (w *watchConn) IdleSupported() bool { return w.idle }
 
 // Idle implements mailstore.WatchConn. A report that arrived since Idle last
 // returned, during a Sync included, makes it return at once without IDLE.

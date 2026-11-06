@@ -333,6 +333,32 @@ func TestWatchDroppedConnection(t *testing.T) {
 	})
 }
 
+// TestWatchIdleSupportedSurvivesADroppedConnection checks a connection that
+// dropped before Idle still reports the IDLE its server advertised, and
+// that Idle on it fails as ErrUnavailable, so the supervisor dials again
+// rather than treat the server as one without IDLE.
+func TestWatchIdleSupportedSurvivesADroppedConnection(t *testing.T) {
+	t.Parallel()
+	s, srv, _ := watchFixture(t)
+	wc, err := s.OpenWatch(t.Context(), storetest.GmailAllMail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wc.Close() })
+	srv.DropConnections()
+	select {
+	case <-wc.(*watchConn).c.client().Closed():
+	case <-time.After(2 * time.Second):
+		t.Fatal("the client did not see the connection drop within 2s")
+	}
+	if !wc.IdleSupported() {
+		t.Error("IdleSupported = false after the connection dropped, want the IDLE the server advertised")
+	}
+	if _, err := wc.Idle(t.Context(), time.Minute); !errors.Is(err, mailstore.ErrUnavailable) {
+		t.Errorf("Idle after the connection dropped = %v, want ErrUnavailable", err)
+	}
+}
+
 // waitIdling waits up to 2 seconds for w to be in Idle, failing t if Idle
 // returns first, with what it returned, or never starts.
 func waitIdling(t *testing.T, w *watchConn, done <-chan error) {
