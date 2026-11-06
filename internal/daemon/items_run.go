@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"github.com/jamesainslie/chainmail/internal/items"
 	"github.com/jamesainslie/chainmail/internal/watch"
@@ -20,4 +21,27 @@ func (s *Server) itemMail(ctx context.Context, tx *sql.Tx, account string, news 
 		return nil, err
 	}
 	return items.MailArrived(ctx, tx, items.MailAccount{Name: acct.Name, Address: acct.Address}, news, s.opts.Now().UTC())
+}
+
+// runItemsTrim trims the item tables every interval until ctx ends, once on
+// entry too, as the event log's Run does: item_mail_seen rows older than
+// the watch retention, and idempotency rows past items.RequestRetention. A
+// failed trim is logged and retried at the next tick; one cut short by ctx
+// is not logged.
+func (s *Server) runItemsTrim(ctx context.Context, interval, retention time.Duration) {
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if _, err := s.items.Trim(ctx, s.opts.Now().Add(-retention)); err != nil && ctx.Err() == nil {
+			s.opts.Logger.ErrorContext(ctx, "trimming the item tables failed", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }

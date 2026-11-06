@@ -71,3 +71,40 @@ func TestItemMailHook(t *testing.T) {
 		t.Errorf("unlinked mail = %v, %v; want no events", events, err)
 	}
 }
+
+// TestStartBackgroundTrimsItemMailSeen checks that startBackground trims
+// item_mail_seen every trimInterval with the watch retention: a row older
+// than it goes and a newer one stays.
+func TestStartBackgroundTrimsItemMailSeen(t *testing.T) {
+	t.Parallel()
+	s, stateDB := newTestServer(t)
+	s.trimInterval = time.Millisecond
+	retention := s.opts.Config.WatchSettings().Retention
+	at := func(age time.Duration) string {
+		return s.opts.Now().Add(-age).UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+	}
+	for key, stamp := range map[string]string{"old": at(retention + time.Hour), "new": at(time.Hour)} {
+		if _, err := stateDB.ExecContext(t.Context(), "INSERT INTO item_mail_seen (item_id, account, message_key, at) VALUES ('it_x', 'host', ?, ?)", key, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := func(key string) int {
+		var n int
+		if err := stateDB.QueryRowContext(t.Context(), "SELECT count(*) FROM item_mail_seen WHERE message_key = ?", key).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	stop := s.startBackground(t.Context())
+	defer stop()
+	deadline := time.Now().Add(5 * time.Second)
+	for count("old") != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the expired item_mail_seen row is still there after 5s")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if count("new") != 1 {
+		t.Error("the trim removed a row inside the retention")
+	}
+}
