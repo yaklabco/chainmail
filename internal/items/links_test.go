@@ -257,8 +257,9 @@ func TestLinksNewestFirst(t *testing.T) {
 	if got := keys(); !slices.Equal(got, want) {
 		t.Errorf("Links keys of the deleted item = %q, want them kept: %q", got, want)
 	}
-	if links, err := r.store.Links(t.Context(), r.task(t)); err != nil || len(links) != 0 {
-		t.Errorf("Links of an item with none = %+v, %v; want none", links, err)
+	// No links is an empty list, not nil, as ThreadKeys and LinkedThreadKeys give.
+	if links, err := r.store.Links(t.Context(), r.task(t)); err != nil || links == nil || len(links) != 0 {
+		t.Errorf("Links of an item with none = %#v, %v; want an empty, non-nil list", links, err)
 	}
 	if _, err := r.store.Links(t.Context(), "it_missing"); !errors.Is(err, items.ErrNotFound) {
 		t.Errorf("Links of an unknown item = %v, want ErrNotFound", err)
