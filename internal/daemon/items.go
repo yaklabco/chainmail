@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -56,6 +57,9 @@ func (s *Server) ensureAdmin() error {
 // itemListHint points at the list of items, where item IDs come from.
 const itemListHint = "run: chainmail item list"
 
+// updateMaskHint lists UpdateItem's mask paths.
+const updateMaskHint = "paths are type, title, description, state, area, priority, start_date, due_date, estimate and parent_id"
+
 // actorOf is who a caller's item change is recorded as: its uid and client
 // kind, as the audit log records them.
 func actorOf(c caller) items.Actor {
@@ -88,8 +92,10 @@ func (s *Server) itemsErr(err error) error {
 var updatePaths = []string{"type", "title", "description", "state", "area", "priority", "start_date", "due_date", "estimate", "parent_id"}
 
 var (
-	errItemID   = &argError{msg: "invalid item ID", hint: "item IDs start with it_; " + itemListHint}
-	errEstimate = &argError{msg: "estimate must be a number, 0 or more", hint: "pass an estimate such as 1.5, or clear it"}
+	errItemID     = &argError{msg: "invalid item ID", hint: "item IDs start with it_; " + itemListHint}
+	errEstimate   = &argError{msg: "estimate must be a number, 0 or more", hint: "pass an estimate such as 1.5, or clear it"}
+	errUpdateMask = &argError{msg: "update_mask must name one or more fields", hint: updateMaskHint}
+	errUpdatePath = &argError{msg: "update_mask names an unknown field", hint: updateMaskHint}
 )
 
 // itemTarget is the audit target key=id, and the error when id cannot be an
@@ -262,4 +268,65 @@ func (i *itemsService) create(ctx context.Context, a items.Actor, typ items.Type
 		return nil, i.s.itemsErr(err)
 	}
 	return &chainmailv1.CreateItemResponse{Item: workItemProto(it), Criteria: criteriaProto(crit), Duplicate: duplicate}, nil
+}
+
+// maskFields checks an update_mask's paths and returns them without
+// repeats, in mask order, with their audit target. A path that is not one
+// of updatePaths fails the whole mask and is never recorded: it can be any
+// bytes.
+func maskFields(paths []string) ([]string, string, error) {
+	if len(paths) == 0 {
+		return nil, "fields=", errUpdateMask
+	}
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if !slices.Contains(updatePaths, p) {
+			return nil, "fields=" + invalidTarget, errUpdatePath
+		}
+		if !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out, "fields=" + strings.Join(out, ","), nil
+}
+
+// updateFields are an UpdateItem request's item fields.
+func updateFields(m *chainmailv1.UpdateItemRequest) itemFields {
+	return itemFields{
+		typ: m.GetType(), title: m.GetTitle(), description: m.GetDescription(), state: m.GetState(),
+		area: m.GetArea(), priority: m.GetPriority(), startDate: m.GetStartDate(), dueDate: m.GetDueDate(),
+		parentID: m.GetParentId(), estimate: m.Estimate,
+	}
+}
+
+// UpdateItem implements chainmailv1connect.ItemsServiceHandler. Only the
+// fields update_mask names change; a named field sent empty is cleared. It
+// is audited as item.update with the item, the field names in mask order
+// and, when it succeeds, the item's type.
+func (i *itemsService) UpdateItem(ctx context.Context, req *connect.Request[chainmailv1.UpdateItemRequest]) (*connect.Response[chainmailv1.UpdateItemResponse], error) {
+	return itemCall(ctx, i.s, req, "item.update", func(ctx context.Context, c caller, entry *audit.Entry) (*chainmailv1.UpdateItemResponse, error) {
+		m := req.Msg
+		idTarget, idErr := itemTarget("item", m.GetId())
+		fields, fieldsTarget, maskErr := maskFields(m.GetUpdateMask().GetPaths())
+		entry.Targets = []string{idTarget, fieldsTarget}
+		if err := cmp.Or(idErr, maskErr); err != nil {
+			return nil, err
+		}
+		it, err := i.update(ctx, actorOf(c), m, fields)
+		if err != nil {
+			return nil, err
+		}
+		entry.Targets = append(entry.Targets, "type="+string(it.Type))
+		return &chainmailv1.UpdateItemResponse{Item: workItemProto(it)}, nil
+	})
+}
+
+// update parses the named fields of an UpdateItem request and runs it.
+func (i *itemsService) update(ctx context.Context, a items.Actor, m *chainmailv1.UpdateItemRequest, fields []string) (items.Item, error) {
+	v, err := updateFields(m).values(fields)
+	if err != nil {
+		return items.Item{}, err
+	}
+	it, err := i.s.items.Update(ctx, a, m.GetId(), items.Patch{Fields: fields, Values: v})
+	return it, i.s.itemsErr(err)
 }
