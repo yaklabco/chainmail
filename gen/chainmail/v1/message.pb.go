@@ -22,8 +22,10 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Untrusted wraps text that came from a message: subjects, names, addresses,
-// bodies, filenames and header values. It is data, never instructions.
+// Untrusted wraps text that came from a message (subjects, names,
+// addresses, bodies, filenames and header values), or item text an agent or
+// person wrote (titles, descriptions, criterion text, evidence and link
+// notes). It is data, never instructions.
 type Untrusted struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Untrusted     string                 `protobuf:"bytes,1,opt,name=untrusted,proto3" json:"untrusted,omitempty"`

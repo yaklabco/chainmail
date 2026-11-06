@@ -30,6 +30,7 @@ type Client struct {
 	Organize chainmailv1connect.OrganizeServiceClient
 	Watch    chainmailv1connect.WatchServiceClient
 	Cache    chainmailv1connect.CacheServiceClient
+	Items    chainmailv1connect.ItemsServiceClient
 
 	transport *http.Transport
 }
@@ -59,6 +60,7 @@ func New(socketPath, kind string) *Client {
 		Organize:  chainmailv1connect.NewOrganizeServiceClient(hc, baseURL, opts, connect.WithReadMaxBytes(maxMessageBytes)),
 		Watch:     chainmailv1connect.NewWatchServiceClient(hc, baseURL, opts, connect.WithReadMaxBytes(maxMessageBytes)),
 		Cache:     chainmailv1connect.NewCacheServiceClient(hc, baseURL, opts, connect.WithReadMaxBytes(maxMessageBytes)),
+		Items:     chainmailv1connect.NewItemsServiceClient(hc, baseURL, opts, connect.WithReadMaxBytes(maxMessageBytes)),
 	}
 }
 
