@@ -165,7 +165,7 @@ func compileSearch(t *testing.T, s *cache.Store, gmail bool, q string) ([]uint32
 // count-only search of the same plan agrees with the UIDs.
 func compileSearchTree(t *testing.T, s *cache.Store, gmail bool, n *query.Node, in string) ([]uint32, cache.Plan) {
 	t.Helper()
-	p, err := cache.Compile(n, in, gmail, compileNow)
+	p, err := cache.Compile(n, in, gmail, compileNow, nil)
 	if err != nil {
 		t.Fatalf("Compile(%s, in %q): %v", n, in, err)
 	}
@@ -279,7 +279,7 @@ func TestCompileNil(t *testing.T) {
 	t.Parallel()
 	s := openCompileStore(t)
 	for _, gmail := range []bool{false, true} {
-		p, err := cache.Compile(nil, "", gmail, compileNow)
+		p, err := cache.Compile(nil, "", gmail, compileNow, nil)
 		if err != nil {
 			t.Fatalf("Compile(nil, gmail %v): %v", gmail, err)
 		}
@@ -456,7 +456,7 @@ func TestCompileAgeStart(t *testing.T) {
 	t.Parallel()
 	since := func(now time.Time, age string) time.Time {
 		t.Helper()
-		p, err := cache.Compile(query.Term(query.FieldNewerThan, age), "", true, now)
+		p, err := cache.Compile(query.Term(query.FieldNewerThan, age), "", true, now, nil)
 		if err != nil {
 			t.Fatalf("Compile(newer_than:%s): %v", age, err)
 		}
@@ -525,7 +525,7 @@ func TestCompileRefuses(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Parse(%q): %v", tt.query, err)
 			}
-			_, err = cache.Compile(n, "", false, compileNow)
+			_, err = cache.Compile(n, "", false, compileNow, nil)
 			if !errors.Is(err, mailstore.ErrUnsupportedQuery) {
 				t.Errorf("Compile(%q) = %v, want ErrUnsupportedQuery", tt.query, err)
 				return
@@ -533,7 +533,7 @@ func TestCompileRefuses(t *testing.T) {
 			if !strings.Contains(err.Error(), tt.detail) {
 				t.Errorf("Compile(%q) = %q, want it to mention %q", tt.query, err, tt.detail)
 			}
-			if _, err := cache.Compile(n, "", true, compileNow); err != nil {
+			if _, err := cache.Compile(n, "", true, compileNow, nil); err != nil {
 				t.Errorf("Compile(%q) on Google = %v, want no error", tt.query, err)
 			}
 		})
@@ -557,7 +557,7 @@ func TestCompileBadValues(t *testing.T) {
 		t.Run(n.String(), func(t *testing.T) {
 			t.Parallel()
 			for _, gmail := range []bool{false, true} {
-				if _, err := cache.Compile(n, "", gmail, compileNow); !errors.Is(err, mailstore.ErrUnsupportedQuery) {
+				if _, err := cache.Compile(n, "", gmail, compileNow, nil); !errors.Is(err, mailstore.ErrUnsupportedQuery) {
 					t.Errorf("Compile(%s, gmail %v) = %v, want ErrUnsupportedQuery", n, gmail, err)
 				}
 			}
@@ -581,7 +581,7 @@ func TestCompileBadValues(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			for _, gmail := range []bool{false, true} {
-				_, err := cache.Compile(tt.n, "", gmail, compileNow)
+				_, err := cache.Compile(tt.n, "", gmail, compileNow, nil)
 				if err == nil || !strings.Contains(err.Error(), tt.detail) {
 					t.Errorf("%s (gmail %v): err = %v, want one mentioning %q", tt.name, gmail, err, tt.detail)
 				}
@@ -684,7 +684,7 @@ func TestCompileFTSExpression(t *testing.T) {
 					t.Fatalf("%s: Parse: %v", tt.name, err)
 				}
 			}
-			p, err := cache.Compile(n, "", false, compileNow)
+			p, err := cache.Compile(n, "", false, compileNow, nil)
 			if err != nil {
 				t.Errorf("%s: Compile: %v", tt.name, err)
 				return
@@ -780,7 +780,7 @@ func TestCompileClassifier(t *testing.T) {
 				scope, n = query.Split(parsed)
 				in = scope.In
 			}
-			p, err := cache.Compile(n, in, tt.gmail, compileNow)
+			p, err := cache.Compile(n, in, tt.gmail, compileNow, nil)
 			if err != nil {
 				t.Errorf("%s: Compile: %v", tt.name, err)
 				return

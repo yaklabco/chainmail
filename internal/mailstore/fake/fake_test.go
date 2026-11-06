@@ -78,6 +78,20 @@ func TestFakeRefusesGmailOnlyOperators(t *testing.T) {
 	}
 }
 
+// TestFakeRefusesItemTerms checks that both fake kinds refuse item:, as no
+// mail server can answer it, so a daemon test that leaks item: to a server
+// fails instead of reading as an empty answer.
+func TestFakeRefusesItemTerms(t *testing.T) {
+	t.Parallel()
+	for _, q := range []string{"item:none", "from:a -item:it_a", "a OR item:it_b"} {
+		for _, gmail := range []bool{false, true} {
+			if _, err := New("acct", gmail).Search(t.Context(), mailstore.SearchRequest{Query: mustParse(t, q)}); !errors.Is(err, mailstore.ErrUnsupportedQuery) {
+				t.Errorf("%s, gmail %v: %v, want ErrUnsupportedQuery", q, gmail, err)
+			}
+		}
+	}
+}
+
 func TestFakeStreamPart(t *testing.T) {
 	t.Parallel()
 	s := New("host", false)

@@ -185,6 +185,9 @@ type Server struct {
 	// housekeeping: Options.Now, the time cache.db stamps rows with, and
 	// time.After. Internal tests replace it before the cache opens.
 	cacheClock watch.Clock
+	// itemThreads resolves item: search terms into thread keys. Nil when
+	// the daemon has no item store, which makes item: an invalid argument.
+	itemThreads itemResolver
 }
 
 // New wires up a Server. Call Serve to run it.
