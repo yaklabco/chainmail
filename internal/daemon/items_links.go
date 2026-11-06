@@ -3,6 +3,7 @@ package daemon
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -345,12 +346,18 @@ func (s *Server) resolveLink(ctx context.Context, l items.Link) resolvedLink {
 	return resolvedLink{link: out, latest: members[0].sum, rank: rankOK}
 }
 
-// markUnavailable marks a link unavailable with err's API reason. The
-// reason is logged; err's text, which can carry a mail server's words, is
-// not.
+// markUnavailable marks a link unavailable with err's API reason. An
+// account no longer configured is a routine state that every read of the
+// item meets again, so it is logged at Debug; any other failure is a
+// warning. The reason is logged; err's text, which can carry a mail
+// server's words, is not.
 func (s *Server) markUnavailable(out *chainmailv1.ThreadLink, err error) resolvedLink {
 	reason := apiReason(err)
-	s.opts.Logger.Warn("resolving a linked thread failed", "account", out.GetAccount(), "reason", reason)
+	if errors.Is(err, config.ErrUnknownAccount) {
+		s.opts.Logger.Debug("a linked thread's account is no longer configured", "account", out.GetAccount(), "reason", reason)
+	} else {
+		s.opts.Logger.Warn("resolving a linked thread failed", "account", out.GetAccount(), "reason", reason)
+	}
 	out.State, out.Reason = linkUnavailable, reason
 	return resolvedLink{link: out, rank: rankUnavailable}
 }
@@ -383,24 +390,29 @@ func (s *Server) cacheMembers(ctx context.Context, acct config.ResolvedAccount, 
 	if err != nil {
 		return nil, false
 	}
-	fresh, _, _, err := ca.Freshness(ctx, folders)
-	if err == nil && fresh {
-		var rows []cache.Row
-		if rows, err = s.cache.ThreadRows(ctx, acct.Name, l.ThreadKey); err == nil {
-			var out []linkMember
-			for _, r := range rows {
-				if slices.Contains(folders, r.Folder) {
-					out = append(out, linkMember{sum: r.Summary(), msgID: r.MessageID})
-				}
-			}
-			return out, true
-		}
-	}
-	if err != nil {
+	failed := func(err error) ([]linkMember, bool) {
 		s.noteCacheErr(err)
 		s.opts.Logger.Warn("reading a linked thread from the cache failed", "account", acct.Name, "err", err)
+		return nil, false
 	}
-	return nil, false
+	fresh, _, _, err := ca.Freshness(ctx, folders)
+	if err != nil {
+		return failed(err)
+	}
+	if !fresh {
+		return nil, false
+	}
+	rows, err := s.cache.ThreadRows(ctx, acct.Name, l.ThreadKey)
+	if err != nil {
+		return failed(err)
+	}
+	var out []linkMember
+	for _, r := range rows {
+		if slices.Contains(folders, r.Folder) {
+			out = append(out, linkMember{sum: r.Summary(), msgID: r.MessageID})
+		}
+	}
+	return out, true
 }
 
 // serverMembers finds a link's messages on the mail server: the thread's
