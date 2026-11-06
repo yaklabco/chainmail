@@ -239,6 +239,8 @@ func New(opts Options) (*Server, error) {
 	s.stores = &storeSet{build: s.buildStore, buildSized: s.buildSized, firstUse: s.probeIfStale, logger: opts.Logger}
 	s.engine = watch.NewEngine(opts.StateDB, s.watchLog, s.watchState, watch.EngineOptions{Now: opts.Now, Snippet: snippetOf, OnNew: s.itemMail})
 	s.items = items.NewStore(opts.StateDB, s.watchLog, opts.Now)
+	// item: searches resolve item IDs to thread keys through the store.
+	s.itemThreads = s.items
 	if err := s.ensureAdmin(); err != nil {
 		return nil, err
 	}

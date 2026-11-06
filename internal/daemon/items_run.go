@@ -45,3 +45,5 @@ func (s *Server) runItemsTrim(ctx context.Context, interval, retention time.Dura
 		}
 	}
 }
+
+var _ itemResolver = (*items.Store)(nil)

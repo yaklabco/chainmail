@@ -108,3 +108,13 @@ func TestStartBackgroundTrimsItemMailSeen(t *testing.T) {
 		t.Error("the trim removed a row inside the retention")
 	}
 }
+
+// TestItemSearchUsesTheItemsStore checks that New gives item: searches the
+// daemon's own items store as their resolver.
+func TestItemSearchUsesTheItemsStore(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServer(t)
+	if s.itemThreads == nil || s.itemThreads != itemResolver(s.items) {
+		t.Errorf("itemThreads = %v, want the items store", s.itemThreads)
+	}
+}
