@@ -5847,7 +5847,7 @@
           "type": "string"
         },
         "evidence": {
-          "description": "required when ticking: how the criterion was met, 1 to 1000 characters; ignored when unticking",
+          "description": "required when ticking: how the criterion was met, 1 to 1000 characters; must be empty when unticking",
           "type": "string"
         },
         "item_id": {

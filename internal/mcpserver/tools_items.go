@@ -518,7 +518,7 @@ type tickCriterionIn struct {
 	ItemID      string `json:"item_id"`
 	CriterionID string `json:"criterion_id" jsonschema:"a criterion ID from get_item"`
 	Ticked      bool   `json:"ticked" jsonschema:"true ticks the criterion, false unticks it"`
-	Evidence    string `json:"evidence,omitempty" jsonschema:"required when ticking: how the criterion was met, 1 to 1000 characters; ignored when unticking"`
+	Evidence    string `json:"evidence,omitempty" jsonschema:"required when ticking: how the criterion was met, 1 to 1000 characters; must be empty when unticking"`
 }
 
 type tickCriterionOut struct {

@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -907,5 +908,54 @@ func TestItemToolAnnotations(t *testing.T) {
 		if !seen[name] {
 			t.Errorf("%s is not listed", name)
 		}
+	}
+}
+
+// inputPropertyDescription returns the description tools/list gives one
+// property of a tool's input schema.
+func inputPropertyDescription(t *testing.T, tool, prop string) string {
+	t.Helper()
+	e := newTestEnv(t, &fakeDaemon{}, latest)
+	res, err := e.cs.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tl := range res.Tools {
+		if tl.Name != tool {
+			continue
+		}
+		raw, err := json.Marshal(tl.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var schema struct {
+			Properties map[string]struct {
+				Description string `json:"description"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatal(err)
+		}
+		p, ok := schema.Properties[prop]
+		if !ok {
+			t.Fatalf("%s has no %s property: %s", tool, prop, raw)
+		}
+		return p.Description
+	}
+	t.Fatalf("%s is not listed", tool)
+	return ""
+}
+
+// TestTickCriterionEvidenceSchema checks the evidence schema matches A4:
+// the daemon refuses an untick that carries evidence, so the schema must
+// not say evidence is ignored then.
+func TestTickCriterionEvidenceSchema(t *testing.T) {
+	t.Parallel()
+	got := inputPropertyDescription(t, "tick_criterion", "evidence")
+	if !strings.Contains(got, "must be empty when unticking") {
+		t.Errorf("evidence description %q does not say it must be empty when unticking", got)
+	}
+	if strings.Contains(got, "ignored") {
+		t.Errorf("evidence description %q says evidence is ignored; A4 refuses it on untick", got)
 	}
 }
