@@ -35,6 +35,11 @@ Filters apply in the daemon. status and gap events pass a --kind filter
 unless --kind names them. --in matches a folder or a Gmail label, and
 inbox also matches \Inbox.
 
+Work item events are sent only when asked for: item, a change to a work
+item, and item_mail, new mail on a thread linked to one, come when --kind
+names them or --item is given. --item ID limits both to that item and every
+item below it, and leaves out new, flags and expunged events.
+
 The watch reconnects by itself when the daemon goes away, or sends nothing
 for 75 seconds, resuming from its group or from the last event or
 heartbeat it saw. It stops with an error only when the daemon refuses the
@@ -44,8 +49,8 @@ status event says what to run.
 --once stops at the first heartbeat, which comes once every event already
 in the log has been printed.
 
-Subjects, names and addresses in new events come from the message and are
-untrusted.`
+Subjects, names and addresses in new and item_mail events come from the
+message and are untrusted.`
 
 // Watch timing. The daemon sends a heartbeat every 30 seconds.
 const (
@@ -64,7 +69,7 @@ const (
 )
 
 // watchKinds are the event kinds --kind takes.
-var watchKinds = []string{"new", "flags", "expunged", "status", "gap"}
+var watchKinds = []string{"new", "flags", "expunged", "status", "gap", "item", "item_mail"}
 
 // newWatchCmd builds chainmail watch and its status and groups subcommands.
 func newWatchCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
@@ -74,11 +79,12 @@ func newWatchCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		accounts  []string
 		kinds     []string
 		in        string
+		item      string
 		once      bool
 		heartbeat bool
 	)
 	cmd := &cobra.Command{
-		Use:   "watch [--group NAME | --since ID] [--account NAME]... [--kind KIND[,KIND]...] [--in FOLDER] [--once] [--heartbeat]",
+		Use:   "watch [--group NAME | --since ID] [--account NAME]... [--kind KIND[,KIND]...] [--in FOLDER] [--item ID] [--once] [--heartbeat]",
 		Short: "Stream mail events as they happen, one per line",
 		Long:  watchHelp,
 		Args:  exactArgs(0),
@@ -97,7 +103,7 @@ func newWatchCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			if err != nil {
 				return usageError{err: err, hint: helpHint(cmd)}
 			}
-			opts.filter = &chainmailv1.WatchFilter{Accounts: accounts, Kinds: ks, In: in}
+			opts.filter = &chainmailv1.WatchFilter{Accounts: accounts, Kinds: ks, In: in, Item: item}
 			c := g.client(env)
 			defer c.Close()
 			return newWatcher(env, c.Watch, opts).run(ctx)
@@ -106,8 +112,9 @@ func newWatchCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	cmd.Flags().StringVar(&group, "group", "", "resume after this group's acknowledged event, and acknowledge each line once written")
 	cmd.Flags().Int64Var(&since, "since", 0, "resume after this event ID")
 	cmd.Flags().StringArrayVar(&accounts, "account", nil, "only this account; repeat for more (default: all)")
-	cmd.Flags().StringSliceVar(&kinds, "kind", nil, "only these kinds, comma separated: new, flags, expunged, status, gap (default: all)")
+	cmd.Flags().StringSliceVar(&kinds, "kind", nil, "only these kinds, comma separated: new, flags, expunged, status, gap, item, item_mail (default: all but item and item_mail)")
 	cmd.Flags().StringVar(&in, "in", "", "only this folder or Gmail label, such as inbox (default: all)")
+	cmd.Flags().StringVar(&item, "item", "", "only item and item_mail events of this item and every item below it")
 	cmd.Flags().BoolVar(&once, "once", false, "exit at the first heartbeat, once every event already in the log is printed")
 	cmd.Flags().BoolVar(&heartbeat, "heartbeat", false, "print heartbeats too")
 	cmd.AddCommand(newWatchStatusCmd(ctx, env, g), newWatchGroupsCmd(ctx, env, g))
@@ -120,7 +127,7 @@ func parseKinds(raw []string) ([]string, error) {
 	for _, k := range raw {
 		k = strings.TrimSpace(k)
 		if !slices.Contains(watchKinds, k) {
-			return nil, fmt.Errorf("unknown --kind %q: want new, flags, expunged, status or gap", k)
+			return nil, fmt.Errorf("unknown --kind %q: want new, flags, expunged, status, gap, item or item_mail", k)
 		}
 		kinds = append(kinds, k)
 	}
@@ -515,6 +522,14 @@ func eventLine(clock string, e *chainmailv1.WatchEvent) string {
 		what = e.GetState() + " " + e.GetDetail()
 	case "gap":
 		what = fmt.Sprintf("%s, next id %d", e.GetReason(), e.GetNextId())
+	case "item":
+		what = itemChangeText(e.GetItem())
+	case "item_mail":
+		what = e.GetItemId()
+		if e.GetFromSelf() {
+			what += " (from self)"
+		}
+		what += " " + clip(termText(e.GetMessage().GetSubject().GetUntrusted()), 60)
 	default:
 		what = e.GetRef()
 	}
@@ -596,4 +611,14 @@ func watchGroupsTable(w io.Writer, loc *time.Location, r *chainmailv1.ListGroups
 			termText(gr.GetName()), gr.GetAckedId(), gr.GetLag(), orDash(shortDate(gr.GetLastSeenAt(), loc)))
 	}
 	return tw.Flush()
+}
+
+// itemChangeText is what an item event's line says happened: the item, its
+// type, the change and the fields it touched, and the revision.
+func itemChangeText(ch *chainmailv1.WorkItemChange) string {
+	parts := []string{ch.GetItemId(), ch.GetType(), ch.GetOp()}
+	if fields := ch.GetFields(); len(fields) > 0 {
+		parts = append(parts, strings.Join(fields, ","))
+	}
+	return strings.Join(parts, " ") + fmt.Sprintf(" revision %d", ch.GetRevision())
 }
