@@ -780,3 +780,66 @@ func TestFakeHostRefusesOutOfRange(t *testing.T) {
 		}
 	}
 }
+
+func TestFakeFindThread(t *testing.T) {
+	t.Parallel()
+	t.Run("standard", func(t *testing.T) {
+		t.Parallel()
+		s := New("host", false)
+		s.AddFolder("All", mailstore.RoleAll)
+		root := s.Add(Message{Folder: "INBOX", Date: day(1), Subject: "root", MessageID: "r@x"})
+		s.Add(Message{Folder: "INBOX", Date: day(1), Subject: "other", MessageID: "o@x"})
+		reply := s.Add(Message{Folder: "Sent", Date: day(2), Subject: "reply", MessageID: "r1@x", References: []string{"<r@x>"}})
+		// late names the root in In-Reply-To only, which the server search
+		// matches too.
+		late := s.Add(Message{Folder: "Archive", Date: day(3), Subject: "late", MessageID: "r2@x", InReplyTo: []string{"<r@x>"}})
+		s.Add(Message{Folder: "Trash", Date: day(4), Subject: "binned", MessageID: "r3@x", References: []string{"<r@x>"}})
+		s.Add(Message{Folder: "Junk", Date: day(4), Subject: "junk", MessageID: "r4@x", References: []string{"<r@x>"}})
+		s.Add(Message{Folder: "All", Date: day(1), Subject: "root", MessageID: "r@x"})
+		want := []ref.Ref{late, root, reply}
+		for _, r := range []string{"r@x", "<r@x>", " <r@x> "} {
+			got, err := s.FindThread(t.Context(), "ignored", r)
+			if err != nil || !slices.Equal(got, want) {
+				t.Errorf("FindThread(%q) = %v, %v; want %v", r, got, err, want)
+			}
+		}
+		for _, r := range []string{"", "missing@x"} {
+			if got, err := s.FindThread(t.Context(), "", r); err != nil || got == nil || len(got) != 0 {
+				t.Errorf("FindThread(%q) = %#v, %v; want an empty slice", r, got, err)
+			}
+		}
+	})
+	t.Run("gmail", func(t *testing.T) {
+		t.Parallel()
+		s := New("gmail", true)
+		root := s.Add(Message{Folder: allMail, Date: day(1), Subject: "root", MessageID: "r@x"})
+		reply := s.Add(Message{Folder: allMail, Date: day(2), Subject: "reply", MessageID: "r1@x", References: []string{"<r@x>"}})
+		s.Add(Message{Folder: allMail, Date: day(3), Subject: "other", MessageID: "o@x"})
+		key := summary(t, s, root).ThreadID
+		tid, err := strconv.ParseUint(key, 16, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Add(Message{Folder: "[Gmail]/Trash", Date: day(4), Subject: "trashed", GmailThreadID: tid})
+		got, err := s.FindThread(t.Context(), key, "ignored@x")
+		if want := []ref.Ref{root, reply}; err != nil || !slices.Equal(got, want) {
+			t.Errorf("FindThread(%s) = %v, %v; want %v", key, got, err, want)
+		}
+		for _, k := range []string{"", "zz", "0", "0" + key, "ffffffff"} {
+			if got, err := s.FindThread(t.Context(), k, "r@x"); err != nil || got == nil || len(got) != 0 {
+				t.Errorf("FindThread(%q) = %#v, %v; want an empty slice", k, got, err)
+			}
+		}
+	})
+	t.Run("a failure", func(t *testing.T) {
+		t.Parallel()
+		s := New("host", false)
+		s.Fail("FindThread", mailstore.ErrUnavailable)
+		if _, err := s.FindThread(t.Context(), "", "r@x"); !errors.Is(err, mailstore.ErrUnavailable) {
+			t.Errorf("FindThread = %v, want ErrUnavailable", err)
+		}
+		if n := s.Calls("FindThread"); n != 1 {
+			t.Errorf("Calls(FindThread) = %d, want 1", n)
+		}
+	})
+}
