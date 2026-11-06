@@ -74,6 +74,9 @@ func newItemCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		newItemDeleteCmd(ctx, env, g),
 		newItemRestoreCmd(ctx, env, g),
 		newItemCriteriaCmd(ctx, env, g),
+		newItemBlockCmd(ctx, env, g),
+		newItemLinkCmd(ctx, env, g),
+		newItemUnlinkCmd(ctx, env, g),
 	)
 	return cmd
 }
@@ -461,4 +464,79 @@ func newCriteriaTickCmd(ctx context.Context, env Env, g *globals, tick bool) *co
 		cmd.Use, cmd.Short = "untick <id> <criterion-id>", "Untick a criterion and drop its evidence"
 	}
 	return cmd
+}
+
+func newItemBlockCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	var remove bool
+	cmd := &cobra.Command{
+		Use:   "block <id> <blocked-by-id>",
+		Short: "Record that an item is blocked by another; --remove clears it",
+		Args:  exactArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			req := &chainmailv1.SetBlockerRequest{ItemId: args[0], BlockedById: args[1], Linked: !remove}
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Items.SetBlocker(ctx, connect.NewRequest(req))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			return writeString(env.Stdout, blockText(args[0], args[1], remove, resp.Msg))
+		},
+	}
+	cmd.Flags().BoolVar(&remove, "remove", false, "remove the blocker instead")
+	return cmd
+}
+
+func newItemLinkCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	var anchor bool
+	var note string
+	cmd := &cobra.Command{
+		Use:   "link <id> <ref>",
+		Short: "File the thread of a message against an item; moving the message keeps the link",
+		Args:  exactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if _, err := parseRef(cmd, args[1]); err != nil {
+				return err
+			}
+			req := &chainmailv1.LinkThreadRequest{ItemId: args[0], Ref: args[1], Anchor: anchor, Note: note}
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Items.LinkThread(ctx, connect.NewRequest(req))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			return writeString(env.Stdout, linkedText(args[0], resp.Msg))
+		},
+	}
+	cmd.Flags().BoolVar(&anchor, "anchor", false, "make this message the link's anchor, the one the item is about")
+	cmd.Flags().StringVar(&note, "note", "", "why the thread belongs to the item (default: keep the note it has)")
+	return cmd
+}
+
+func newItemUnlinkCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	return &cobra.Command{
+		Use:   "unlink <id> <account> <thread-key>",
+		Short: "Remove a thread's link from an item; item show lists the account and thread key",
+		Args:  exactArgs(3),
+		RunE: func(_ *cobra.Command, args []string) error {
+			req := &chainmailv1.UnlinkThreadRequest{ItemId: args[0], Account: args[1], ThreadKey: args[2]}
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Items.UnlinkThread(ctx, connect.NewRequest(req))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			return writeString(env.Stdout, fmt.Sprintf("unlinked %s thread %s from %s, revision %d\n",
+				termText(args[1]), termText(args[2]), termText(args[0]), resp.Msg.GetRevision()))
+		},
+	}
 }

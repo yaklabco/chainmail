@@ -310,3 +310,34 @@ func tickedText(item string, tick bool, r *chainmailv1.TickCriterionResponse) st
 	}
 	return fmt.Sprintf("%s %s on %s, revision %d\n", verb, termText(r.GetCriterion().GetId()), termText(item), r.GetRevision())
 }
+
+// blockText is item block's line, which says whether anything changed.
+func blockText(item, by string, remove bool, r *chainmailv1.SetBlockerResponse) string {
+	item, by = termText(item), termText(by)
+	switch {
+	case !remove && r.GetChanged():
+		return fmt.Sprintf("%s is now blocked by %s, revision %d\n", item, by, r.GetRevision())
+	case !remove:
+		return fmt.Sprintf("%s was already blocked by %s\n", item, by)
+	case r.GetChanged():
+		return fmt.Sprintf("%s is no longer blocked by %s, revision %d\n", item, by, r.GetRevision())
+	default:
+		return fmt.Sprintf("%s was not blocked by %s\n", item, by)
+	}
+}
+
+// linkedText is item link's line: the thread, whether the link is new, and
+// what resolving it found.
+func linkedText(item string, r *chainmailv1.LinkThreadResponse) string {
+	l := r.GetLink()
+	verb := "linked"
+	if !r.GetCreated() {
+		verb = "updated link"
+	}
+	state := termText(l.GetState())
+	if reason := l.GetReason(); reason != "" {
+		state += " (" + termText(reason) + ")"
+	}
+	return fmt.Sprintf("%s %s thread %s to %s: %s, %d messages, revision %d\n",
+		verb, termText(l.GetAccount()), termText(l.GetThreadKey()), termText(item), state, l.GetMessages(), r.GetRevision())
+}

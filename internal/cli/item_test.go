@@ -749,3 +749,64 @@ func TestCompleteCriterionDescription(t *testing.T) {
 		t.Errorf("candidates %q, want %q", cands, want)
 	}
 }
+
+func TestItemBlockAndLinks(t *testing.T) {
+	t.Parallel()
+	testItemRequests(t, []itemCase{
+		{name: "block", args: []string{"block", "it_task1", "it_task0"}, want: &chainmailv1.SetBlockerRequest{ItemId: "it_task1", BlockedById: "it_task0", Linked: true}},
+		{name: "unblock", args: []string{"block", "it_task1", "it_task0", "--remove"}, want: &chainmailv1.SetBlockerRequest{ItemId: "it_task1", BlockedById: "it_task0"}},
+		{name: "link", args: []string{"link", "it_task1", "cm1:work:INBOX:7:42"}, want: &chainmailv1.LinkThreadRequest{ItemId: "it_task1", Ref: "cm1:work:INBOX:7:42"}},
+		{
+			name: "link anchor and note",
+			args: []string{"link", "it_task1", "cm1:work:INBOX:7:42", "--anchor", "--note", "the renewal notice"},
+			want: &chainmailv1.LinkThreadRequest{ItemId: "it_task1", Ref: "cm1:work:INBOX:7:42", Anchor: true, Note: "the renewal notice"},
+		},
+		{name: "unlink", args: []string{"unlink", "it_task1", "work", "a1b2c3d4"}, want: &chainmailv1.UnlinkThreadRequest{ItemId: "it_task1", Account: "work", ThreadKey: "a1b2c3d4"}},
+	})
+	testItemUsage(t, []itemCase{
+		{name: "block one", args: []string{"block", "it_task1"}, usage: "accepts 2 arg(s)"},
+		{name: "link a bad ref", args: []string{"link", "it_task1", "nope"}, usage: "refs come from search results"},
+		{name: "link without a ref", args: []string{"link", "it_task1"}, usage: "accepts 2 arg(s)"},
+		{name: "unlink without a key", args: []string{"unlink", "it_task1", "work"}, usage: "accepts 3 arg(s)"},
+	})
+	newFake := func() *fakeItems {
+		return &fakeItems{
+			block: func(r *chainmailv1.SetBlockerRequest) (*chainmailv1.SetBlockerResponse, error) {
+				if r.GetBlockedById() == "it_same" {
+					return &chainmailv1.SetBlockerResponse{Revision: 50}, nil
+				}
+				return &chainmailv1.SetBlockerResponse{Changed: true, Revision: 51}, nil
+			},
+			link: func(r *chainmailv1.LinkThreadRequest) (*chainmailv1.LinkThreadResponse, error) {
+				if r.GetAnchor() {
+					link := &chainmailv1.ThreadLink{Account: "work", ThreadKey: "a1b2c3d4", State: "unavailable", Reason: "SERVER_UNAVAILABLE"}
+					return &chainmailv1.LinkThreadResponse{Link: link, Revision: 52}, nil
+				}
+				link := &chainmailv1.ThreadLink{Account: "work", ThreadKey: "a1b2c3d4", State: "ok", Messages: 3}
+				return &chainmailv1.LinkThreadResponse{Link: link, Created: true, Revision: 53}, nil
+			},
+			unlink: func(*chainmailv1.UnlinkThreadRequest) (*chainmailv1.UnlinkThreadResponse, error) {
+				return &chainmailv1.UnlinkThreadResponse{Revision: 54}, nil
+			},
+		}
+	}
+	testItemTable(t, newFake, []itemCase{
+		{name: "block table", args: []string{"block", "it_task1", "it_task0"}, out: "it_task1 is now blocked by it_task0, revision 51\n"},
+		{name: "block again", args: []string{"block", "it_task1", "it_same"}, out: "it_task1 was already blocked by it_same\n"},
+		{name: "unblock table", args: []string{"block", "it_task1", "it_task0", "--remove"}, out: "it_task1 is no longer blocked by it_task0, revision 51\n"},
+		{name: "unblock again", args: []string{"block", "it_task1", "it_same", "--remove"}, out: "it_task1 was not blocked by it_same\n"},
+		{name: "link table", args: []string{"link", "it_task1", "cm1:work:INBOX:7:42"}, out: "linked work thread a1b2c3d4 to it_task1: ok, 3 messages, revision 53\n"},
+		{
+			name: "relink unavailable", args: []string{"link", "it_task1", "cm1:work:INBOX:7:42", "--anchor"},
+			out: "updated link work thread a1b2c3d4 to it_task1: unavailable (SERVER_UNAVAILABLE), 0 messages, revision 52\n",
+		},
+		{name: "unlink table", args: []string{"unlink", "it_task1", "work", "a1b2c3d4"}, out: "unlinked work thread a1b2c3d4 from it_task1, revision 54\n"},
+	})
+	testItemCompletion(t, []itemCase{
+		{name: "block blocker leaves out the item", args: []string{"item", "block", "it_task1", ""}, cands: []string{"it_admin_work"}},
+		{name: "link item", args: []string{"item", "link", ""}, cands: []string{"it_admin_work", "it_task1"}},
+		{name: "unlink accounts", args: []string{"item", "unlink", "it_task1", ""}, cands: []string{"old", "work"}},
+		{name: "unlink threads", args: []string{"item", "unlink", "it_task1", "work", ""}, cands: []string{"a1b2c3d4", "b2c3d4e5"}},
+		{name: "unlink nothing after the key", args: []string{"item", "unlink", "it_task1", "work", "a1b2c3d4", ""}},
+	})
+}

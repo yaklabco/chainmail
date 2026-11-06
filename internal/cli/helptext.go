@@ -58,6 +58,8 @@ var examples = map[string]string{
 	"chainmail get": `  chainmail get cm1:work:INBOX:7:42
   chainmail get --full cm1:work:INBOX:7:42
   chainmail get --raw cm1:work:INBOX:7:42 > message.eml`,
+	"chainmail item block": `  chainmail item block it_01jcb7m2k9r8q3v4w5x6y7z8a9 it_01jcb7m2k9r8q3v4w5x6y7z8b0
+  chainmail item block it_01jcb7m2k9r8q3v4w5x6y7z8a9 it_01jcb7m2k9r8q3v4w5x6y7z8b0 --remove`,
 	"chainmail item create": `  # a task in the inbox, to sort later
   chainmail item create task "Renew the domain" --area work --due 2026-11-20
   # a chore under the work Admin initiative, with acceptance criteria
@@ -73,6 +75,9 @@ var examples = map[string]string{
 	"chainmail item delete": `  chainmail item delete it_01jcb7m2k9r8q3v4w5x6y7z8a9
   # the item and every item below it
   chainmail item delete it_01jcb7m2k9r8q3v4w5x6y7z8b0 --cascade`,
+	"chainmail item link": `  chainmail item link it_01jcb7m2k9r8q3v4w5x6y7z8a9 cm1:work:INBOX:7:42 --anchor --note "the renewal notice"
+  # then find the item's mail
+  chainmail search item:it_01jcb7m2k9r8q3v4w5x6y7z8a9`,
 	"chainmail item list": `  # the inbox: tasks not yet sorted
   chainmail item list --inbox
   chainmail item list --under it_admin_work --state in-progress
@@ -85,6 +90,8 @@ var examples = map[string]string{
   chainmail item restore it_01jcb7m2k9r8q3v4w5x6y7z8b0 --cascade`,
 	"chainmail item show": `  chainmail item show it_admin_work
   chainmail item show it_01jcb7m2k9r8q3v4w5x6y7z8a9 --output json`,
+	"chainmail item unlink": `  # item show lists each link's account and thread key
+  chainmail item unlink it_01jcb7m2k9r8q3v4w5x6y7z8a9 work 18c2f0a1b2c3d4e5`,
 	"chainmail item update": `  chainmail item update it_01jcb7m2k9r8q3v4w5x6y7z8a9 --state in-progress --due 2026-11-30
   # drop the due date and the estimate
   chainmail item update it_01jcb7m2k9r8q3v4w5x6y7z8a9 --clear due,estimate`,

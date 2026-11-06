@@ -93,6 +93,12 @@ func (cp *completer) itemSpecs() map[string]compSpec {
 			flags: map[string]cobra.CompletionFunc{"evidence": noComplete},
 		},
 		"chainmail item criteria untick": {args: byPosition(noComplete, cp.items(0), cp.criteria)},
+		"chainmail item block":           {args: cp.items(2)},
+		"chainmail item link": {
+			args:  byPosition(noComplete, cp.items(0), cp.refs("in:inbox", 0, sender)),
+			flags: map[string]cobra.CompletionFunc{"note": noComplete},
+		},
+		"chainmail item unlink": {args: byPosition(noComplete, cp.items(0), cp.linkAccounts, cp.linkThreads)},
 	}
 }
 
@@ -155,6 +161,42 @@ func (cp *completer) criteria(cmd *cobra.Command, args []string, toComplete stri
 			box = "[x] "
 		}
 		out = append(out, cobra.CompletionWithDesc(id, completionText(box+c.GetText().GetUntrusted())))
+	}
+	return out, cobra.ShellCompDirectiveNoFileComp
+}
+
+// linkAccounts completes the accounts of the threads linked to the item
+// the first argument names, for item unlink.
+func (cp *completer) linkAccounts(cmd *cobra.Command, args []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
+	view, ok := cp.getItem(cmd, args[0])
+	if !ok {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	var names []string
+	for _, l := range view.GetThreads() {
+		if a := l.GetAccount(); safeValue(a) && strings.HasPrefix(a, toComplete) {
+			names = append(names, a)
+		}
+	}
+	slices.Sort(names)
+	return slices.Compact(names), cobra.ShellCompDirectiveNoFileComp
+}
+
+// linkThreads completes the keys of the threads linked to the item the
+// first argument names on the account the second names, for item unlink.
+// Each is described by its newest message's subject.
+func (cp *completer) linkThreads(cmd *cobra.Command, args []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
+	view, ok := cp.getItem(cmd, args[0])
+	if !ok {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	var out []cobra.Completion
+	for _, l := range view.GetThreads() {
+		key := l.GetThreadKey()
+		if l.GetAccount() != args[1] || !safeValue(key) || !strings.HasPrefix(key, toComplete) {
+			continue
+		}
+		out = append(out, cobra.CompletionWithDesc(key, completionText(l.GetLatest().GetSubject().GetUntrusted())))
 	}
 	return out, cobra.ShellCompDirectiveNoFileComp
 }
