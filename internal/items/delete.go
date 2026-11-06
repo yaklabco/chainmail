@@ -52,7 +52,7 @@ func (s *Store) Delete(ctx context.Context, a Actor, id string, cascade bool) ([
 			return nil, err
 		}
 		ids = nodeIDs(set)
-		return stampDeleted(ctx, tx, set, formatTime(now), revision, now, a, OpDeleted)
+		return stampDeleted(ctx, tx, set, sql.NullString{String: formatTime(now), Valid: true}, revision, now, a, OpDeleted)
 	})
 	if err != nil {
 		return nil, 0, err
@@ -98,7 +98,7 @@ func (s *Store) Restore(ctx context.Context, a Actor, id string, cascade bool) (
 			return nil, err
 		}
 		ids = nodeIDs(set)
-		return stampDeleted(ctx, tx, set, nil, revision, now, a, OpRestored)
+		return stampDeleted(ctx, tx, set, sql.NullString{}, revision, now, a, OpRestored)
 	})
 	if err != nil {
 		return nil, 0, err
@@ -106,10 +106,10 @@ func (s *Store) Restore(ctx context.Context, a Actor, id string, cascade bool) (
 	return ids, revision, nil
 }
 
-// stampDeleted sets deleted_at to deletedAt (a stored time, or nil for
-// live) on every node in tx with one revision, and returns one event per
-// node with op.
-func stampDeleted(ctx context.Context, tx *sql.Tx, set []*node, deletedAt any, revision int64, at time.Time, a Actor, op string) ([]watch.Event, error) {
+// stampDeleted sets deleted_at to deletedAt on every node in tx with one
+// revision, and returns one event per node with op. deletedAt is a stored
+// time to delete, or the zero sql.NullString, which stores NULL, to restore.
+func stampDeleted(ctx context.Context, tx *sql.Tx, set []*node, deletedAt sql.NullString, revision int64, at time.Time, a Actor, op string) ([]watch.Event, error) {
 	stmt, err := tx.PrepareContext(ctx,
 		"UPDATE items SET deleted_at = ?, revision = ?, updated_at = ?, updated_by = ? WHERE id = ?")
 	if err != nil {

@@ -115,6 +115,26 @@ func (f *forest) find(id, what string) (*node, error) {
 	return nil, errMissing(what)
 }
 
+// settledItem returns it, as a write just stored it, with its effective area
+// and priority worked out from its parent in f. f must hold that parent and
+// its ancestors as stored, which a write that changed only it leaves true,
+// so Create and Update return what they wrote without reading the forest
+// again. f itself is not changed.
+func (f *forest) settledItem(it Item) (Item, error) {
+	n := &node{item: it}
+	if it.ParentID != "" {
+		p, err := f.find(it.ParentID, "parent")
+		if err != nil {
+			return Item{}, err
+		}
+		n.parent = p
+	}
+	if err := f.settle(n); err != nil {
+		return Item{}, err
+	}
+	return n.item, nil
+}
+
 // getItem reads one item, deleted or not, with its description and its
 // effective values.
 func getItem(ctx context.Context, q queryer, id string) (Item, error) {

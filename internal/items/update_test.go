@@ -248,3 +248,45 @@ func TestUpdateRefuses(t *testing.T) {
 	}
 	r.unchanged(t, revision, tail)
 }
+
+// Create and Update return the item they wrote, with effective values from
+// its ancestors, exactly as a later Get reads it.
+func TestWritesReturnTheStoredItem(t *testing.T) {
+	t.Parallel()
+	r := newStoreRig(t)
+	f := newFamily(t, r)
+	other := r.create(t, NewItem{Type: TypeObjective, Title: "other", Area: AreaPersonal, Priority: PriorityP0})
+	task, _, _, err := r.store.Create(t.Context(), testActor, NewItem{
+		Type: TypeTask, Title: "task", Description: "body", Estimate: floatp(1), ParentID: f.epic2.ID,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if task.EffectiveArea != AreaWork || task.EffectivePriority != PriorityP3 {
+		t.Errorf("created task effective = %s, %s; want work, p3 from the objective", task.EffectiveArea, task.EffectivePriority)
+	}
+	sameItem(t, task, r.get(t, task.ID))
+	updates := []struct {
+		name string
+		id   string
+		p    Patch
+	}{
+		{"move under another root", f.epic2.ID, Patch{Fields: []string{fieldParent}, Values: NewItem{ParentID: other.ID}}},
+		{"set its own area and priority", task.ID, Patch{
+			Fields: []string{fieldArea, fieldPriority}, Values: NewItem{Area: AreaWork, Priority: PriorityP1},
+		}},
+		{"clear them again", task.ID, Patch{Fields: []string{fieldArea, fieldPriority, fieldEstimate}}},
+	}
+	for _, u := range updates {
+		t.Run(u.name, func(t *testing.T) {
+			got, err := r.store.Update(t.Context(), testActor, u.id, u.p)
+			if err != nil {
+				t.Fatalf("Update: %v", err)
+			}
+			sameItem(t, got, r.get(t, u.id))
+		})
+	}
+	if got := r.get(t, task.ID); got.EffectiveArea != AreaPersonal || got.EffectivePriority != PriorityP0 {
+		t.Errorf("task effective = %s, %s after the moves; want personal, p0 from the new root", got.EffectiveArea, got.EffectivePriority)
+	}
+}

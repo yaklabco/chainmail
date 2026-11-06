@@ -36,7 +36,7 @@ var (
 		Hint: "link a message that has a Message-ID, or a reply that names its thread",
 	}
 	errAnchorNoMsgID = &InvalidError{Msg: "the message has no Message-ID, so it cannot be the anchor", Hint: "link it without anchor"}
-	errLinkDeleted   = &InvalidError{Msg: "the item is deleted", Hint: "restore it first, with: chainmail item restore"}
+	errLinkDeleted   = &InvalidError{Msg: "the item is deleted", Hint: "restore it first: chainmail item restore"}
 )
 
 // linkColumns are the item_links columns, in the order scanLink reads them.
@@ -155,9 +155,9 @@ func (s *Store) UnlinkThread(ctx context.Context, a Actor, itemID, account, thre
 
 // Links returns the links of item itemID, live or deleted, newest created
 // first, then by account and thread key. An unknown item is ErrNotFound
-// "item"; an item with no links gives an empty result.
+// "item"; an item with no links gives an empty, non-nil slice.
 func (s *Store) Links(ctx context.Context, itemID string) ([]Link, error) {
-	var out []Link
+	out := []Link{}
 	err := s.read(ctx, func(tx *sql.Tx) error {
 		if _, err := itemHead(ctx, tx, itemID, "item"); err != nil {
 			return err

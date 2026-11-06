@@ -38,3 +38,26 @@ func TestErrorValues(t *testing.T) {
 		t.Error("items.ErrKeyMismatch matches idempotency.ErrKeyMismatch")
 	}
 }
+
+// The refusals for a deleted item read the same wherever they come from,
+// and the one for a deleted blocker names the blocker. All are fixed text.
+func TestDeletedRefusals(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		err       *InvalidError
+		msg, hint string
+	}{
+		{"item", errItemDeleted, "the item is deleted", "restore it first: chainmail item restore"},
+		{"link", errLinkDeleted, "the item is deleted", "restore it first: chainmail item restore"},
+		{"blocker", errBlockerDeleted, "the blocker is deleted", "restore the blocker first: chainmail item restore"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if tt.err.Msg != tt.msg || tt.err.Hint != tt.hint {
+				t.Errorf("refusal = %q, %q; want %q, %q", tt.err.Msg, tt.err.Hint, tt.msg, tt.hint)
+			}
+		})
+	}
+}

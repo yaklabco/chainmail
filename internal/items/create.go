@@ -130,7 +130,10 @@ func (s *Store) Create(ctx context.Context, a Actor, n NewItem) (Item, []Criteri
 				return nil, err
 			}
 		}
-		if it, crit, err = itemWithCriteria(ctx, tx, row.ID); err != nil {
+		if it, err = f.settledItem(row); err != nil {
+			return nil, err
+		}
+		if crit, err = criteriaOf(ctx, tx, row.ID); err != nil {
 			return nil, err
 		}
 		return []watch.Event{itemEvent(now, row.ID, row.Type, r, OpCreated, nil)}, nil
