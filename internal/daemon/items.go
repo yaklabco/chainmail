@@ -463,6 +463,16 @@ func criterionTarget(id string) (string, error) {
 	return "criterion=" + id, nil
 }
 
+// criteriaIDsValid reports whether every criterion ID an EditCriteria
+// request names, in remove, edit and order, can be a criterion ID.
+func criteriaIDsValid(m *chainmailv1.EditCriteriaRequest) bool {
+	ids := slices.Concat(m.GetRemove(), m.GetOrder())
+	for _, e := range m.GetEdit() {
+		ids = append(ids, e.GetId())
+	}
+	return !slices.ContainsFunc(ids, func(id string) bool { return !items.ValidCriterionID(id) })
+}
+
 // criteriaEdit is an EditCriteria request in the store's form.
 func criteriaEdit(m *chainmailv1.EditCriteriaRequest) items.CriteriaEdit {
 	edits := make([]items.CriterionText, len(m.GetEdit()))
@@ -483,6 +493,9 @@ func (i *itemsService) EditCriteria(ctx context.Context, req *connect.Request[ch
 		entry.Targets = []string{target}
 		if err != nil {
 			return nil, err
+		}
+		if !criteriaIDsValid(m) {
+			return nil, errCriterionID
 		}
 		crit, revision, err := i.s.items.EditCriteria(ctx, actorOf(c), m.GetItemId(), criteriaEdit(m))
 		if err != nil {

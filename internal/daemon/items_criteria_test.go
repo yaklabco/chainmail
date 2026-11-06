@@ -44,6 +44,15 @@ func TestEditAndTickCriteria(t *testing.T) {
 	wantItemErr(t, "order missing an ID", err, connect.CodeInvalidArgument, api.ReasonInvalidArgument, "")
 	_, err = h.Client.Items.EditCriteria(t.Context(), connect.NewRequest(&chainmailv1.EditCriteriaRequest{ItemId: id, Edit: []*chainmailv1.CriterionText{{Id: "cr_nope", Text: "x"}}}))
 	wantItemErr(t, "unknown criterion", err, connect.CodeNotFound, api.ReasonNotFound, "")
+	const critHint = "criterion IDs start with cr_; run: chainmail item show <id>"
+	for name, req := range map[string]*chainmailv1.EditCriteriaRequest{
+		"malformed remove ID": {ItemId: id, Remove: []string{"c2"}},
+		"malformed edit ID":   {ItemId: id, Edit: []*chainmailv1.CriterionText{{Id: "CR_1", Text: "x"}}},
+		"malformed order ID":  {ItemId: id, Order: []string{c3, "cr_a b"}},
+	} {
+		_, err = h.Client.Items.EditCriteria(t.Context(), connect.NewRequest(req))
+		wantItemErr(t, name, err, connect.CodeInvalidArgument, api.ReasonInvalidArgument, critHint)
+	}
 
 	tick := func(criterion string, ticked bool, evidence string) (*chainmailv1.TickCriterionResponse, error) {
 		resp, err := h.Client.Items.TickCriterion(t.Context(), connect.NewRequest(&chainmailv1.TickCriterionRequest{ItemId: id, CriterionId: criterion, Ticked: ticked, Evidence: evidence}))
@@ -78,6 +87,9 @@ func TestEditAndTickCriteria(t *testing.T) {
 		{Client: "test", Action: "item.criteria", Targets: itemTargets(t, "item="+id, "criteria=3"), Result: "ok"},
 		{Client: "test", Action: "item.criteria", Targets: itemTargets(t, "item="+id), Result: "error", Reason: api.ReasonInvalidArgument},
 		{Client: "test", Action: "item.criteria", Targets: itemTargets(t, "item="+id), Result: "error", Reason: api.ReasonNotFound},
+		{Client: "test", Action: "item.criteria", Targets: itemTargets(t, "item="+id), Result: "error", Reason: api.ReasonInvalidArgument},
+		{Client: "test", Action: "item.criteria", Targets: itemTargets(t, "item="+id), Result: "error", Reason: api.ReasonInvalidArgument},
+		{Client: "test", Action: "item.criteria", Targets: itemTargets(t, "item="+id), Result: "error", Reason: api.ReasonInvalidArgument},
 		{Client: "test", Action: "item.tick", Targets: itemTargets(t, "item="+id, "criterion="+c3), Result: "error", Reason: api.ReasonInvalidArgument},
 		{Client: "test", Action: "item.tick", Targets: itemTargets(t, "item="+id, "criterion="+c3), Result: "ok"},
 		{Client: "test", Action: "item.tick", Targets: itemTargets(t, "item="+id, "criterion="+c3), Result: "ok"},
