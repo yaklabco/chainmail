@@ -270,3 +270,235 @@ func TestUpdateItemOutput(t *testing.T) {
 		t.Errorf("text = %q", text)
 	}
 }
+
+// itemRowAnswer is a faked compact row with text as its title.
+func itemRowAnswer(id, typ, title string, depth int32) *chainmailv1.WorkItemRow {
+	return &chainmailv1.WorkItemRow{
+		Id: id, Type: typ, Title: readU(title), State: "backlog", EffectiveArea: "work", EffectivePriority: "p2",
+		DueDate: "2026-12-01", ParentId: "it_admin_work", Depth: depth, Children: 2, CriteriaTotal: 3, CriteriaTicked: 1, Links: 1, Revision: 9,
+	}
+}
+
+// itemRowOut is itemRowAnswer as the tools shape it.
+func itemRowOut(id, typ, title string, depth int32) workItemRowOut {
+	return workItemRowOut{
+		ID: id, Type: typ, Title: serverName(title), State: "backlog", EffectiveArea: "work", EffectivePriority: "p2",
+		DueDate: "2026-12-01", ParentID: "it_admin_work", Depth: depth, Children: 2, CriteriaTotal: 3, CriteriaTicked: 1, Links: 1, Revision: 9,
+	}
+}
+
+// linkAnswer is an ok link with an anchor, with text as its note and as its
+// newest message's subject.
+func linkAnswer(text string) *chainmailv1.ThreadLink {
+	ts := timestamppb.New(itemAt)
+	return &chainmailv1.ThreadLink{
+		Account: "work", ThreadKey: "18c0ffee", Note: readU(text), AnchorRef: testRef, State: "ok", Source: "cache", Messages: 4,
+		Latest: &chainmailv1.MessageRow{
+			Ref: testRef2, Account: "work", Folder: "INBOX", Date: ts,
+			From: []*chainmailv1.Address{{Name: readU("Ann"), Email: readU("ann@x.test")}}, Subject: readU(text), ThreadId: "18c0ffee",
+		},
+		CreatedAt: ts, CreatedBy: "1000/mcp",
+	}
+}
+
+// linkOut is linkAnswer as the tools shape it.
+func linkOut(text string) threadLinkOut {
+	return threadLinkOut{
+		Account: "work", ThreadKey: "18c0ffee", Note: serverNamePtr(text), AnchorRef: testRef, State: "ok", Source: "cache", Messages: 4,
+		Latest: &rowOut{
+			Ref: testRef2, Account: "work", Folder: serverName("INBOX"), Date: itemAtText,
+			From: []untrusted{serverName("Ann <ann@x.test>")}, To: []untrusted{}, Subject: serverName(text),
+			Flags: []string{}, ThreadID: "18c0ffee",
+		},
+		CreatedAt: itemAtText, CreatedBy: "1000/mcp",
+	}
+}
+
+// getItemAnswer is the story with text in every item text field: its two
+// criteria, one ancestor, one of three children, a blocker each way, and
+// three links: ok with an anchor, empty, and unavailable.
+func getItemAnswer(text string) *chainmailv1.GetItemResponse {
+	ts := timestamppb.New(itemAt)
+	return &chainmailv1.GetItemResponse{
+		Item: itemAnswer(text), Criteria: criteriaAnswer(text, text),
+		Ancestors:     []*chainmailv1.WorkItemRow{itemRowAnswer("it_admin_work", "initiative", text, 0)},
+		Children:      []*chainmailv1.WorkItemRow{itemRowAnswer("it_01jc0task", "task", text, 0)},
+		ChildrenTotal: 3,
+		BlockedBy:     []*chainmailv1.WorkItemRow{itemRowAnswer("it_01jc0dep", "story", text, 0)},
+		Blocks:        []*chainmailv1.WorkItemRow{itemRowAnswer("it_01jc0next", "story", text, 0)},
+		Threads: []*chainmailv1.ThreadLink{
+			linkAnswer(text),
+			{Account: "home", ThreadKey: "9f2e", State: "empty", Source: "server", CreatedAt: ts, CreatedBy: "1000/cli"},
+			{Account: "old", ThreadKey: "77aa", State: "unavailable", Reason: "NOT_FOUND", CreatedAt: ts, CreatedBy: "1000/cli"},
+		},
+		ThreadsTotal: 3,
+	}
+}
+
+// getItemWant is getItemAnswer(text) as get_item shapes it.
+func getItemWant(text string) getItemOut {
+	return getItemOut{
+		Item: itemOut(text), Criteria: criteriaOut(text, text),
+		Ancestors:     []workItemRowOut{itemRowOut("it_admin_work", "initiative", text, 0)},
+		Children:      []workItemRowOut{itemRowOut("it_01jc0task", "task", text, 0)},
+		ChildrenTotal: 3,
+		BlockedBy:     []workItemRowOut{itemRowOut("it_01jc0dep", "story", text, 0)},
+		Blocks:        []workItemRowOut{itemRowOut("it_01jc0next", "story", text, 0)},
+		Threads: []threadLinkOut{
+			linkOut(text),
+			{Account: "home", ThreadKey: "9f2e", State: "empty", Source: "server", CreatedAt: itemAtText, CreatedBy: "1000/cli"},
+			{Account: "old", ThreadKey: "77aa", State: "unavailable", Reason: "NOT_FOUND", CreatedAt: itemAtText, CreatedBy: "1000/cli"},
+		},
+		ThreadsTotal: 3,
+	}
+}
+
+func TestReadItemToolRequests(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		tool string
+		args map[string]any
+		proc string
+		want proto.Message
+	}{
+		{
+			name: "get_item", tool: "get_item", args: map[string]any{"id": "it_admin_work"},
+			proc: chainmailv1connect.ItemsServiceGetItemProcedure, want: &chainmailv1.GetItemRequest{Id: "it_admin_work"},
+		},
+		{
+			name: "list_items defaults", tool: "list_items", args: map[string]any{},
+			proc: chainmailv1connect.ItemsServiceListItemsProcedure, want: &chainmailv1.ListItemsRequest{},
+		},
+		{
+			name: "list_items every filter", tool: "list_items",
+			args: map[string]any{
+				"type": "task", "state": "backlog", "area": "work", "under": "it_admin_work", "inbox": true, "ongoing": false,
+				"include_deleted": true, "changed_since": 40, "limit": 500, "page_token": "dDo1MA",
+			},
+			proc: chainmailv1connect.ItemsServiceListItemsProcedure,
+			want: &chainmailv1.ListItemsRequest{
+				Type: "task", State: "backlog", Area: "work", Under: "it_admin_work", Inbox: true, Ongoing: proto.Bool(false),
+				IncludeDeleted: true, ChangedSince: proto.Int64(40), Limit: 500, PageToken: "dDo1MA",
+			},
+		},
+		{
+			name: "list_items changed_since 0 is sent", tool: "list_items", args: map[string]any{"changed_since": 0, "ongoing": true},
+			proc: chainmailv1connect.ItemsServiceListItemsProcedure,
+			want: &chainmailv1.ListItemsRequest{Ongoing: proto.Bool(true), ChangedSince: proto.Int64(0)},
+		},
+		{
+			name: "list_items the inbox", tool: "list_items", args: map[string]any{"inbox": true},
+			proc: chainmailv1connect.ItemsServiceListItemsProcedure, want: &chainmailv1.ListItemsRequest{Inbox: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnv(t, &fakeDaemon{}, latest)
+			e.call(t, tt.tool, tt.args)
+			if got := e.fake.lastCall(t, tt.proc).Msg; !proto.Equal(got, tt.want) {
+				t.Errorf("request = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestListItemsRejectsBadLimit(t *testing.T) {
+	t.Parallel()
+	for _, limit := range []int{-1, 501} {
+		e := newTestEnv(t, &fakeDaemon{}, latest)
+		body := wantError(t, e.call(t, "list_items", map[string]any{"limit": limit}), api.ReasonInvalidArgument)
+		if !strings.Contains(body.Message, "limit must be 1 to 500") {
+			t.Errorf("limit %d: message %q", limit, body.Message)
+		}
+		itemNoCall(t, e.fake)
+	}
+}
+
+func TestGetItemOutput(t *testing.T) {
+	t.Parallel()
+	f := &fakeDaemon{GetItem: func(context.Context, *chainmailv1.GetItemRequest) (*chainmailv1.GetItemResponse, error) {
+		return getItemAnswer("Pay invoice"), nil
+	}}
+	e := newTestEnv(t, f, latest)
+	res := e.call(t, "get_item", map[string]any{"id": "it_01jc0story"})
+	wantOK(t, res)
+	var out getItemOut
+	decode(t, res, &out)
+	if want := getItemWant("Pay invoice"); !reflect.DeepEqual(out, want) {
+		t.Errorf("get_item =\n%+v\nwant\n%+v", out, want)
+	}
+	if text := textOf(res); !strings.HasPrefix(text, "story it_01jc0story: 2 criteria, 1 of 3 children, 3 of 3 threads\n") {
+		t.Errorf("text = %q", text)
+	}
+}
+
+// TestGetItemWithNothingAround: an item with no criteria, relatives or
+// links still shows every list, empty.
+func TestGetItemWithNothingAround(t *testing.T) {
+	t.Parallel()
+	f := &fakeDaemon{GetItem: func(context.Context, *chainmailv1.GetItemRequest) (*chainmailv1.GetItemResponse, error) {
+		return &chainmailv1.GetItemResponse{Item: itemAnswer("Lone")}, nil
+	}}
+	e := newTestEnv(t, f, latest)
+	res := e.call(t, "get_item", map[string]any{"id": "it_01jc0story"})
+	wantOK(t, res)
+	var raw map[string]any
+	decode(t, res, &raw)
+	for _, key := range []string{"criteria", "ancestors", "children", "blocked_by", "blocks", "threads"} {
+		if list, ok := raw[key].([]any); !ok || len(list) != 0 {
+			t.Errorf("%s = %v, want an empty array", key, raw[key])
+		}
+	}
+}
+
+func TestListItemsOutput(t *testing.T) {
+	t.Parallel()
+	deleted := itemRowAnswer("it_01jc0gone", "task", "Old", 1)
+	deleted.Deleted = true
+	deletedOut := itemRowOut("it_01jc0gone", "task", "Old", 1)
+	deletedOut.Deleted = true
+	tests := []struct {
+		name    string
+		resp    *chainmailv1.ListItemsResponse
+		want    listItemsOut
+		summary string
+	}{
+		{
+			name: "a page with more to come",
+			resp: &chainmailv1.ListItemsResponse{
+				Items: []*chainmailv1.WorkItemRow{itemRowAnswer("it_admin_work", "initiative", "Admin", 0), deleted}, NextPageToken: "dDoy", Revision: 41,
+			},
+			want: listItemsOut{
+				Items: []workItemRowOut{itemRowOut("it_admin_work", "initiative", "Admin", 0), deletedOut}, NextPageToken: "dDoy", Revision: 41,
+			},
+			summary: "2 items at revision 41; pass next_page_token as page_token for the next page\n",
+		},
+		{
+			name:    "nothing listed",
+			resp:    &chainmailv1.ListItemsResponse{Revision: 41},
+			want:    listItemsOut{Items: []workItemRowOut{}, Revision: 41},
+			summary: "0 items at revision 41\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeDaemon{ListItems: func(context.Context, *chainmailv1.ListItemsRequest) (*chainmailv1.ListItemsResponse, error) {
+				return tt.resp, nil
+			}}
+			e := newTestEnv(t, f, latest)
+			res := e.call(t, "list_items", map[string]any{"include_deleted": true})
+			wantOK(t, res)
+			var out listItemsOut
+			decode(t, res, &out)
+			if !reflect.DeepEqual(out, tt.want) {
+				t.Errorf("list_items =\n%+v\nwant\n%+v", out, tt.want)
+			}
+			if text := textOf(res); !strings.HasPrefix(text, tt.summary) {
+				t.Errorf("text = %q, want the summary %q first", text, tt.summary)
+			}
+		})
+	}
+}
