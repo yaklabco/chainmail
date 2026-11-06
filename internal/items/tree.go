@@ -142,3 +142,24 @@ func withDescription(ctx context.Context, q queryer, it Item) (Item, error) {
 func (n *node) live() bool {
 	return n.item.DeletedAt.IsZero()
 }
+
+// under reports whether n sits somewhere below a.
+func (n *node) under(a *node) bool {
+	for p := n.parent; p != nil; p = p.parent {
+		if p == a {
+			return true
+		}
+	}
+	return false
+}
+
+// liveChildren returns n's live children in sibling order.
+func (n *node) liveChildren() []*node {
+	var out []*node
+	for _, c := range n.children {
+		if c.live() {
+			out = append(out, c)
+		}
+	}
+	return out
+}
