@@ -50,3 +50,35 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go tool stave test:integration
+  nix:
+    # Builds the flake's package, so a vendorHash that go.mod or go.sum has
+    # made stale fails here and not for someone installing from the flake.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31.11.3
+      - run: nix build .#default --print-build-logs
+  release-config:
+    # Checks the goreleaser config and builds the release archives and the
+    # Cask into dist/ without publishing, so a broken release config fails
+    # before release day.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The next version comes from the commits since the last tag.
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # The same goreleaser version the Nix dev shell gives local runs.
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: v2.17.1
+          install-only: true
+      - run: goreleaser check
+      - run: go tool stave snapshot
