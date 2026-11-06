@@ -77,6 +77,10 @@ func (cp *completer) itemSpecs() map[string]compSpec {
 				"parent": cp.items(0), "criterion": noComplete, "idempotency-key": noComplete,
 			}),
 		},
+		"chainmail item update": {args: cp.items(1), flags: mergeFlagCompletions(itemFieldFlagSpecs(), map[string]cobra.CompletionFunc{
+			"type": fixed(itemTypes...), "title": noComplete, "clear": commaList(itemClearFields...),
+		})},
+		"chainmail item move": {args: cp.items(2)},
 	}
 }
 

@@ -3,11 +3,15 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
+	"strings"
 	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
 )
@@ -41,6 +45,22 @@ var (
 	itemPriorities = []string{"p0", "p1", "p2", "p3"}
 )
 
+// itemMaskOrder is the order update and move list UpdateItem mask paths in:
+// the order of UpdateItemRequest's fields, so a request never depends on
+// the order the flags were given in.
+var itemMaskOrder = []string{"type", "title", "description", "state", "area", "priority", "start_date", "due_date", "estimate", "parent_id"}
+
+// itemClearFields are the names --clear takes, in the order completion
+// offers them.
+var itemClearFields = []string{"area", "priority", "start", "due", "estimate", "description"}
+
+// itemFlagPaths maps each item update flag, and so each --clear name, to
+// the UpdateItem mask path it changes.
+var itemFlagPaths = map[string]string{
+	"type": "type", "title": "title", "description": "description", "description-file": "description",
+	"state": "state", "area": "area", "priority": "priority", "start": "start_date", "due": "due_date", "estimate": "estimate",
+}
+
 // newItemCmd builds chainmail item and its subcommands.
 func newItemCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	cmd := newGroup("item", "Keep work items and file mail threads against them")
@@ -49,6 +69,8 @@ func newItemCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		newItemCreateCmd(ctx, env, g),
 		newItemShowCmd(ctx, env, g),
 		newItemListCmd(ctx, env, g),
+		newItemUpdateCmd(ctx, env, g),
+		newItemMoveCmd(ctx, env, g),
 	)
 	return cmd
 }
@@ -187,5 +209,122 @@ func newItemCreateCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	f.Float64Var(&estimate, "estimate", 0, "the estimate, a number in a unit of your choosing such as days")
 	f.StringArrayVar(&req.Criteria, "criterion", nil, "an acceptance criterion (repeatable, kept in order)")
 	f.StringVar(&req.IdempotencyKey, "idempotency-key", "", "a key that makes a retry return the first item instead of making a second")
+	return cmd
+}
+
+func newItemUpdateCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	req := &chainmailv1.UpdateItemRequest{}
+	var description, descriptionFile string
+	var estimate float64
+	var clears []string
+	cmd := &cobra.Command{
+		Use:   "update <id>",
+		Short: "Change an item's fields; --clear unsets those that can be unset",
+		Args:  exactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			desc, hasDesc, err := readDescription(cmd, description, descriptionFile)
+			if err != nil {
+				return err
+			}
+			paths, err := updateMask(cmd, clears, hasDesc)
+			if err != nil {
+				return err
+			}
+			req.Id, req.Description, req.UpdateMask = args[0], desc, &fieldmaskpb.FieldMask{Paths: paths}
+			if cmd.Flags().Changed("estimate") {
+				req.Estimate = proto.Float64(estimate)
+			}
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Items.UpdateItem(ctx, connect.NewRequest(req))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			return writeString(env.Stdout, updatedText(resp.Msg.GetItem()))
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&req.Type, "type", "", "the new type, which must fit the parent and every child")
+	f.StringVar(&req.Title, "title", "", "the new title")
+	f.StringVar(&description, "description", "", "the new description, as Markdown")
+	f.StringVar(&descriptionFile, "description-file", "", "read the new description from this file")
+	f.StringVar(&req.State, "state", "", "backlog, in-progress, in-review or done")
+	f.StringVar(&req.Area, "area", "", "work or personal")
+	f.StringVar(&req.Priority, "priority", "", "p0 to p3")
+	f.StringVar(&req.StartDate, "start", "", "the start date, YYYY-MM-DD")
+	f.StringVar(&req.DueDate, "due", "", "the due date, YYYY-MM-DD")
+	f.Float64Var(&estimate, "estimate", 0, "the estimate")
+	f.StringSliceVar(&clears, "clear", nil, "unset these, comma separated: area, priority, start, due, estimate, description")
+	return cmd
+}
+
+// updateMask returns the UpdateItem mask paths for the field flags cmd was
+// given and the names in clears, in itemMaskOrder. hasDescription says
+// --description or --description-file was given. An unknown --clear name,
+// a field both set and cleared, or nothing to change is a usage error.
+func updateMask(cmd *cobra.Command, clears []string, hasDescription bool) ([]string, error) {
+	set := map[string]bool{"description": hasDescription}
+	for _, name := range []string{"type", "title", "state", "area", "priority", "start", "due", "estimate"} {
+		if cmd.Flags().Changed(name) {
+			set[itemFlagPaths[name]] = true
+		}
+	}
+	cleared := map[string]bool{}
+	for _, name := range clears {
+		name = strings.TrimSpace(name)
+		if !slices.Contains(itemClearFields, name) {
+			return nil, usageError{err: fmt.Errorf("unknown --clear %q: want area, priority, start, due, estimate or description", name), hint: helpHint(cmd)}
+		}
+		path := itemFlagPaths[name]
+		if set[path] {
+			return nil, usageError{err: fmt.Errorf("--clear %s cannot be used with the flag that sets it", name), hint: helpHint(cmd)}
+		}
+		cleared[path] = true
+	}
+	var paths []string
+	for _, p := range itemMaskOrder {
+		if set[p] || cleared[p] {
+			paths = append(paths, p)
+		}
+	}
+	if len(paths) == 0 {
+		return nil, usageError{err: errors.New("nothing to change: give a field flag or --clear"), hint: helpHint(cmd)}
+	}
+	return paths, nil
+}
+
+func newItemMoveCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	var root bool
+	cmd := &cobra.Command{
+		Use:   "move <id> (<parent-id> | --root)",
+		Short: "Move an item under another, or to the top of the tree with --root",
+		Args:  rangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			switch {
+			case root && len(args) == 2:
+				return usageError{err: errors.New("--root and a parent ID cannot be used together"), hint: helpHint(cmd)}
+			case !root && len(args) == 1:
+				return usageError{err: errors.New("give a parent ID or --root"), hint: helpHint(cmd)}
+			}
+			req := &chainmailv1.UpdateItemRequest{Id: args[0], UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"parent_id"}}}
+			if !root {
+				req.ParentId = args[1]
+			}
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Items.UpdateItem(ctx, connect.NewRequest(req))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			return writeString(env.Stdout, movedText(resp.Msg.GetItem()))
+		},
+	}
+	cmd.Flags().BoolVar(&root, "root", false, "move the item to the top of the tree; a task goes to the inbox")
 	return cmd
 }

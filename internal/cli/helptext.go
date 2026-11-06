@@ -68,8 +68,14 @@ var examples = map[string]string{
   chainmail item list --under it_admin_work --state in-progress
   # everything changed after revision 120, deleted items included
   chainmail item list --changed-since 120 --output json`,
+	"chainmail item move": `  chainmail item move it_01jcb7m2k9r8q3v4w5x6y7z8a9 it_admin_work
+  # back to the inbox
+  chainmail item move it_01jcb7m2k9r8q3v4w5x6y7z8a9 --root`,
 	"chainmail item show": `  chainmail item show it_admin_work
   chainmail item show it_01jcb7m2k9r8q3v4w5x6y7z8a9 --output json`,
+	"chainmail item update": `  chainmail item update it_01jcb7m2k9r8q3v4w5x6y7z8a9 --state in-progress --due 2026-11-30
+  # drop the due date and the estimate
+  chainmail item update it_01jcb7m2k9r8q3v4w5x6y7z8a9 --clear due,estimate`,
 	"chainmail label": `  chainmail label cm1:gmail:INBOX:3:17:g1790000000000000001 --add Receipts --remove Todo`,
 	"chainmail mcp": `  # configure your agent to run this command over stdio
   chainmail mcp`,

@@ -13,6 +13,7 @@ import (
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
@@ -570,5 +571,81 @@ func TestCompleteItemCreate(t *testing.T) {
 		{name: "areas", args: []string{"item", "create", "task", "T", "--area", ""}, cands: itemAreas},
 		{name: "priorities", args: []string{"item", "create", "task", "T", "--priority", ""}, cands: itemPriorities},
 		{name: "parent", args: []string{"item", "create", "task", "T", "--parent", ""}, cands: []string{"it_admin_work", "it_task1"}},
+	})
+}
+
+func TestItemUpdateRequestsAndUsage(t *testing.T) {
+	t.Parallel()
+	desc := descriptionFile(t)
+	mask := func(paths ...string) *fieldmaskpb.FieldMask { return &fieldmaskpb.FieldMask{Paths: paths} }
+	testItemRequests(t, []itemCase{
+		{
+			name: "update in mask order",
+			args: []string{"update", "it_task1", "--due", "2026-12-01", "--state", "done", "--title", "Renewed"},
+			want: &chainmailv1.UpdateItemRequest{Id: "it_task1", UpdateMask: mask("title", "state", "due_date"), Title: "Renewed", State: "done", DueDate: "2026-12-01"},
+		},
+		{name: "update type", args: []string{"update", "it_task1", "--type", "story"}, want: &chainmailv1.UpdateItemRequest{Id: "it_task1", UpdateMask: mask("type"), Type: "story"}},
+		{
+			name: "update clear and set",
+			args: []string{"update", "it_task1", "--clear", "due,area", "--estimate", "2"},
+			want: &chainmailv1.UpdateItemRequest{Id: "it_task1", UpdateMask: mask("area", "due_date", "estimate"), Estimate: proto.Float64(2)},
+		},
+		{
+			name: "update clear twice",
+			args: []string{"update", "it_task1", "--clear", "estimate", "--clear", "description,estimate"},
+			want: &chainmailv1.UpdateItemRequest{Id: "it_task1", UpdateMask: mask("description", "estimate")},
+		},
+		{
+			name: "update every clear",
+			args: []string{"update", "it_task1", "--clear", "area,priority,start,due,estimate,description"},
+			want: &chainmailv1.UpdateItemRequest{Id: "it_task1", UpdateMask: mask("description", "area", "priority", "start_date", "due_date", "estimate")},
+		},
+		{
+			name: "update description file",
+			args: []string{"update", "it_task1", "--description-file", desc, "--priority", "p0", "--start", "2026-11-08"},
+			want: &chainmailv1.UpdateItemRequest{
+				Id: "it_task1", UpdateMask: mask("description", "priority", "start_date"),
+				Description: "line one\nline two\n", Priority: "p0", StartDate: "2026-11-08",
+			},
+		},
+		{name: "update empty description", args: []string{"update", "it_task1", "--description", ""}, want: &chainmailv1.UpdateItemRequest{Id: "it_task1", UpdateMask: mask("description")}},
+		{name: "move", args: []string{"move", "it_task1", "it_feat1"}, want: &chainmailv1.UpdateItemRequest{Id: "it_task1", UpdateMask: mask("parent_id"), ParentId: "it_feat1"}},
+		{name: "move to root", args: []string{"move", "it_task1", "--root"}, want: &chainmailv1.UpdateItemRequest{Id: "it_task1", UpdateMask: mask("parent_id")}},
+	})
+	testItemUsage(t, []itemCase{
+		{name: "update nothing", args: []string{"update", "it_task1"}, usage: "nothing to change"},
+		{name: "update unknown clear", args: []string{"update", "it_task1", "--clear", "title"}, usage: "unknown --clear"},
+		{name: "update set and clear", args: []string{"update", "it_task1", "--clear", "area", "--area", "work"}, usage: "--clear area cannot be used with the flag that sets it"},
+		{name: "update description and clear", args: []string{"update", "it_task1", "--clear", "description", "--description", "x"}, usage: "--clear description cannot be used"},
+		{name: "update file and clear", args: []string{"update", "it_task1", "--clear", "description", "--description-file", desc}, usage: "--clear description cannot be used"},
+		{name: "move without a parent", args: []string{"move", "it_task1"}, usage: "give a parent ID or --root"},
+		{name: "move with both", args: []string{"move", "it_task1", "it_feat1", "--root"}, usage: "--root and a parent ID"},
+		{name: "move three", args: []string{"move", "a", "b", "c"}, usage: "accepts between 1 and 2 arg(s)"},
+	})
+}
+
+func TestItemUpdateTable(t *testing.T) {
+	t.Parallel()
+	newFake := func() *fakeItems {
+		return &fakeItems{update: func(r *chainmailv1.UpdateItemRequest) (*chainmailv1.UpdateItemResponse, error) {
+			return &chainmailv1.UpdateItemResponse{Item: &chainmailv1.WorkItem{Id: r.GetId(), Type: "task", ParentId: r.GetParentId(), Revision: 44}}, nil
+		}}
+	}
+	testItemTable(t, newFake, []itemCase{
+		{name: "update", args: []string{"update", "it_task1", "--state", "done"}, out: "updated task it_task1, revision 44\n"},
+		{name: "move", args: []string{"move", "it_task1", "it_feat1"}, out: "moved it_task1 under it_feat1, revision 44\n"},
+		{name: "move to root", args: []string{"move", "it_task1", "--root"}, out: "moved it_task1 to the top of the tree, revision 44\n"},
+	})
+}
+
+func TestCompleteItemUpdate(t *testing.T) {
+	t.Parallel()
+	testItemCompletion(t, []itemCase{
+		{name: "update item", args: []string{"item", "update", ""}, cands: []string{"it_admin_work", "it_task1"}},
+		{name: "priorities", args: []string{"item", "update", "it_task1", "--priority", ""}, cands: itemPriorities},
+		{name: "clear", args: []string{"item", "update", "it_task1", "--clear", ""}, cands: itemClearFields},
+		{name: "second clear", args: []string{"item", "update", "it_task1", "--clear", "due,e"}, cands: []string{"due,estimate"}},
+		{name: "move parent leaves out the item", args: []string{"item", "move", "it_task1", ""}, cands: []string{"it_admin_work"}},
+		{name: "move takes two", args: []string{"item", "move", "it_task1", "it_admin_work", ""}},
 	})
 }

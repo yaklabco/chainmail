@@ -280,3 +280,16 @@ func createdText(r *chainmailv1.CreateItemResponse) string {
 	}
 	return fmt.Sprintf("created %s %s\n", termText(it.GetType()), termText(it.GetId()))
 }
+
+// updatedText is item update's line.
+func updatedText(it *chainmailv1.WorkItem) string {
+	return fmt.Sprintf("updated %s %s, revision %d\n", termText(it.GetType()), termText(it.GetId()), it.GetRevision())
+}
+
+// movedText is item move's line: where the item now sits.
+func movedText(it *chainmailv1.WorkItem) string {
+	if p := it.GetParentId(); p != "" {
+		return fmt.Sprintf("moved %s under %s, revision %d\n", termText(it.GetId()), termText(p), it.GetRevision())
+	}
+	return fmt.Sprintf("moved %s to the top of the tree, revision %d\n", termText(it.GetId()), it.GetRevision())
+}
