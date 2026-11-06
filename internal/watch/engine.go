@@ -42,6 +42,21 @@ type EngineOptions struct {
 	// mailstore.DefaultSyncBatch, which is also the most it may be: a larger
 	// value is lowered to it.
 	Batch int
+	// OnNew, when set, runs inside each batch transaction after the batch's
+	// events are appended, with the batch's new messages in UID order. The
+	// events it returns are appended in the same transaction. It may use only
+	// tx: state.db has one connection, and tx holds it. An error rolls the
+	// batch back, so the next Pass fetches the same messages and calls OnNew
+	// with them again. It is not called for a batch with no new messages,
+	// such as a baseline. It must not modify news.
+	OnNew func(ctx context.Context, tx *sql.Tx, account string, news []NewMail) ([]Event, error)
+}
+
+// NewMail is one new message of a batch: its summary and the new event
+// already appended for it (ID set).
+type NewMail struct {
+	Summary mailstore.Summary
+	Event   Event
 }
 
 // errNoProgress means a source reported more new messages but returned
@@ -59,6 +74,7 @@ type Engine struct {
 	now     func() time.Time
 	snippet func(mailstore.Summary) string
 	batch   int
+	onNew   func(ctx context.Context, tx *sql.Tx, account string, news []NewMail) ([]Event, error)
 	// commitTx commits a batch's transaction. Tests replace it to fail a
 	// commit the way a crash or a full disk would.
 	commitTx func(*sql.Tx) error
@@ -68,7 +84,7 @@ type Engine struct {
 // schema, through log and state.
 func NewEngine(db *sql.DB, log *Log, state *State, opts EngineOptions) *Engine {
 	e := &Engine{
-		db: db, log: log, state: state, now: opts.Now, snippet: opts.Snippet, batch: opts.Batch,
+		db: db, log: log, state: state, now: opts.Now, snippet: opts.Snippet, batch: opts.Batch, onNew: opts.OnNew,
 		commitTx: (*sql.Tx).Commit,
 	}
 	if e.now == nil {
@@ -162,10 +178,11 @@ func (e *Engine) step(ctx context.Context, account, folder string, src Source, s
 	if mode != "" {
 		dr.Next.Mode = mode
 	}
-	if err := e.commit(ctx, dr); err != nil {
+	appended, err := e.commit(ctx, dr)
+	if err != nil {
 		return false, err
 	}
-	res.Events += len(dr.Events)
+	res.Events += appended
 	res.Batches++
 	res.Baselined = res.Baselined || d.Rebased
 	res.CondStore = d.State.CondStore
@@ -173,45 +190,95 @@ func (e *Engine) step(ctx context.Context, account, folder string, src Source, s
 }
 
 // commit writes one batch in one transaction and, once it has committed,
-// wakes blocked readers when it appended events. A batch without events,
-// such as a Google account's check every google_check that finds nothing,
-// gives a reader nothing to read.
-func (e *Engine) commit(ctx context.Context, dr diffResult) error {
+// wakes blocked readers when it appended events. It returns how many events
+// it appended, the OnNew hook's included. A batch without events, such as
+// a Google account's check every google_check that finds nothing, gives a
+// reader nothing to read.
+func (e *Engine) commit(ctx context.Context, dr diffResult) (int, error) {
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("beginning sync batch: %w", err)
+		return 0, fmt.Errorf("beginning sync batch: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }() // a no-op after Commit; an earlier error is the one to report
 
 	account, folder := dr.Next.Account, dr.Next.Folder
 	if len(dr.Events) > 0 {
 		if err := e.log.Append(ctx, tx, dr.Events); err != nil {
-			return fmt.Errorf("appending events: %w", err)
+			return 0, fmt.Errorf("appending events: %w", err)
 		}
 	}
+	extra, err := e.runOnNew(ctx, tx, account, dr)
+	if err != nil {
+		return 0, err
+	}
 	if err := PutFolder(ctx, tx, dr.Next); err != nil {
-		return fmt.Errorf("storing sync checkpoint: %w", err)
+		return 0, fmt.Errorf("storing sync checkpoint: %w", err)
 	}
 	if dr.Replace != nil {
 		if err := replaceUIDs(ctx, tx, account, folder, dr.Replace); err != nil {
-			return fmt.Errorf("replacing known UIDs: %w", err)
+			return 0, fmt.Errorf("replacing known UIDs: %w", err)
 		}
 	}
 	if len(dr.Delete) > 0 {
 		if err := deleteUIDs(ctx, tx, account, folder, dr.Delete); err != nil {
-			return fmt.Errorf("deleting expunged UIDs: %w", err)
+			return 0, fmt.Errorf("deleting expunged UIDs: %w", err)
 		}
 	}
 	if len(dr.Put) > 0 {
 		if err := putUIDs(ctx, tx, account, folder, dr.Put); err != nil {
-			return fmt.Errorf("storing known UIDs: %w", err)
+			return 0, fmt.Errorf("storing known UIDs: %w", err)
 		}
 	}
 	if err := e.commitTx(tx); err != nil {
-		return fmt.Errorf("committing sync batch: %w", err)
+		return 0, fmt.Errorf("committing sync batch: %w", err)
 	}
-	if len(dr.Events) > 0 {
+	appended := len(dr.Events) + len(extra)
+	if appended > 0 {
 		e.log.Notify()
 	}
-	return nil
+	return appended, nil
+}
+
+// runOnNew calls the OnNew hook in tx with the batch's new messages, after
+// their events are appended, and appends the events it returns. It does
+// nothing without a hook or without new messages.
+func (e *Engine) runOnNew(ctx context.Context, tx *sql.Tx, account string, dr diffResult) ([]Event, error) {
+	if e.onNew == nil || len(dr.New) == 0 {
+		return nil, nil
+	}
+	news, err := pairNewMail(dr)
+	if err != nil {
+		return nil, err
+	}
+	extra, err := e.onNew(ctx, tx, account, news)
+	if err != nil {
+		return nil, fmt.Errorf("running the new mail hook: %w", err)
+	}
+	if err := e.log.Append(ctx, tx, extra); err != nil {
+		return nil, fmt.Errorf("appending new mail hook events: %w", err)
+	}
+	return extra, nil
+}
+
+// pairNewMail pairs each of dr.New with its new event, which Append has
+// stamped with an ID. diff builds the new events in the order of dr.New, so
+// the i-th new event belongs to dr.New[i]; a mismatch is a bug in diff.
+func pairNewMail(dr diffResult) ([]NewMail, error) {
+	var events []Event
+	for _, ev := range dr.Events {
+		if ev.Kind == KindNew {
+			events = append(events, ev)
+		}
+	}
+	if len(events) != len(dr.New) {
+		return nil, fmt.Errorf("sync batch has %d new events for %d new messages", len(events), len(dr.New))
+	}
+	news := make([]NewMail, len(dr.New))
+	for i, s := range dr.New {
+		if events[i].Ref != s.Ref.String() {
+			return nil, fmt.Errorf("new event %d is for %s, not %s", i, events[i].Ref, s.Ref)
+		}
+		news[i] = NewMail{Summary: s, Event: events[i]}
+	}
+	return news, nil
 }

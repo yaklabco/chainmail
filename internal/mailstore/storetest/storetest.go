@@ -1501,6 +1501,10 @@ func fetchHeaders(e *env) {
 	if h.MessageID != want.MessageID {
 		e.t.Errorf("MessageID = %q, want %q without angle brackets", h.MessageID, want.MessageID)
 	}
+	if sums[1].MessageID != want.MessageID || h.Summary.MessageID != want.MessageID {
+		e.t.Errorf("summary MessageIDs = %q (FetchSummaries), %q (FetchHeaders); want %q without angle brackets",
+			sums[1].MessageID, h.Summary.MessageID, want.MessageID)
+	}
 	if got := mailstore.MessageIDs(h.InReplyTo); !slices.Equal(got, []string{want.InReplyTo}) {
 		e.t.Errorf("In-Reply-To = %q", h.InReplyTo)
 	}
@@ -1591,7 +1595,7 @@ func SameSummary(a, b mailstore.Summary) bool {
 		slices.Equal(a.From, b.From) && slices.Equal(a.To, b.To) && a.Subject == b.Subject &&
 		slices.Equal(a.Flags, b.Flags) && a.Size == b.Size && a.HasAttachment == b.HasAttachment &&
 		a.AttachmentsUnknown == b.AttachmentsUnknown &&
-		a.ThreadID == b.ThreadID && slices.Equal(a.Labels, b.Labels)
+		a.ThreadID == b.ThreadID && slices.Equal(a.Labels, b.Labels) && a.MessageID == b.MessageID
 }
 
 func sortRefs(refs []ref.Ref) {

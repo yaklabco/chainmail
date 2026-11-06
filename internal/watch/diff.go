@@ -31,6 +31,10 @@ type diffResult struct {
 	Replace map[uint32]knownUID // non-nil: replace the folder's UID set with it
 	Put     map[uint32]knownUID // upserts
 	Delete  []uint32
+	// New are the batch's new messages in the order of their new events,
+	// ascending UID: New[i] is the summary of the i-th new event. A rebased
+	// delta, or a batch without new mail, has none.
+	New []mailstore.Summary
 }
 
 // diff is the pure core of Pass, which the table tests call directly. prev
@@ -56,6 +60,9 @@ func diff(prev FolderRow, known map[uint32]knownUID, d mailstore.Delta, in diffI
 		return res
 	}
 	news := slices.SortedFunc(slices.Values(d.New), bySummaryUID)
+	if len(news) > 0 {
+		res.New = news
+	}
 	put := make(map[uint32]knownUID)
 	if in.Sweep || d.FullFlags {
 		var expunged []Event

@@ -62,6 +62,7 @@ func (r Row) Summary() mailstore.Summary {
 		HasAttachment:      r.HasAttachment,
 		AttachmentsUnknown: r.AttachmentsUnknown,
 		ThreadID:           r.ThreadID,
+		MessageID:          r.MessageID,
 		Labels:             r.Labels,
 	}
 }
