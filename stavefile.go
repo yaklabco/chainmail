@@ -201,7 +201,10 @@ func Snapshot() error {
 	if err := writeSnapshotNotes(changelogFile, releaseNotesFile, tag); err != nil {
 		return err
 	}
-	return sh.RunV("goreleaser", "release", "--snapshot", "--clean", "--skip=publish",
+	// .goreleaser.yaml names the snapshot after this version, so the archives
+	// carry the version that the notes describe.
+	env := map[string]string{"CHAINMAIL_SNAPSHOT_VERSION": strings.TrimPrefix(tag, "v")}
+	return sh.RunWithV(env, "", "goreleaser", "release", "--snapshot", "--clean", "--skip=publish",
 		"--release-notes", releaseNotesFile, "--parallelism", goreleaserParallelism())
 }
 

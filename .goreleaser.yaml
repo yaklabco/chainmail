@@ -46,7 +46,9 @@ checksum:
   name_template: "checksums.txt"
 
 snapshot:
-  version_template: "{{ incpatch .Version }}-snapshot"
+  # stave snapshot sets CHAINMAIL_SNAPSHOT_VERSION to the version the next
+  # release will get, so the archives match the release notes it writes.
+  version_template: '{{ envOrDefault "CHAINMAIL_SNAPSHOT_VERSION" (incpatch .Version) }}-snapshot'
 
 homebrew_casks:
   - name: chainmail
