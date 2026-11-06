@@ -293,3 +293,11 @@ func movedText(it *chainmailv1.WorkItem) string {
 	}
 	return fmt.Sprintf("moved %s to the top of the tree, revision %d\n", termText(it.GetId()), it.GetRevision())
 }
+
+func idsText(verb string, ids []string, revision int64) string {
+	clean := make([]string, len(ids))
+	for i, id := range ids {
+		clean[i] = termText(id)
+	}
+	return fmt.Sprintf("%s %s, revision %d\n", verb, strings.Join(clean, " "), revision)
+}

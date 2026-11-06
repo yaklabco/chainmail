@@ -63,6 +63,9 @@ var examples = map[string]string{
   # a chore under the work Admin initiative, with acceptance criteria
   chainmail item create task "File the expense report" --parent it_admin_work --criterion "Receipts attached" --criterion "Submitted"
   chainmail item create feature "Search by item" --parent it_01jcb7m2k9r8q3v4w5x6y7z8b0 --description-file spec.md`,
+	"chainmail item delete": `  chainmail item delete it_01jcb7m2k9r8q3v4w5x6y7z8a9
+  # the item and every item below it
+  chainmail item delete it_01jcb7m2k9r8q3v4w5x6y7z8b0 --cascade`,
 	"chainmail item list": `  # the inbox: tasks not yet sorted
   chainmail item list --inbox
   chainmail item list --under it_admin_work --state in-progress
@@ -71,6 +74,8 @@ var examples = map[string]string{
 	"chainmail item move": `  chainmail item move it_01jcb7m2k9r8q3v4w5x6y7z8a9 it_admin_work
   # back to the inbox
   chainmail item move it_01jcb7m2k9r8q3v4w5x6y7z8a9 --root`,
+	"chainmail item restore": `  chainmail item restore it_01jcb7m2k9r8q3v4w5x6y7z8a9
+  chainmail item restore it_01jcb7m2k9r8q3v4w5x6y7z8b0 --cascade`,
 	"chainmail item show": `  chainmail item show it_admin_work
   chainmail item show it_01jcb7m2k9r8q3v4w5x6y7z8a9 --output json`,
 	"chainmail item update": `  chainmail item update it_01jcb7m2k9r8q3v4w5x6y7z8a9 --state in-progress --due 2026-11-30

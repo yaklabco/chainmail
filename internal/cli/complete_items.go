@@ -80,7 +80,9 @@ func (cp *completer) itemSpecs() map[string]compSpec {
 		"chainmail item update": {args: cp.items(1), flags: mergeFlagCompletions(itemFieldFlagSpecs(), map[string]cobra.CompletionFunc{
 			"type": fixed(itemTypes...), "title": noComplete, "clear": commaList(itemClearFields...),
 		})},
-		"chainmail item move": {args: cp.items(2)},
+		"chainmail item move":    {args: cp.items(2)},
+		"chainmail item delete":  {args: cp.items(1)},
+		"chainmail item restore": {args: cp.deletedItems(1)},
 	}
 }
 
@@ -101,4 +103,8 @@ func itemFieldFlagSpecs() map[string]cobra.CompletionFunc {
 		"description": noComplete, "description-file": files, "state": fixed(itemStates...), "area": fixed(itemAreas...),
 		"priority": fixed(itemPriorities...), "start": noComplete, "due": noComplete, "estimate": noComplete,
 	}
+}
+
+func (cp *completer) deletedItems(maxArgs int) cobra.CompletionFunc {
+	return cp.itemIDs(maxArgs, true)
 }

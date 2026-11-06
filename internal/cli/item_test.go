@@ -649,3 +649,35 @@ func TestCompleteItemUpdate(t *testing.T) {
 		{name: "move takes two", args: []string{"item", "move", "it_task1", "it_admin_work", ""}},
 	})
 }
+
+func TestItemDeleteAndRestore(t *testing.T) {
+	t.Parallel()
+	testItemRequests(t, []itemCase{
+		{name: "delete", args: []string{"delete", "it_task1"}, want: &chainmailv1.DeleteItemRequest{Id: "it_task1"}},
+		{name: "delete cascade", args: []string{"delete", "it_feat1", "--cascade"}, want: &chainmailv1.DeleteItemRequest{Id: "it_feat1", Cascade: true}},
+		{name: "restore", args: []string{"restore", "it_task1"}, want: &chainmailv1.RestoreItemRequest{Id: "it_task1"}},
+		{name: "restore cascade", args: []string{"restore", "it_feat1", "--cascade"}, want: &chainmailv1.RestoreItemRequest{Id: "it_feat1", Cascade: true}},
+	})
+	testItemUsage(t, []itemCase{
+		{name: "delete two", args: []string{"delete", "a", "b"}, usage: "accepts 1 arg(s)"},
+		{name: "restore none", args: []string{"restore"}, usage: "accepts 1 arg(s)"},
+	})
+	newFake := func() *fakeItems {
+		return &fakeItems{
+			del: func(*chainmailv1.DeleteItemRequest) (*chainmailv1.DeleteItemResponse, error) {
+				return &chainmailv1.DeleteItemResponse{Ids: []string{"it_feat1", "it_task1"}, Revision: 46}, nil
+			},
+			restore: func(*chainmailv1.RestoreItemRequest) (*chainmailv1.RestoreItemResponse, error) {
+				return &chainmailv1.RestoreItemResponse{Ids: []string{"it_feat1", "it_task1"}, Revision: 47}, nil
+			},
+		}
+	}
+	testItemTable(t, newFake, []itemCase{
+		{name: "delete table", args: []string{"delete", "it_feat1", "--cascade"}, out: "deleted it_feat1 it_task1, revision 46\n"},
+		{name: "restore table", args: []string{"restore", "it_feat1", "--cascade"}, out: "restored it_feat1 it_task1, revision 47\n"},
+	})
+	testItemCompletion(t, []itemCase{
+		{name: "delete offers live items", args: []string{"item", "delete", ""}, cands: []string{"it_admin_work", "it_task1"}},
+		{name: "restore offers deleted items", args: []string{"item", "restore", ""}, cands: []string{"it_gone"}},
+	})
+}

@@ -71,6 +71,8 @@ func newItemCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		newItemListCmd(ctx, env, g),
 		newItemUpdateCmd(ctx, env, g),
 		newItemMoveCmd(ctx, env, g),
+		newItemDeleteCmd(ctx, env, g),
+		newItemRestoreCmd(ctx, env, g),
 	)
 	return cmd
 }
@@ -326,5 +328,51 @@ func newItemMoveCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&root, "root", false, "move the item to the top of the tree; a task goes to the inbox")
+	return cmd
+}
+
+func newItemDeleteCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	var cascade bool
+	cmd := &cobra.Command{
+		Use:   "delete <id>",
+		Short: "Delete an item, softly; --cascade deletes the items below it too",
+		Args:  exactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Items.DeleteItem(ctx, connect.NewRequest(&chainmailv1.DeleteItemRequest{Id: args[0], Cascade: cascade}))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			return writeString(env.Stdout, idsText("deleted", resp.Msg.GetIds(), resp.Msg.GetRevision()))
+		},
+	}
+	cmd.Flags().BoolVar(&cascade, "cascade", false, "also delete every item below it")
+	return cmd
+}
+
+func newItemRestoreCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	var cascade bool
+	cmd := &cobra.Command{
+		Use:   "restore <id>",
+		Short: "Bring back a deleted item; --cascade brings back the items deleted with it",
+		Args:  exactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Items.RestoreItem(ctx, connect.NewRequest(&chainmailv1.RestoreItemRequest{Id: args[0], Cascade: cascade}))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			return writeString(env.Stdout, idsText("restored", resp.Msg.GetIds(), resp.Msg.GetRevision()))
+		},
+	}
+	cmd.Flags().BoolVar(&cascade, "cascade", false, "also restore the items deleted with it")
 	return cmd
 }
