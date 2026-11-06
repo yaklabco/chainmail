@@ -54,7 +54,7 @@ func (s *Server) registerWatchTools() {
 type readEventsIn struct {
 	Group       string   `json:"group,omitempty" jsonschema:"a consumer group name of lowercase letters, digits, dot, dash and underscore, up to 64 characters, not starting with cache.; reads after the group's acknowledged event and acknowledges what it returns; not with cursor"`
 	Cursor      *int64   `json:"cursor,omitempty" jsonschema:"next_cursor from an earlier read; reads the events after it; 0 reads from the oldest event kept; not with group"`
-	Kinds       []string `json:"kinds,omitempty" jsonschema:"event kinds to return: new, flags, expunged, status, gap, item, item_mail; empty means every kind but item and item_mail, which are opt-in; status and gap events pass a list that names neither"`
+	Kinds       []string `json:"kinds,omitempty" jsonschema:"event kinds to return: new, flags, expunged, status, gap, item, item_mail; empty means every kind but item and item_mail, which are opt-in, unless item is set, when it means item, item_mail, status and gap; status and gap events pass a list that names neither"`
 	Accounts    []string `json:"accounts,omitempty" jsonschema:"accounts to return events for; empty means every account"`
 	In          string   `json:"in,omitempty" jsonschema:"a folder name or Gmail label, in any case; inbox also matches the Gmail label \\Inbox and sent matches \\Sent"`
 	Item        string   `json:"item,omitempty" jsonschema:"a work item ID: only item and item_mail events of that item and every live item below it, plus status and gap; new, flags and expunged events are left out"`

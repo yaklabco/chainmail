@@ -4012,7 +4012,7 @@
           "type": "string"
         },
         "kinds": {
-          "description": "event kinds to return: new, flags, expunged, status, gap, item, item_mail; empty means every kind but item and item_mail, which are opt-in; status and gap events pass a list that names neither",
+          "description": "event kinds to return: new, flags, expunged, status, gap, item, item_mail; empty means every kind but item and item_mail, which are opt-in, unless item is set, when it means item, item_mail, status and gap; status and gap events pass a list that names neither",
           "items": {
             "type": "string"
           },

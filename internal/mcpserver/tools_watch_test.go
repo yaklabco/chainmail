@@ -452,3 +452,13 @@ func TestReadEventsItemEvents(t *testing.T) {
 	}
 	readInsideMarkers(t, textOf(res), readHostile)
 }
+
+// TestReadEventsKindsSchema checks the kinds schema names the C2 exception:
+// an empty kinds list leaves item events out unless item is set.
+func TestReadEventsKindsSchema(t *testing.T) {
+	t.Parallel()
+	got := inputPropertyDescription(t, "read_events", "kinds")
+	if !strings.Contains(got, "unless item is set") {
+		t.Errorf("kinds description %q does not say item enables item and item_mail when kinds is empty", got)
+	}
+}
