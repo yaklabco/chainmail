@@ -27,13 +27,10 @@ const maxListLimit = 500
 
 // itemsService implements chainmailv1connect.ItemsServiceHandler. Every
 // call is audited, and no audit target, error message, hint or log line
-// holds item text: only IDs, types, field names and counts. Error text
-// reaches agents outside the untrusted wrapping, so it must never repeat
-// what an agent copied from a message into an item.
+// holds item text: only IDs, types, field names, accounts, thread keys and
+// counts. Error text reaches agents outside the untrusted wrapping, so it
+// must never repeat what an agent copied from a message into an item.
 type itemsService struct {
-	// GetItem, LinkThread and UnlinkThread answer Unimplemented until the
-	// link handlers land.
-	chainmailv1connect.UnimplementedItemsServiceHandler
 	s *Server
 }
 
