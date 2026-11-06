@@ -174,8 +174,10 @@ func TestCreateItemRefusals(t *testing.T) {
 		{name: "empty title", req: &chainmailv1.CreateItemRequest{Type: "task", Title: "  ", Area: "work"}, code: connect.CodeInvalidArgument, reason: api.ReasonInvalidArgument},
 	}
 	for _, tt := range tests {
-		_, err := h.Client.Items.CreateItem(t.Context(), connect.NewRequest(tt.req))
-		wantItemErr(t, tt.name, err, tt.code, tt.reason, tt.hint)
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := h.Client.Items.CreateItem(t.Context(), connect.NewRequest(tt.req))
+			wantItemErr(t, tt.name, err, tt.code, tt.reason, tt.hint)
+		})
 	}
 	rows := itemAudit(t, h)
 	if len(rows) != len(tests)+1 {

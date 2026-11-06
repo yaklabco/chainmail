@@ -70,9 +70,11 @@ func TestWatchItemFilter(t *testing.T) {
 		{name: "deleted", item: other, code: connect.CodeNotFound, reason: api.ReasonNotFound, hint: "run: chainmail item list"},
 	}
 	for _, tt := range refusals {
-		_, err := h.Client.Watch.ReadEvents(t.Context(), connect.NewRequest(&chainmailv1.ReadEventsRequest{Filter: &chainmailv1.WatchFilter{Item: tt.item}}))
-		wantItemErr(t, "read "+tt.name, err, tt.code, tt.reason, tt.hint)
-		wantItemErr(t, "subscribe "+tt.name, subscribeErr(t, h, &chainmailv1.SubscribeRequest{Filter: &chainmailv1.WatchFilter{Item: tt.item}}), tt.code, tt.reason, tt.hint)
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := h.Client.Watch.ReadEvents(t.Context(), connect.NewRequest(&chainmailv1.ReadEventsRequest{Filter: &chainmailv1.WatchFilter{Item: tt.item}}))
+			wantItemErr(t, "read "+tt.name, err, tt.code, tt.reason, tt.hint)
+			wantItemErr(t, "subscribe "+tt.name, subscribeErr(t, h, &chainmailv1.SubscribeRequest{Filter: &chainmailv1.WatchFilter{Item: tt.item}}), tt.code, tt.reason, tt.hint)
+		})
 	}
 	var reads []string
 	for _, r := range h.AuditRows(t) {

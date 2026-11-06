@@ -95,8 +95,10 @@ func TestListItems(t *testing.T) {
 		{name: "malformed token", req: &chainmailv1.ListItemsRequest{PageToken: "!!"}, code: connect.CodeInvalidArgument},
 	}
 	for _, tt := range refusals {
-		_, err := h.Client.Items.ListItems(t.Context(), connect.NewRequest(tt.req))
-		wantItemErr(t, tt.name, err, tt.code, api.ReasonInvalidArgument, tt.hint)
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := h.Client.Items.ListItems(t.Context(), connect.NewRequest(tt.req))
+			wantItemErr(t, tt.name, err, tt.code, api.ReasonInvalidArgument, tt.hint)
+		})
 	}
 
 	lists := itemAudit(t, h, "item.list")

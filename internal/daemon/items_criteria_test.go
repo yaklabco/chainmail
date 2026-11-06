@@ -50,8 +50,10 @@ func TestEditAndTickCriteria(t *testing.T) {
 		"malformed edit ID":   {ItemId: id, Edit: []*chainmailv1.CriterionText{{Id: "CR_1", Text: "x"}}},
 		"malformed order ID":  {ItemId: id, Order: []string{c3, "cr_a b"}},
 	} {
-		_, err = h.Client.Items.EditCriteria(t.Context(), connect.NewRequest(req))
-		wantItemErr(t, name, err, connect.CodeInvalidArgument, api.ReasonInvalidArgument, critHint)
+		t.Run(name, func(t *testing.T) {
+			_, err := h.Client.Items.EditCriteria(t.Context(), connect.NewRequest(req))
+			wantItemErr(t, name, err, connect.CodeInvalidArgument, api.ReasonInvalidArgument, critHint)
+		})
 	}
 
 	tick := func(criterion string, ticked bool, evidence string) (*chainmailv1.TickCriterionResponse, error) {
