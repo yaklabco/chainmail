@@ -153,3 +153,31 @@ func TestValidID(t *testing.T) {
 		t.Errorf("Admin IDs = %q, %q", AdminWorkID, AdminPersonalID)
 	}
 }
+
+func TestValidCriterionID(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		id   string
+		want bool
+	}{
+		{NewID("cr_", now, nil), true},
+		{"cr_a", true},
+		{"cr_" + strings.Repeat("a", 60), true},
+		{"cr_" + strings.Repeat("a", 61), false},
+		{"cr_", false},
+		{"", false},
+		{"CR_abc", false},
+		{"cr_ABC", false},
+		{NewID("it_", now, nil), false},
+		{AdminWorkID, false},
+		{"cr-abc", false},
+		{"cr_a b", false},
+		{"cr_abc\n", false},
+	}
+	for _, tt := range tests {
+		if got := ValidCriterionID(tt.id); got != tt.want {
+			t.Errorf("ValidCriterionID(%q) = %v, want %v", tt.id, got, tt.want)
+		}
+	}
+}

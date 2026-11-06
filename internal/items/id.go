@@ -28,6 +28,16 @@ func ValidID(id string) bool {
 	return itemIDRE.MatchString(id)
 }
 
+// criterionIDRE is the criterion ID rule: the cr_ prefix NewID gives
+// criteria, then the same characters as an item ID.
+var criterionIDRE = regexp.MustCompile(`^cr_[0-9a-z_]{1,60}$`)
+
+// ValidCriterionID matches ^cr_[0-9a-z_]{1,60}$: every generated criterion
+// ID. The daemon checks criterion IDs with it before calling the store.
+func ValidCriterionID(id string) bool {
+	return criterionIDRE.MatchString(id)
+}
+
 // NewID returns prefix ("it_" or "cr_") plus a 26-character lowercase
 // Crockford ULID: the low 48 bits of now in Unix milliseconds as ten
 // characters, so IDs sort by creation time as text, then 80 random bits
