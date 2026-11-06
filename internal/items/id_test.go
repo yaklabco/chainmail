@@ -42,6 +42,26 @@ func TestNewID(t *testing.T) {
 			name: "last 48-bit millisecond", prefix: "it_", now: time.UnixMilli(1<<48 - 1),
 			random: bytes.Repeat([]byte{0xff}, 10), want: "it_7zzzzzzzzzzzzzzzzzzzzzzzzz",
 		},
+		// Only the low 48 bits of the millisecond count are kept, so a time
+		// past the 48-bit range wraps around to the start of it.
+		{
+			name: "first millisecond past 48 bits", prefix: "it_", now: time.UnixMilli(1 << 48),
+			random: make([]byte, 10), want: "it_00000000000000000000000000",
+		},
+		{
+			name: "past 48 bits keeps the low bits", prefix: "it_", now: time.UnixMilli(1<<48 + 33),
+			random: make([]byte, 10), want: "it_00000000110000000000000000",
+		},
+		// A time before 1970 is a negative count, which the mask turns into
+		// its 48-bit two's complement.
+		{
+			name: "one millisecond before the epoch", prefix: "it_", now: time.UnixMilli(-1),
+			random: make([]byte, 10), want: "it_7zzzzzzzzz0000000000000000",
+		},
+		{
+			name: "years before the epoch", prefix: "cr_", now: time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC),
+			random: make([]byte, 10), want: "cr_" + wrappedTime(-2208988800000) + "0000000000000000",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -180,4 +200,16 @@ func TestValidCriterionID(t *testing.T) {
 			t.Errorf("ValidCriterionID(%q) = %v, want %v", tt.id, got, tt.want)
 		}
 	}
+}
+
+// wrappedTime renders ms as NewID's ten time characters, worked out by hand
+// from the 48-bit two's complement, independently of NewID's loop.
+func wrappedTime(ms int64) string {
+	v := uint64(ms) % (1 << 48)
+	out := make([]byte, 10)
+	for i := range out {
+		shift := uint(45 - 5*i)
+		out[i] = idCrockford[(v>>shift)&31]
+	}
+	return string(out)
 }
