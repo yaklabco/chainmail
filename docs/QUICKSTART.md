@@ -27,7 +27,7 @@ chainmail runs on Linux and on macOS.
 With Nix, build from a checkout. The flake's package is `packages.<system>.default`, for `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`.
 
 ```sh
-git clone https://github.com/jamesainslie/chainmail
+git clone https://github.com/yaklabco/chainmail
 cd chainmail
 nix build
 ./result/bin/chainmail version

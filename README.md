@@ -37,14 +37,14 @@ flowchart LR
 
 | Sub-project | Delivered | State |
 |---|---|---|
-| 1. Foundation | The daemon, its socket and peer check, the vault, password and OAuth2 login, `secret set`, `auth login` and `accounts test` | Shipped ([#1](https://github.com/jamesainslie/chainmail/pull/1)) |
-| 2. Read | `folders`, `search`, `get`, `thread` and `attachment`, refs and the untrusted envelope | Shipped ([#2](https://github.com/jamesainslie/chainmail/pull/2)) |
-| 3. Write and organize | `send`, `send-raw`, `reply`, `forward` and `draft`, every organize command, `folder` and `accounts probe` | Shipped ([#3](https://github.com/jamesainslie/chainmail/pull/3)) |
-| 4. Policy and deployment | The send policy and held drafts, the gates on `expunge` and `folder delete`, `audit`, and the NixOS module | Shipped ([#4](https://github.com/jamesainslie/chainmail/pull/4)) |
-| 5. MCP | `chainmail mcp` and its tools | Shipped ([#7](https://github.com/jamesainslie/chainmail/pull/7)) |
-| 6. Watch | IDLE and polling, the durable event log with groups, `chainmail watch` and `read_events` | Shipped ([#8](https://github.com/jamesainslie/chainmail/pull/8)) |
-| 7. Local cache | `cache.db`, full-text search, routing of searches and reads, and the `cache` commands | Shipped ([#12](https://github.com/jamesainslie/chainmail/pull/12)) |
-| 13. Work items | Items, criteria, blockers, thread links, `item:` search, and the `item` and `item_mail` events | Shipped ([#22](https://github.com/jamesainslie/chainmail/pull/22)). Deferred: [#16](https://github.com/jamesainslie/chainmail/issues/16), [#17](https://github.com/jamesainslie/chainmail/issues/17), [#18](https://github.com/jamesainslie/chainmail/issues/18), [#19](https://github.com/jamesainslie/chainmail/issues/19), [#20](https://github.com/jamesainslie/chainmail/issues/20), [#21](https://github.com/jamesainslie/chainmail/issues/21) |
+| 1. Foundation | The daemon, its socket and peer check, the vault, password and OAuth2 login, `secret set`, `auth login` and `accounts test` | Shipped ([#1](https://github.com/yaklabco/chainmail/pull/1)) |
+| 2. Read | `folders`, `search`, `get`, `thread` and `attachment`, refs and the untrusted envelope | Shipped ([#2](https://github.com/yaklabco/chainmail/pull/2)) |
+| 3. Write and organize | `send`, `send-raw`, `reply`, `forward` and `draft`, every organize command, `folder` and `accounts probe` | Shipped ([#3](https://github.com/yaklabco/chainmail/pull/3)) |
+| 4. Policy and deployment | The send policy and held drafts, the gates on `expunge` and `folder delete`, `audit`, and the NixOS module | Shipped ([#4](https://github.com/yaklabco/chainmail/pull/4)) |
+| 5. MCP | `chainmail mcp` and its tools | Shipped ([#7](https://github.com/yaklabco/chainmail/pull/7)) |
+| 6. Watch | IDLE and polling, the durable event log with groups, `chainmail watch` and `read_events` | Shipped ([#8](https://github.com/yaklabco/chainmail/pull/8)) |
+| 7. Local cache | `cache.db`, full-text search, routing of searches and reads, and the `cache` commands | Shipped ([#12](https://github.com/yaklabco/chainmail/pull/12)) |
+| 13. Work items | Items, criteria, blockers, thread links, `item:` search, and the `item` and `item_mail` events | Shipped ([#22](https://github.com/yaklabco/chainmail/pull/22)). Deferred: [#16](https://github.com/yaklabco/chainmail/issues/16), [#17](https://github.com/yaklabco/chainmail/issues/17), [#18](https://github.com/yaklabco/chainmail/issues/18), [#19](https://github.com/yaklabco/chainmail/issues/19), [#20](https://github.com/yaklabco/chainmail/issues/20), [#21](https://github.com/yaklabco/chainmail/issues/21) |
 | Approvals | An approval queue for held sends, approved or rejected with a TOTP code. Sub-project 4 shipped the hold, not the queue. | Planned |
 | 8. Rules | A rules engine with Sieve and schedules, due-date and overdue events for items, and rules that file new mail into items | Planned |
 | 9. Calendar | Invite detection and RSVP through the policy | Planned |
@@ -52,7 +52,7 @@ flowchart LR
 | 11. Agent skill | One skill that teaches an agent to use chainmail over MCP and the CLI | Planned |
 | 12. Observability | Logs, metrics and traces over OpenTelemetry through libo11y | Planned |
 
-The CLI's styled help, settings file and shell completion shipped in [#11](https://github.com/jamesainslie/chainmail/pull/11), and fixes since sub-project 7 in [#13](https://github.com/jamesainslie/chainmail/pull/13), [#14](https://github.com/jamesainslie/chainmail/pull/14) and [#15](https://github.com/jamesainslie/chainmail/pull/15). Of the work deferred from sub-project 13, item due-date events ([#16](https://github.com/jamesainslie/chainmail/issues/16)) and rules that file mail into items ([#17](https://github.com/jamesainslie/chainmail/issues/17)) belong to sub-project 8, the agent skill's coverage of items ([#20](https://github.com/jamesainslie/chainmail/issues/20)) to sub-project 11, item metrics and traces ([#21](https://github.com/jamesainslie/chainmail/issues/21)) to sub-project 12, and the Lathe task type ([#18](https://github.com/jamesainslie/chainmail/issues/18)) and two-way sync with Lathe ([#19](https://github.com/jamesainslie/chainmail/issues/19)) to the Lathe work.
+The CLI's styled help, settings file and shell completion shipped in [#11](https://github.com/yaklabco/chainmail/pull/11), and fixes since sub-project 7 in [#13](https://github.com/yaklabco/chainmail/pull/13), [#14](https://github.com/yaklabco/chainmail/pull/14) and [#15](https://github.com/yaklabco/chainmail/pull/15). Of the work deferred from sub-project 13, item due-date events ([#16](https://github.com/yaklabco/chainmail/issues/16)) and rules that file mail into items ([#17](https://github.com/yaklabco/chainmail/issues/17)) belong to sub-project 8, the agent skill's coverage of items ([#20](https://github.com/yaklabco/chainmail/issues/20)) to sub-project 11, item metrics and traces ([#21](https://github.com/yaklabco/chainmail/issues/21)) to sub-project 12, and the Lathe task type ([#18](https://github.com/yaklabco/chainmail/issues/18)) and two-way sync with Lathe ([#19](https://github.com/yaklabco/chainmail/issues/19)) to the Lathe work.
 
 ## Documentation
 
@@ -1331,7 +1331,7 @@ The flake exports a NixOS module as `nixosModules.default`. It runs the daemon a
 
 ```nix
 {
-  inputs.chainmail.url = "github:jamesainslie/chainmail";
+  inputs.chainmail.url = "github:yaklabco/chainmail";
 
   outputs = { nixpkgs, chainmail, ... }: {
     nixosConfigurations.incus = nixpkgs.lib.nixosSystem {

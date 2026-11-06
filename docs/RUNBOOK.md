@@ -513,7 +513,7 @@ If the newer release applied no migration, that is all. If it did, the older bin
 Build the new binary, put it where your unit's `ExecStart` or your launchd job points, and restart:
 
 ```sh
-nix build github:jamesainslie/chainmail
+nix build github:yaklabco/chainmail
 ./result/bin/chainmail version
 ```
 
