@@ -38,6 +38,10 @@ group, and values with spaces are quoted.
                                 (or junk), anywhere, or a folder name
   account:                      this account; each account: term and each
                                 --account adds one
+  item:                         mail in threads linked to this item or any
+                                item below it; item:none, mail in threads
+                                linked to no item. Only the cache answers
+                                these, never the mail server
 
 Every folder except Trash and Spam is searched unless in: says otherwise.
 On accounts other than Google, dates work at day granularity on the arrival

@@ -818,3 +818,26 @@ func TestCompleteWatchItem(t *testing.T) {
 		{name: "kinds", args: []string{"watch", "--kind", "new,item"}, cands: []string{"new,item", "new,item_mail"}},
 	})
 }
+
+func TestCompleteSearchItemTerms(t *testing.T) {
+	t.Parallel()
+	testItemCompletion(t, []itemCase{
+		{name: "item values", args: []string{"search", "item:"}, cands: []string{"item:it_admin_work", "item:it_task1", "item:none"}},
+		{name: "item prefix", args: []string{"search", "item:n"}, cands: []string{"item:none"}},
+		{name: "negated", args: []string{"search", "--", "invoice", "-item:it_t"}, cands: []string{"-item:it_task1"}},
+	})
+}
+
+func TestSearchHelpNamesItemTerms(t *testing.T) {
+	t.Parallel()
+	got := runCLI(t, Env{}, "search", "--help")
+	if got.code != 0 {
+		t.Fatalf("search --help: %+v", got)
+	}
+	help := strings.Join(strings.Fields(got.stdout), " ")
+	for _, want := range []string{"item: mail in threads linked to this item or any item below it", "item:none", "Only the cache answers these"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("search help lacks %q:\n%s", want, got.stdout)
+		}
+	}
+}
