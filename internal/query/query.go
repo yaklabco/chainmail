@@ -30,6 +30,7 @@ const (
 	FieldHas       Field = "has"
 	FieldFilename  Field = "filename"
 	FieldLabel     Field = "label"
+	FieldItem      Field = "item"
 	FieldIn        Field = "in"
 	FieldAccount   Field = "account"
 )
@@ -38,10 +39,14 @@ const (
 // order help text shows them.
 var Operators = []Field{
 	FieldFrom, FieldTo, FieldCc, FieldBcc, FieldSubject, FieldIs, FieldNewerThan, FieldOlderThan,
-	FieldAfter, FieldBefore, FieldLarger, FieldSmaller, FieldHas, FieldFilename, FieldLabel, FieldIn, FieldAccount,
+	FieldAfter, FieldBefore, FieldLarger, FieldSmaller, FieldHas, FieldFilename, FieldLabel, FieldItem, FieldIn, FieldAccount,
 }
 
 func isOperator(f Field) bool { return slices.Contains(Operators, f) }
+
+// ItemNone is the item: value that matches mail in threads no live item
+// links. Every other item: value is an item ID.
+const ItemNone = "none"
 
 // Limits on a query.
 const (
