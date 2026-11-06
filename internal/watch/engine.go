@@ -44,11 +44,12 @@ type EngineOptions struct {
 	Batch int
 	// OnNew, when set, runs inside each batch transaction after the batch's
 	// events are appended, with the batch's new messages in UID order. The
-	// events it returns are appended in the same transaction. It may use only
-	// tx: state.db has one connection, and tx holds it. An error rolls the
-	// batch back, so the next Pass fetches the same messages and calls OnNew
-	// with them again. It is not called for a batch with no new messages,
-	// such as a baseline. It must not modify news.
+	// events it returns are appended in the same transaction, and Append
+	// sets each one's ID, and its At when zero, in place on the returned
+	// slice. It may use only tx: state.db has one connection, and tx holds
+	// it. An error rolls the batch back, so the next Pass fetches the same
+	// messages and calls OnNew with them again. It is not called for a batch
+	// with no new messages, such as a baseline. It must not modify news.
 	OnNew func(ctx context.Context, tx *sql.Tx, account string, news []NewMail) ([]Event, error)
 }
 

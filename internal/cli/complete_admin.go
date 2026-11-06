@@ -204,6 +204,7 @@ func (cp *completer) searchTerms(cmd *cobra.Command, _ []string, toComplete stri
 		vals = cp.searchFolders(cmd, cp.googleAccounts, labelFolder)
 	case "item":
 		vals = []string{"none"}
+		// A failed lookup leaves rows empty, which offers only none.
 		rows, _ := cp.listItemRows(cmd, false)
 		for _, r := range rows {
 			if querySafe(r.GetId()) {

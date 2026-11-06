@@ -1494,11 +1494,19 @@ func findThread(e *env) {
 	if !slices.Equal(got, want) {
 		e.t.Errorf("FindThread(%s, %s) = %v, want %v", rootSum.ThreadID, root.MessageID, got, want)
 	}
-	for _, miss := range []struct{ key, root string }{
+	// A Google thread key is lowercase hexadecimal with no leading zero, as
+	// Summary.ThreadID writes it: the same number written any other way is no
+	// key. Off Google the key is ignored and the root misses.
+	misses := []struct{ key, root string }{
 		{"ffffffffffff", "find-missing@conformance.test"},
 		{"not-hex", "find-missing@conformance.test"},
 		{"", ""},
-	} {
+		{"0" + rootSum.ThreadID, "find-missing@conformance.test"},
+	}
+	if upper := strings.ToUpper(rootSum.ThreadID); upper != rootSum.ThreadID {
+		misses = append(misses, struct{ key, root string }{upper, "find-missing@conformance.test"})
+	}
+	for _, miss := range misses {
 		got, err := tf.FindThread(e.ctx, miss.key, miss.root)
 		if err != nil || got == nil || len(got) != 0 {
 			e.t.Errorf("FindThread(%q, %q) = %#v, %v; want an empty slice", miss.key, miss.root, got, err)

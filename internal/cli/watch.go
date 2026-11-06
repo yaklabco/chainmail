@@ -112,7 +112,7 @@ func newWatchCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	cmd.Flags().StringVar(&group, "group", "", "resume after this group's acknowledged event, and acknowledge each line once written")
 	cmd.Flags().Int64Var(&since, "since", 0, "resume after this event ID")
 	cmd.Flags().StringArrayVar(&accounts, "account", nil, "only this account; repeat for more (default: all)")
-	cmd.Flags().StringSliceVar(&kinds, "kind", nil, "only these kinds, comma separated: new, flags, expunged, status, gap, item, item_mail (default: all but item and item_mail)")
+	cmd.Flags().StringSliceVar(&kinds, "kind", nil, "only these kinds, comma separated: new, flags, expunged, status, gap, item, item_mail (default: all but item and item_mail; with --item: item, item_mail, status and gap)")
 	cmd.Flags().StringVar(&in, "in", "", "only this folder or Gmail label, such as inbox (default: all)")
 	cmd.Flags().StringVar(&item, "item", "", "only item and item_mail events of this item and every item below it")
 	cmd.Flags().BoolVar(&once, "once", false, "exit at the first heartbeat, once every event already in the log is printed")
@@ -533,7 +533,7 @@ func eventLine(clock string, e *chainmailv1.WatchEvent) string {
 	default:
 		what = e.GetRef()
 	}
-	line := fmt.Sprintf("%s %-8s %s %s", clock, termText(e.GetKind()),
+	line := fmt.Sprintf("%s %-9s %s %s", clock, termText(e.GetKind()),
 		orDash(termText(e.GetAccount())), orDash(termText(e.GetFolder())))
 	if what = termText(what); what != "" {
 		line += " " + what

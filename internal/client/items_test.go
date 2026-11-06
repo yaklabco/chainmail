@@ -2,10 +2,12 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
@@ -17,16 +19,30 @@ import (
 
 // stubItems answers the ItemsService calls the client tests make from
 // their requests, so a test can see each field arrive. It sends the client
-// header of every call on headers. idBytes, when set, makes the listed
-// row's ID that long.
+// header of every call on headers, and fails a call once headers is full.
+// idBytes, when set, makes the listed row's ID that long.
 type stubItems struct {
 	chainmailv1connect.UnimplementedItemsServiceHandler
 	headers chan<- string
 	idBytes int
 }
 
+// record sends req's client header on headers. A call past the buffer
+// the test made for its calls fails at once instead of blocking on the
+// send, so an unexpected extra call fails the test rather than hanging it.
+func (s stubItems) record(req connect.AnyRequest) error {
+	select {
+	case s.headers <- req.Header().Get(api.HeaderClient):
+		return nil
+	default:
+		return connect.NewError(connect.CodeFailedPrecondition, errors.New("stubItems: a call past the headers buffer"))
+	}
+}
+
 func (s stubItems) CreateItem(_ context.Context, req *connect.Request[chainmailv1.CreateItemRequest]) (*connect.Response[chainmailv1.CreateItemResponse], error) {
-	s.headers <- req.Header().Get(api.HeaderClient)
+	if err := s.record(req); err != nil {
+		return nil, err
+	}
 	m := req.Msg
 	crit := make([]*chainmailv1.Criterion, len(m.GetCriteria()))
 	for i, text := range m.GetCriteria() {
@@ -44,7 +60,9 @@ func (s stubItems) CreateItem(_ context.Context, req *connect.Request[chainmailv
 }
 
 func (s stubItems) UpdateItem(_ context.Context, req *connect.Request[chainmailv1.UpdateItemRequest]) (*connect.Response[chainmailv1.UpdateItemResponse], error) {
-	s.headers <- req.Header().Get(api.HeaderClient)
+	if err := s.record(req); err != nil {
+		return nil, err
+	}
 	m := req.Msg
 	// The title echoes the mask, so the test sees the paths arrive in order.
 	return connect.NewResponse(&chainmailv1.UpdateItemResponse{Item: &chainmailv1.WorkItem{
@@ -54,7 +72,9 @@ func (s stubItems) UpdateItem(_ context.Context, req *connect.Request[chainmailv
 }
 
 func (s stubItems) ListItems(_ context.Context, req *connect.Request[chainmailv1.ListItemsRequest]) (*connect.Response[chainmailv1.ListItemsResponse], error) {
-	s.headers <- req.Header().Get(api.HeaderClient)
+	if err := s.record(req); err != nil {
+		return nil, err
+	}
 	id := "it_" + req.Msg.GetUnder()
 	if s.idBytes > 0 {
 		id = strings.Repeat("x", s.idBytes)
@@ -67,7 +87,9 @@ func (s stubItems) ListItems(_ context.Context, req *connect.Request[chainmailv1
 }
 
 func (s stubItems) LinkThread(_ context.Context, req *connect.Request[chainmailv1.LinkThreadRequest]) (*connect.Response[chainmailv1.LinkThreadResponse], error) {
-	s.headers <- req.Header().Get(api.HeaderClient)
+	if err := s.record(req); err != nil {
+		return nil, err
+	}
 	return connect.NewResponse(&chainmailv1.LinkThreadResponse{
 		Link: &chainmailv1.ThreadLink{
 			Account: "work", ThreadKey: "0123456789abcdef", Note: &chainmailv1.Untrusted{Untrusted: req.Msg.GetNote()},
@@ -192,5 +214,21 @@ func TestItemsReadLimit(t *testing.T) {
 				t.Errorf("ListItems: code %v (%v), want %v", connect.CodeOf(err), err, connect.CodeResourceExhausted)
 			}
 		})
+	}
+}
+
+// TestStubItemsRefusesAnExtraCall checks that a call past the stub's
+// headers buffer fails at once instead of blocking the test on the send.
+func TestStubItemsRefusesAnExtraCall(t *testing.T) {
+	t.Parallel()
+	headers := make(chan string, 1)
+	headers <- "earlier" // the buffer is full: the next call is one too many
+	c := New(serveItems(t, stubItems{headers: headers}), "test")
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	_, err := c.Items.ListItems(ctx, connect.NewRequest(&chainmailv1.ListItemsRequest{}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("ListItems past the buffer: code %v (%v), want %v", connect.CodeOf(err), err, connect.CodeFailedPrecondition)
 	}
 }

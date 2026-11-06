@@ -2,11 +2,14 @@ package imapstore
 
 import (
 	"cmp"
+	"context"
+	"errors"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/jamesainslie/chainmail/internal/auth"
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/provider"
 	"github.com/jamesainslie/chainmail/internal/ref"
@@ -125,5 +128,130 @@ func TestGmailFindThread(t *testing.T) {
 				t.Errorf("FindThread(%q) = %v, want UID order", tc.threadKey, got)
 			}
 		})
+	}
+}
+
+// findThreadRoot is a root message for the FindThread error tests, and
+// findThreadReply its reply in Sent.
+const (
+	findThreadRoot  = "From: ann@example.com\r\nSubject: root\r\nMessage-ID: <root@example.com>\r\n\r\nbody\r\n"
+	findThreadReply = "From: me@example.test\r\nSubject: Re: root\r\nMessage-ID: <reply@example.test>\r\n" +
+		"In-Reply-To: <root@example.com>\r\nReferences: <root@example.com>\r\n\r\nbody\r\n"
+)
+
+// withFolders makes s's cached folder list hold names besides the folders
+// the server listed, each a selectable folder the server does not have, or
+// only names when only is true.
+func withFolders(t *testing.T, s *Store, only bool, names ...string) {
+	t.Helper()
+	listed, err := s.folderList(t.Context(), false)
+	if err != nil {
+		t.Fatalf("listing folders: %v", err)
+	}
+	var folders []mailstore.Folder
+	if !only {
+		folders = slices.Clone(listed)
+	}
+	for _, name := range names {
+		folders = append(folders, mailstore.Folder{Name: name, Selectable: true})
+	}
+	s.mu.Lock()
+	s.folders = folders
+	s.mu.Unlock()
+}
+
+// A login refusal while the folder searches dial fails FindThread for the
+// whole account instead of giving a partial thread, as it fails Thread.
+func TestFindThreadReportsLoginRefusalForTheAccount(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	ep := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{
+		Username: "host@example.test", Password: "right", Folders: []string{"Archive", "Sent"},
+		Mail: map[string][]string{"INBOX": {findThreadRoot}, "Sent": {findThreadReply}},
+	})
+	creds := passwordCreds("host@example.test", "right")
+	creds.then = "stale" // the folder list's login works; the folder searches that dial afresh are refused
+	s := New(testAccount("host", ep, false), creds, Options{RootCAs: ca.Pool, Backoff: noBackoff})
+	t.Cleanup(func() { _ = s.Close() })
+	refs, err := s.FindThread(t.Context(), "", "root@example.com")
+	if !errors.Is(err, auth.ErrRejected) && !errors.Is(err, auth.ErrAuthRequired) {
+		t.Errorf("FindThread = %v, %v; want the login refusal for the whole account, not a partial thread", refs, err)
+	}
+	if refs != nil {
+		t.Errorf("FindThread = %v beside its error, want nil", refs)
+	}
+}
+
+// The end of ctx while the folder searches run fails FindThread instead of
+// giving a partial thread.
+func TestFindThreadReportsCancellation(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ep := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{
+		Username: "host@example.test", Password: "pw", Folders: []string{"Archive", "Sent"},
+		Mail: map[string][]string{"INBOX": {findThreadRoot}, "Sent": {findThreadReply}},
+		OnSelect: func(name string, _ bool) {
+			if name == "Archive" {
+				cancel()
+			}
+		},
+	})
+	s := New(testAccount("host", ep, false), passwordCreds("host@example.test", "pw"), Options{RootCAs: ca.Pool, Backoff: noBackoff, PoolSize: 1})
+	t.Cleanup(func() { _ = s.Close() })
+	refs, err := s.FindThread(ctx, "", "root@example.com")
+	if !errors.Is(err, context.Canceled) || refs != nil {
+		t.Errorf("FindThread = %v, %v; want context.Canceled, not a partial thread", refs, err)
+	}
+}
+
+// A folder whose search fails on its own is left out of the thread, which
+// the other folders still give; when every folder fails, FindThread fails
+// with the first folder's error.
+func TestFindThreadFolderFailures(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	ep := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{
+		Username: "host@example.test", Password: "pw", Folders: []string{"Sent"},
+		Mail: map[string][]string{"INBOX": {findThreadRoot}, "Sent": {findThreadReply}},
+	})
+	t.Run("one folder fails", func(t *testing.T) {
+		t.Parallel()
+		s := New(testAccount("host", ep, false), passwordCreds("host@example.test", "pw"), Options{RootCAs: ca.Pool, Backoff: noBackoff})
+		t.Cleanup(func() { _ = s.Close() })
+		want := []ref.Ref{folderRefs(t, s, "INBOX")[0], folderRefs(t, s, "Sent")[0]}
+		withFolders(t, s, false, "Gone")
+		got, err := s.FindThread(t.Context(), "", "root@example.com")
+		if err != nil || !slices.Equal(got, want) {
+			t.Errorf("FindThread = %v, %v; want %v without the missing folder", got, err, want)
+		}
+	})
+	t.Run("every folder fails", func(t *testing.T) {
+		t.Parallel()
+		s := New(testAccount("host", ep, false), passwordCreds("host@example.test", "pw"), Options{RootCAs: ca.Pool, Backoff: noBackoff})
+		t.Cleanup(func() { _ = s.Close() })
+		withFolders(t, s, true, "Gone1", "Gone2")
+		got, err := s.FindThread(t.Context(), "", "root@example.com")
+		if !errors.Is(err, mailstore.ErrNotFound) || !strings.Contains(err.Error(), "Gone1") || got != nil {
+			t.Errorf("FindThread = %v, %v; want the first folder's ErrNotFound, for Gone1", got, err)
+		}
+	})
+}
+
+// A Google account with no All Mail folder has nowhere to find a thread by
+// its key, so FindThread is ErrNotFound.
+func TestGmailFindThreadWithoutAllMail(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	ep := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{
+		Username: "gmail@example.test", Password: "pw", Folders: []string{"Sent"},
+		Mail: map[string][]string{"INBOX": {findThreadRoot}},
+	})
+	s := New(testAccount("gmail", ep, true), passwordCreds("gmail@example.test", "pw"), Options{RootCAs: ca.Pool, Backoff: noBackoff})
+	t.Cleanup(func() { _ = s.Close() })
+	refs, err := s.FindThread(t.Context(), "18c2", "")
+	if !errors.Is(err, mailstore.ErrNotFound) || refs != nil {
+		t.Errorf("FindThread = %v, %v; want ErrNotFound for an account with no All Mail", refs, err)
 	}
 }

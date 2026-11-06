@@ -52,6 +52,9 @@ func TestSummaryMessageID(t *testing.T) {
 		if sums[i].MessageID != w {
 			t.Errorf("summary of UID %d: MessageID = %q, want %q", uids[i], sums[i].MessageID, w)
 		}
+		if hs[i].Summary.MessageID != w {
+			t.Errorf("header of UID %d: Summary.MessageID = %q, want %q", uids[i], hs[i].Summary.MessageID, w)
+		}
 		if hs[i].Summary.MessageID != hs[i].MessageID {
 			t.Errorf("header of UID %d: Summary.MessageID = %q, MessageID = %q; want them equal",
 				uids[i], hs[i].Summary.MessageID, hs[i].MessageID)

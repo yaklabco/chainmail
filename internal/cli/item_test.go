@@ -516,9 +516,21 @@ func descriptionFile(t *testing.T) string {
 	return path
 }
 
+// badDescriptionFile writes a description file that is not UTF-8 for the
+// test and returns its path.
+func badDescriptionFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "description.md")
+	if err := os.WriteFile(path, []byte("line one\n\xff\xfe broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestItemCreateRequestsAndUsage(t *testing.T) {
 	t.Parallel()
 	desc := descriptionFile(t)
+	bad := badDescriptionFile(t)
 	testItemRequests(t, []itemCase{
 		{name: "create", args: []string{"create", "task", "Renew the domain"}, want: &chainmailv1.CreateItemRequest{Type: "task", Title: "Renew the domain"}},
 		{
@@ -541,6 +553,7 @@ func TestItemCreateRequestsAndUsage(t *testing.T) {
 		{name: "create without a title", args: []string{"create", "task"}, usage: "accepts 2 arg(s)"},
 		{name: "create with both descriptions", args: []string{"create", "task", "T", "--description", "a", "--description-file", desc}, usage: "--description and --description-file"},
 		{name: "create with a missing file", args: []string{"create", "task", "T", "--description-file", "/nonexistent/x.md"}, usage: "no such file"},
+		{name: "create with a file that is not UTF-8", args: []string{"create", "task", "T", "--description-file", bad}, usage: "--description-file is not UTF-8"},
 		{name: "create with a bad estimate", args: []string{"create", "task", "T", "--estimate", "soon"}, usage: "--estimate"},
 	})
 }
@@ -577,6 +590,7 @@ func TestCompleteItemCreate(t *testing.T) {
 func TestItemUpdateRequestsAndUsage(t *testing.T) {
 	t.Parallel()
 	desc := descriptionFile(t)
+	bad := badDescriptionFile(t)
 	mask := func(paths ...string) *fieldmaskpb.FieldMask { return &fieldmaskpb.FieldMask{Paths: paths} }
 	testItemRequests(t, []itemCase{
 		{
@@ -618,6 +632,7 @@ func TestItemUpdateRequestsAndUsage(t *testing.T) {
 		{name: "update set and clear", args: []string{"update", "it_task1", "--clear", "area", "--area", "work"}, usage: "--clear area cannot be used with the flag that sets it"},
 		{name: "update description and clear", args: []string{"update", "it_task1", "--clear", "description", "--description", "x"}, usage: "--clear description cannot be used"},
 		{name: "update file and clear", args: []string{"update", "it_task1", "--clear", "description", "--description-file", desc}, usage: "--clear description cannot be used"},
+		{name: "update with a file that is not UTF-8", args: []string{"update", "it_task1", "--description-file", bad}, usage: "--description-file is not UTF-8"},
 		{name: "move without a parent", args: []string{"move", "it_task1"}, usage: "give a parent ID or --root"},
 		{name: "move with both", args: []string{"move", "it_task1", "it_feat1", "--root"}, usage: "--root and a parent ID"},
 		{name: "move three", args: []string{"move", "a", "b", "c"}, usage: "accepts between 1 and 2 arg(s)"},
