@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/db"
+	"github.com/yaklabco/chainmail/internal/db"
 )
 
 var t0 = time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)

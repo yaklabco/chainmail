@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/items"
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/items"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // itemMail is the sync engine's OnNew hook. Inside the batch's transaction

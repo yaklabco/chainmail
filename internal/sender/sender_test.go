@@ -13,10 +13,10 @@ import (
 
 	"github.com/emersion/go-smtp"
 
-	"github.com/jamesainslie/chainmail/internal/auth"
-	"github.com/jamesainslie/chainmail/internal/provider"
-	"github.com/jamesainslie/chainmail/internal/testutil/smtptest"
-	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
+	"github.com/yaklabco/chainmail/internal/auth"
+	"github.com/yaklabco/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/testutil/smtptest"
+	"github.com/yaklabco/chainmail/internal/testutil/tlstest"
 )
 
 var user = smtptest.User{Username: "me@example.com", Password: "pw", Token: "tok"}

@@ -5,7 +5,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // malformRig is a store with five INBOX messages, the second with an

@@ -11,11 +11,11 @@ import (
 
 	"connectrpc.com/connect"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/api"
-	"github.com/jamesainslie/chainmail/internal/cache"
-	"github.com/jamesainslie/chainmail/internal/items"
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/cache"
+	"github.com/yaklabco/chainmail/internal/items"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // stubItemResolver resolves item: values from fixed maps, as *items.Store

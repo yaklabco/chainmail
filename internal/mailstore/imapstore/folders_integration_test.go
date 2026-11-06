@@ -7,9 +7,9 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/ref"
-	"github.com/jamesainslie/chainmail/internal/testutil/dovecot"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/testutil/dovecot"
 )
 
 func TestDovecotCreateRenameDeleteFolders(t *testing.T) {

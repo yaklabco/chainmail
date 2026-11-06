@@ -34,4 +34,4 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - github.com/jamesainslie/chainmail
+        - github.com/yaklabco/chainmail

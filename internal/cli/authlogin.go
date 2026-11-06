@@ -11,7 +11,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 )
 
 const loginInstructions = `Open this URL in a browser and approve access:

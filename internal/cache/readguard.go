@@ -1,6 +1,6 @@
 package cache
 
-import "github.com/jamesainslie/chainmail/internal/ref"
+import "github.com/yaklabco/chainmail/internal/ref"
 
 // readGuard records the flags and expunged changes the builder applies to
 // the account while the read path downloads messages or flags with wmu

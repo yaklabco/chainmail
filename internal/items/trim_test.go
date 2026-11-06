@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/items"
+	"github.com/yaklabco/chainmail/internal/items"
 )
 
 func TestTrim(t *testing.T) {

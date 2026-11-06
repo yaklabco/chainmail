@@ -641,9 +641,9 @@ const file_chainmail_v1_cache_proto_rawDesc = "" +
 	"\x0eGetCacheStatus\x12#.chainmail.v1.GetCacheStatusRequest\x1a$.chainmail.v1.GetCacheStatusResponse\x12U\n" +
 	"\fRebuildCache\x12!.chainmail.v1.RebuildCacheRequest\x1a\".chainmail.v1.RebuildCacheResponse\x12O\n" +
 	"\n" +
-	"EvictCache\x12\x1f.chainmail.v1.EvictCacheRequest\x1a .chainmail.v1.EvictCacheResponseB\xaf\x01\n" +
+	"EvictCache\x12\x1f.chainmail.v1.EvictCacheRequest\x1a .chainmail.v1.EvictCacheResponseB\xab\x01\n" +
 	"\x10com.chainmail.v1B\n" +
-	"CacheProtoP\x01Z>github.com/jamesainslie/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
+	"CacheProtoP\x01Z:github.com/yaklabco/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
 
 var (
 	file_chainmail_v1_cache_proto_rawDescOnce sync.Once

@@ -8,9 +8,9 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 
-	"github.com/jamesainslie/chainmail/internal/api"
-	"github.com/jamesainslie/chainmail/internal/mcpserver"
-	"github.com/jamesainslie/chainmail/internal/version"
+	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/mcpserver"
+	"github.com/yaklabco/chainmail/internal/version"
 )
 
 const mcpHelp = `Serve chainmail's tools to an AI agent over the Model Context Protocol.

@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/config"
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // eventTrimInterval is how often the event log is trimmed.

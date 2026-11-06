@@ -5,7 +5,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // chain makes epic (work) holding story holding task, and early, a story

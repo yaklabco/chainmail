@@ -11,7 +11,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 )
 
 const cacheHelp = `The daemon keeps a local cache of every synced folder: headers for all

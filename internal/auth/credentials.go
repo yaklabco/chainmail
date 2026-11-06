@@ -11,7 +11,7 @@ import (
 
 	"github.com/emersion/go-sasl"
 
-	"github.com/jamesainslie/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/provider"
 )
 
 // redacted replaces a secret value wherever one would be printed.

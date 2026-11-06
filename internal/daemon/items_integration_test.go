@@ -12,10 +12,10 @@ import (
 
 	"connectrpc.com/connect"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
-	"github.com/jamesainslie/chainmail/internal/testutil/dovecot"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/testutil/daemontest"
+	"github.com/yaklabco/chainmail/internal/testutil/dovecot"
 )
 
 // doveItemsConfig is one account on Dovecot that watches INBOX and Archive

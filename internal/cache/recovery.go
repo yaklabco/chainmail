@@ -7,7 +7,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 // MessageIDOf returns the Message-ID cached for r, from messages or ref_recovery.

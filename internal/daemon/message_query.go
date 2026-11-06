@@ -3,8 +3,8 @@ package daemon
 import (
 	"fmt"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/query"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/query"
 )
 
 // parseSearchQuery turns a request's query_string or query into a validated

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // Refusals of updates. Their text never holds request values.

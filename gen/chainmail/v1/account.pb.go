@@ -719,8 +719,8 @@ const file_chainmail_v1_account_proto_rawDesc = "" +
 	"\x0eAccountService\x12U\n" +
 	"\fListAccounts\x12!.chainmail.v1.ListAccountsRequest\x1a\".chainmail.v1.ListAccountsResponse\x12R\n" +
 	"\vTestAccount\x12 .chainmail.v1.TestAccountRequest\x1a!.chainmail.v1.TestAccountResponse\x12R\n" +
-	"\vProbeLimits\x12 .chainmail.v1.ProbeLimitsRequest\x1a!.chainmail.v1.ProbeLimitsResponseB\xb1\x01\n" +
-	"\x10com.chainmail.v1B\fAccountProtoP\x01Z>github.com/jamesainslie/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
+	"\vProbeLimits\x12 .chainmail.v1.ProbeLimitsRequest\x1a!.chainmail.v1.ProbeLimitsResponseB\xad\x01\n" +
+	"\x10com.chainmail.v1B\fAccountProtoP\x01Z:github.com/yaklabco/chainmail/gen/chainmail/v1;chainmailv1\xa2\x02\x03CXX\xaa\x02\fChainmail.V1\xca\x02\fChainmail\\V1\xe2\x02\x18Chainmail\\V1\\GPBMetadata\xea\x02\rChainmail::V1b\x06proto3"
 
 var (
 	file_chainmail_v1_account_proto_rawDescOnce sync.Once

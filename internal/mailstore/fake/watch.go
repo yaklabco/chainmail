@@ -21,7 +21,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // Watch method names, as Calls counts them and Fail takes them.

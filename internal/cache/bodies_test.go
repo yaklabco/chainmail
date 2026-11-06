@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 func putBody(t *testing.T, s *Store, r ref.Ref, raw []byte, read bool) {

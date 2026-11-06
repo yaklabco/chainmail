@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jamesainslie/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/provider"
 )
 
 func TestPasswordSASLIsPlain(t *testing.T) {

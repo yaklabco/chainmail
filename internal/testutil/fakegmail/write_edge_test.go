@@ -10,7 +10,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 
-	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
+	"github.com/yaklabco/chainmail/internal/testutil/tlstest"
 )
 
 // starState reads whether the message at All Mail uid is flagged and whether

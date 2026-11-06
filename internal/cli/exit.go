@@ -7,7 +7,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	"github.com/jamesainslie/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/api"
 )
 
 // usageError marks a mistake in how chainmail was invoked.

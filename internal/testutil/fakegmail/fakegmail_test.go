@@ -14,7 +14,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 	"github.com/emersion/go-imap/v2/imapserver"
 
-	"github.com/jamesainslie/chainmail/internal/testutil/tlstest"
+	"github.com/yaklabco/chainmail/internal/testutil/tlstest"
 )
 
 const raw1 = "From: Alex <alex@example.com>\r\nSubject: Invoice\r\nMessage-ID: <a@example.com>\r\n\r\nPlease pay.\r\n"

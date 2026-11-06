@@ -5,7 +5,7 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // SetBusy, while on, makes every read called with a background context

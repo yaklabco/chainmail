@@ -1,4 +1,4 @@
-module github.com/jamesainslie/chainmail
+module github.com/yaklabco/chainmail
 
 go 1.26.10
 

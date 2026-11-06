@@ -11,10 +11,10 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
 
-	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
-	"github.com/jamesainslie/chainmail/internal/api"
-	"github.com/jamesainslie/chainmail/internal/render"
-	"github.com/jamesainslie/chainmail/internal/testutil/daemontest"
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/render"
+	"github.com/yaklabco/chainmail/internal/testutil/daemontest"
 )
 
 // itemMarker is item text the tests send so they can prove that no error,

@@ -4,8 +4,8 @@ import (
 	"context"
 	"slices"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // applyGap applies the gap that closes a segment. A uidvalidity gap resets

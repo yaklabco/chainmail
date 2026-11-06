@@ -7,7 +7,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/jamesainslie/chainmail/internal/idempotency"
+	"github.com/yaklabco/chainmail/internal/idempotency"
 )
 
 // Limits on item text, and how long item_requests rows are kept. Runes are

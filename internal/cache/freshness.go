@@ -5,7 +5,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // Reasons the cache cannot answer completely, as AccountCount's

@@ -11,7 +11,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/db"
+	"github.com/yaklabco/chainmail/internal/db"
 )
 
 var errRefused = errors.New("too many connections")

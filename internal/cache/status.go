@@ -3,7 +3,7 @@ package cache
 import (
 	"context"
 
-	"github.com/jamesainslie/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/api"
 )
 
 // Cache states, as AccountCacheStatus and FolderCacheStatus report them.

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // MailAccount is what MailArrived needs to know about the account.

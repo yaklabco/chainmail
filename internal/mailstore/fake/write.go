@@ -26,8 +26,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 // Writer operation names, as Ops records them and FailWrite takes them.

@@ -19,8 +19,8 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/viper"
 
-	"github.com/jamesainslie/chainmail/internal/mailaddr/allow"
-	"github.com/jamesainslie/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/mailaddr/allow"
+	"github.com/yaklabco/chainmail/internal/provider"
 )
 
 // Production defaults.

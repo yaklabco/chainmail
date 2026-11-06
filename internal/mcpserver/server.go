@@ -14,7 +14,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/jamesainslie/chainmail/internal/client"
+	"github.com/yaklabco/chainmail/internal/client"
 )
 
 // clientKind names this process in the daemon's audit log.

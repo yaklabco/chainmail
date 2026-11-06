@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/ref"
 )
 
 func cacheDay(d int) time.Time { return time.Date(2026, 10, d, 9, 0, 0, 0, time.UTC) }

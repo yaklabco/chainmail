@@ -9,7 +9,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // criterionColumns are the item_criteria columns scanCriterion reads, in its order.

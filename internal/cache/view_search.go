@@ -7,8 +7,8 @@ import (
 	"slices"
 	"unicode/utf8"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
-	"github.com/jamesainslie/chainmail/internal/render"
+	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/render"
 )
 
 // Search answers a search as the server's Search would, from the cache:

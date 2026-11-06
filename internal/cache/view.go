@@ -1,6 +1,6 @@
 package cache
 
-import "github.com/jamesainslie/chainmail/internal/mailstore"
+import "github.com/yaklabco/chainmail/internal/mailstore"
 
 // View is one account's cache seen through the read methods of
 // mailstore.Store. The daemon picks the view or the server store per

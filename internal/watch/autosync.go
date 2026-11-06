@@ -6,7 +6,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // errNoScoper means the account's store cannot say which folders a search

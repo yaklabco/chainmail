@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jamesainslie/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/api"
 )
 
 type cliResult struct {

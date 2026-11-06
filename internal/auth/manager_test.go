@@ -15,11 +15,11 @@ import (
 
 	"golang.org/x/oauth2"
 
-	"github.com/jamesainslie/chainmail/internal/auth"
-	"github.com/jamesainslie/chainmail/internal/config"
-	"github.com/jamesainslie/chainmail/internal/provider"
-	"github.com/jamesainslie/chainmail/internal/testutil/oauthtest"
-	"github.com/jamesainslie/chainmail/internal/vault"
+	"github.com/yaklabco/chainmail/internal/auth"
+	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/testutil/oauthtest"
+	"github.com/yaklabco/chainmail/internal/vault"
 )
 
 const testConfig = `

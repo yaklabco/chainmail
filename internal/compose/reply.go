@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/render"
+	"github.com/yaklabco/chainmail/internal/render"
 )
 
 // maxReferences is how many Message-IDs a reply's References header keeps.

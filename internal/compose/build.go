@@ -23,7 +23,7 @@ import (
 	mimetext "github.com/emersion/go-message/textproto"
 	nethtml "golang.org/x/net/html"
 
-	"github.com/jamesainslie/chainmail/internal/render"
+	"github.com/yaklabco/chainmail/internal/render"
 )
 
 // crockford is Crockford's base32 alphabet, as ULIDs use: no I, L, O or U.

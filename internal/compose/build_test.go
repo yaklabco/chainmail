@@ -19,7 +19,7 @@ import (
 	"github.com/emersion/go-message"
 	gomail "github.com/emersion/go-message/mail"
 
-	"github.com/jamesainslie/chainmail/internal/render"
+	"github.com/yaklabco/chainmail/internal/render"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files")

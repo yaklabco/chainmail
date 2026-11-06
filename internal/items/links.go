@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jamesainslie/chainmail/internal/watch"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // LinkTarget is a mail thread to link, as the daemon read it from one of

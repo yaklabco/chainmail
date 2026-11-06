@@ -6,7 +6,7 @@ import (
 	"math/bits"
 	"slices"
 
-	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
 // isolate fetches the messages uids name in folder with fetch, so that one
