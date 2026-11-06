@@ -1,0 +1,449 @@
+syntax = "proto3";
+
+package chainmail.v1;
+
+import "chainmail/v1/message.proto";
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+
+// ItemsService keeps work items, from objectives down to tasks, and the mail
+// threads linked to them. Every call is audited. Item text (titles,
+// descriptions, criterion text, evidence and link notes) comes back wrapped
+// in Untrusted, and no error message, hint or audit row ever holds it.
+service ItemsService {
+  // CreateItem adds an item with its acceptance criteria. With
+  // idempotency_key, a retry of the same request returns the item the first
+  // call made, with duplicate set, and the same key with a different
+  // request is refused. Audited as item.create, with the new item's ID and
+  // type.
+  rpc CreateItem(CreateItemRequest) returns (CreateItemResponse);
+  // UpdateItem changes the fields update_mask names. Changing parent_id
+  // moves the item. Audited as item.update, with the item's ID and the
+  // changed field names.
+  rpc UpdateItem(UpdateItemRequest) returns (UpdateItemResponse);
+  // DeleteItem marks an item deleted, and with cascade every live item
+  // below it. Deleted items stay readable and can be restored. Audited as
+  // item.delete, with the item's ID and how many items it deleted.
+  rpc DeleteItem(DeleteItemRequest) returns (DeleteItemResponse);
+  // RestoreItem brings back a deleted item, and with cascade the items that
+  // were deleted with it. Audited as item.restore, with the item's ID and
+  // how many items it restored.
+  rpc RestoreItem(RestoreItemRequest) returns (RestoreItemResponse);
+  // GetItem returns an item, deleted or live, with its criteria, ancestors,
+  // children, blockers and linked threads. Audited as item.get, with the
+  // item's ID.
+  rpc GetItem(GetItemRequest) returns (GetItemResponse);
+  // ListItems returns compact rows in tree order, or in revision order with
+  // changed_since. Audited as item.list, with the filters and the row
+  // count.
+  rpc ListItems(ListItemsRequest) returns (ListItemsResponse);
+  // EditCriteria removes, edits, reorders and adds an item's acceptance
+  // criteria as one change. Audited as item.criteria, with the item's ID
+  // and the criterion count after the change.
+  rpc EditCriteria(EditCriteriaRequest) returns (EditCriteriaResponse);
+  // TickCriterion ticks a criterion with evidence, or unticks it. Audited
+  // as item.tick, with the item's and the criterion's IDs.
+  rpc TickCriterion(TickCriterionRequest) returns (TickCriterionResponse);
+  // SetBlocker records, or removes, that one item is blocked by another.
+  // Audited as item.block, with both IDs.
+  rpc SetBlocker(SetBlockerRequest) returns (SetBlockerResponse);
+  // LinkThread links the mail thread of a message to an item, or updates
+  // the anchor and note of an existing link. Audited as item.link, with
+  // the item's ID, the account and the thread key.
+  rpc LinkThread(LinkThreadRequest) returns (LinkThreadResponse);
+  // UnlinkThread removes a thread's link from an item. Audited as
+  // item.unlink, with the item's ID, the account and the thread key.
+  rpc UnlinkThread(UnlinkThreadRequest) returns (UnlinkThreadResponse);
+}
+
+// WorkItem is one item with every field.
+message WorkItem {
+  // it_ followed by lowercase letters, digits and underscores, such as
+  // it_admin_work.
+  string id = 1;
+  // objective, key-result, initiative, epic, feature, story, bug,
+  // support-ticket or task.
+  string type = 2;
+  // 1 to 200 characters.
+  Untrusted title = 3;
+  // At most 65536 bytes. Empty when there is none.
+  Untrusted description = 4;
+  // backlog, in-progress, in-review or done.
+  string state = 5;
+  // work, personal, or empty to inherit the parent's.
+  string area = 6;
+  // p0, p1, p2, p3, or empty to inherit the parent's.
+  string priority = 7;
+  // The area after inheritance: work or personal.
+  string effective_area = 8;
+  // The priority after inheritance. p2 when no item above sets one.
+  string effective_priority = 9;
+  // YYYY-MM-DD, or empty.
+  string start_date = 10;
+  // YYYY-MM-DD, or empty.
+  string due_date = 11;
+  // Zero or more, in whatever unit the team uses. Unset when there is none.
+  optional double estimate = 12;
+  // Empty for a root, or for a task in the inbox.
+  string parent_id = 13;
+  // Set on the standing Admin items, which never close and cannot be
+  // deleted, moved or retyped.
+  bool ongoing = 14;
+  // Unset while the item is live.
+  google.protobuf.Timestamp deleted_at = 15;
+  // The global revision of the item's last change.
+  int64 revision = 16;
+  google.protobuf.Timestamp created_at = 17;
+  google.protobuf.Timestamp updated_at = 18;
+  // <uid>/<client kind>, such as 1000/mcp.
+  string created_by = 19;
+  // <uid>/<client kind> of the last change.
+  string updated_by = 20;
+}
+
+// WorkItemRow is one item as a list shows it.
+message WorkItemRow {
+  string id = 1;
+  // objective, key-result, initiative, epic, feature, story, bug,
+  // support-ticket or task.
+  string type = 2;
+  Untrusted title = 3;
+  // backlog, in-progress, in-review or done.
+  string state = 4;
+  // work or personal.
+  string effective_area = 5;
+  // p0, p1, p2 or p3.
+  string effective_priority = 6;
+  // YYYY-MM-DD, or empty.
+  string due_date = 7;
+  // Empty for a root, or for a task in the inbox.
+  string parent_id = 8;
+  bool ongoing = 9;
+  bool deleted = 10;
+  // 0 for the top of the listed scope, 1 for its children, and so on.
+  int32 depth = 11;
+  // How many live items sit directly below this one.
+  int32 children = 12;
+  // How many acceptance criteria the item has.
+  int32 criteria_total = 13;
+  // How many of them are ticked.
+  int32 criteria_ticked = 14;
+  // How many mail threads are linked to the item.
+  int32 links = 15;
+  // The global revision of the item's last change.
+  int64 revision = 16;
+}
+
+// Criterion is one acceptance criterion of an item.
+message Criterion {
+  // cr_ followed by lowercase letters and digits.
+  string id = 1;
+  // 0-based place in the item's list.
+  int32 position = 2;
+  // 1 to 500 characters.
+  Untrusted text = 3;
+  bool ticked = 4;
+  // What shows the criterion is met: 1 to 1000 characters while ticked,
+  // empty otherwise.
+  Untrusted evidence = 5;
+  // Unset while unticked.
+  google.protobuf.Timestamp ticked_at = 6;
+  // <uid>/<client kind> of whoever ticked it. Empty while unticked.
+  string ticked_by = 7;
+}
+
+// ThreadLink is one mail thread linked to an item, resolved to the
+// messages it holds now.
+message ThreadLink {
+  string account = 1;
+  // The thread's key: Gmail's thread ID in lowercase hexadecimal on Google
+  // accounts, else a hash of the thread's root Message-ID.
+  string thread_key = 2;
+  // At most 500 characters. Empty when there is none.
+  Untrusted note = 3;
+  // The ref of the link's anchor message. Empty when the link has no
+  // anchor, or the anchor was not found.
+  string anchor_ref = 4;
+  // ok, empty (no message of the thread was found; the link is kept) or
+  // unavailable (the thread could not be read).
+  string state = 5;
+  // With state unavailable: an api reason, such as NOT_FOUND or
+  // SERVER_UNAVAILABLE, never server text.
+  string reason = 6;
+  // cache or server: what found the thread's messages. Empty when
+  // unavailable.
+  string source = 7;
+  // How many of the thread's messages were found.
+  int32 messages = 8;
+  // The newest message of the thread. Unset unless state is ok.
+  MessageRow latest = 9;
+  google.protobuf.Timestamp created_at = 10;
+  // <uid>/<client kind> of whoever linked it.
+  string created_by = 11;
+}
+
+// CreateItemRequest describes a new item. Only type and title are
+// required.
+message CreateItemRequest {
+  // objective, key-result, initiative, epic, feature, story, bug,
+  // support-ticket or task.
+  string type = 1;
+  // 1 to 200 characters after trimming.
+  string title = 2;
+  // At most 65536 bytes.
+  string description = 3;
+  // backlog, in-progress, in-review or done. Empty means backlog.
+  string state = 4;
+  // work or personal. A root item needs one; empty inherits the parent's.
+  string area = 5;
+  // p0, p1, p2 or p3. Empty inherits the parent's.
+  string priority = 6;
+  // YYYY-MM-DD, or empty.
+  string start_date = 7;
+  // YYYY-MM-DD, or empty.
+  string due_date = 8;
+  // Zero or more. Unset for none.
+  optional double estimate = 9;
+  // The parent's ID. Empty makes a root item, or puts a task in the inbox.
+  string parent_id = 10;
+  // Acceptance criteria, in order, each 1 to 500 characters.
+  repeated string criteria = 11;
+  // 1 to 128 of A-Z, a-z, 0-9 and . _ : -. A retry with the same key and
+  // the same request returns the first item. Kept for 7 days.
+  string idempotency_key = 12;
+}
+
+// CreateItemResponse is the item CreateItem made, or the one an earlier
+// call with the same idempotency_key made.
+message CreateItemResponse {
+  WorkItem item = 1;
+  repeated Criterion criteria = 2;
+  // Set when an earlier call with the same idempotency_key made the item.
+  bool duplicate = 3;
+}
+
+// UpdateItemRequest changes the fields update_mask names and leaves the
+// rest alone.
+message UpdateItemRequest {
+  string id = 1;
+  // Paths: type, title, description, state, area, priority, start_date,
+  // due_date, estimate, parent_id. A named path with an empty or unset value
+  // clears it where clearing is allowed (area, priority, start_date,
+  // due_date, estimate, parent_id, description). An empty mask or an
+  // unknown path is refused.
+  google.protobuf.FieldMask update_mask = 2;
+  // As in CreateItemRequest.
+  string type = 3;
+  string title = 4;
+  string description = 5;
+  string state = 6;
+  string area = 7;
+  string priority = 8;
+  string start_date = 9;
+  string due_date = 10;
+  optional double estimate = 11;
+  // The new parent's ID. Empty moves the item to the root, or a task to
+  // the inbox.
+  string parent_id = 12;
+}
+
+// UpdateItemResponse is the item after the change.
+message UpdateItemResponse {
+  WorkItem item = 1;
+}
+
+// DeleteItemRequest names the item to delete.
+message DeleteItemRequest {
+  string id = 1;
+  // Delete every live item below it too. Without it, an item with live
+  // children is refused.
+  bool cascade = 2;
+}
+
+// DeleteItemResponse lists what was deleted.
+message DeleteItemResponse {
+  // The deleted items, the named one first.
+  repeated string ids = 1;
+  // The global revision of the change.
+  int64 revision = 2;
+}
+
+// RestoreItemRequest names the item to restore.
+message RestoreItemRequest {
+  string id = 1;
+  // Restore the items deleted with it too.
+  bool cascade = 2;
+}
+
+// RestoreItemResponse lists what was restored.
+message RestoreItemResponse {
+  // The restored items, the named one first.
+  repeated string ids = 1;
+  // The global revision of the change.
+  int64 revision = 2;
+}
+
+// GetItemRequest names the item to read.
+message GetItemRequest {
+  string id = 1;
+}
+
+// GetItemResponse is the item view.
+message GetItemResponse {
+  WorkItem item = 1;
+  repeated Criterion criteria = 2;
+  // From the root down to the item's parent.
+  repeated WorkItemRow ancestors = 3;
+  // Live direct children, at most 50.
+  repeated WorkItemRow children = 4;
+  // How many live direct children there are.
+  int32 children_total = 5;
+  // Live items this item is blocked by.
+  repeated WorkItemRow blocked_by = 6;
+  // Live items this item blocks.
+  repeated WorkItemRow blocks = 7;
+  // Linked threads, at most 50, newest message first, empty and
+  // unavailable ones last.
+  repeated ThreadLink threads = 8;
+  // How many threads are linked.
+  int32 threads_total = 9;
+}
+
+// ListItemsRequest filters and pages the item list. Empty filters match
+// everything.
+message ListItemsRequest {
+  // Only this type.
+  string type = 1;
+  // Only this state.
+  string state = 2;
+  // Only this effective area: work or personal.
+  string area = 3;
+  // Only the items below this one, not including it.
+  string under = 4;
+  // Only live tasks with no parent.
+  bool inbox = 5;
+  // Only ongoing items when true, only the others when false.
+  optional bool ongoing = 6;
+  // Include deleted items.
+  bool include_deleted = 7;
+  // Only items changed after this revision, in revision order, deleted
+  // ones included.
+  optional int64 changed_since = 8;
+  // 1 to 500. 0 means 100.
+  int32 limit = 9;
+  // next_page_token from the previous page of the same list.
+  string page_token = 10;
+}
+
+// ListItemsResponse is one page of rows.
+message ListItemsResponse {
+  repeated WorkItemRow items = 1;
+  // Pass as page_token for the next page. Empty on the last page.
+  string next_page_token = 2;
+  // The global revision when the page was read.
+  int64 revision = 3;
+}
+
+// CriterionText is a new text for one criterion.
+message CriterionText {
+  // The criterion's ID.
+  string id = 1;
+  // 1 to 500 characters.
+  string text = 2;
+}
+
+// EditCriteriaRequest changes an item's criteria. The steps apply in field
+// order, and the whole edit is one change or none.
+message EditCriteriaRequest {
+  string item_id = 1;
+  // Criterion IDs to remove, applied first.
+  repeated string remove = 2;
+  // New texts, applied after the removals.
+  repeated CriterionText edit = 3;
+  // When set, every remaining criterion ID exactly once, in the new order.
+  repeated string order = 4;
+  // New criteria, each 1 to 500 characters, appended in this order last.
+  repeated string add = 5;
+}
+
+// EditCriteriaResponse is the item's criteria after the edit.
+message EditCriteriaResponse {
+  repeated Criterion criteria = 1;
+  // The global revision of the change, or the current one when nothing
+  // changed.
+  int64 revision = 2;
+}
+
+// TickCriterionRequest ticks or unticks one criterion.
+message TickCriterionRequest {
+  string item_id = 1;
+  string criterion_id = 2;
+  // True ticks, false unticks.
+  bool ticked = 3;
+  // Required when ticking: 1 to 1000 characters. Ignored when unticking,
+  // which clears it.
+  string evidence = 4;
+}
+
+// TickCriterionResponse is the criterion after the change.
+message TickCriterionResponse {
+  Criterion criterion = 1;
+  // The global revision of the change, or the current one when nothing
+  // changed.
+  int64 revision = 2;
+}
+
+// SetBlockerRequest records or removes one blocker.
+message SetBlockerRequest {
+  // The item that is blocked.
+  string item_id = 1;
+  // The item that blocks it.
+  string blocked_by_id = 2;
+  // True records the blocker, false removes it.
+  bool linked = 3;
+}
+
+// SetBlockerResponse says whether anything changed.
+message SetBlockerResponse {
+  // False when the blocker was already as asked.
+  bool changed = 1;
+  // The global revision of the change, or the current one when nothing
+  // changed.
+  int64 revision = 2;
+}
+
+// LinkThreadRequest links the thread of one message to an item.
+message LinkThreadRequest {
+  string item_id = 1;
+  // The ref of any message of the thread, from a search, a read or an
+  // event.
+  string ref = 2;
+  // Make this message the link's anchor, the one the thread is found by
+  // first. It needs a Message-ID.
+  bool anchor = 3;
+  // At most 500 characters. Empty keeps an existing link's note.
+  string note = 4;
+}
+
+// LinkThreadResponse is the link, resolved as GetItem resolves it.
+message LinkThreadResponse {
+  ThreadLink link = 1;
+  // False when the thread was already linked to the item.
+  bool created = 2;
+  // The global revision of the change, or the current one when nothing
+  // changed.
+  int64 revision = 3;
+}
+
+// UnlinkThreadRequest names the link to remove, as GetItem's ThreadLink
+// reports it.
+message UnlinkThreadRequest {
+  string item_id = 1;
+  string account = 2;
+  string thread_key = 3;
+}
+
+// UnlinkThreadResponse is the revision of the change.
+message UnlinkThreadResponse {
+  int64 revision = 1;
+}
