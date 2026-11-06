@@ -237,7 +237,7 @@ func New(opts Options) (*Server, error) {
 		s.newStore = func(acct config.ResolvedAccount, _ storeParams) mailstore.Store { return opts.NewStore(acct) }
 	}
 	s.stores = &storeSet{build: s.buildStore, buildSized: s.buildSized, firstUse: s.probeIfStale, logger: opts.Logger}
-	s.engine = watch.NewEngine(opts.StateDB, s.watchLog, s.watchState, watch.EngineOptions{Now: opts.Now, Snippet: snippetOf})
+	s.engine = watch.NewEngine(opts.StateDB, s.watchLog, s.watchState, watch.EngineOptions{Now: opts.Now, Snippet: snippetOf, OnNew: s.itemMail})
 	s.items = items.NewStore(opts.StateDB, s.watchLog, opts.Now)
 	if err := s.ensureAdmin(); err != nil {
 		return nil, err

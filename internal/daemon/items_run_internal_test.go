@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -8,6 +9,9 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/jamesainslie/chainmail/gen/chainmail/v1"
+	"github.com/jamesainslie/chainmail/internal/config"
+	"github.com/jamesainslie/chainmail/internal/mailstore"
+	"github.com/jamesainslie/chainmail/internal/ref"
 	"github.com/jamesainslie/chainmail/internal/watch"
 )
 
@@ -42,5 +46,28 @@ func TestEventToProtoItemKinds(t *testing.T) {
 	}
 	if !proto.Equal(mail, wantMail) {
 		t.Errorf("item_mail event = %v, want %v", mail, wantMail)
+	}
+}
+
+// TestItemMailHook checks the engine hook: an account missing from the
+// config is an error, which rolls the batch back, and new mail on a thread
+// no item links gives no events. It uses only the transaction it is given.
+func TestItemMailHook(t *testing.T) {
+	t.Parallel()
+	s, stateDB := newTestServer(t)
+	tx, err := stateDB.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }() // nothing here is kept
+	if _, err := s.itemMail(t.Context(), tx, "nope", nil); !errors.Is(err, config.ErrUnknownAccount) {
+		t.Errorf("unknown account: %v, want ErrUnknownAccount", err)
+	}
+	news := []watch.NewMail{{
+		Summary: mailstore.Summary{Ref: ref.Ref{Account: "host", Folder: "INBOX", UIDValidity: 1, UID: 7}, ThreadID: "00aa11bb22cc33dd", MessageID: "m@example.com"},
+		Event:   watch.Event{ID: 1, Kind: watch.KindNew, Account: "host", Folder: "INBOX", Ref: "cm1:host:INBOX:1:7"},
+	}}
+	if events, err := s.itemMail(t.Context(), tx, "host", news); err != nil || len(events) != 0 {
+		t.Errorf("unlinked mail = %v, %v; want no events", events, err)
 	}
 }
