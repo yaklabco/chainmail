@@ -502,6 +502,12 @@ func TestWatchFlagsPassThrough(t *testing.T) {
 			filter:   &chainmailv1.WatchFilter{Accounts: []string{"host", "icloud"}, Kinds: []string{"new", "flags"}, In: "inbox"},
 		},
 		{name: "group", args: []string{"--group", "bot"}, position: "group=bot", filter: &chainmailv1.WatchFilter{}},
+		{
+			name:     "item filter",
+			args:     []string{"--kind", "item,item_mail", "--item", "it_task1"},
+			position: "live",
+			filter:   &chainmailv1.WatchFilter{Kinds: []string{"item", "item_mail"}, Item: "it_task1"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -518,7 +524,7 @@ func TestWatchFlagsPassThrough(t *testing.T) {
 				t.Errorf("position = %s, want %s", p, tt.position)
 			}
 			fl := req.GetFilter()
-			if !slices.Equal(fl.GetAccounts(), tt.filter.GetAccounts()) || !slices.Equal(fl.GetKinds(), tt.filter.GetKinds()) || fl.GetIn() != tt.filter.GetIn() {
+			if !slices.Equal(fl.GetAccounts(), tt.filter.GetAccounts()) || !slices.Equal(fl.GetKinds(), tt.filter.GetKinds()) || fl.GetIn() != tt.filter.GetIn() || fl.GetItem() != tt.filter.GetItem() {
 				t.Errorf("filter = %v, want %v", fl, tt.filter)
 			}
 		})
@@ -1260,4 +1266,68 @@ func TestWatchNeverAcknowledgesPastWhatTheStreamSent(t *testing.T) {
 			t.Errorf("requests = %v, want a reconnect since=4", reqs)
 		}
 	})
+}
+
+// Item and item_mail events read as one line each: the item, the change
+// and its revision, or the item and the new message's subject, cleaned.
+func TestEventLineItemKinds(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		e    *chainmailv1.WatchEvent
+		want string
+	}{
+		{
+			name: "item update",
+			e:    &chainmailv1.WatchEvent{Id: 7, Kind: "item", Item: &chainmailv1.WorkItemChange{ItemId: "it_task1", Type: "task", Revision: 42, Op: "updated", Fields: []string{"state", "due_date"}}},
+			want: "10:00:00 item     - - it_task1 task updated state,due_date revision 42\n",
+		},
+		{
+			name: "item created",
+			e:    &chainmailv1.WatchEvent{Id: 6, Kind: "item", Item: &chainmailv1.WorkItemChange{ItemId: "it_task1", Type: "task", Revision: 41, Op: "created"}},
+			want: "10:00:00 item     - - it_task1 task created revision 41\n",
+		},
+		{
+			name: "item mail",
+			e: &chainmailv1.WatchEvent{
+				Id: 8, Kind: "item_mail", Account: "work", Folder: "INBOX", Ref: "cm1:work:INBOX:7:43", ItemId: "it_task1",
+				Message: &chainmailv1.MessageRow{Subject: &chainmailv1.Untrusted{Untrusted: "Re: Domain\x1b[2J renewal\nnow"}},
+			},
+			want: "10:00:00 item_mail work INBOX it_task1 Re: Domain[2J renewal now\n",
+		},
+		{
+			name: "item mail from self",
+			e: &chainmailv1.WatchEvent{
+				Id: 9, Kind: "item_mail", Account: "work", Folder: "Sent", ItemId: "it_task1", FromSelf: true,
+				Message: &chainmailv1.MessageRow{Subject: &chainmailv1.Untrusted{Untrusted: "Paid"}},
+			},
+			want: "10:00:00 item_mail work Sent it_task1 (from self) Paid\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := eventLine("10:00:00", tt.e); got != tt.want {
+				t.Errorf("eventLine = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWatchHelpSaysItemKindsAreOptIn(t *testing.T) {
+	t.Parallel()
+	got := runCLI(t, Env{}, "watch", "--help")
+	if got.code != 0 {
+		t.Fatalf("watch --help: %+v", got)
+	}
+	help := strings.Join(strings.Fields(got.stdout), " ")
+	for _, want := range []string{
+		"come when --kind names them or --item is given",
+		"--item string",
+		"(default: all but item and item_mail)",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("watch help lacks %q:\n%s", want, got.stdout)
+		}
+	}
 }

@@ -423,6 +423,7 @@ func (cp *completer) specs() map[string]compSpec {
 			"account": allAccounts, "kind": commaList(watchKinds...), "since": noComplete,
 			"in":    cp.folders(folderSpec{accounts: anyAccount}),
 			"group": cp.groups(0),
+			"item":  cp.items(0),
 		}},
 		"chainmail watch groups delete": {args: cp.groups(1)},
 		"chainmail audit": {args: noComplete, flags: map[string]cobra.CompletionFunc{

@@ -123,7 +123,9 @@ var examples = map[string]string{
 	"chainmail watch": `  # resume where the triage group left off, new mail only
   chainmail watch --group triage --kind new
   # print everything logged for one inbox, then exit
-  chainmail watch --since 0 --account work --in inbox --once`,
+  chainmail watch --since 0 --account work --in inbox --once
+  # changes to an item and the items below it, and new mail on their threads
+  chainmail watch --kind item,item_mail --item it_01jcb7m2k9r8q3v4w5x6y7z8a9`,
 	"chainmail watch groups":        `  chainmail watch groups`,
 	"chainmail watch groups delete": `  chainmail watch groups delete triage`,
 	"chainmail watch status":        `  chainmail watch status`,
