@@ -54,6 +54,12 @@ func newMail(m mailSpec) watch.NewMail {
 // MailArrived's events with their IDs.
 func (r *linkRig) arrive(t *testing.T, acct items.MailAccount, news ...watch.NewMail) []watch.Event {
 	t.Helper()
+	return r.arriveAt(t, acct, r.clock.Now(), news...)
+}
+
+// arriveAt is arrive with at passed to MailArrived as given.
+func (r *linkRig) arriveAt(t *testing.T, acct items.MailAccount, at time.Time, news ...watch.NewMail) []watch.Event {
+	t.Helper()
 	ctx := t.Context()
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -70,7 +76,7 @@ func (r *linkRig) arrive(t *testing.T, acct items.MailAccount, news ...watch.New
 	for i := range news {
 		news[i].Event = events[i]
 	}
-	extra, err := items.MailArrived(ctx, tx, acct, news, r.clock.Now())
+	extra, err := items.MailArrived(ctx, tx, acct, news, at)
 	if err != nil {
 		t.Fatalf("MailArrived: %v", err)
 	}
@@ -217,11 +223,13 @@ func TestMailArrivedSkipsMailFromBeforeTheLink(t *testing.T) {
 	r.link(t, id, "work", "t1")
 	linked := r.clock.Now()
 	acct := items.MailAccount{Name: "work", Address: "me@example.net"}
-	// A message that was on the server before the link, filed or copied into
-	// another synced folder now, is old mail: no event. One that arrived at
-	// or after the link is news. A message with no arrival time counts as news.
-	before := newMail(mailSpec{account: "work", folder: "Archive", uid: 1, thread: "t1", msgID: "old@example.com", arrived: linked.Add(-time.Minute)})
-	at := newMail(mailSpec{account: "work", folder: "INBOX", uid: 2, thread: "t1", msgID: "now@example.com", arrived: linked})
+	// A message that was on the server well before the link, filed or copied
+	// into another synced folder now, is old mail: no event. One that arrived
+	// at the link is news, even though the server's INTERNALDATE has only
+	// whole seconds and so reads a little before the link's time. A message
+	// with no arrival time counts as news.
+	before := newMail(mailSpec{account: "work", folder: "Archive", uid: 1, thread: "t1", msgID: "old@example.com", arrived: linked.Add(-time.Hour).Truncate(time.Second)})
+	at := newMail(mailSpec{account: "work", folder: "INBOX", uid: 2, thread: "t1", msgID: "now@example.com", arrived: linked.Truncate(time.Second)})
 	undated := newMail(mailSpec{account: "work", folder: "INBOX", uid: 3, thread: "t1", msgID: "undated@example.com"})
 	undated.Summary.InternalDate = time.Time{}
 	got := r.arrive(t, acct, before, at, undated)
@@ -230,6 +238,68 @@ func TestMailArrivedSkipsMailFromBeforeTheLink(t *testing.T) {
 	}
 	if c := r.count(t, "SELECT count(*) FROM item_mail_seen"); c != 2 {
 		t.Errorf("item_mail_seen holds %d rows, want 2: old mail is not recorded", c)
+	}
+}
+
+func TestMailArrivedClockSkewAllowance(t *testing.T) {
+	t.Parallel()
+	// The link is made at 12:00:00.200. The server stamps INTERNALDATE in
+	// whole seconds and its clock may lag the daemon's, so mail up to five
+	// minutes before the link, counted from the link's whole second, is news.
+	linked := time.Date(2026, 11, 6, 12, 0, 0, 200*int(time.Millisecond), time.UTC)
+	whole := linked.Truncate(time.Second)
+	tests := []struct {
+		name    string
+		arrived time.Time
+		want    int
+	}{
+		{"in the link's second", whole, 1},
+		{"after the link", whole.Add(time.Second), 1},
+		{"4m59s before the link", whole.Add(-4*time.Minute - 59*time.Second), 1},
+		{"exactly the allowance before the link", whole.Add(-5 * time.Minute), 1},
+		{"a second past the allowance", whole.Add(-5*time.Minute - time.Second), 0},
+		{"an hour before the link", whole.Add(-time.Hour), 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newLinkRig(t)
+			id := r.task(t)
+			r.clock.Advance(linked.Sub(r.clock.Now()))
+			r.link(t, id, "work", "t1")
+			m := newMail(mailSpec{account: "work", folder: "INBOX", uid: 1, thread: "t1", msgID: "m1@example.com", arrived: tc.arrived})
+			if got := r.arrive(t, items.MailAccount{Name: "work"}, m); len(got) != tc.want {
+				t.Errorf("MailArrived gave %d events, want %d: %+v", len(got), tc.want, got)
+			}
+			if c := r.count(t, "SELECT count(*) FROM item_mail_seen"); c != tc.want {
+				t.Errorf("item_mail_seen holds %d rows, want %d", c, tc.want)
+			}
+		})
+	}
+}
+
+func TestMailArrivedZeroAtUsesTheClock(t *testing.T) {
+	t.Parallel()
+	r := newLinkRig(t)
+	r.link(t, r.task(t), "work", "t1")
+	acct := items.MailAccount{Name: "work"}
+	inbox := mailSpec{account: "work", folder: "INBOX", uid: 1, thread: "t1", msgID: "m1@example.com"}
+	got := r.arriveAt(t, acct, time.Time{}, newMail(inbox))
+	if len(got) != 1 || got[0].At.IsZero() {
+		t.Fatalf("MailArrived with a zero at = %+v, want one event with a time", got)
+	}
+	// The seen row was stamped now, so a trim of rows older than a minute
+	// ago keeps it, and a copy of the message in another folder is not news.
+	if _, err := r.store.Trim(t.Context(), time.Now().Add(-time.Minute)); err != nil {
+		t.Fatalf("Trim: %v", err)
+	}
+	if c := r.count(t, "SELECT count(*) FROM item_mail_seen"); c != 1 {
+		t.Errorf("item_mail_seen holds %d rows after the trim, want 1", c)
+	}
+	sent := inbox
+	sent.folder, sent.uid = "Sent", 4
+	if again := r.arrive(t, acct, newMail(sent)); len(again) != 0 {
+		t.Errorf("the same Message-ID in another folder gave %+v, want no event", again)
 	}
 }
 

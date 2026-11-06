@@ -20,6 +20,14 @@ type MailAccount struct {
 	Address string // the account's own address, for from_self
 }
 
+// mailClockSkew is how far before a link's creation a message may have
+// arrived and still count as news on the linked thread. IMAP INTERNALDATE
+// has one-second precision, so a reply in the same second as the link reads
+// as earlier than it, and the server's clock may lag the daemon's, which
+// stamps the link. Only mail older than this is taken to have been on the
+// server before the link.
+const mailClockSkew = 5 * time.Minute
+
 // MailArrived runs inside a sync batch transaction (the engine's OnNew hook).
 // For each new message with a thread key, and each live item linked to that
 // thread, it records (item, account, message key) in item_mail_seen, where the
@@ -27,11 +35,13 @@ type MailAccount struct {
 // it inserts it returns one item_mail event: Account, Folder, Ref and Message
 // copied from the new event, ItemID set, FromSelf true when any From address
 // equals Address case-insensitively, At = at. Events come in the order of
-// news, then by item ID.
+// news, then by item ID. A zero at is replaced by the current time, the clock
+// a Store uses by default, so the seen rows always carry a time Trim can age.
 //
-// A message whose InternalDate is before the link was made is skipped for
-// that link: it was on the server already, and has only been filed or
-// copied. A zero InternalDate is never skipped.
+// A message whose InternalDate is before the link's creation less
+// mailClockSkew, truncated to the second, is skipped for that link: it was
+// on the server already, and has only been filed or copied. A zero
+// InternalDate is never skipped.
 //
 // It uses only tx: the state.db connection is the batch's until it commits.
 // A row already recorded, as for the same message arriving in a second
@@ -55,6 +65,9 @@ func MailArrived(ctx context.Context, tx *sql.Tx, acct MailAccount, news []watch
 		return nil, fmt.Errorf("items: preparing item mail: %w", err)
 	}
 	defer func() { _ = insert.Close() }() // closing a prepared statement only frees it
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
 	stamp := formatTime(at)
 	var out []watch.Event
 	for _, n := range news {
@@ -90,26 +103,31 @@ func MailArrived(ctx context.Context, tx *sql.Tx, acct MailAccount, news []watch
 }
 
 // linkedItems returns the live items linked to threadKey on account, by ID,
-// leaving out links made after the message arrived: a message the server
-// had before the link, now filed or copied into another synced folder, is
-// not news. A zero arrival time leaves nothing out. It closes its Rows
-// before returning.
+// leaving out links made after the message arrived, as mailBeforeLink
+// decides: a message the server had before the link, now filed or copied
+// into another synced folder, is not news. A zero arrival time leaves
+// nothing out. It closes its Rows before returning.
 func linkedItems(ctx context.Context, tx *sql.Tx, account, threadKey string, arrived time.Time) ([]string, error) {
-	since := formatTime(arrived) // "" for the zero time, which keeps every link
-	rows, err := tx.QueryContext(ctx, `SELECT item_links.item_id
+	rows, err := tx.QueryContext(ctx, `SELECT item_links.item_id, item_links.created_at
 FROM item_links JOIN items ON items.id = item_links.item_id
 WHERE item_links.account = ? AND item_links.thread_key = ? AND items.deleted_at IS NULL
-  AND (? = '' OR item_links.created_at <= ?)
-ORDER BY item_links.item_id`, account, threadKey, since, since)
+ORDER BY item_links.item_id`, account, threadKey)
 	if err != nil {
 		return nil, fmt.Errorf("items: reading links: %w", err)
 	}
 	defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
 	var ids []string
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var id, created string
+		if err := rows.Scan(&id, &created); err != nil {
 			return nil, fmt.Errorf("items: reading links: %w", err)
+		}
+		createdAt, err := parseTime(created)
+		if err != nil {
+			return nil, fmt.Errorf("items: reading links: %w", err)
+		}
+		if mailBeforeLink(arrived, createdAt) {
+			continue
 		}
 		ids = append(ids, id)
 	}
@@ -117,6 +135,14 @@ ORDER BY item_links.item_id`, account, threadKey, since, since)
 		return nil, fmt.Errorf("items: reading links: %w", err)
 	}
 	return ids, nil
+}
+
+// mailBeforeLink reports whether a message that arrived on the server at
+// arrived was there before a link made at linked: earlier than linked less
+// mailClockSkew, truncated to the second as INTERNALDATE is. A zero arrival
+// time is never before.
+func mailBeforeLink(arrived, linked time.Time) bool {
+	return !arrived.IsZero() && arrived.Before(linked.Add(-mailClockSkew).Truncate(time.Second))
 }
 
 // fromSelf reports whether any of from is the account's own address. No
