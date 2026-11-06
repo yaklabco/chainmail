@@ -15,7 +15,7 @@ flowchart LR
 
 ## 1. What you need
 
-- Nix with flakes enabled, or Go 1.26.10 or later, the version `go.mod` names.
+- Homebrew, Nix with flakes enabled, or Go 1.26.10 or later, the version `go.mod` names.
 - `age-keygen`, from [age](https://age-encryption.org), to make the vault key. The Nix dev shell provides it. Otherwise install `age` from your package manager.
 - `jq`, for the snippets that pick one field out of JSON output.
 - Docker, only to run the integration tests.
@@ -23,6 +23,13 @@ flowchart LR
 chainmail runs on Linux and on macOS.
 
 ### Get the binary
+
+With Homebrew, on macOS and Linux, install the latest release. This puts `chainmail` on your `PATH` with its shell completions and its man page. It does not start a daemon, which the next step does.
+
+```sh
+brew install yaklabco/tap/chainmail
+chainmail version
+```
 
 With Nix, build from a checkout. The flake's package is `packages.<system>.default`, for `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`.
 

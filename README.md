@@ -54,10 +54,13 @@ flowchart LR
 
 The CLI's styled help, settings file and shell completion shipped in [#11](https://github.com/yaklabco/chainmail/pull/11), and fixes since sub-project 7 in [#13](https://github.com/yaklabco/chainmail/pull/13), [#14](https://github.com/yaklabco/chainmail/pull/14) and [#15](https://github.com/yaklabco/chainmail/pull/15). Of the work deferred from sub-project 13, item due-date events ([#16](https://github.com/yaklabco/chainmail/issues/16)) and rules that file mail into items ([#17](https://github.com/yaklabco/chainmail/issues/17)) belong to sub-project 8, the agent skill's coverage of items ([#20](https://github.com/yaklabco/chainmail/issues/20)) to sub-project 11, item metrics and traces ([#21](https://github.com/yaklabco/chainmail/issues/21)) to sub-project 12, and the Lathe task type ([#18](https://github.com/yaklabco/chainmail/issues/18)) and two-way sync with Lathe ([#19](https://github.com/yaklabco/chainmail/issues/19)) to the Lathe work.
 
+Releases are published on [GitHub](https://github.com/yaklabco/chainmail/releases) and in the [yaklabco/homebrew-tap](https://github.com/yaklabco/homebrew-tap) tap. [CHANGELOG.md](CHANGELOG.md) lists what each release changed.
+
 ## Documentation
 
 - [docs/QUICKSTART.md](docs/QUICKSTART.md): building chainmail, then setting up and configuring a daemon, its accounts and its secrets.
-- [docs/RUNBOOK.md](docs/RUNBOOK.md): operating the daemon day to day, with commands that run in bash and fish.
+- [docs/RUNBOOK.md](docs/RUNBOOK.md): operating the daemon day to day, and cutting a release, with commands that run in bash and fish.
+- [CHANGELOG.md](CHANGELOG.md): what each release added, changed and fixed.
 - The reference sections below: [Security model](#security-model), [Build](#build), [Development](#development), [Provider setup](#provider-setup), [Configuration reference](#configuration-reference), [Commands](#commands), [CLI settings](#cli-settings), [Shell completion](#shell-completion), [Reading mail](#reading-mail), [Sending mail](#sending-mail), [Organizing mail](#organizing-mail), [Policy](#policy), [Reading the audit log](#reading-the-audit-log), [Agents over MCP](#agents-over-mcp), [Watching for mail](#watching-for-mail), [Local cache](#local-cache), [Items](#items), [NixOS deployment](#nixos-deployment), [Connection probing and pool sizing](#connection-probing-and-pool-sizing) and [Exit codes and error output](#exit-codes-and-error-output).
 
 ## Security model
@@ -73,7 +76,16 @@ The CLI's styled help, settings file and shell completion shipped in [#11](https
 
 ## Build
 
-With Nix:
+With Homebrew, on macOS and Linux:
+
+```sh
+brew install yaklabco/tap/chainmail
+chainmail version
+```
+
+This installs the released binary, its shell completions and its man page. Homebrew does not start the daemon. Start it as [docs/QUICKSTART.md](docs/QUICKSTART.md) describes.
+
+Or build from a checkout with Nix:
 
 ```fish
 nix build
@@ -1439,3 +1451,7 @@ Reasons and exit codes are a contract with agents and never change. They come fr
 Usage errors always exit 2 with `USAGE`. That covers a missing or extra argument, an unknown flag, a bad output format from `--output`, `CHAINMAIL_OUTPUT` or `cli.toml`, a group command such as `chainmail accounts` run on its own, an unknown subcommand, and `chainmail help <unknown>`. It also covers a `cli.toml` that cannot be read or parsed, is not a regular file, is larger than 64 KiB, holds an unknown key or holds a value that is not a string (see [CLI settings](#cli-settings)), a `CHAINMAIL_DEV` that is not a boolean (`true`, `false`, `1`, `0`, `t` or `f`) when `--dev` is not given, and `chainmail completion` without a shell or with one it does not know.
 
 Interrupting a prompt with Ctrl-C, such as the `secret set` prompt or the `auth login` paste, exits 1 with `INTERNAL` and a message containing `interrupted`.
+
+## License
+
+chainmail is released under the MIT license. See [LICENSE](LICENSE).
