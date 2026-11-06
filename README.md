@@ -1279,7 +1279,7 @@ Every change to an item, its criteria, its blockers or its links raises one glob
 | `empty` | No message of the thread was found. The link stays. |
 | `unavailable` | The thread could not be read. `reason` holds the error's reason, such as `NOT_FOUND` for an account that is no longer in the config, or `MALFORMED_RESPONSE` when the mail server sends one of its messages in a form chainmail cannot read. |
 
-`source` says what found the messages. The cache finds them when every folder of the account's default search is backfilled and fresh in the cache. Otherwise the mail server finds them. On Google the server then searches All Mail by thread ID. Elsewhere it searches the default folders for messages whose Message-ID, `References` or `In-Reply-To` names the root.
+`source` says what found the messages. The cache finds them when every folder of the account's default search is backfilled and fresh in the cache, and none of those folders holds a message the cache recorded as unreadable. Otherwise the mail server finds them, and a linked thread that holds an unreadable message is `unavailable` with `MALFORMED_RESPONSE`. On Google the server then searches All Mail by thread ID. Elsewhere it searches the default folders for messages whose Message-ID, `References` or `In-Reply-To` names the root.
 
 Off Google, a reply whose `References` do not start with the thread's root, as from a client that drops them, gets another key. `item:` does not find it, and it raises no `item_mail` event. The server lookup in `item show` can still count it, since that lookup also matches `In-Reply-To`.
 
