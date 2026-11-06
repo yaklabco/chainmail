@@ -45,6 +45,7 @@ var toolRPC = map[string]string{
 	"delete_folder":       chainmailv1connect.OrganizeServiceDeleteFolderProcedure,
 	"read_events":         chainmailv1connect.WatchServiceReadEventsProcedure,
 	"cache_status":        chainmailv1connect.CacheServiceGetCacheStatusProcedure,
+	"create_item":         chainmailv1connect.ItemsServiceCreateItemProcedure,
 }
 
 // leftOut lists agent-facing RPCs with no tool, and why (spec section 4).
@@ -59,6 +60,17 @@ var leftOut = map[string]string{
 	chainmailv1connect.WatchServiceDeleteGroupProcedure:        "group administration for operators",
 	chainmailv1connect.CacheServiceRebuildCacheProcedure:       "an operator action that drops cached mail and downloads it again",
 	chainmailv1connect.CacheServiceEvictCacheProcedure:         "an operator action; the daemon evicts bodies on its own",
+	// Temporary: the later cycles of T11 add these tools and delete the entries.
+	chainmailv1connect.ItemsServiceUpdateItemProcedure:    "T11 cycle B adds update_item",
+	chainmailv1connect.ItemsServiceGetItemProcedure:       "T11 cycle C adds get_item",
+	chainmailv1connect.ItemsServiceListItemsProcedure:     "T11 cycle C adds list_items",
+	chainmailv1connect.ItemsServiceDeleteItemProcedure:    "T11 cycle D adds delete_item",
+	chainmailv1connect.ItemsServiceRestoreItemProcedure:   "T11 cycle D adds restore_item",
+	chainmailv1connect.ItemsServiceEditCriteriaProcedure:  "T11 cycle D adds edit_criteria",
+	chainmailv1connect.ItemsServiceTickCriterionProcedure: "T11 cycle D adds tick_criterion",
+	chainmailv1connect.ItemsServiceSetBlockerProcedure:    "T11 cycle D adds set_blocker",
+	chainmailv1connect.ItemsServiceLinkThreadProcedure:    "T11 cycle D adds link_thread",
+	chainmailv1connect.ItemsServiceUnlinkThreadProcedure:  "T11 cycle D adds unlink_thread",
 }
 
 // ignored lists request fields no tool sets, keyed "<procedure> <field path>", and why.
@@ -81,6 +93,7 @@ var agentServices = []protoreflect.ServiceDescriptor{
 	chainmailv1.File_chainmail_v1_organize_proto.Services().ByName("OrganizeService"),
 	chainmailv1.File_chainmail_v1_watch_proto.Services().ByName("WatchService"),
 	chainmailv1.File_chainmail_v1_cache_proto.Services().ByName("CacheService"),
+	chainmailv1.File_chainmail_v1_items_proto.Services().ByName("ItemsService"),
 }
 
 func procedure(sd protoreflect.ServiceDescriptor, md protoreflect.MethodDescriptor) string {
@@ -205,6 +218,11 @@ func coverageSamples(file string) map[string][]map[string]any {
 			{"cursor": 7},
 		},
 		"cache_status": {{"accounts": []string{"work"}}},
+		"create_item": {{
+			"type": "task", "title": "t", "description": "d", "state": "backlog", "area": "work", "priority": "p1",
+			"start_date": "2026-11-01", "due_date": "2026-11-30", "estimate": 2.5, "parent_id": "it_admin_work",
+			"criteria": []string{"c"}, "idempotency_key": "k",
+		}},
 	}
 }
 
