@@ -222,7 +222,7 @@ client_id = "5678.apps.googleusercontent.com"
 provider = "google-workspace"    # auth defaults to oauth2, the only method it accepts
 address = "james@example.org"
 oauth_client = "workspace"       # refresh token stored as tokens/work by auth login
-display_name = "James Ainslie"   # the From name on mail this account sends
+display_name = "James Example"   # the From name on mail this account sends
 signature = "James\n[example.org](https://example.org)"   # Markdown
 
 [accounts.personal]
@@ -752,7 +752,7 @@ The daemon checks every send against a policy before anything is transmitted, an
 
 ```toml
 [policy]
-send_allow = ["*@ainslies.us", "someone@example.com"]
+send_allow = ["*@example.org", "someone@example.com"]
 max_recipients = 10
 allow_expunge = false
 allow_folder_delete = false
@@ -768,7 +768,7 @@ The keys are listed in the [Configuration reference](#configuration-reference). 
 An entry in `send_allow` has one of two forms:
 
 - **A bare address**, such as `someone@example.com`: no display name, no angle brackets, exactly one `@`. It matches only that address.
-- **`*@domain`**, such as `*@ainslies.us`. It matches any address whose part after its last `@` is exactly that domain. Subdomains do not match, so `*@ainslies.us` does not allow `bob@mail.ainslies.us`.
+- **`*@domain`**, such as `*@example.org`. It matches any address whose part after its last `@` is exactly that domain. Subdomains do not match, so `*@example.org` does not allow `bob@mail.example.org`.
 
 Anything else, such as `*@*`, `*.example.com`, `@example.com` or `bob@*`, is a config error that names the table and the entry. Matching ignores case.
 
@@ -1334,16 +1334,16 @@ The flake exports a NixOS module as `nixosModules.default`. It runs the daemon a
   inputs.chainmail.url = "github:yaklabco/chainmail";
 
   outputs = { nixpkgs, chainmail, ... }: {
-    nixosConfigurations.incus = nixpkgs.lib.nixosSystem {
+    nixosConfigurations.mailhost = nixpkgs.lib.nixosSystem {
       modules = [
         chainmail.nixosModules.default
         {
           services.chainmail = {
             enable = true;
-            clientUsers = [ "jamesainslie" ];
+            clientUsers = [ "alice" ];
             vaultKeyCredential = ./chainmail-vault-key.cred;
             settings = {
-              policy.send_allow = [ "*@ainslies.us" ];
+              policy.send_allow = [ "*@example.org" ];
               accounts.site = {
                 provider = "hostinger";
                 address = "me@example.com";

@@ -178,12 +178,12 @@ func TestValidateAPITrees(t *testing.T) {
 
 func TestSplit(t *testing.T) {
 	t.Parallel()
-	n, err := Parse("invoice in:inbox account:gmail account:arsoculus from:a account:gmail")
+	n, err := Parse("invoice in:inbox account:work account:personal from:a account:work")
 	if err != nil {
 		t.Fatal(err)
 	}
 	scope, rest := Split(n)
-	if scope.In != "inbox" || !slices.Equal(scope.Accounts, []string{"arsoculus", "gmail"}) {
+	if scope.In != "inbox" || !slices.Equal(scope.Accounts, []string{"personal", "work"}) {
 		t.Errorf("scope = %+v", scope)
 	}
 	if got := rest.String(); got != "invoice from:a" {

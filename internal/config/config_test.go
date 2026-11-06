@@ -22,7 +22,7 @@ client_id = "id-123"
 
 [accounts.work]
 provider = "google-workspace"
-address = "james@ainslies.us"
+address = "james@example.org"
 oauth_client = "workspace"
 
 [accounts.hostinger]
@@ -67,7 +67,7 @@ func TestParseValid(t *testing.T) {
 	if work.ClientID != "id-123" || work.OAuthClient != "workspace" {
 		t.Errorf("work oauth client = %q/%q", work.OAuthClient, work.ClientID)
 	}
-	if work.Username != "james@ainslies.us" {
+	if work.Username != "james@example.org" {
 		t.Errorf("work username = %q, want the address", work.Username)
 	}
 	if work.IMAP.Addr() != "imap.gmail.com:993" {
@@ -347,8 +347,8 @@ func TestComposeFields(t *testing.T) {
 [accounts.host]
 provider = "hostinger"
 address = "me@example.com"
-display_name = "James Ainslie"
-signature = "James\n[ainslies.us](https://ainslies.us)"
+display_name = "James Example"
+signature = "James\n[example.org](https://example.org)"
 archive_folder = "Archive"
 pool = 4
 max_message_size = "10MiB"
@@ -361,10 +361,10 @@ max_message_size = "10MiB"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.DisplayName != "James Ainslie" {
+	if got.DisplayName != "James Example" {
 		t.Errorf("DisplayName = %q", got.DisplayName)
 	}
-	if got.Signature != "James\n[ainslies.us](https://ainslies.us)" {
+	if got.Signature != "James\n[example.org](https://example.org)" {
 		t.Errorf("Signature = %q", got.Signature)
 	}
 	if got.ArchiveFolder != "Archive" {
@@ -461,7 +461,7 @@ func TestPolicyTables(t *testing.T) {
 	t.Parallel()
 	cfg, err := Parse([]byte(`
 [policy]
-send_allow = ["*@ainslies.us", "someone@example.com"]
+send_allow = ["*@example.org", "someone@example.com"]
 max_recipients = 25
 allow_expunge = true
 allow_folder_delete = true
@@ -477,7 +477,7 @@ send_allow = ["friend@gmail.com"]
 		t.Fatalf("Parse: %v", err)
 	}
 	want := Policy{
-		SendAllow:         []string{"*@ainslies.us", "someone@example.com"},
+		SendAllow:         []string{"*@example.org", "someone@example.com"},
 		MaxRecipients:     25,
 		AllowExpunge:      true,
 		AllowFolderDelete: true,
@@ -862,7 +862,7 @@ func TestWatchValidBounds(t *testing.T) {
 
 func TestWatchInvalid(t *testing.T) {
 	t.Parallel()
-	const workspace = "[oauth_clients.ws]\nclient_id = \"id\"\n[accounts.w]\nprovider = \"google-workspace\"\naddress = \"me@ainslies.us\"\noauth_client = \"ws\"\n"
+	const workspace = "[oauth_clients.ws]\nclient_id = \"id\"\n[accounts.w]\nprovider = \"google-workspace\"\naddress = \"me@example.org\"\noauth_client = \"ws\"\n"
 	const durationHint = "want a Go duration such as 30s, 5m or 168h"
 	tests := []struct {
 		name    string
