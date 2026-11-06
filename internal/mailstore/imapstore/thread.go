@@ -1,8 +1,11 @@
 package imapstore
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
+	"strconv"
 	"sync"
 
 	"github.com/emersion/go-imap/v2"
@@ -10,6 +13,8 @@ import (
 	"github.com/jamesainslie/chainmail/internal/mailstore"
 	"github.com/jamesainslie/chainmail/internal/ref"
 )
+
+var _ mailstore.ThreadFinder = (*Store)(nil)
 
 // Thread implements mailstore.Store.
 func (s *Store) Thread(ctx context.Context, r ref.Ref) ([]ref.Ref, error) {
@@ -20,6 +25,53 @@ func (s *Store) Thread(ctx context.Context, r ref.Ref) ([]ref.Ref, error) {
 		return s.gmailThread(ctx, r)
 	}
 	return s.standardThread(ctx, r)
+}
+
+// FindThread implements mailstore.ThreadFinder. On Google it lists All Mail
+// by the X-GM-THRID threadKey names. Elsewhere it runs the search Thread
+// runs for a root Message-ID, in the same folders. Either way it searches
+// and fetches UIDs only, so it never sets \Seen.
+func (s *Store) FindThread(ctx context.Context, threadKey, rootMessageID string) ([]ref.Ref, error) {
+	var found []ref.Ref
+	if s.gmail() {
+		id, ok := gmailThreadKey(threadKey)
+		if !ok {
+			return []ref.Ref{}, nil
+		}
+		refs, err := s.gmailMembers(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		found = refs
+	} else {
+		root := bareMessageID(rootMessageID)
+		if root == "" {
+			return []ref.Ref{}, nil
+		}
+		perFolder, errs, err := s.rootMembers(ctx, root)
+		if err != nil {
+			return nil, err
+		}
+		if found, err = mergeFound(ctx, perFolder, errs); err != nil {
+			return nil, err
+		}
+	}
+	out := append([]ref.Ref{}, found...)
+	slices.SortFunc(out, func(a, b ref.Ref) int {
+		return cmp.Or(cmp.Compare(a.Folder, b.Folder), cmp.Compare(a.UID, b.UID))
+	})
+	return out, nil
+}
+
+// gmailThreadKey reads a Google thread key: the X-GM-THRID in lowercase
+// hexadecimal with no leading zero, as Summary.ThreadID writes it. Any other
+// form, and thread 0, which Summary.ThreadID never gives, is no key.
+func gmailThreadKey(key string) (uint64, bool) {
+	id, err := strconv.ParseUint(key, 16, 64)
+	if err != nil || id == 0 || strconv.FormatUint(id, 16) != key {
+		return 0, false
+	}
+	return id, true
 }
 
 func (s *Store) gmailThread(ctx context.Context, r ref.Ref) ([]ref.Ref, error) {
@@ -37,6 +89,17 @@ func (s *Store) gmailThread(ctx context.Context, r ref.Ref) ([]ref.Ref, error) {
 	if err != nil {
 		return nil, err
 	}
+	out, err := s.gmailMembers(ctx, threadID)
+	if err != nil {
+		return nil, err
+	}
+	return withSeed(out, seed), nil
+}
+
+// gmailMembers returns the refs in All Mail whose X-GM-THRID is threadID, in
+// the order the server lists them. An account with no All Mail folder is
+// ErrNotFound.
+func (s *Store) gmailMembers(ctx context.Context, threadID uint64) ([]ref.Ref, error) {
 	folders, err := s.folderList(ctx, false)
 	if err != nil {
 		return nil, err
@@ -67,7 +130,7 @@ func (s *Store) gmailThread(ctx context.Context, r ref.Ref) ([]ref.Ref, error) {
 	if err != nil {
 		return nil, err
 	}
-	return withSeed(out, seed), nil
+	return out, nil
 }
 
 func (s *Store) standardThread(ctx context.Context, r ref.Ref) ([]ref.Ref, error) {
@@ -88,13 +151,26 @@ func (s *Store) standardThread(ctx context.Context, r ref.Ref) ([]ref.Ref, error
 	if root == "" {
 		return []ref.Ref{r}, nil
 	}
-	folders, err := s.folderList(ctx, false)
+	found, errs, err := s.rootMembers(ctx, root)
 	if err != nil {
 		return nil, err
 	}
+	return threadOf(ctx, found, errs, r)
+}
+
+// rootMembers searches every folder of the default search scope, in
+// parallel, for the messages whose Message-ID is root or whose References
+// or In-Reply-To mention it. It returns each folder's matches and failure,
+// in the order of the folders, and an error only when it could not pick the
+// folders.
+func (s *Store) rootMembers(ctx context.Context, root string) ([][]ref.Ref, []error, error) {
+	folders, err := s.folderList(ctx, false)
+	if err != nil {
+		return nil, nil, err
+	}
 	sources, err := standardSources(folders, "")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	id := "<" + root + ">"
 	header := func(key string) imap.SearchCriteria {
@@ -123,15 +199,24 @@ func (s *Store) standardThread(ctx context.Context, r ref.Ref) ([]ref.Ref, error
 		})
 	}
 	wg.Wait()
-	return threadOf(ctx, found, errs, r)
+	return found, errs, nil
 }
 
 // threadOf merges the matches found in each folder into the thread, seed
-// included. A folder that failed on its own is left out, since the thread is
-// still useful without it. A failure of the whole account fails the call
-// instead of hiding behind a partial thread: a login refusal, the end of
-// ctx, or every folder failing.
+// included, as mergeFound does.
 func threadOf(ctx context.Context, found [][]ref.Ref, errs []error, seed ref.Ref) ([]ref.Ref, error) {
+	out, err := mergeFound(ctx, found, errs)
+	if err != nil {
+		return nil, err
+	}
+	return withSeed(out, seed), nil
+}
+
+// mergeFound joins the matches found in each folder. A folder that failed
+// on its own is left out, since the thread is still useful without it. A
+// failure of the whole account fails the call instead of hiding behind a
+// partial thread: a login refusal, the end of ctx, or every folder failing.
+func mergeFound(ctx context.Context, found [][]ref.Ref, errs []error) ([]ref.Ref, error) {
 	if err := accountFailure(ctx, errs); err != nil {
 		return nil, err
 	}
@@ -151,7 +236,7 @@ func threadOf(ctx context.Context, found [][]ref.Ref, errs []error, seed ref.Ref
 	if failed > 0 && failed == len(found) {
 		return nil, first
 	}
-	return withSeed(out, seed), nil
+	return out, nil
 }
 
 // withSeed adds seed to refs unless a ref already names the same message: the

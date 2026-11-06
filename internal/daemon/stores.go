@@ -348,6 +348,7 @@ var (
 	_ mailstore.Store         = (*accountStore)(nil)
 	_ mailstore.HeaderFetcher = (*accountStore)(nil)
 	_ mailstore.Scoper        = (*accountStore)(nil)
+	_ mailstore.ThreadFinder  = (*accountStore)(nil)
 )
 
 // refsFailed gives every ref the same error.
@@ -529,6 +530,21 @@ func (a *accountStore) SearchFolders(ctx context.Context, in string) (folders []
 		return err
 	})
 	return folders, err
+}
+
+// FindThread implements mailstore.ThreadFinder on the current store, under
+// the account's read lock as Thread runs. A store without it gives
+// ErrUnsupported.
+func (a *accountStore) FindThread(ctx context.Context, threadKey, rootMessageID string) (refs []ref.Ref, err error) {
+	err = a.call(ctx, func(st mailstore.Store) error {
+		tf, ok := st.(mailstore.ThreadFinder)
+		if !ok {
+			return fmt.Errorf("%w: the account's store cannot find a thread by its key", mailstore.ErrUnsupported)
+		}
+		refs, err = tf.FindThread(ctx, threadKey, rootMessageID)
+		return err
+	})
+	return refs, err
 }
 
 // Close does nothing: the store set owns the store and closes it on shutdown.
