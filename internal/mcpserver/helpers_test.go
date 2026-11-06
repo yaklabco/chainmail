@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -55,7 +56,10 @@ func connectClient(t *testing.T, s *Server, version string) *mcp.ClientSession {
 	go func() { done <- s.Run(ctx, serverT) }()
 	t.Cleanup(func() {
 		cancel()
-		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+		// The client closes first, so a server still writing the reply to a
+		// cancelled call can find the pipe closed. That is the client hanging
+		// up, not a server fault.
+		if err := <-done; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.ErrClosedPipe) {
 			t.Errorf("Run: %v", err)
 		}
 	})
