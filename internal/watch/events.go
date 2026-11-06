@@ -6,6 +6,7 @@ package watch
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -26,6 +27,14 @@ const (
 	// the cache records. Only a Filter with Internal set matches it, so
 	// the API never shows it.
 	KindUnreadable Kind = "unreadable"
+	// KindItem is a change to a work item. It has no account, folder or
+	// ref, and its payload never holds item text. Readers opt in: a Filter
+	// matches it only when Kinds names it or Items is set.
+	KindItem Kind = "item"
+	// KindItemMail is new mail on a thread linked to a work item, one event
+	// per item and message. It carries the new event's account, folder, ref
+	// and message. Readers opt in, as for KindItem.
+	KindItemMail Kind = "item_mail"
 )
 
 // Status is a folder's sync state, as status events and sync_folders rows
@@ -67,21 +76,39 @@ type Message struct {
 	Snippet       *string             `json:"snippet,omitempty"`
 }
 
+// ItemChange is the payload of an item event. It never holds item text.
+type ItemChange struct {
+	// ItemID is the changed item's ID.
+	ItemID string `json:"item_id"`
+	// Type is the item's type after the change.
+	Type string `json:"type"`
+	// Revision is the global item revision the change was written at.
+	Revision int64 `json:"revision"`
+	// Op is what happened: created, updated, moved, deleted, restored,
+	// linked, unlinked, criteria or blockers.
+	Op string `json:"op"`
+	// Fields names the changed fields, for updated and moved.
+	Fields []string `json:"fields,omitempty"`
+}
+
 // Event is one entry in the log. Which optional fields are set depends on Kind.
 type Event struct {
-	ID      int64 // assigned by Append; 0 before
-	At      time.Time
-	Kind    Kind
-	Account string
-	Folder  string
-	Ref     string
-	Message *Message // new
-	Flags   []string // flags
-	Labels  []string // flags
-	State   Status   // status
-	Detail  string   // status
-	Reason  string   // gap
-	NextID  int64    // gap
+	ID       int64 // assigned by Append; 0 before
+	At       time.Time
+	Kind     Kind
+	Account  string // "" for item and the trimmed gap
+	Folder   string
+	Ref      string
+	Message  *Message    // new, item_mail
+	Flags    []string    // flags
+	Labels   []string    // flags
+	State    Status      // status
+	Detail   string      // status
+	Reason   string      // gap
+	NextID   int64       // gap
+	Item     *ItemChange // item
+	ItemID   string      // item_mail
+	FromSelf bool        // item_mail: the message is from the account's own address
 }
 
 // The payload column holds one of these per kind, as JSON. expunged and
@@ -102,6 +129,14 @@ type (
 		Reason string `json:"reason"`
 		NextID int64  `json:"next_id"`
 	}
+	itemPayload struct {
+		Item *ItemChange `json:"item"`
+	}
+	itemMailPayload struct {
+		ItemID   string   `json:"item_id"`
+		FromSelf bool     `json:"from_self"`
+		Message  *Message `json:"message"`
+	}
 )
 
 // encodePayload renders the kind-specific fields of e as the payload column.
@@ -119,6 +154,19 @@ func encodePayload(e Event) (string, error) {
 		v = statusPayload{State: string(e.State), Detail: e.Detail}
 	case KindGap:
 		v = gapPayload{Reason: e.Reason, NextID: e.NextID}
+	case KindItem:
+		if e.Item == nil {
+			return "", errors.New("item event has no change")
+		}
+		v = itemPayload{Item: e.Item}
+	case KindItemMail:
+		if e.Message == nil {
+			return "", fmt.Errorf("item_mail event for %s has no message", e.Ref)
+		}
+		if e.ItemID == "" {
+			return "", fmt.Errorf("item_mail event for %s has no item", e.Ref)
+		}
+		v = itemMailPayload{ItemID: e.ItemID, FromSelf: e.FromSelf, Message: e.Message}
 	case KindExpunged, KindUnreadable:
 		return "{}", nil
 	default:
@@ -156,6 +204,16 @@ func decodePayload(e *Event, payload string) error {
 		var p gapPayload
 		if err = json.Unmarshal(data, &p); err == nil {
 			e.Reason, e.NextID = p.Reason, p.NextID
+		}
+	case KindItem:
+		var p itemPayload
+		if err = json.Unmarshal(data, &p); err == nil {
+			e.Item = p.Item
+		}
+	case KindItemMail:
+		var p itemMailPayload
+		if err = json.Unmarshal(data, &p); err == nil {
+			e.ItemID, e.FromSelf, e.Message = p.ItemID, p.FromSelf, p.Message
 		}
 	case KindExpunged, KindUnreadable:
 	default:

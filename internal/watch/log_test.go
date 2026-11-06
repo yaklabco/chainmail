@@ -281,3 +281,47 @@ func TestReadScanCap(t *testing.T) {
 		t.Errorf("second read = %d events next %d, want 0 and %d", len(got), next, maxScan+100)
 	}
 }
+
+// item and item_mail events survive Publish and Read with every field
+// intact. An item event has no account, folder or ref.
+func TestItemPayloadRoundTrip(t *testing.T) {
+	t.Parallel()
+	l, _, _ := newLog(t)
+	snippet := "see the plan below"
+	at := time.Date(2026, 11, 6, 10, 0, 0, 123456789, time.UTC)
+	in := []Event{
+		{At: at, Kind: KindItem, Item: &ItemChange{ItemID: "it_01", Type: "task", Revision: 3, Op: "updated", Fields: []string{"title", "due_date"}}},
+		{At: at, Kind: KindItem, Item: &ItemChange{ItemID: "it_02", Type: "epic", Revision: 4, Op: "deleted"}},
+		{
+			At: at, Kind: KindItemMail, Account: "a", Folder: "INBOX", Ref: "cm:a:INBOX:7:9",
+			ItemID: "it_01", FromSelf: true,
+			Message: &Message{
+				Date:          time.Date(2026, 11, 6, 9, 30, 0, 0, time.UTC),
+				InternalDate:  time.Date(2026, 11, 6, 9, 31, 0, 0, time.UTC),
+				From:          []mailstore.Address{{Name: "Me", Email: "me@example.com"}},
+				To:            []mailstore.Address{{Email: "ann@example.com"}},
+				Subject:       "re: plan",
+				Flags:         []string{`\Seen`},
+				Labels:        []string{`\Inbox`, "Work"},
+				Size:          900,
+				HasAttachment: true,
+				ThreadID:      "5e1f",
+				Snippet:       &snippet,
+			},
+		},
+		{At: at, Kind: KindItemMail, Account: "a", Folder: "Sent", Ref: "cm:a:Sent:3:2", ItemID: "it_02", Message: &Message{Subject: "bare"}},
+	}
+	stored := publish(t, l, in...)
+	page, err := l.Read(t.Context(), Query{Filter: Filter{Kinds: []Kind{KindItem, KindItemMail}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != len(stored) {
+		t.Fatalf("read %d events, want %d", len(page.Events), len(stored))
+	}
+	for i, got := range page.Events {
+		if !reflect.DeepEqual(got, stored[i]) {
+			t.Errorf("event %d:\n got %+v\nwant %+v", i, got, stored[i])
+		}
+	}
+}
