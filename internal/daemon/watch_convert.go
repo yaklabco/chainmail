@@ -5,7 +5,9 @@ import (
 	"github.com/jamesainslie/chainmail/internal/watch"
 )
 
-// eventToProto builds the API form of an event. A new event's message
+// eventToProto builds the API form of an event. An item event carries its
+// change, never item text; an item_mail event carries its item and
+// from_self besides the message row a new event has. A new event's message
 // becomes a search row shaped as rowFromSummary shapes one: every string
 // from the message is wrapped as untrusted and cleaned, and the row carries
 // the event's ref, account and folder. The snippet was rendered by the sync
@@ -30,6 +32,10 @@ func eventToProto(e watch.Event) *chainmailv1.WatchEvent {
 			out.Message.Snippet = &chainmailv1.Untrusted{Untrusted: *m.Snippet}
 		}
 	}
+	if c := e.Item; c != nil {
+		out.Item = &chainmailv1.WorkItemChange{ItemId: c.ItemID, Type: c.Type, Revision: c.Revision, Op: c.Op, Fields: c.Fields}
+	}
+	out.ItemId, out.FromSelf = e.ItemID, e.FromSelf
 	return out
 }
 

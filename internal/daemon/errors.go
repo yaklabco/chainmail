@@ -87,7 +87,7 @@ func toConnectError(err error) *connect.Error {
 	case errors.Is(err, errNotReady):
 		return api.New(connect.CodeFailedPrecondition, api.ReasonCacheNotReady, cacheNotReadyHint, err)
 	case errors.Is(err, items.ErrNotFound):
-		return api.New(connect.CodeNotFound, api.ReasonNotFound, "run: chainmail item list", err)
+		return api.New(connect.CodeNotFound, api.ReasonNotFound, itemListHint, err)
 	case errors.Is(err, mailstore.ErrNotFound):
 		return api.New(connect.CodeNotFound, api.ReasonNotFound, "", err)
 	case errors.Is(err, context.DeadlineExceeded):

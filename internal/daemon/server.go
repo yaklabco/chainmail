@@ -159,6 +159,9 @@ type Server struct {
 	supervisors supervisorSet
 	// trimInterval is how often the event log is trimmed. Tests shorten it.
 	trimInterval time.Duration
+	// itemsTrimTick, when set, replaces the ticker that runs the item
+	// trim every trimInterval, so a test can trigger each trim.
+	itemsTrimTick <-chan time.Time
 	// cache is cache.db, or nil when the cache is off or did not open.
 	// Serve opens it before any handler, background loop or supervisor
 	// runs, and closes it after all of them have stopped.
@@ -237,8 +240,10 @@ func New(opts Options) (*Server, error) {
 		s.newStore = func(acct config.ResolvedAccount, _ storeParams) mailstore.Store { return opts.NewStore(acct) }
 	}
 	s.stores = &storeSet{build: s.buildStore, buildSized: s.buildSized, firstUse: s.probeIfStale, logger: opts.Logger}
-	s.engine = watch.NewEngine(opts.StateDB, s.watchLog, s.watchState, watch.EngineOptions{Now: opts.Now, Snippet: snippetOf})
+	s.engine = watch.NewEngine(opts.StateDB, s.watchLog, s.watchState, watch.EngineOptions{Now: opts.Now, Snippet: snippetOf, OnNew: s.itemMail})
 	s.items = items.NewStore(opts.StateDB, s.watchLog, opts.Now)
+	// item: searches resolve item IDs to thread keys through the store.
+	s.itemThreads = s.items
 	if err := s.openSendState(); err != nil {
 		return nil, err
 	}

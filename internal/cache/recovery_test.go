@@ -77,3 +77,40 @@ func TestPruneRecovery(t *testing.T) {
 		t.Error("recovery row removed after the cutoff was pruned")
 	}
 }
+
+// TestRecoverRef checks the recovery rule the cache view and the daemon's
+// links share: r's Message-ID, from its row or ref_recovery, matched
+// against the account's other rows, with exactly one match the answer.
+func TestRecoverRef(t *testing.T) {
+	t.Parallel()
+	s, _ := openStore(t)
+	moved, copied, twice, alone := testRow("INBOX", 1), testRow("Archive", 5), testRow("INBOX", 2), testRow("INBOX", 3)
+	copied.MessageID = moved.MessageID
+	dupA, dupB := testRow("Archive", 6), testRow("Archive", 7)
+	dupA.MessageID, dupB.MessageID = twice.MessageID, twice.MessageID
+	gone := testRow("Old", 4)
+	gone.MessageID = alone.MessageID
+	other := testRow("Archive", 8)
+	other.Account, other.MessageID = "other", moved.MessageID
+	putRows(t, s, moved, copied, twice, dupA, dupB, alone, gone, other)
+	if err := s.DropFolder(t.Context(), testAccount, "Old", true); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name   string
+		r      ref.Ref
+		want   ref.Ref
+		wantOK bool
+	}{
+		{name: "one other row", r: moved.Ref(), want: copied.Ref(), wantOK: true},
+		{name: "from ref_recovery", r: testRef("Old", 4), want: alone.Ref(), wantOK: true},
+		{name: "several matches", r: twice.Ref()},
+		{name: "only its own row", r: testRef("INBOX", 3)},
+		{name: "no Message-ID known", r: testRef("INBOX", 99)},
+	} {
+		got, ok, err := s.RecoverRef(t.Context(), testAccount, tt.r)
+		if err != nil || ok != tt.wantOK || got != tt.want {
+			t.Errorf("%s: RecoverRef(%s/%d) = %+v, %v, %v; want %+v, %v", tt.name, tt.r.Folder, tt.r.UID, got, ok, err, tt.want, tt.wantOK)
+		}
+	}
+}
