@@ -85,7 +85,7 @@ func (s *Store) Update(ctx context.Context, a Actor, id string, p Patch) (Item, 
 		if err := updateItem(ctx, tx, next); err != nil {
 			return nil, err
 		}
-		if out, err = getItem(ctx, tx, id); err != nil {
+		if out, err = f.settledItem(next); err != nil {
 			return nil, err
 		}
 		op := OpUpdated
