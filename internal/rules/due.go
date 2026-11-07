@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/yaklabco/chainmail/internal/watch"
@@ -14,6 +16,9 @@ import (
 // alone decides whether an item is live.
 const dueOpenItems = "SELECT id, type, state, due_date, parent_id FROM items " +
 	"WHERE due_date IS NOT NULL AND state <> 'done' AND deleted_at IS NULL"
+
+// dueChunk bounds the item IDs one Hook query binds.
+const dueChunk = 500
 
 // DueChecker writes the item_due_soon, item_due and item_overdue events.
 // For each open item it fires the most advanced stage the item's due date
@@ -80,6 +85,32 @@ func (d *DueChecker) scan(ctx context.Context, now time.Time) (int, error) {
 	}
 	d.log.Notify()
 	return len(events), nil
+}
+
+// Hook does what Scan does for the items ids names, at now, inside the
+// caller's transaction tx. It uses only tx, appends nothing, and returns the
+// events for the caller to append before it commits. IDs of items that are
+// done, deleted, undated or missing are skipped. Its signature is
+// items.DueHook, so the daemon passes it to items.Store.SetDueHook.
+func (d *DueChecker) Hook(ctx context.Context, tx *sql.Tx, ids []string, now time.Time) ([]watch.Event, error) {
+	var open []dueItem
+	for chunk := range slices.Chunk(ids, dueChunk) {
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		got, err := dueItems(ctx, tx, dueOpenItems+" AND id IN ("+dueMarks(len(chunk))+") ORDER BY due_date, id", args...)
+		if err != nil {
+			return nil, err
+		}
+		open = append(open, got...)
+	}
+	return d.fire(ctx, tx, open, now.UTC())
+}
+
+// dueMarks is n comma-separated placeholders.
+func dueMarks(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?, ", n), ", ")
 }
 
 // dueItem is what a due event needs to know about one open item.
