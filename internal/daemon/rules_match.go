@@ -331,3 +331,205 @@ func (s *Server) matchBatch(ctx context.Context, sc ruleScope, uids map[string][
 func (s *Server) matchPage(ctx context.Context, sc ruleScope, after cache.MatchCursor, limit int) ([]cache.Row, error) {
 	return s.matchRows(ctx, sc, cache.MatchOptions{After: after, Limit: limit})
 }
+
+const (
+	// dryRunNewest is how many of an account's newest cached messages a
+	// dry-run of trigger new matches, standing in for a new-mail batch.
+	dryRunNewest = 200
+	// dryRunMatches is how many matches a dry-run returns per account.
+	dryRunMatches = 50
+)
+
+var (
+	// errRuleTrigger refuses a dry-run trigger other than new, schedule or
+	// manual.
+	errRuleTrigger = &argError{
+		msg:  "trigger must be new, schedule or manual",
+		hint: "leave trigger empty for a manual dry-run",
+	}
+	// errRuleAccountNotCovered refuses a dry-run of one account the rule
+	// does not cover.
+	errRuleAccountNotCovered = &argError{
+		msg:  "the rule does not cover that account",
+		hint: "leave account empty for every account the rule covers; its accounts and its query's account: terms decide which",
+	}
+)
+
+// appliedLookup reads the act-once table: which of an account's message
+// keys a rule has already handled. *rules.Store satisfies it.
+type appliedLookup interface {
+	Applied(ctx context.Context, ruleID, account string, keys []string) (map[string]rules.AppliedRow, error)
+}
+
+// ruleSkipped counts the rows of sc's rule the act-once table holds, in
+// any outcome. An unsaved rule, or a daemon without the table, skips none.
+func (s *Server) ruleSkipped(ctx context.Context, sc ruleScope, rows []cache.Row) (int, error) {
+	if sc.ruleID == "" || s.ruleApplied == nil || len(rows) == 0 {
+		return 0, nil
+	}
+	keys := make([]string, len(rows))
+	for i, r := range rows {
+		keys[i] = ruleMessageKey(sc.acct, r)
+	}
+	done, err := s.ruleApplied.Applied(ctx, sc.ruleID, sc.acct.Name, keys)
+	if err != nil {
+		return 0, &fixedTextError{msg: "reading the rule's applied messages failed", err: err}
+	}
+	n := 0
+	for _, k := range keys {
+		if _, ok := done[k]; ok {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// dryRunTally counts one account's dry-run matches and keeps the first
+// dryRunMatches of them.
+type dryRunTally struct {
+	matched, skipped int
+	rows             []cache.Row
+}
+
+// add counts a page of matches, skipped of which the act-once table holds.
+func (d *dryRunTally) add(rows []cache.Row, skipped int) {
+	d.matched += len(rows)
+	d.skipped += skipped
+	if room := dryRunMatches - len(d.rows); room > 0 {
+		d.rows = append(d.rows, rows[:min(room, len(rows))]...)
+	}
+}
+
+// dryRun runs a definition without acting, per covered account (or only
+// account when set). Trigger new matches each account's newest
+// dryRunNewest cached messages as a new-mail batch; schedule, manual and
+// "" (manual) match the whole cache and need it complete. Each account
+// reports its match count, how many the act-once table would skip (none
+// for an unsaved rule, ruleID ""), its first dryRunMatches matches as
+// search rows, oldest first, and the actions each would get, or a reason
+// and no matches when its cache cannot answer. Nothing is written.
+func (s *Server) dryRun(ctx context.Context, ruleID string, d rules.Definition, t rules.Trigger, account string) (*chainmailv1.DryRunRuleResponse, error) {
+	switch t {
+	case rules.TriggerNew, rules.TriggerSchedule, rules.TriggerManual, "":
+	default:
+		return nil, errRuleTrigger
+	}
+	accts, err := s.ruleAccounts(d)
+	if err != nil {
+		return nil, err
+	}
+	if account != "" {
+		if !config.ValidName(account) {
+			return nil, errInvalidAccountName
+		}
+		if _, err := s.opts.Config.Account(account); err != nil {
+			return nil, err
+		}
+		accts = slices.DeleteFunc(accts, func(a config.ResolvedAccount) bool { return a.Name != account })
+		if len(accts) == 0 {
+			return nil, errRuleAccountNotCovered
+		}
+	}
+	resp := &chainmailv1.DryRunRuleResponse{Accounts: make([]*chainmailv1.DryRunAccount, 0, len(accts))}
+	for _, acct := range accts {
+		out, err := s.dryRunAccount(ctx, ruleID, d, t, acct)
+		if err != nil {
+			return nil, err
+		}
+		resp.Accounts = append(resp.Accounts, out)
+	}
+	return resp, nil
+}
+
+// dryRunAccount is dryRun on one account.
+func (s *Server) dryRunAccount(ctx context.Context, ruleID string, d rules.Definition, t rules.Trigger, acct config.ResolvedAccount) (*chainmailv1.DryRunAccount, error) {
+	out := &chainmailv1.DryRunAccount{Account: acct.Name, Actions: ruleActionsProto(d.Actions)}
+	newMail := t == rules.TriggerNew
+	sc, reason, err := s.scopeRule(ctx, ruleID, d, acct, !newMail)
+	if err != nil {
+		return nil, err
+	}
+	if reason != "" {
+		out.Reason = reason
+		return out, nil
+	}
+	var tally dryRunTally
+	if newMail {
+		tally, err = s.dryRunNewest(ctx, sc)
+	} else {
+		tally, err = s.dryRunScope(ctx, sc, rulePageSize)
+	}
+	if err != nil {
+		return nil, err
+	}
+	out.Matched, out.Skipped = int64(tally.matched), int64(tally.skipped)
+	out.Matches = make([]*chainmailv1.MessageRow, len(tally.rows))
+	for i, r := range tally.rows {
+		out.Matches[i] = rowFromSummary(r.Summary(), false, 0)
+	}
+	return out, nil
+}
+
+// dryRunNewest matches sc against the account's newest dryRunNewest
+// cached messages, in every folder the cache tracks, as a new-mail batch
+// of them would be matched: the rule's scope then drops what it does not
+// cover.
+func (s *Server) dryRunNewest(ctx context.Context, sc ruleScope) (dryRunTally, error) {
+	ca := s.cacheAccount(sc.acct.Name)
+	if ca == nil || s.cache == nil {
+		return dryRunTally{}, errRuleCacheOff
+	}
+	folders, err := ca.Folders(ctx)
+	if err != nil {
+		return dryRunTally{}, s.ruleCacheErr(err)
+	}
+	all, err := s.cache.SourcesOf(ctx, sc.acct.Name, folders)
+	if err != nil {
+		return dryRunTally{}, s.ruleCacheErr(err)
+	}
+	batch := map[string][]uint32{}
+	if len(all) > 0 {
+		newest, err := s.cache.MatchRows(ctx, sc.acct.Name, cache.Where{}, cache.MatchOptions{Sources: all, Order: cache.NewestFirst, Limit: dryRunNewest})
+		if err != nil {
+			return dryRunTally{}, s.ruleCacheErr(err)
+		}
+		for _, r := range newest {
+			batch[r.Folder] = append(batch[r.Folder], r.UID)
+		}
+	}
+	rows, err := s.matchBatch(ctx, sc, batch)
+	if err != nil {
+		return dryRunTally{}, err
+	}
+	skipped, err := s.ruleSkipped(ctx, sc, rows)
+	if err != nil {
+		return dryRunTally{}, err
+	}
+	var tally dryRunTally
+	tally.add(rows, skipped)
+	return tally, nil
+}
+
+// dryRunScope matches sc's whole scope, oldest first, page rows at a time,
+// counting every match and keeping the first dryRunMatches.
+func (s *Server) dryRunScope(ctx context.Context, sc ruleScope, page int) (dryRunTally, error) {
+	var (
+		tally dryRunTally
+		after cache.MatchCursor
+	)
+	for {
+		rows, err := s.matchPage(ctx, sc, after, page)
+		if err != nil {
+			return dryRunTally{}, err
+		}
+		skipped, err := s.ruleSkipped(ctx, sc, rows)
+		if err != nil {
+			return dryRunTally{}, err
+		}
+		tally.add(rows, skipped)
+		if len(rows) < page {
+			return tally, nil
+		}
+		after = cache.CursorOf(rows[len(rows)-1])
+	}
+}
