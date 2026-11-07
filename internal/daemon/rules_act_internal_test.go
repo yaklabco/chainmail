@@ -316,7 +316,6 @@ func TestActReplaysPendingRows(t *testing.T) {
 	t.Parallel()
 	g := newActRig(t, nil)
 	g.failDial(t, true)
-	ctx := t.Context()
 	acct := g.acct(t, "host")
 	host := g.f.fakes["host"]
 	fresh := &rules.AppliedRow{Outcome: rules.AppliedPending, RunID: 1, At: routeNow}
@@ -327,7 +326,7 @@ func TestActReplaysPendingRows(t *testing.T) {
 			d.Actions = []rules.Action{{Kind: rules.ActCopy, Folder: "Archive"}, {Kind: rules.ActFlag}}
 		})
 		copies, flags := host.Calls("Copy"), host.Calls("StoreFlags")
-		res := g.f.s.actOn(ctx, rule, 2, acct, g.row(t, "host lunch"), fresh)
+		res := g.f.s.actOn(t.Context(), rule, 2, acct, g.row(t, "host lunch"), fresh)
 		if res.class != actOK || res.note != rules.NoteReplayed || res.copyRef != "" {
 			t.Errorf("actOn = %+v, want ok, replayed, no copy", res)
 		}
@@ -343,7 +342,7 @@ func TestActReplaysPendingRows(t *testing.T) {
 			d.Actions = []rules.Action{{Kind: rules.ActForward, To: []string{"you@example.net"}}}
 		})
 		g.crashedForward(t, rule.ID, "host", keyOf(false, g.refs["host invoice"]))
-		res := g.f.s.actOn(ctx, rule, 2, acct, g.row(t, "host invoice"), fresh)
+		res := g.f.s.actOn(t.Context(), rule, 2, acct, g.row(t, "host invoice"), fresh)
 		if res.class != actOK || res.note != rules.NoteOutcomeUnknown {
 			t.Errorf("actOn = %+v, want ok, outcome_unknown", res)
 		}
@@ -353,7 +352,7 @@ func TestActReplaysPendingRows(t *testing.T) {
 			d.Actions = []rules.Action{{Kind: rules.ActForward, To: []string{"you@example.net"}}}
 		})
 		before := len(g.audit(t))
-		res := g.f.s.actOn(ctx, rule, 2, acct, g.row(t, "host invoice"), old)
+		res := g.f.s.actOn(t.Context(), rule, 2, acct, g.row(t, "host invoice"), old)
 		if res.class != actOK || res.note != rules.NoteOutcomeUnknown {
 			t.Errorf("actOn = %+v, want ok, outcome_unknown", res)
 		}
