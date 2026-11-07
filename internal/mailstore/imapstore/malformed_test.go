@@ -2,9 +2,14 @@ package imapstore
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapclient"
 
 	"github.com/yaklabco/chainmail/internal/mailstore"
 )
@@ -314,5 +319,39 @@ func TestSyncPassIsolatesABacklogInParts(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// The reader shuts the socket before it fails the pending commands with its
+// parse error, so a command of the same exchange that was still being
+// written can fail on the closed socket instead. The exchange is still
+// malformed, never a lost connection that a retry on a fresh one would
+// fetch again.
+func TestPipelineCountsAClosedSocketAfterAParseErrorAsMalformed(t *testing.T) {
+	t.Parallel()
+	srv := startScriptServer(t, &scriptServer{n: 4, badEnvelope: 3})
+	s := scriptStore(t, srv, Options{CommandTimeout: 5 * time.Second})
+	c, err := s.connect(t.Context())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	if err := c.SelectFolder(t.Context(), "INBOX", false); err != nil {
+		t.Fatalf("SelectFolder: %v", err)
+	}
+	err = c.pipeline(t.Context(), func(func()) error {
+		_, err := c.client().Fetch(imap.UIDSetNum(3), s.summaryItems(false, false)).Collect()
+		var parseErr *imapclient.ParseError
+		if !errors.As(err, &parseErr) {
+			t.Errorf("FETCH of the bad envelope = %v, want a ParseError", err)
+		}
+		// What a command still being written when the reader stopped gets.
+		return fmt.Errorf("write tcp: %w", net.ErrClosed)
+	})
+	if !errors.Is(err, mailstore.ErrMalformed) || errors.Is(err, errConnLost) {
+		t.Errorf("pipeline = %v, want ErrMalformed and not a lost connection", err)
+	}
+	if !c.Dead() {
+		t.Error("the connection is not dead after a parse error")
 	}
 }

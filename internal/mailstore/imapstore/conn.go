@@ -135,9 +135,36 @@ func (c *conn) pipeline(ctx context.Context, f func(progress func()) error) erro
 	var imapErr *imap.Error
 	if err != nil && (!errors.As(err, &imapErr) || imapErr.Type == imap.StatusResponseTypeBye) {
 		c.kill()
+		if readErr := c.readerParseError(); readErr != nil {
+			return fmt.Errorf("%w: %w", mailstore.ErrMalformed, readErr)
+		}
 		return fmt.Errorf("%w: %w", errConnLost, err)
 	}
 	return err
+}
+
+// readerStopWait bounds the wait for the reader to stop once the socket is
+// shut, which takes it no longer than its next read.
+const readerStopWait = time.Second
+
+// readerParseError returns the ParseError that stopped c's reader, or nil
+// when it stopped for another reason or not within readerStopWait. The
+// reader shuts the socket before it fails the pending commands with its
+// error, so a command still being written then fails on the closed socket
+// instead, and only the reader's own error tells a malformed response from
+// a dropped connection. c must be killed first.
+func (c *conn) readerParseError() error {
+	select {
+	case <-c.client().Closed():
+	case <-time.After(readerStopWait):
+		return nil
+	}
+	// Once the reader has stopped, Close returns the error that stopped it.
+	err := c.client().Close()
+	if parseErr, ok := errors.AsType[*imapclient.ParseError](err); ok {
+		return parseErr
+	}
+	return nil
 }
 
 // watchdog calls fire once d passes without a reset.
