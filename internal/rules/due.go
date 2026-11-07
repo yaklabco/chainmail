@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
+	"math/rand/v2"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yaklabco/chainmail/internal/watch"
@@ -35,12 +38,19 @@ type DueChecker struct {
 	log      *watch.Log
 	now      func() time.Time
 	settings DueSettings
+	logger   *slog.Logger
+	// jitter scales Run's retry backoff; it returns a value in [0, 1).
+	jitter func() float64
+
+	mu   sync.Mutex
+	next time.Time // when Run next scans; zero until Run plans it
 }
 
 // NewDueChecker returns a DueChecker over db, which must hold the state
 // schema, that appends due events to log, the daemon's one shared Log. now
 // is the time Scan checks at; nil uses time.Now. A nil s.Location means
-// time.Local.
+// time.Local. Failures Run meets are discarded until SetLogger names a
+// logger.
 func NewDueChecker(db *sql.DB, log *watch.Log, now func() time.Time, s DueSettings) *DueChecker {
 	if now == nil {
 		now = time.Now
@@ -48,7 +58,18 @@ func NewDueChecker(db *sql.DB, log *watch.Log, now func() time.Time, s DueSettin
 	if s.Location == nil {
 		s.Location = time.Local
 	}
-	return &DueChecker{db: db, log: log, now: now, settings: s}
+	return &DueChecker{
+		db: db, log: log, now: now, settings: s,
+		logger: slog.New(slog.DiscardHandler), jitter: rand.Float64,
+	}
+}
+
+// SetLogger makes Run log its failed scans to l. Call it before Run; nil
+// keeps the current logger.
+func (d *DueChecker) SetLogger(l *slog.Logger) {
+	if l != nil {
+		d.logger = l
+	}
 }
 
 // Scan checks every open item with a due date in one transaction, writes
@@ -201,4 +222,49 @@ func dueStagesBefore(k watch.Kind) []watch.Kind {
 	default:
 		return nil
 	}
+}
+
+// Run scans at once, then at each NextDueWake, until ctx ends. clock gives
+// the time of every scan and every wait. A scan that fails is logged and
+// tried again after watch.Backoff, which grows with each failure in a row,
+// or at the next due time when that comes first.
+func (d *DueChecker) Run(ctx context.Context, clock watch.Clock) {
+	failures := 0
+	for {
+		now := clock.Now()
+		wake := NextDueWake(now, d.settings)
+		if _, err := d.scan(ctx, now); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			d.logger.ErrorContext(ctx, "checking item due dates failed", "err", err)
+			if retry := now.Add(watch.Backoff(failures, d.jitter())); retry.Before(wake) {
+				wake = retry
+			}
+			failures++
+		} else {
+			failures = 0
+		}
+		d.setNext(wake)
+		select {
+		case <-ctx.Done():
+			return
+		case <-clock.After(wake.Sub(now)):
+		}
+	}
+}
+
+// NextWake returns when Run next scans, for the rules status. It is zero
+// until Run has planned its first wake.
+func (d *DueChecker) NextWake() time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.next
+}
+
+// setNext records the time Run sleeps until.
+func (d *DueChecker) setNext(t time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.next = t
 }
