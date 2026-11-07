@@ -61,13 +61,18 @@ type MatchOptions struct {
 	Order MatchOrder
 	// Limit is the most rows returned, 1 to 1000.
 	Limit int
+	// ExcludeLabels skips rows whose labels hold any of these, compared
+	// exactly as the server reported them, such as Google's \Sent and
+	// \Draft.
+	ExcludeLabels []string
 }
 
 // MatchRows returns the full cached rows of account that satisfy w in the
 // folders of o.Sources, ordered by (internal_date, folder, uid) in
-// o.Order, strictly after o.After, at most o.Limit. Arguments bind in
-// placeholder order: the account, the sources, w.Args, the UID
-// restriction, then w.FTS, then the cursor and the limit. A limit outside
+// o.Order, strictly after o.After, at most o.Limit, leaving out rows that
+// hold a label of o.ExcludeLabels. Arguments bind in placeholder order:
+// the account, the sources, w.Args, the UID restriction, then w.FTS, the
+// excluded labels, the cursor and the limit. A limit outside
 // 1 to 1000 or an unknown order is an error; empty sources, or a UID
 // restriction that leaves no source a UID, match nothing.
 func (s *Store) MatchRows(ctx context.Context, account string, w Where, o MatchOptions) ([]Row, error) {
@@ -114,6 +119,13 @@ func (s *Store) MatchRows(ctx context.Context, account string, w Where, o MatchO
 	if w.FTS != "" {
 		q.WriteString(" AND m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
 		args = append(args, w.FTS)
+	}
+	if len(o.ExcludeLabels) > 0 {
+		q.WriteString(" AND NOT EXISTS (SELECT 1 FROM json_each(m.labels_json) WHERE value IN (" +
+			placeholders(len(o.ExcludeLabels)) + "))")
+		for _, l := range o.ExcludeLabels {
+			args = append(args, l)
+		}
 	}
 	if !o.After.IsZero() {
 		q.WriteString(" AND (m.internal_date, m.folder, m.uid) " + after + " (?, ?, ?)")

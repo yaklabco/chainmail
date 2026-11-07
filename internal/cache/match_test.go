@@ -344,3 +344,52 @@ func TestSourcesOf(t *testing.T) {
 		t.Errorf("SourcesOf(nil) = %+v, %v; want none", none, err)
 	}
 }
+
+// ExcludeLabels skips rows holding any of the labels, compared exactly as
+// the server reported them, and binds its arguments in placeholder order
+// with every other option.
+func TestMatchRowsExcludeLabels(t *testing.T) {
+	t.Parallel()
+	s, byKey := seedMatch(t)
+	tests := []struct {
+		name   string
+		labels []string
+		want   []string
+	}{
+		{name: "none", labels: nil, want: matchOldest},
+		{name: "sent", labels: []string{`\Sent`}, want: []string{"INBOX/1", "Archive/1", "INBOX/3", "Archive/2"}},
+		{name: "sent and draft", labels: []string{`\Sent`, `\Draft`}, want: []string{"INBOX/1", "INBOX/3", "Archive/2"}},
+		{name: "a user label", labels: []string{"work"}, want: []string{"INBOX/1", "INBOX/2", "INBOX/3", "Archive/2"}},
+		{name: "compared exactly", labels: []string{`\sent`}, want: matchOldest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchKeys(t, s, testAccount, Where{}, MatchOptions{Sources: matchSources, ExcludeLabels: tt.labels, Limit: 100})
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("rows = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	w := compileMatch(t, "from:ann zebra", nil)
+	uids := map[string][]uint32{"INBOX": {2, 3}, "Archive": {1, 2}}
+	everything := []struct {
+		name  string
+		order MatchOrder
+		after string
+	}{
+		{name: "oldest first", order: OldestFirst, after: "Archive/1"},
+		{name: "newest first", order: NewestFirst, after: "Archive/2"},
+	}
+	for _, tt := range everything {
+		t.Run("every argument "+tt.name, func(t *testing.T) {
+			got := matchKeys(t, s, testAccount, w, MatchOptions{
+				Sources: matchSources, UIDs: uids, After: CursorOf(byKey[tt.after]), Order: tt.order,
+				Limit: 100, ExcludeLabels: []string{`\Sent`},
+			})
+			if want := []string{"INBOX/3"}; !slices.Equal(got, want) {
+				t.Errorf("rows = %v, want %v", got, want)
+			}
+		})
+	}
+}
