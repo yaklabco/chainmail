@@ -57,6 +57,7 @@ func newRuleCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	cmd.AddCommand(
 		newRuleListCmd(ctx, env, g),
 		newRuleShowCmd(ctx, env, g),
+		newRuleCreateCmd(ctx, env, g),
 	)
 	return cmd
 }

@@ -222,3 +222,9 @@ func ruleListTable(w io.Writer, loc *time.Location, r *chainmailv1.ListRulesResp
 	}
 	return tw.Flush()
 }
+
+// ruleChangedText is the line rule create, edit, enable, disable, delete
+// and restore print: what happened, the rule, and its revision now.
+func ruleChangedText(verb string, r *chainmailv1.Rule) string {
+	return fmt.Sprintf("%s rule %s %s, revision %d\n", verb, termText(r.GetName()), termText(r.GetId()), r.GetRevision())
+}

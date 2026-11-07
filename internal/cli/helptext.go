@@ -101,6 +101,11 @@ var examples = map[string]string{
 	"chainmail move": `  chainmail move cm1:work:INBOX:7:42 --to Receipts`,
 	"chainmail reply": `  chainmail reply cm1:work:INBOX:7:42 --body "Thanks, paid."
   chainmail reply cm1:work:INBOX:7:42 --all --body-file reply.md --draft`,
+	"chainmail rule create": `  # file Stripe receipts as they arrive
+  chainmail rule create --name receipts --account gmail --query 'from:stripe.com subject:receipt' --on-new --action label=Receipts --action archive
+  # archive read inbox mail older than 30 days, once a day
+  chainmail rule create --name inbox-cleanup --query 'in:inbox is:read older_than:30d' --every 1d --action archive
+  chainmail rule create -f receipts.toml`,
 	"chainmail rule list": `  chainmail rule list
   chainmail rule list --account gmail --disabled`,
 	"chainmail rule show": `  chainmail rule show receipts --history
