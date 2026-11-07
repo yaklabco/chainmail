@@ -445,8 +445,15 @@ func TestTestAccountTimeout(t *testing.T) {
 	setSecret(t, h, "accounts/local", "pw")
 	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
 	defer cancel()
-	if _, err := h.Client.Account.TestAccount(ctx, connect.NewRequest(&chainmailv1.TestAccountRequest{Account: "local"})); err == nil {
-		t.Fatal("TestAccount succeeded against a silent server")
+	// Connect sends the deadline to the daemon, whose context then ends at
+	// about the same moment. Either the client gives up first and gets an
+	// error, or the daemon answers first with its IMAP check timed out.
+	// What may never happen is a check passing against a silent server.
+	resp, err := h.Client.Account.TestAccount(ctx, connect.NewRequest(&chainmailv1.TestAccountRequest{Account: "local"}))
+	if err == nil {
+		if c := resp.Msg.GetImap(); c.GetOk() || c.GetReason() != api.ReasonTimeout {
+			t.Fatalf("TestAccount answered imap = %+v against a silent server, want an error or TIMEOUT", c)
+		}
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
