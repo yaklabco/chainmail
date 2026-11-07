@@ -2,11 +2,14 @@ package daemon
 
 import (
 	"maps"
+	"slices"
+	"strings"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/api"
 	"github.com/yaklabco/chainmail/internal/cache"
 	"github.com/yaklabco/chainmail/internal/rules"
 )
@@ -120,5 +123,78 @@ func TestRuleActionsProto(t *testing.T) {
 	}
 	if got := ruleActionsProto(nil); len(got) != 0 {
 		t.Errorf("no actions gave %v, want none", got)
+	}
+}
+
+// ruleMarker is in every query, folder, item ID and account name the rule
+// tests put in a failing rule. No error text or hint may repeat it.
+const ruleMarker = "zqx"
+
+// ruleWantErr fails unless err maps to reason with exactly msg as its text,
+// and neither its text nor its hint holds ruleMarker.
+func ruleWantErr(t *testing.T, err error, reason, msg string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("err = nil, want %s %q", reason, msg)
+	}
+	d := api.Detail(toConnectError(err))
+	if d.GetReason() != reason || err.Error() != msg {
+		t.Errorf("err = %s %q, want %s %q", d.GetReason(), err.Error(), reason, msg)
+	}
+	if strings.Contains(err.Error(), ruleMarker) || strings.Contains(d.GetHint(), ruleMarker) {
+		t.Errorf("err %q (hint %q) repeats rule text", err.Error(), d.GetHint())
+	}
+}
+
+// TestRuleAccounts checks that a rule covers its own accounts, or every
+// configured one, narrowed by its query's account: terms, and that a name
+// no config holds is refused without repeating it.
+func TestRuleAccounts(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServerConfig(t, routeConfig)
+	tests := []struct {
+		name     string
+		accounts []string
+		query    string
+		want     []string
+	}{
+		{name: "every account", want: []string{"gmail", "host"}},
+		{name: "explicit", accounts: []string{"host"}, want: []string{"host"}},
+		{name: "explicit, repeated and unsorted", accounts: []string{"host", "gmail", "host"}, want: []string{"gmail", "host"}},
+		{name: "query narrows every account", query: "account:gmail from:acme", want: []string{"gmail"}},
+		{name: "query narrows the explicit list", accounts: []string{"gmail", "host"}, query: "account:host", want: []string{"host"}},
+		{name: "query names two accounts", query: "account:host account:gmail", want: []string{"gmail", "host"}},
+		{name: "query outside the explicit list", accounts: []string{"host"}, query: "account:gmail", want: []string{}},
+	}
+	for _, tt := range tests {
+		accts, err := s.ruleAccounts(rules.Definition{Accounts: tt.accounts, Query: tt.query})
+		if err != nil {
+			t.Errorf("%s: %v", tt.name, err)
+			continue
+		}
+		names := make([]string, len(accts))
+		for i, a := range accts {
+			names[i] = a.Name
+		}
+		if !slices.Equal(names, tt.want) {
+			t.Errorf("%s: accounts = %q, want %q", tt.name, names, tt.want)
+		}
+	}
+	errs := []struct {
+		name   string
+		d      rules.Definition
+		reason string
+		msg    string
+	}{
+		{"unknown account", rules.Definition{Accounts: []string{"zqxnope"}}, api.ReasonNotFound, "the rule names an account that is not configured"},
+		{"invalid account name", rules.Definition{Accounts: []string{"zqx bad"}}, api.ReasonInvalidArgument, "the rule names an account that is not configured"},
+		{"unknown account: term", rules.Definition{Query: "account:zqxnope"}, api.ReasonNotFound, "the rule names an account that is not configured"},
+		{"query does not parse", rules.Definition{Query: "is:zqxbogus"}, api.ReasonInvalidArgument, "the rule's query does not parse"},
+	}
+	for _, tt := range errs {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := s.ruleAccounts(tt.d)
+			ruleWantErr(t, err, tt.reason, tt.msg)
+		})
 	}
 }

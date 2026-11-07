@@ -6,6 +6,7 @@ import (
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 	"github.com/yaklabco/chainmail/internal/cache"
 	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/query"
 	"github.com/yaklabco/chainmail/internal/rules"
 )
 
@@ -51,4 +52,44 @@ func ruleActionsProto(as []rules.Action) []*chainmailv1.RuleAction {
 		}
 	}
 	return out
+}
+
+// ruleQueryErr is a rule query that does not parse, with fixed text: the
+// parser's own error, which can quote the query, stays on the chain for
+// the reason and the logs.
+func ruleQueryErr(err error) error {
+	return &fixedTextError{msg: "the rule's query does not parse", err: err}
+}
+
+// ruleAccountErr is a rule account, or account: term, that names no
+// configured account, with fixed text.
+func ruleAccountErr(err error) error {
+	return &fixedTextError{msg: "the rule names an account that is not configured", err: err}
+}
+
+// ruleAccounts resolves the accounts a rule covers: its Accounts or every
+// configured account, intersected with the query's account: terms. The
+// result is sorted without repeats and may be empty, when the query names
+// only accounts the rule leaves out.
+func (s *Server) ruleAccounts(d rules.Definition) ([]config.ResolvedAccount, error) {
+	n, err := query.Parse(d.Query)
+	if err != nil {
+		return nil, ruleQueryErr(err)
+	}
+	scope, _ := query.Split(n)
+	accts, err := s.resolveAccounts(d.Accounts)
+	if err != nil {
+		return nil, ruleAccountErr(err)
+	}
+	if len(scope.Accounts) == 0 {
+		return accts, nil
+	}
+	for _, name := range scope.Accounts {
+		if _, err := s.opts.Config.Account(name); err != nil {
+			return nil, ruleAccountErr(err)
+		}
+	}
+	return slices.DeleteFunc(accts, func(a config.ResolvedAccount) bool {
+		return !slices.Contains(scope.Accounts, a.Name)
+	}), nil
 }
