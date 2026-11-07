@@ -2,11 +2,14 @@ package mcpserver
 
 import (
 	"errors"
+	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 	"github.com/yaklabco/chainmail/internal/api"
@@ -378,5 +381,243 @@ func TestRunRuleRequest(t *testing.T) {
 				t.Errorf("request = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// ruleAt is the time every faked rule and run carries, and ruleAtText how
+// the tools show it.
+var ruleAt = time.Date(2026, 11, 7, 8, 0, 0, 0, time.UTC)
+
+const ruleAtText = "2026-11-07T08:00:00Z"
+
+// ruleActionsAnswer is a rule's actions as the daemon sends them, with note
+// as the forward's note.
+func ruleActionsAnswer(note string) []*chainmailv1.RuleAction {
+	return []*chainmailv1.RuleAction{
+		{Kind: "label", Label: "Receipts"},
+		{Kind: "link_item", ItemId: "it_01jc0story", Anchor: true},
+		{Kind: "forward", To: []string{"books@x.test"}, Note: note},
+		{Kind: "archive"},
+	}
+}
+
+// ruleActionsWant is ruleActionsAnswer as the tools shape it.
+func ruleActionsWant(note string) []ruleActionOut {
+	return []ruleActionOut{
+		{Kind: "label", Label: "Receipts"},
+		{Kind: "link_item", ItemID: "it_01jc0story", Anchor: true},
+		{Kind: "forward", To: []string{"books@x.test"}, Note: serverNamePtr(note)},
+		{Kind: "archive"},
+	}
+}
+
+// ruleAnswer is a faked rule that chainmail switched off, with text as its
+// description, its query and its forward note, and every other field set.
+func ruleAnswer(text string) *chainmailv1.Rule {
+	ts := timestamppb.New(ruleAt)
+	return &chainmailv1.Rule{
+		Id: "ru_01jc0stripe", Name: "stripe-receipts", Description: readU(text), Accounts: []string{"work"},
+		Query: readU(text), OnNew: true, Schedule: "every:6h", Priority: 50, Stop: true,
+		Actions: ruleActionsAnswer(text), MaxPerRun: 200, DisabledReason: "repeated_failures",
+		Revision: 3, CreatedAt: ts, UpdatedAt: ts, CreatedBy: "1000/mcp", UpdatedBy: "1000/cli",
+		NextRunAt: ts, LastRunAt: ts, FailedRuns: 5,
+	}
+}
+
+// ruleWant is ruleAnswer(text) as the tools shape it.
+func ruleWant(text string) ruleOut {
+	return ruleOut{
+		ID: "ru_01jc0stripe", Name: "stripe-receipts", Description: serverNamePtr(text), Accounts: []string{"work"},
+		Query: serverName(text), OnNew: true, Schedule: "every:6h", Priority: 50, Stop: true,
+		Actions: ruleActionsWant(text), MaxPerRun: 200, DisabledReason: "repeated_failures",
+		Revision: 3, CreatedAt: ruleAtText, UpdatedAt: ruleAtText, CreatedBy: "1000/mcp", UpdatedBy: "1000/cli",
+		NextRunAt: ruleAtText, LastRunAt: ruleAtText, FailedRuns: 5,
+	}
+}
+
+// ruleRunsAnswer is a capped run on work and a failed run on home.
+func ruleRunsAnswer() []*chainmailv1.RuleRun {
+	ts := timestamppb.New(ruleAt)
+	return []*chainmailv1.RuleRun{
+		{
+			Id: 41, RuleId: "ru_01jc0stripe", Account: "work", Trigger: "manual", StartedAt: ts, FinishedAt: ts,
+			Matched: 7, Applied: 5, Held: 1, Skipped: 1, Outcome: "capped",
+		},
+		{
+			Id: 42, RuleId: "ru_01jc0stripe", Account: "home", Trigger: "manual", StartedAt: ts, FinishedAt: ts,
+			Matched: 2, Failed: 2, Outcome: "failed", Reason: "NOT_FOUND", Hint: "check that the folder exists",
+		},
+	}
+}
+
+// ruleRunsWant is ruleRunsAnswer as the tools shape it.
+func ruleRunsWant() []ruleRunOut {
+	return []ruleRunOut{
+		{
+			ID: 41, RuleID: "ru_01jc0stripe", Account: "work", Trigger: "manual", StartedAt: ruleAtText, FinishedAt: ruleAtText,
+			Matched: 7, Applied: 5, Held: 1, Skipped: 1, Outcome: "capped",
+		},
+		{
+			ID: 42, RuleID: "ru_01jc0stripe", Account: "home", Trigger: "manual", StartedAt: ruleAtText, FinishedAt: ruleAtText,
+			Matched: 2, Failed: 2, Outcome: "failed", Reason: "NOT_FOUND", Hint: "check that the folder exists",
+		},
+	}
+}
+
+// getRuleAnswer is the rule with its runs, counts and one revision.
+func getRuleAnswer(text string) *chainmailv1.GetRuleResponse {
+	return &chainmailv1.GetRuleResponse{
+		Rule: ruleAnswer(text), Runs: ruleRunsAnswer(),
+		Counts: &chainmailv1.RuleCounts{Runs: 12, Matched: 40, Applied: 30, Held: 2, Failed: 3},
+		Revisions: []*chainmailv1.RuleRevision{
+			{Revision: 3, Change: "disabled", Rule: ruleAnswer(text), Actor: "1000/rule", At: timestamppb.New(ruleAt)},
+		},
+	}
+}
+
+// getRuleWant is getRuleAnswer(text) as get_rule shapes it.
+func getRuleWant(text string) getRuleOut {
+	return getRuleOut{
+		Rule: ruleWant(text), Runs: ruleRunsWant(),
+		Counts:    ruleCountsOut{Runs: 12, Matched: 40, Applied: 30, Held: 2, Failed: 3},
+		Revisions: []ruleRevisionOut{{Revision: 3, Change: "disabled", Rule: ruleWant(text), Actor: "1000/rule", At: ruleAtText}},
+	}
+}
+
+// listRulesAnswer is two faked rules, both with text in their rule text.
+func listRulesAnswer(text string) []*chainmailv1.Rule {
+	cleanup := ruleAnswer(text)
+	cleanup.Id, cleanup.Name, cleanup.Priority = "ru_01jc0cleanup", "inbox-cleanup", 200
+	return []*chainmailv1.Rule{ruleAnswer(text), cleanup}
+}
+
+// listRulesWant is listRulesAnswer(text) as list_rules shapes it.
+func listRulesWant(text string) listRulesOut {
+	cleanup := ruleWant(text)
+	cleanup.ID, cleanup.Name, cleanup.Priority = "ru_01jc0cleanup", "inbox-cleanup", 200
+	return listRulesOut{Rules: []ruleOut{ruleWant(text), cleanup}}
+}
+
+// dryRunAnswer is a dry run with one match on work, text as its subject
+// and as the forward's note, and an account whose cache cannot answer.
+func dryRunAnswer(text string) *chainmailv1.DryRunRuleResponse {
+	return &chainmailv1.DryRunRuleResponse{Accounts: []*chainmailv1.DryRunAccount{
+		{
+			Account: "work", Matched: 120, Skipped: 3, Actions: ruleActionsAnswer(text),
+			Matches: []*chainmailv1.MessageRow{{
+				Ref: testRef, Account: "work", Folder: "INBOX", Date: timestamppb.New(ruleAt),
+				From: []*chainmailv1.Address{{Email: readU("billing@stripe.test")}}, Subject: readU(text), ThreadId: "18c0ffee",
+			}},
+		},
+		{Account: "home", Reason: "CACHE_NOT_READY"},
+	}}
+}
+
+// dryRunWant is dryRunAnswer(text) as dry_run_rule shapes it.
+func dryRunWant(text string) dryRunRuleOut {
+	return dryRunRuleOut{Accounts: []dryRunAccountOut{
+		{
+			Account: "work", Matched: 120, Skipped: 3, Actions: ruleActionsWant(text),
+			Matches: []rowOut{{
+				Ref: testRef, Account: "work", Folder: serverName("INBOX"), Date: ruleAtText,
+				From: []untrusted{serverName("billing@stripe.test")}, To: []untrusted{}, Subject: serverName(text),
+				Flags: []string{}, ThreadID: "18c0ffee",
+			}},
+		},
+		{Account: "home", Matches: []rowOut{}, Actions: []ruleActionOut{}, Reason: "CACHE_NOT_READY"},
+	}}
+}
+
+func TestRuleFrom(t *testing.T) {
+	t.Parallel()
+	if got, want := ruleFrom(ruleAnswer("Stripe receipts")), ruleWant("Stripe receipts"); !reflect.DeepEqual(got, want) {
+		t.Errorf("ruleFrom =\n%+v\nwant\n%+v", got, want)
+	}
+	// A bare rule still shows its lists, empty, and leaves out what it lacks.
+	bare := ruleFrom(&chainmailv1.Rule{Id: "ru_01jc0bare", Name: "bare", Query: readU("in:inbox"), Enabled: true})
+	want := ruleOut{ID: "ru_01jc0bare", Name: "bare", Accounts: []string{}, Query: serverName("in:inbox"), Actions: []ruleActionOut{}, Enabled: true}
+	if !reflect.DeepEqual(bare, want) {
+		t.Errorf("ruleFrom(bare) =\n%+v\nwant\n%+v", bare, want)
+	}
+}
+
+func TestRulesFromAndRunsFrom(t *testing.T) {
+	t.Parallel()
+	if got, want := rulesFrom(listRulesAnswer("x")), listRulesWant("x").Rules; !reflect.DeepEqual(got, want) {
+		t.Errorf("rulesFrom =\n%+v\nwant\n%+v", got, want)
+	}
+	if got := ruleRunsFrom(ruleRunsAnswer()); !reflect.DeepEqual(got, ruleRunsWant()) {
+		t.Errorf("ruleRunsFrom =\n%+v\nwant\n%+v", got, ruleRunsWant())
+	}
+	if got := rulesFrom(nil); got == nil || len(got) != 0 {
+		t.Errorf("rulesFrom(nil) = %#v, want an empty list", got)
+	}
+	if got := ruleRunsFrom(nil); got == nil || len(got) != 0 {
+		t.Errorf("ruleRunsFrom(nil) = %#v, want an empty list", got)
+	}
+}
+
+func TestGetRuleFrom(t *testing.T) {
+	t.Parallel()
+	if got, want := getRuleFrom(getRuleAnswer("Stripe receipts")), getRuleWant("Stripe receipts"); !reflect.DeepEqual(got, want) {
+		t.Errorf("getRuleFrom =\n%+v\nwant\n%+v", got, want)
+	}
+	bare := getRuleFrom(&chainmailv1.GetRuleResponse{Rule: ruleAnswer("x")})
+	if bare.Runs == nil || len(bare.Runs) != 0 || bare.Revisions == nil || len(bare.Revisions) != 0 || bare.Counts != (ruleCountsOut{}) {
+		t.Errorf("getRuleFrom(rule only) = %+v, want empty runs and revisions and zero counts", bare)
+	}
+}
+
+func TestDryRunFrom(t *testing.T) {
+	t.Parallel()
+	if got, want := dryRunFrom(dryRunAnswer("Your receipt")), dryRunWant("Your receipt"); !reflect.DeepEqual(got, want) {
+		t.Errorf("dryRunFrom =\n%+v\nwant\n%+v", got, want)
+	}
+	if got := dryRunFrom(&chainmailv1.DryRunRuleResponse{}); got.Accounts == nil || len(got.Accounts) != 0 {
+		t.Errorf("dryRunFrom(empty) = %+v, want an empty account list", got)
+	}
+}
+
+// TestRuleSummaries pins each summary line. A summary sits outside the
+// untrusted markers, so it holds only IDs, counts and fixed words.
+func TestRuleSummaries(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, got, want string
+	}{
+		{name: "one rule", got: ruleSummary("created", ruleWant("x")), want: "created rule ru_01jc0stripe at revision 3"},
+		{
+			name: "get, switched off", got: getRuleSummary(getRuleWant("x")),
+			want: "rule ru_01jc0stripe at revision 3, disabled; recent runs 2, revisions 1",
+		},
+		{
+			name: "get, on", got: getRuleSummary(getRuleOut{Rule: ruleOut{ID: "ru_01jc0bare", Revision: 1, Enabled: true}}),
+			want: "rule ru_01jc0bare at revision 1, enabled; recent runs 0, revisions 0",
+		},
+		{
+			name: "get, deleted", got: getRuleSummary(getRuleOut{Rule: ruleOut{ID: "ru_01jc0gone", Revision: 4, Enabled: true, DeletedAt: ruleAtText}}),
+			want: "rule ru_01jc0gone at revision 4, deleted; recent runs 0, revisions 0",
+		},
+		{
+			name: "dry run with an account that cannot answer", got: dryRunSummary(dryRunWant("x")),
+			want: "dry run, nothing changed: matched 120, already acted on 3, accounts 2; accounts the cache cannot answer: 1, see reason",
+		},
+		{
+			name: "dry run, every account answered", got: dryRunSummary(dryRunRuleOut{Accounts: []dryRunAccountOut{{Account: "work", Matched: 4}}}),
+			want: "dry run, nothing changed: matched 4, already acted on 0, accounts 1",
+		},
+		{
+			name: "run with a capped account", got: runRuleSummary(runRuleOut{Runs: ruleRunsWant()}),
+			want: "runs 2: matched 9, applied 5, held 1, skipped 1, failed 2; a capped run stopped at its max: run the rule again to continue",
+		},
+		{
+			name: "run, nothing capped", got: runRuleSummary(runRuleOut{Runs: ruleRunsWant()[1:]}),
+			want: "runs 1: matched 2, applied 0, held 0, skipped 0, failed 2",
+		},
+	}
+	for _, tt := range tests {
+		if tt.got != tt.want {
+			t.Errorf("%s: summary = %q, want %q", tt.name, tt.got, tt.want)
+		}
 	}
 }

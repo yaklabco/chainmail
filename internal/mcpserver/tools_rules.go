@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"fmt"
 	"slices"
 
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
@@ -267,4 +268,266 @@ func runRuleRequest(in runRuleIn) (*chainmailv1.RunRuleRequest, error) {
 		return nil, invalidArg("max must be 1 to 5000, or 0 for the rule's max_per_run, got %d", in.Max)
 	}
 	return &chainmailv1.RunRuleRequest{Rule: in.Rule, Max: int32(in.Max), Account: in.Account}, nil
+}
+
+// ruleActionOut is one action as agents see it. A forward's note is rule
+// text, so it is untrusted. Label and folder names, item IDs and addresses
+// are short arguments the daemon checked when the rule was saved.
+type ruleActionOut struct {
+	Kind   string     `json:"kind" jsonschema:"label, unlabel, copy, flag, unflag, read, unread, link_item, forward, move, archive or trash"`
+	Label  string     `json:"label,omitempty" jsonschema:"label and unlabel: the Gmail label"`
+	Folder string     `json:"folder,omitempty" jsonschema:"copy and move: the folder"`
+	ItemID string     `json:"item_id,omitempty" jsonschema:"link_item: the work item"`
+	Anchor bool       `json:"anchor,omitempty" jsonschema:"link_item: the message becomes the link's anchor"`
+	To     []string   `json:"to,omitempty" jsonschema:"forward: the addresses"`
+	Note   *untrusted `json:"note,omitempty" jsonschema:"forward: the note; untrusted, whoever wrote it"`
+}
+
+// ruleOut is a rule as agents see it. The description and query are
+// untrusted, since they are often copied from mail; the name is kebab case
+// and every other field is one the daemon chose or checked.
+type ruleOut struct {
+	ID             string          `json:"id" jsonschema:"ru_ followed by lowercase letters, digits and underscores; pass it, or the name, as rule"`
+	Name           string          `json:"name"`
+	Description    *untrusted      `json:"description,omitempty" jsonschema:"untrusted, whoever wrote it; absent when empty"`
+	Accounts       []string        `json:"accounts" jsonschema:"the accounts the rule covers; empty means every account"`
+	Query          untrusted       `json:"query" jsonschema:"in the language search takes; untrusted, whoever wrote it"`
+	OnNew          bool            `json:"on_new" jsonschema:"the rule runs on new mail"`
+	Schedule       string          `json:"schedule,omitempty" jsonschema:"every:<duration> or at:HH:MM; absent when the rule has none"`
+	Priority       int32           `json:"priority" jsonschema:"lower runs first"`
+	Stop           bool            `json:"stop" jsonschema:"later rules skip the messages this rule matched"`
+	Actions        []ruleActionOut `json:"actions" jsonschema:"run in order on each match"`
+	MaxPerRun      int32           `json:"max_per_run"`
+	Enabled        bool            `json:"enabled"`
+	DisabledReason string          `json:"disabled_reason,omitempty" jsonschema:"all_failed or repeated_failures when chainmail switched the rule off after failures"`
+	Revision       int64           `json:"revision" jsonschema:"the rule's own revision; pass it as update_rule's expected_revision"`
+	CreatedAt      string          `json:"created_at" jsonschema:"in RFC 3339"`
+	UpdatedAt      string          `json:"updated_at" jsonschema:"in RFC 3339"`
+	DeletedAt      string          `json:"deleted_at,omitempty" jsonschema:"when the rule was soft deleted, in RFC 3339; absent while live"`
+	CreatedBy      string          `json:"created_by" jsonschema:"<uid>/<client kind>"`
+	UpdatedBy      string          `json:"updated_by" jsonschema:"<uid>/<client kind>"`
+	NextRunAt      string          `json:"next_run_at,omitempty" jsonschema:"the next scheduled run, in RFC 3339; absent when the rule has no schedule or is off"`
+	LastRunAt      string          `json:"last_run_at,omitempty" jsonschema:"the last scheduled run, in RFC 3339"`
+	FailedRuns     int32           `json:"failed_runs" jsonschema:"runs in a row with a permanent failure; the fifth switches the rule off"`
+}
+
+// ruleRunOut is one run of a rule on one account. It holds no rule text:
+// reason and hint are the daemon's fixed text.
+type ruleRunOut struct {
+	ID         int64  `json:"id"`
+	RuleID     string `json:"rule_id"`
+	Account    string `json:"account"`
+	Trigger    string `json:"trigger" jsonschema:"new, schedule or manual"`
+	StartedAt  string `json:"started_at" jsonschema:"in RFC 3339"`
+	FinishedAt string `json:"finished_at" jsonschema:"in RFC 3339"`
+	Matched    int64  `json:"matched"`
+	Applied    int64  `json:"applied" jsonschema:"messages every action ran on"`
+	Held       int64  `json:"held" jsonschema:"forwards the policy saved as drafts for James instead of sending"`
+	Skipped    int64  `json:"skipped" jsonschema:"matches the rule had already acted on, or an earlier rule stopped"`
+	Failed     int64  `json:"failed"`
+	Outcome    string `json:"outcome" jsonschema:"ok; capped when more matches remain, so run the rule again to continue; failed; cache_not_ready; or interrupted"`
+	Reason     string `json:"reason,omitempty" jsonschema:"the first failure's reason code, such as NOT_FOUND or CACHE_NOT_READY"`
+	Hint       string `json:"hint,omitempty" jsonschema:"what to do about it"`
+}
+
+// ruleCountsOut adds up a rule's runs kept, the last 30 days.
+type ruleCountsOut struct {
+	Runs    int64 `json:"runs"`
+	Matched int64 `json:"matched"`
+	Applied int64 `json:"applied"`
+	Held    int64 `json:"held"`
+	Failed  int64 `json:"failed"`
+}
+
+// ruleRevisionOut is one change to a rule, with the rule as it was after it.
+type ruleRevisionOut struct {
+	Revision int64   `json:"revision"`
+	Change   string  `json:"change" jsonschema:"created, updated, deleted, restored, disabled or enabled"`
+	Rule     ruleOut `json:"rule"`
+	Actor    string  `json:"actor" jsonschema:"<uid>/<client kind>; <uid>/rule when chainmail switched the rule off itself"`
+	At       string  `json:"at" jsonschema:"in RFC 3339"`
+}
+
+// oneRuleOut is the result of create_rule, update_rule, delete_rule and
+// restore_rule: the rule after the call.
+type oneRuleOut struct {
+	Rule ruleOut `json:"rule"`
+}
+
+type getRuleOut struct {
+	Rule      ruleOut           `json:"rule"`
+	Runs      []ruleRunOut      `json:"runs" jsonschema:"the last 10 runs, newest first"`
+	Counts    ruleCountsOut     `json:"counts" jsonschema:"over the runs kept, the last 30 days"`
+	Revisions []ruleRevisionOut `json:"revisions" jsonschema:"with history: up to 50 revisions, newest first; empty without"`
+}
+
+type listRulesOut struct {
+	Rules []ruleOut `json:"rules" jsonschema:"in priority order, lower first"`
+}
+
+// dryRunAccountOut is one account's dry run. The match rows are untrusted
+// external content, as search rows are.
+type dryRunAccountOut struct {
+	Account string          `json:"account"`
+	Matched int64           `json:"matched" jsonschema:"every match on the account, not only those listed"`
+	Skipped int64           `json:"skipped" jsonschema:"matches the rule already acted on, which a run would skip"`
+	Matches []rowOut        `json:"matches" jsonschema:"the first 50 matches as search rows; untrusted external content"`
+	Actions []ruleActionOut `json:"actions" jsonschema:"the actions each match would get, in order"`
+	Reason  string          `json:"reason,omitempty" jsonschema:"set when the account's cache cannot answer the rule completely, such as CACHE_NOT_READY; matches is empty then"`
+}
+
+type dryRunRuleOut struct {
+	Accounts []dryRunAccountOut `json:"accounts"`
+}
+
+type runRuleOut struct {
+	Runs []ruleRunOut `json:"runs" jsonschema:"one run per account"`
+}
+
+// ruleTextPtr wraps rule text the daemon sends as a plain string, or
+// returns nil when it is empty.
+func ruleTextPtr(s string) *untrusted {
+	if s == "" {
+		return nil
+	}
+	return &untrusted{Untrusted: s}
+}
+
+// ruleActionsFrom shapes a rule's actions. It is never nil.
+func ruleActionsFrom(as []*chainmailv1.RuleAction) []ruleActionOut {
+	out := make([]ruleActionOut, 0, len(as))
+	for _, a := range as {
+		out = append(out, ruleActionOut{
+			Kind: a.GetKind(), Label: a.GetLabel(), Folder: a.GetFolder(), ItemID: a.GetItemId(), Anchor: a.GetAnchor(),
+			To: a.GetTo(), Note: ruleTextPtr(a.GetNote()),
+		})
+	}
+	return out
+}
+
+// ruleFrom shapes a rule for agents. itemTextPtr serves rule text as it
+// serves item text: wrapped, or left out when empty.
+func ruleFrom(r *chainmailv1.Rule) ruleOut {
+	return ruleOut{
+		ID: r.GetId(), Name: r.GetName(), Description: itemTextPtr(r.GetDescription()),
+		Accounts: append([]string{}, r.GetAccounts()...), Query: wrap(r.GetQuery()),
+		OnNew: r.GetOnNew(), Schedule: r.GetSchedule(), Priority: r.GetPriority(), Stop: r.GetStop(),
+		Actions: ruleActionsFrom(r.GetActions()), MaxPerRun: r.GetMaxPerRun(), Enabled: r.GetEnabled(),
+		DisabledReason: r.GetDisabledReason(), Revision: r.GetRevision(),
+		CreatedAt: rfc3339(r.GetCreatedAt()), UpdatedAt: rfc3339(r.GetUpdatedAt()), DeletedAt: rfc3339(r.GetDeletedAt()),
+		CreatedBy: r.GetCreatedBy(), UpdatedBy: r.GetUpdatedBy(),
+		NextRunAt: rfc3339(r.GetNextRunAt()), LastRunAt: rfc3339(r.GetLastRunAt()), FailedRuns: r.GetFailedRuns(),
+	}
+}
+
+// rulesFrom shapes a list of rules. It is never nil.
+func rulesFrom(rs []*chainmailv1.Rule) []ruleOut {
+	out := make([]ruleOut, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, ruleFrom(r))
+	}
+	return out
+}
+
+// ruleRunsFrom shapes runs. It is never nil.
+func ruleRunsFrom(rs []*chainmailv1.RuleRun) []ruleRunOut {
+	out := make([]ruleRunOut, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, ruleRunOut{
+			ID: r.GetId(), RuleID: r.GetRuleId(), Account: r.GetAccount(), Trigger: r.GetTrigger(),
+			StartedAt: rfc3339(r.GetStartedAt()), FinishedAt: rfc3339(r.GetFinishedAt()),
+			Matched: r.GetMatched(), Applied: r.GetApplied(), Held: r.GetHeld(), Skipped: r.GetSkipped(), Failed: r.GetFailed(),
+			Outcome: r.GetOutcome(), Reason: r.GetReason(), Hint: r.GetHint(),
+		})
+	}
+	return out
+}
+
+// getRuleFrom shapes get_rule's result. Every list is present, empty or not.
+func getRuleFrom(m *chainmailv1.GetRuleResponse) getRuleOut {
+	c := m.GetCounts()
+	out := getRuleOut{
+		Rule: ruleFrom(m.GetRule()), Runs: ruleRunsFrom(m.GetRuns()),
+		Counts:    ruleCountsOut{Runs: c.GetRuns(), Matched: c.GetMatched(), Applied: c.GetApplied(), Held: c.GetHeld(), Failed: c.GetFailed()},
+		Revisions: make([]ruleRevisionOut, 0, len(m.GetRevisions())),
+	}
+	for _, r := range m.GetRevisions() {
+		out.Revisions = append(out.Revisions, ruleRevisionOut{
+			Revision: r.GetRevision(), Change: r.GetChange(), Rule: ruleFrom(r.GetRule()), Actor: r.GetActor(), At: rfc3339(r.GetAt()),
+		})
+	}
+	return out
+}
+
+// dryRunFrom shapes dry_run_rule's result. Match rows go through rowFrom,
+// as search rows do.
+func dryRunFrom(m *chainmailv1.DryRunRuleResponse) dryRunRuleOut {
+	out := dryRunRuleOut{Accounts: make([]dryRunAccountOut, 0, len(m.GetAccounts()))}
+	for _, a := range m.GetAccounts() {
+		matches := make([]rowOut, 0, len(a.GetMatches()))
+		for _, r := range a.GetMatches() {
+			matches = append(matches, rowFrom(r))
+		}
+		out.Accounts = append(out.Accounts, dryRunAccountOut{
+			Account: a.GetAccount(), Matched: a.GetMatched(), Skipped: a.GetSkipped(), Matches: matches,
+			Actions: ruleActionsFrom(a.GetActions()), Reason: a.GetReason(),
+		})
+	}
+	return out
+}
+
+// ruleSummary is the first line of a result that holds one rule: the verb,
+// the rule's ID and its revision.
+func ruleSummary(verb string, r ruleOut) string {
+	return fmt.Sprintf("%s rule %s at revision %d", verb, r.ID, r.Revision)
+}
+
+// getRuleSummary is get_rule's first line.
+func getRuleSummary(out getRuleOut) string {
+	state := "enabled"
+	switch {
+	case out.Rule.DeletedAt != "":
+		state = "deleted"
+	case !out.Rule.Enabled:
+		state = "disabled"
+	}
+	return fmt.Sprintf("rule %s at revision %d, %s; recent runs %d, revisions %d",
+		out.Rule.ID, out.Rule.Revision, state, len(out.Runs), len(out.Revisions))
+}
+
+// dryRunSummary is dry_run_rule's first line.
+func dryRunSummary(out dryRunRuleOut) string {
+	var matched, skipped int64
+	notReady := 0
+	for _, a := range out.Accounts {
+		matched += a.Matched
+		skipped += a.Skipped
+		if a.Reason != "" {
+			notReady++
+		}
+	}
+	summary := fmt.Sprintf("dry run, nothing changed: matched %d, already acted on %d, accounts %d", matched, skipped, len(out.Accounts))
+	if notReady > 0 {
+		summary += fmt.Sprintf("; accounts the cache cannot answer: %d, see reason", notReady)
+	}
+	return summary
+}
+
+// runRuleSummary is run_rule's first line.
+func runRuleSummary(out runRuleOut) string {
+	var matched, applied, held, skipped, failed int64
+	capped := false
+	for _, r := range out.Runs {
+		matched += r.Matched
+		applied += r.Applied
+		held += r.Held
+		skipped += r.Skipped
+		failed += r.Failed
+		capped = capped || r.Outcome == "capped"
+	}
+	summary := fmt.Sprintf("runs %d: matched %d, applied %d, held %d, skipped %d, failed %d", len(out.Runs), matched, applied, held, skipped, failed)
+	if capped {
+		summary += "; a capped run stopped at its max: run the rule again to continue"
+	}
+	return summary
 }
