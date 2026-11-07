@@ -55,6 +55,7 @@ message ReadAuditRequest {
   string action = 3; // empty: all actions
   int32 limit = 4; // 0 means 100; maximum 1000
   int64 before_id = 5; // paging: only rows with id < before_id; 0 means no bound
+  string client = 6; // empty: every client
 }
 
 // ReadAuditResponse is one page of audit rows.

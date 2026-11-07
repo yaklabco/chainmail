@@ -6,20 +6,23 @@ import "chainmail/v1/message.proto";
 import "google/protobuf/timestamp.proto";
 
 // WatchFilter selects events. Empty fields match everything, except that
-// item and item_mail events come only to a reader that names them in kinds
-// or sets item. Status and gap events pass a kinds filter unless kinds
-// names them.
+// the opt-in kinds (item, item_mail, rule, item_due_soon, item_due and
+// item_overdue) come only to a reader that names them in kinds, or, for
+// every opt-in kind but rule, sets item. Status and gap events pass a kinds
+// filter unless kinds names them.
 message WatchFilter {
   repeated string accounts = 1;
-  // new, flags, expunged, status, gap, item or item_mail. Empty matches
-  // every kind but item and item_mail.
+  // new, flags, expunged, status, gap, item, item_mail, rule,
+  // item_due_soon, item_due or item_overdue. Empty matches every kind but
+  // the opt-in ones.
   repeated string kinds = 2;
   // A folder name or label. inbox also matches the Gmail label \Inbox.
+  // Item, rule and due events always pass it.
   string in = 3;
-  // An item ID. Limits item and item_mail events to that item and every
-  // live item below it, resolved when the read starts, and drops new, flags
-  // and expunged events. With no kinds it returns item, item_mail, status
-  // and gap events.
+  // An item ID. Limits item, item_mail and due events to that item and
+  // every live item below it, resolved when the read starts, and drops new,
+  // flags, expunged and rule events. With no kinds it returns item,
+  // item_mail, due, status and gap events.
   string item = 4;
 }
 
@@ -28,9 +31,11 @@ message WatchEvent {
   // 0 for a trimmed gap, which is generated at read time.
   int64 id = 1;
   google.protobuf.Timestamp at = 2;
-  // new, flags, expunged, status, gap, item or item_mail.
+  // new, flags, expunged, status, gap, item, item_mail, rule,
+  // item_due_soon, item_due or item_overdue.
   string kind = 3;
-  // Empty for item, which belongs to no account.
+  // Empty for item, rule, item_due_soon, item_due and item_overdue, which
+  // belong to no account.
   string account = 4;
   string folder = 5;
   string ref = 6;
@@ -55,6 +60,11 @@ message WatchEvent {
   string item_id = 15;
   // item_mail: the message is from the account's own address.
   bool from_self = 16;
+  // rule: what changed. It never holds rule text.
+  RuleChange rule = 17;
+  // item_due_soon, item_due and item_overdue: the item that reached the
+  // stage the kind names. It never holds item text.
+  WorkItemDue due = 18;
 }
 
 // WorkItemChange is the payload of an item event. It never holds item text.
@@ -71,6 +81,40 @@ message WorkItemChange {
   string op = 4;
   // Changed field names, for updated and moved. Never their values.
   repeated string fields = 5;
+}
+
+// RuleChange is the payload of a rule event. It never holds rule text.
+message RuleChange {
+  // ru_ followed by lowercase letters, digits and underscores.
+  string rule_id = 1;
+  string name = 2;
+  // created, updated, deleted, restored, disabled or enabled.
+  string change = 3;
+  // The rule's own revision after the change. Each rule counts from 1.
+  int64 revision = 4;
+  // <uid>/<client kind> of the change, such as 1000/mcp. <uid>/rule when
+  // the daemon turned the rule off.
+  string actor = 5;
+  // all_failed or repeated_failures when the daemon turned the rule off.
+  // Empty otherwise.
+  string reason = 6;
+}
+
+// WorkItemDue is the payload of item_due_soon, item_due and item_overdue
+// events: a work item with a due date reached the stage the event's kind
+// names. Each stage fires once per item and due date. It never holds item
+// text: read the title with GetItem.
+message WorkItemDue {
+  string item_id = 1;
+  // objective, key-result, initiative, epic, feature, story, bug,
+  // support-ticket or task.
+  string type = 2;
+  // YYYY-MM-DD.
+  string due_date = 3;
+  // backlog, in-progress or in-review. Done items get no due events.
+  string state = 4;
+  // Empty for a root, or for a task in the inbox.
+  string parent_id = 5;
 }
 
 // SubscribeRequest starts a stream. Set at most one of group and since.
