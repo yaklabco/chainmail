@@ -780,3 +780,134 @@ func TestRuleRunnerStartsUnopened(t *testing.T) {
 		t.Errorf("opened runner status = %+v, want idle at %d", st, pos)
 	}
 }
+
+// TestRuleBatchLeavesTheGroupUnreadWhileTheCacheIsDown checks spec 5.2:
+// while the account's cache is disabled, as a full disk turns it off, a
+// batch is left unacknowledged with reason cache_disabled and no rule acts
+// or writes a run, and once the cache is back the batch runs.
+func TestRuleBatchLeavesTheGroupUnreadWhileTheCacheIsDown(t *testing.T) {
+	t.Parallel()
+	g := newRunnerRig(t, "host", nil)
+	rule := g.newRule(t, "host", "flag-lunch", func(d *rules.Definition) { d.Query = "subject:lunch" })
+	start := g.pos
+	last := g.publish(t, g.refs["host lunch"])
+	g.f.s.cacheDown.Store(true)
+	err := g.step(t.Context())
+	if reason, _ := failureOf(err); reason != reasonCacheDisabled {
+		t.Fatalf("step = %v, want a cache_disabled failure", err)
+	}
+	if g.pos != start || g.acked(t) != start {
+		t.Errorf("position %d, acked %d, want both %d", g.pos, g.acked(t), start)
+	}
+	if n := g.fk.Calls("StoreFlags"); n != 0 {
+		t.Errorf("flagged %d times while the cache was down", n)
+	}
+	if runs := g.runsOf(t, rule.ID); len(runs) != 0 {
+		t.Errorf("runs = %+v, want none", runs)
+	}
+	g.f.s.cacheDown.Store(false)
+	if err := g.step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !g.flagged([]ref.Ref{g.refs["host lunch"]})[0] {
+		t.Error("lunch is not flagged once the cache is back")
+	}
+	if got := g.acked(t); got != last {
+		t.Errorf("acked %d, want %d", got, last)
+	}
+}
+
+// TestRuleCopyClearFailureStillCountsTheFailure checks that a failed copy
+// whose pending row cannot be dropped still counts as failed and lets the
+// batch be acknowledged: failing the batch would replay it, and the replay
+// would take the pending row as a copy made.
+func TestRuleCopyClearFailureStillCountsTheFailure(t *testing.T) {
+	t.Parallel()
+	g := newRunnerRig(t, "host", nil)
+	rule := g.newRule(t, "host", "copy-nowhere", func(d *rules.Definition) {
+		d.Query, d.Actions = "subject:lunch", []rules.Action{{Kind: rules.ActCopy, Folder: "Nowhere"}}
+	})
+	if _, err := g.f.stateDB.ExecContext(t.Context(),
+		`CREATE TRIGGER keep_applied BEFORE DELETE ON rule_applied BEGIN SELECT RAISE(ABORT, 'kept'); END`); err != nil {
+		t.Fatal(err)
+	}
+	last := g.publish(t, g.refs["host lunch"])
+	if err := g.step(t.Context()); err != nil {
+		t.Fatalf("step = %v, want the failure counted", err)
+	}
+	if run := g.lastRun(t, rule.ID); run.Outcome != rules.OutcomeFailed || run.Failed != 1 || run.Reason != api.ReasonNotFound {
+		t.Errorf("run = %+v, want failed, 1 failed, NOT_FOUND", run)
+	}
+	if got := g.acked(t); got != last {
+		t.Errorf("acked %d, want %d", got, last)
+	}
+}
+
+// TestRuleBatchScopeFailureCountsAndDisables checks the behaviour table's
+// row for a rule that cannot be scoped for good: each batch records a
+// failed run with one failure, nothing matched and the scope's reason, the
+// batch is acknowledged, and the fifth such run in a row disables the
+// rule with repeated_failures.
+func TestRuleBatchScopeFailureCountsAndDisables(t *testing.T) {
+	t.Parallel()
+	g := newRunnerRig(t, "host", nil)
+	rule := g.newRule(t, "host", "gone-item", func(d *rules.Definition) { d.Query = "item:it_zqxgone" })
+	for i := range 5 {
+		last := g.publish(t, g.refs["host lunch"])
+		if err := g.step(t.Context()); err != nil {
+			t.Fatalf("step %d: %v", i+1, err)
+		}
+		if got := g.acked(t); got != last {
+			t.Errorf("step %d acked %d, want %d", i+1, got, last)
+		}
+		run := g.lastRun(t, rule.ID)
+		if run.Outcome != rules.OutcomeFailed || run.Failed != 1 || run.Matched != 0 || run.Reason != api.ReasonNotFound || run.Hint == "" {
+			t.Errorf("run %d = %+v, want failed, 1 failed, 0 matched, NOT_FOUND with a hint", i+1, run)
+		}
+		now, err := g.f.s.rules.Get(t.Context(), rule.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if wantOn := i < 4; now.Enabled != wantOn {
+			t.Errorf("after run %d enabled %t, want %t", i+1, now.Enabled, wantOn)
+		}
+		if i == 4 && now.DisabledReason != rules.ReasonRepeatedFailures {
+			t.Errorf("disabled reason %q, want %s", now.DisabledReason, rules.ReasonRepeatedFailures)
+		}
+	}
+	if n := g.fk.Calls("StoreFlags"); n != 0 {
+		t.Errorf("flagged %d times", n)
+	}
+}
+
+// TestRuleRunnerStaysStartingWhileOpenFails checks amendment 8: a runner
+// whose group does not open backs off as starting, with acked ID -1 and
+// the failure's reason, and opens once the log answers.
+func TestRuleRunnerStaysStartingWhileOpenFails(t *testing.T) {
+	t.Parallel()
+	g := newActRig(t, nil)
+	clk := newRuleClock(routeNow)
+	g.f.s.rulesClock = clk
+	r := g.f.s.newRuleRunner(g.acct(t, "host"), g.f.accounts["host"])
+	r.jitter = func() float64 { return 0.5 }
+	if _, err := g.f.stateDB.ExecContext(t.Context(), `ALTER TABLE event_groups RENAME TO event_groups_away`); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	wg.Go(func() { r.Run(ctx) })
+	defer wg.Wait()
+	defer cancel()
+	w := clk.next(t)
+	if want := watch.Backoff(0, 0.5); w.d != want {
+		t.Errorf("backoff %v, want %v", w.d, want)
+	}
+	if st := r.status(); st.State != runnerStarting || st.AckedID != -1 || st.Reason != api.ReasonInternal {
+		t.Errorf("status = %+v, want starting at -1 with INTERNAL", st)
+	}
+	if _, err := g.f.stateDB.ExecContext(t.Context(), `ALTER TABLE event_groups_away RENAME TO event_groups`); err != nil {
+		t.Fatal(err)
+	}
+	w.fire <- clk.Now()
+	waitStatus(t, r, func(st runnerStatus) bool { return st.State == runnerIdle && st.AckedID >= 0 && st.Reason == "" })
+}

@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/mailstore/fake"
 	"github.com/yaklabco/chainmail/internal/ref"
 	"github.com/yaklabco/chainmail/internal/rules"
@@ -185,5 +187,32 @@ func TestRunnerStatusReportsAJobAsRunning(t *testing.T) {
 	done()
 	if st := g.r.status(); st.State != runnerBackingOff || st.Reason != "SERVER_UNAVAILABLE" {
 		t.Errorf("status after the job = %+v, want the loop's state back", st)
+	}
+}
+
+// TestRunRuleInterruptedMidPage checks spec 5.5 for a manual run: a
+// transient failure after the page's first rows ends the run interrupted
+// with the failure's reason and what it counted so far, and runRule still
+// returns the run with a nil error.
+func TestRunRuleInterruptedMidPage(t *testing.T) {
+	t.Parallel()
+	g, batch, rule := newBatchRig(t)
+	if _, err := g.r.runRule(t.Context(), rule, rules.TriggerManual, 0); err != nil {
+		t.Fatal(err)
+	}
+	g.fk.FailWrite("StoreFlags", mailstore.ErrUnavailable)
+	run, err := g.r.runRule(t.Context(), rule, rules.TriggerManual, 0)
+	if err != nil {
+		t.Fatalf("runRule = %v, want the run with a nil error", err)
+	}
+	if run.Outcome != rules.OutcomeInterrupted || run.Reason != api.ReasonServerUnavailable ||
+		run.Matched != 3 || run.Skipped != 2 || run.Applied != 0 || run.Failed != 0 {
+		t.Errorf("run = %+v, want interrupted, SERVER_UNAVAILABLE, 3 matched, 2 skipped", run)
+	}
+	if last := g.lastRun(t, rule.ID); last.ID != run.ID || last.Outcome != rules.OutcomeInterrupted {
+		t.Errorf("stored run = %+v, want the interrupted run", last)
+	}
+	if got := g.flagged(batch); !slices.Equal(got, []bool{true, true, false, false, false}) {
+		t.Errorf("flagged %v, want the 2 oldest", got)
 	}
 }

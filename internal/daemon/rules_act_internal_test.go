@@ -361,3 +361,30 @@ func TestActReplaysPendingRows(t *testing.T) {
 		}
 	})
 }
+
+// TestActAuditsNoRuleFolder checks the Global Constraint that no audit
+// target holds a folder name copied from a rule: a rule's move and copy
+// rows carry the ref, the rule and the run, and nothing else.
+func TestActAuditsNoRuleFolder(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []rules.ActionKind{rules.ActMove, rules.ActCopy} {
+		t.Run(string(kind), func(t *testing.T) {
+			t.Parallel()
+			g := newActRig(t, nil)
+			rule := g.newRule(t, "host", "file-lunch", func(d *rules.Definition) {
+				d.Actions = []rules.Action{{Kind: kind, Folder: "Archive"}}
+			})
+			lunch := g.refs["host lunch"]
+			if res := g.f.s.act(t.Context(), rule, 3, g.acct(t, "host"), g.row(t, "host lunch")); res.class != actOK {
+				t.Fatalf("act = %+v, want ok", res)
+			}
+			rows := g.audit(t)
+			if len(rows) != 1 {
+				t.Fatalf("audit rows = %+v, want one", rows)
+			}
+			if want := []string{lunch.String(), "rule=" + rule.ID, "run=3"}; !slices.Equal(rows[0].targets, want) {
+				t.Errorf("targets = %q, want %q", rows[0].targets, want)
+			}
+		})
+	}
+}

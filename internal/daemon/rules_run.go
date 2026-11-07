@@ -43,9 +43,15 @@ const (
 	// search_items.go's cacheNotReadyHint answers a refused search.
 	ruleCacheNotReadyHint = "the cache cannot answer this rule completely yet; " +
 		"run it again once chainmail cache status shows the account up to date"
+	// ruleCacheDisabledHint is the fixed hint of a runner that leaves new
+	// mail unread while the account's cache is off.
+	ruleCacheDisabledHint = "the cache is off, as it turns off when the disk holding cache.db is full; " +
+		"rules run on the new mail once the cache is back on, which the daemon log reports"
 )
 
 // errRuleAccount refuses a run of a rule on an account it does not cover.
+// Its message is errRuleAccountNotCovered's, but its hint fits RunRule,
+// whose account is named or left out, where that one fits a dry-run.
 var errRuleAccount = &argError{
 	msg:  "the rule does not cover that account",
 	hint: "run the rule on an account it names, or on all of its accounts",
@@ -369,10 +375,11 @@ func (r *ruleRunner) runBatch(ctx context.Context, b *newBatch) error {
 // the bodies it needs, and a message whose body does not come counts as a
 // failed match (amendment 10). A rule that matched nothing writes no run
 // (spec 3.3). It returns a transient failure, after recording the run as
-// interrupted.
+// interrupted. While the account's cache is off it returns a
+// cache_disabled failure and writes no run, so the batch stays unread.
 func (r *ruleRunner) newRun(ctx context.Context, rule rules.Rule, b *newBatch, stopped map[string]bool) error {
 	start := r.s.opts.Now()
-	sc, covered, _, err := r.scope(ctx, rule, false)
+	sc, covered, reason, err := r.scope(ctx, rule, false)
 	switch {
 	case err != nil && classifyReason(errDetail(err).GetReason()) == actTransient:
 		return err
@@ -381,6 +388,11 @@ func (r *ruleRunner) newRun(ctx context.Context, rule rules.Rule, b *newBatch, s
 		return err
 	case !covered:
 		return nil
+	case reason == reasonCacheDisabled:
+		// The cache is down, as a full disk turns it off: the batch
+		// would match nothing, so it stays unread until the cache is back
+		// (spec 5.2).
+		return &actionUnavailable{reason: reasonCacheDisabled, hint: ruleCacheDisabledHint}
 	}
 	uids := b.scoped(sc.sources)
 	var bodyFailed []ref.Ref
@@ -571,7 +583,13 @@ func (r *ruleRunner) apply(ctx context.Context, rule rules.Rule, run *rules.Run,
 			run.Reason, run.Hint = res.reason, res.hint
 		}
 		if res.clearPending {
-			return false, rules.ClearPending(ctx, r.s.opts.StateDB, rule.ID, r.acct.Name, key)
+			// A pending row left behind would make a replay of this batch
+			// take the copy as made, so failing the batch here is worse
+			// than keeping the failure counted and going on.
+			if err := rules.ClearPending(ctx, r.s.opts.StateDB, rule.ID, r.acct.Name, key); err != nil {
+				r.s.opts.Logger.WarnContext(ctx, "a failed rule action left a pending act-once row",
+					"rule", rule.ID, "account", r.acct.Name, "run", run.ID, "err", err)
+			}
 		}
 		return false, nil
 	default:
