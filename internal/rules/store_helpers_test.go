@@ -318,3 +318,51 @@ func ruleIDs(rules []Rule) []string {
 	}
 	return out
 }
+
+// begin starts a run of ruleID on account at at and returns its ID.
+func (r *storeRig) begin(t *testing.T, ruleID, account string, trig Trigger, at time.Time) int64 {
+	t.Helper()
+	id, err := r.store.BeginRun(t.Context(), ruleID, account, trig, at)
+	if err != nil {
+		t.Fatalf("BeginRun: %v", err)
+	}
+	return id
+}
+
+// finish finishes run and reports whether it disabled the rule.
+func (r *storeRig) finish(t *testing.T, run Run) bool {
+	t.Helper()
+	disabled, err := r.store.FinishRun(t.Context(), run)
+	if err != nil {
+		t.Fatalf("FinishRun %d: %v", run.ID, err)
+	}
+	return disabled
+}
+
+// sameRuns fails the test unless got is want, in order, with times
+// compared by instant.
+func sameRuns(t *testing.T, got []Run, want ...Run) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%d runs %+v, want %d %+v", len(got), got, len(want), want)
+	}
+	for i := range got {
+		g, w := got[i], want[i]
+		if !g.StartedAt.Equal(w.StartedAt) || !g.FinishedAt.Equal(w.FinishedAt) {
+			t.Errorf("run %d times = %v to %v, want %v to %v", w.ID, g.StartedAt, g.FinishedAt, w.StartedAt, w.FinishedAt)
+		}
+		g.StartedAt, g.FinishedAt, w.StartedAt, w.FinishedAt = time.Time{}, time.Time{}, time.Time{}, time.Time{}
+		if !reflect.DeepEqual(g, w) {
+			t.Errorf("run %d =\n%+v\nwant\n%+v", w.ID, g, w)
+		}
+	}
+}
+
+// runIDs is the IDs of runs, in order.
+func runIDs(runs []Run) []int64 {
+	var out []int64
+	for _, r := range runs {
+		out = append(out, r.ID)
+	}
+	return out
+}
