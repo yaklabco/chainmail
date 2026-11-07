@@ -35,10 +35,13 @@ Filters apply in the daemon. status and gap events pass a --kind filter
 unless --kind names them. --in matches a folder or a Gmail label, and
 inbox also matches \Inbox.
 
-Work item events are sent only when asked for: item, a change to a work
-item, and item_mail, new mail on a thread linked to one, come when --kind
-names them or --item is given. --item ID limits both to that item and every
-item below it, and leaves out new, flags and expunged events.
+Work item and rule events are sent only when asked for. The item kinds
+are item, a change to a work item; item_mail, new mail on a thread linked
+to one; and item_due_soon, item_due and item_overdue, an open item
+reaching a stage of its due date. They come when --kind names them or
+--item is given. rule, a change to a rule, comes only when --kind names it.
+--item ID limits the item kinds to that item and every item below it, and
+leaves out new, flags, expunged and rule events.
 
 The watch reconnects by itself when the daemon goes away, or sends nothing
 for 75 seconds, resuming from its group or from the last event or
@@ -69,7 +72,7 @@ const (
 )
 
 // watchKinds are the event kinds --kind takes.
-var watchKinds = []string{"new", "flags", "expunged", "status", "gap", "item", "item_mail"}
+var watchKinds = []string{"new", "flags", "expunged", "status", "gap", "item", "item_mail", "rule", "item_due_soon", "item_due", "item_overdue"}
 
 // newWatchCmd builds chainmail watch and its status and groups subcommands.
 func newWatchCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
@@ -112,9 +115,9 @@ func newWatchCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	cmd.Flags().StringVar(&group, "group", "", "resume after this group's acknowledged event, and acknowledge each line once written")
 	cmd.Flags().Int64Var(&since, "since", 0, "resume after this event ID")
 	cmd.Flags().StringArrayVar(&accounts, "account", nil, "only this account; repeat for more (default: all)")
-	cmd.Flags().StringSliceVar(&kinds, "kind", nil, "only these kinds, comma separated: new, flags, expunged, status, gap, item, item_mail (default: all but item and item_mail; with --item: item, item_mail, status and gap)")
+	cmd.Flags().StringSliceVar(&kinds, "kind", nil, "only these kinds, comma separated: new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due, item_overdue (default: all but the opt-in kinds item, item_mail, rule and the item_due kinds; with --item: the item kinds, status and gap)")
 	cmd.Flags().StringVar(&in, "in", "", "only this folder or Gmail label, such as inbox (default: all)")
-	cmd.Flags().StringVar(&item, "item", "", "only item and item_mail events of this item and every item below it")
+	cmd.Flags().StringVar(&item, "item", "", "only item, item_mail and item_due events of this item and every item below it")
 	cmd.Flags().BoolVar(&once, "once", false, "exit at the first heartbeat, once every event already in the log is printed")
 	cmd.Flags().BoolVar(&heartbeat, "heartbeat", false, "print heartbeats too")
 	cmd.AddCommand(newWatchStatusCmd(ctx, env, g), newWatchGroupsCmd(ctx, env, g))
@@ -127,7 +130,7 @@ func parseKinds(raw []string) ([]string, error) {
 	for _, k := range raw {
 		k = strings.TrimSpace(k)
 		if !slices.Contains(watchKinds, k) {
-			return nil, fmt.Errorf("unknown --kind %q: want new, flags, expunged, status, gap, item or item_mail", k)
+			return nil, fmt.Errorf("unknown --kind %q: want new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due or item_overdue", k)
 		}
 		kinds = append(kinds, k)
 	}
@@ -530,6 +533,10 @@ func eventLine(clock string, e *chainmailv1.WatchEvent) string {
 			what += " (from self)"
 		}
 		what += " " + clip(termText(e.GetMessage().GetSubject().GetUntrusted()), 60)
+	case "rule":
+		what = ruleChangeText(e.GetRule())
+	case "item_due_soon", "item_due", "item_overdue":
+		what = itemDueText(e.GetDue())
 	default:
 		what = e.GetRef()
 	}
@@ -621,4 +628,21 @@ func itemChangeText(ch *chainmailv1.WorkItemChange) string {
 		parts = append(parts, strings.Join(fields, ","))
 	}
 	return strings.Join(parts, " ") + fmt.Sprintf(" revision %d", ch.GetRevision())
+}
+
+// ruleChangeText is what a rule event's line says happened: the rule, the
+// change with the reason of an automatic disable, the revision and who
+// made the change.
+func ruleChangeText(ch *chainmailv1.RuleChange) string {
+	parts := []string{ch.GetRuleId(), ch.GetName(), ch.GetChange()}
+	if reason := ch.GetReason(); reason != "" {
+		parts = append(parts, "("+reason+")")
+	}
+	return strings.Join(parts, " ") + fmt.Sprintf(" revision %d by %s", ch.GetRevision(), ch.GetActor())
+}
+
+// itemDueText is what a due event's line says: the item, its type, its due
+// date and its state. The kind names the stage.
+func itemDueText(d *chainmailv1.WorkItemDue) string {
+	return fmt.Sprintf("%s %s due %s %s", d.GetItemId(), d.GetType(), d.GetDueDate(), d.GetState())
 }

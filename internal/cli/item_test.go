@@ -830,7 +830,7 @@ func TestCompleteWatchItem(t *testing.T) {
 	t.Parallel()
 	testItemCompletion(t, []itemCase{
 		{name: "item", args: []string{"watch", "--item", ""}, cands: []string{"it_admin_work", "it_task1"}},
-		{name: "kinds", args: []string{"watch", "--kind", "new,item"}, cands: []string{"new,item", "new,item_mail"}},
+		{name: "kinds", args: []string{"watch", "--kind", "new,item"}, cands: []string{"new,item", "new,item_mail", "new,item_due_soon", "new,item_due", "new,item_overdue"}},
 	})
 }
 
