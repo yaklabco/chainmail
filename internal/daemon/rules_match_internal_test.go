@@ -409,3 +409,146 @@ func TestScopeRuleErrors(t *testing.T) {
 		})
 	}
 }
+
+// ruleRowNamed returns account's cached row with subject, from any folder
+// the cache tracks, Sent and Drafts included.
+func ruleRowNamed(t *testing.T, f *routeFixture, account, subject string) cache.Row {
+	t.Helper()
+	folders, err := f.accounts[account].Folders(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources, err := f.store.SourcesOf(t.Context(), account, folders)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := f.store.MatchRows(t.Context(), account, cache.Where{}, cache.MatchOptions{Sources: sources, Limit: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.Subject == subject {
+			return r
+		}
+	}
+	t.Fatalf("%s has no cached row %q", account, subject)
+	return cache.Row{}
+}
+
+// ruleRowSubjects returns the subjects of rows, in order.
+func ruleRowSubjects(rows []cache.Row) []string {
+	var out []string
+	for _, r := range rows {
+		out = append(out, r.Subject)
+	}
+	return out
+}
+
+// ruleMatchAll pages sc with matchPage, limit rows at a time, checking
+// that no page is longer than limit, and returns every row in order.
+func ruleMatchAll(t *testing.T, f *routeFixture, sc ruleScope, limit int) []cache.Row {
+	t.Helper()
+	var (
+		out   []cache.Row
+		after cache.MatchCursor
+	)
+	for range 100 {
+		rows, err := f.s.matchPage(t.Context(), sc, after, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) > limit {
+			t.Fatalf("page of %d rows, limit %d", len(rows), limit)
+		}
+		out = append(out, rows...)
+		if len(rows) < limit {
+			return out
+		}
+		after = cache.CursorOf(rows[len(rows)-1])
+	}
+	t.Fatal("matchPage never ran out of rows")
+	return nil
+}
+
+// TestMatchPage checks that a rule's scope pages oldest first, two rows at
+// a time, through every match and only those: default scopes, in:, text,
+// item: and Google labels.
+func TestMatchPage(t *testing.T) {
+	t.Parallel()
+	f := ruleFixture(t)
+	tests := []struct {
+		account, query string
+		want           []string
+	}{
+		{"host", "", []string{"old plan", "invoice 41", "re: old plan", "invoice 42", "lunch"}},
+		{"host", "from:acme", []string{"invoice 41", "invoice 42"}},
+		{"host", "in:sent", []string{"re: re: old plan"}},
+		{"host", "in:inbox newer_than:7d", []string{"invoice 42", "lunch"}},
+		{"host", "invoice newer_than:30d", []string{"invoice 41", "invoice 42"}},
+		{"host", "item:it_plan", []string{"old plan", "re: old plan"}},
+		{"host", "item:it_plan in:sent", []string{"re: re: old plan"}},
+		{"host", "item:none", []string{"invoice 41", "invoice 42", "lunch"}},
+		{"host", "item:it_empty", nil},
+		{"gmail", "", []string{"invoice 40", "trip", "re: trip"}},
+		{"gmail", "in:sent", []string{"sent note"}},
+		{"gmail", "in:drafts", []string{"draft note"}},
+		{"gmail", "item:it_plan", nil},
+		{"gmail", "in:trash", nil},
+	}
+	for _, tt := range tests {
+		sc := ruleScopeOf(t, f, tt.account, tt.query, false)
+		if got := ruleRowSubjects(ruleMatchAll(t, f, sc, 2)); !slices.Equal(got, tt.want) {
+			t.Errorf("%s %q = %q, want %q", tt.account, tt.query, got, tt.want)
+		}
+	}
+}
+
+// TestMatchBatch checks that a batch matches only its own UIDs, only in the
+// folders the rule covers, and that an empty or nil batch matches nothing
+// rather than the whole scope.
+func TestMatchBatch(t *testing.T) {
+	t.Parallel()
+	f := ruleFixture(t)
+	uid := func(account, subject string) uint32 { return ruleRowNamed(t, f, account, subject).UID }
+	inv41, inv42, lunch, sent := uid("host", "invoice 41"), uid("host", "invoice 42"), uid("host", "lunch"), uid("host", "re: re: old plan")
+	allMail := "[Gmail]/All Mail"
+	trip, sentNote := uid("gmail", "trip"), uid("gmail", "sent note")
+	tests := []struct {
+		name, account, query string
+		uids                 map[string][]uint32
+		want                 []string
+	}{
+		{"across folders, Sent left out", "host", "", map[string][]uint32{"INBOX": {inv42}, "Archive": {inv41}, "Sent": {sent}}, []string{"invoice 41", "invoice 42"}},
+		{"the query narrows the batch", "host", "from:acme", map[string][]uint32{"INBOX": {inv42, lunch}}, []string{"invoice 42"}},
+		{"a folder absent from the batch", "host", "", map[string][]uint32{"INBOX": {lunch}}, []string{"lunch"}},
+		{"a UID in the wrong folder", "host", "", map[string][]uint32{"Archive": {lunch}}, nil},
+		{"in:sent opts in", "host", "in:sent", map[string][]uint32{"Sent": {sent}, "INBOX": {lunch}}, []string{"re: re: old plan"}},
+		{"google skips sent mail", "gmail", "", map[string][]uint32{allMail: {trip, sentNote}}, []string{"trip"}},
+		{"empty batch", "host", "", map[string][]uint32{}, nil},
+		{"nil batch", "host", "", nil, nil},
+	}
+	for _, tt := range tests {
+		sc := ruleScopeOf(t, f, tt.account, tt.query, false)
+		rows, err := f.s.matchBatch(t.Context(), sc, tt.uids)
+		if err != nil {
+			t.Errorf("%s: %v", tt.name, err)
+			continue
+		}
+		if got := ruleRowSubjects(rows); !slices.Equal(got, tt.want) {
+			t.Errorf("%s: matched %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+// TestMatchWithoutACache checks that matching on a daemon whose cache.db
+// is not open is CACHE_NOT_READY, not a crash.
+func TestMatchWithoutACache(t *testing.T) {
+	t.Parallel()
+	f := ruleFixture(t)
+	sc := ruleScopeOf(t, f, "host", "", false)
+	f.s.cache = nil
+	_, err := f.s.matchPage(t.Context(), sc, cache.MatchCursor{}, 10)
+	ruleWantErr(t, err, api.ReasonCacheNotReady, "the local cache is not running")
+	_, err = f.s.matchBatch(t.Context(), sc, map[string][]uint32{"INBOX": {1}})
+	ruleWantErr(t, err, api.ReasonCacheNotReady, "the local cache is not running")
+}

@@ -271,3 +271,63 @@ func ruleFolders(ctx context.Context, scoper mailstore.Scoper, acct config.Resol
 	}
 	return folders, nil
 }
+
+// rulePageSize is how many rows one cache read of a rule's matches
+// returns: a page of a scheduled, manual or dry run, or of a batch.
+const rulePageSize = 500
+
+// errRuleCacheOff is a match on a daemon whose cache.db is not open.
+var errRuleCacheOff = &fixedTextError{msg: "the local cache is not running", err: errNotReady}
+
+// matchRows reads one page of sc's matches oldest first with o's batch,
+// cursor and limit, in sc's sources and without its excluded labels. No
+// sources match nothing, without a query.
+func (s *Server) matchRows(ctx context.Context, sc ruleScope, o cache.MatchOptions) ([]cache.Row, error) {
+	if s.cache == nil {
+		return nil, errRuleCacheOff
+	}
+	if len(sc.sources) == 0 {
+		return nil, nil
+	}
+	o.Sources, o.ExcludeLabels, o.Order = sc.sources, sc.excludeLabels, cache.OldestFirst
+	rows, err := s.cache.MatchRows(ctx, sc.acct.Name, sc.where, o)
+	if err != nil {
+		return nil, s.ruleCacheErr(err)
+	}
+	return rows, nil
+}
+
+// matchBatch matches only the given UIDs per folder: a new-mail batch, or
+// the stand-in batch of a trigger new dry-run. A folder missing from uids
+// matches nothing, and so does an empty or nil uids, never the whole scope.
+// Rows come oldest first, every page of them.
+func (s *Server) matchBatch(ctx context.Context, sc ruleScope, uids map[string][]uint32) ([]cache.Row, error) {
+	if len(uids) == 0 {
+		return nil, nil
+	}
+	if s.cache == nil {
+		return nil, errRuleCacheOff
+	}
+	var (
+		out   []cache.Row
+		after cache.MatchCursor
+	)
+	for {
+		rows, err := s.matchRows(ctx, sc, cache.MatchOptions{UIDs: uids, After: after, Limit: rulePageSize})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+		if len(rows) < rulePageSize {
+			return out, nil
+		}
+		after = cache.CursorOf(rows[len(rows)-1])
+	}
+}
+
+// matchPage pages the whole scope oldest first: at most limit rows after
+// the cursor, 1 to 1000. A zero cursor starts at the oldest match. A page
+// shorter than limit is the last.
+func (s *Server) matchPage(ctx context.Context, sc ruleScope, after cache.MatchCursor, limit int) ([]cache.Row, error) {
+	return s.matchRows(ctx, sc, cache.MatchOptions{After: after, Limit: limit})
+}
