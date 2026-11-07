@@ -18,7 +18,7 @@ Installing chainmail starts nothing. The [quick start](./quick-start.mdx) runs a
 
 ## Homebrew
 
-The Homebrew tap `yaklabco/tap` holds a Cask for the latest release. It works on macOS and on Linux.
+The Homebrew tap `yaklabco/tap` holds a Cask for the latest release. It works on macOS. Recent Homebrew releases also install casks on Linux, and the Cask has Linux builds. If your Homebrew on Linux refuses it, use a [release archive](#release-archives) or [Nix](#nix) instead.
 
 ```sh
 brew install yaklabco/tap/chainmail

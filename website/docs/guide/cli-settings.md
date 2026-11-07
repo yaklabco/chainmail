@@ -56,7 +56,7 @@ An `output` other than `json` or `table` is a usage error too, naming where it c
 
 Every client command, `chainmail mcp` included, checks the settings before it runs. `help`, `completion`, `man` and `daemon` do not, so a bad `cli.toml` or `CHAINMAIL_OUTPUT` never stops them.
 
-The daemon never reads `cli.toml` and ignores `CHAINMAIL_OUTPUT`. Its own config file is separate (see [configuration](../reference/configuration.md)), and no environment variable can change it.
+The daemon never reads `cli.toml` and ignores `CHAINMAIL_OUTPUT`. Its own config file is separate (see [configuration](../reference/configuration.md)). The daemon's flags `--config`, `--state-dir`, `--vault-key-file` and `--dev` can also come from `CHAINMAIL_CONFIG`, `CHAINMAIL_STATE_DIR`, `CHAINMAIL_VAULT_KEY_FILE` and `CHAINMAIL_DEV`, but no environment variable changes a setting inside the config file.
 
 ## Shell completion
 

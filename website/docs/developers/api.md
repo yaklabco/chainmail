@@ -107,7 +107,7 @@ Act on `reason`, never on the message text. The reasons are defined in `internal
 - `CreateDraft` saves a new message to Drafts.
 - `UpdateDraft` replaces a draft with a new version.
 - `SendDraft` sends a draft and removes it from Drafts.
-- `DeleteDraft` deletes a draft for good.
+- `DeleteDraft` removes a draft: it moves it to Trash, or expunges it when `policy.allow_expunge` is set.
 - `UploadAttachment` is a client stream that stores a file for a later send to attach or show inline.
 
 Every call that sends needs an `idempotency_key`. `Send`, `Reply` and `Forward` need none for a dry run or a draft.

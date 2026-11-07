@@ -87,30 +87,33 @@ systemctl is-active chainmail
 sudo ls -l '<backup-dir>'
 ```
 
-3. Remove the old database's write-ahead files and the cache, then put the backup's files in place:
+3. Remove the old database's write-ahead files and the cache, then put the backup's `state.db` in place. Removing `cache.db` is optional. Without it, the daemon notices that its cache has run past the restored event log, logs `cache group is past the event log's tail; rebuilding the account's cache`, and rebuilds those accounts itself.
 
 ```sh
 sudo rm -f /var/lib/chainmail/state.db-wal /var/lib/chainmail/state.db-shm
 sudo rm -f /var/lib/chainmail/cache.db /var/lib/chainmail/cache.db-wal /var/lib/chainmail/cache.db-shm
 sudo install -o chainmail -g chainmail -m 0600 '<backup-dir>'/state.db /var/lib/chainmail/state.db
+```
+
+4. Keep the vault you have. Restore `vault.age` from the backup only when the current one is lost or damaged, because the backup lacks every password, client secret and refresh token set after it was taken. In that case only:
+
+```sh
 sudo install -o chainmail -g chainmail -m 0600 '<backup-dir>'/vault.age /var/lib/chainmail/vault.age
 ```
 
-4. Only when the backup has a `state.db-wal`: copy it too, then fold it into `state.db` as the `chainmail` user. Both backup procedures on this page make one-file backups, so a backup with a `state.db-wal` was made some other way. Restore that log only when you know it was copied together with that same `state.db`, at the same moment. A log left from an older backup brings back old data without any error. Good output is `0|0|0`, then `ok`. Do not copy a `state.db-shm` from the backup. SQLite rebuilds it from the log.
+5. Only when the backup has a `state.db-wal`: copy it too, then fold it into `state.db` as the `chainmail` user. Both backup procedures on this page make one-file backups, so a backup with a `state.db-wal` was made some other way. Restore that log only when you know it was copied together with that same `state.db`, at the same moment. A log left from an older backup brings back old data without any error. Good output is `0|0|0`, then `ok`. Do not copy a `state.db-shm` from the backup. SQLite rebuilds it from the log.
 
 ```sh
 sudo install -o chainmail -g chainmail -m 0600 '<backup-dir>'/state.db-wal /var/lib/chainmail/state.db-wal
 sudo -u chainmail $(nix build --no-link --print-out-paths nixpkgs#sqlite.bin)/bin/sqlite3 /var/lib/chainmail/state.db 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA integrity_check'
 ```
 
-5. Check the files. `state.db` and `vault.age` must be owned by `chainmail chainmail` with mode `-rw-------`, and there must be no `state.db-wal` or `state.db-shm`. Then start the daemon:
+6. Check the files. `state.db` and `vault.age` must be owned by `chainmail chainmail` with mode `-rw-------`, and there must be no `state.db-wal` or `state.db-shm`. Then start the daemon:
 
 ```sh
 sudo ls -l /var/lib/chainmail
 sudo systemctl start chainmail
 ```
-
-Restore `vault.age` only when it is lost or damaged, since the backup lacks any secret set after it. Leave out its `install` line otherwise. Removing `cache.db` is optional. Without it, the daemon notices that its cache has run past the restored event log, logs `cache group is past the event log's tail; rebuilding the account's cache`, and rebuilds those accounts itself.
 
 What a restore of an older `state.db` means:
 

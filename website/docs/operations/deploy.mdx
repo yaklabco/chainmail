@@ -314,7 +314,7 @@ sudo chown root:wheel /Library/LaunchDaemons/com.example.chainmail.plist
 sudo chmod 0644 /Library/LaunchDaemons/com.example.chainmail.plist
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.example.chainmail.plist
 sudo launchctl print system/com.example.chainmail
-tail -n 20 /usr/local/var/log/chainmail/daemon.log
+sudo tail -n 20 /usr/local/var/log/chainmail/daemon.log
 ```
 
 [Start, stop and restart](start-stop.md#commands) has the other `launchctl` commands.
