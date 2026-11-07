@@ -266,7 +266,8 @@ func Load(path string) (*Config, error) {
 
 // Parse decodes config TOML, rejecting unknown keys and values of the wrong
 // type, applies defaults and validates the result. Nothing outside data is
-// read: no environment variable can set or change a key.
+// read but the time zone database that checks [rules] timezone: no
+// environment variable can set or change a key.
 //
 // go-toml's strict decoder gates the input first, refusing unknown keys and
 // values of the wrong type that viper alone would accept or change. Only
@@ -519,6 +520,7 @@ func (c *Config) validate() error {
 	validateSendAllow("policy.send_allow", c.Policy.SendAllow, add)
 	c.Watch.validate(add)
 	c.Cache.validate(add)
+	c.Rules.validate(add)
 	for _, name := range c.AccountNames() {
 		c.validateAccount(name, add)
 	}

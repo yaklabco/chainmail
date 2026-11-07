@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -153,24 +154,28 @@ func TestParseClock(t *testing.T) {
 		hour, minute int
 		ok           bool
 	}
-	for in, want := range map[string]clock{
-		"00:00":    {0, 0, true},
-		"08:00":    {8, 0, true},
-		"07:30":    {7, 30, true},
-		"23:59":    {23, 59, true},
-		"8:00":     {},
-		"24:00":    {},
-		"08:60":    {},
-		"08:0":     {},
-		"08:00:00": {},
-		" 08:00":   {},
-		"0800":     {},
-		"":         {},
-		"noon":     {},
+	// A slice, not a map, so the leading-space input is a plain value.
+	for _, tt := range []struct {
+		in   string
+		want clock
+	}{
+		{"00:00", clock{0, 0, true}},
+		{"08:00", clock{8, 0, true}},
+		{"07:30", clock{7, 30, true}},
+		{"23:59", clock{23, 59, true}},
+		{"8:00", clock{}},
+		{"24:00", clock{}},
+		{"08:60", clock{}},
+		{"08:0", clock{}},
+		{"08:00:00", clock{}},
+		{" 08:00", clock{}},
+		{"0800", clock{}},
+		{"", clock{}},
+		{"noon", clock{}},
 	} {
-		hour, minute, ok := parseClock(in)
-		if got := (clock{hour, minute, ok}); got != want {
-			t.Errorf("parseClock(%q) = %+v, want %+v", in, got, want)
+		hour, minute, ok := parseClock(tt.in)
+		if got := (clock{hour, minute, ok}); got != tt.want {
+			t.Errorf("parseClock(%q) = %+v, want %+v", tt.in, got, tt.want)
 		}
 	}
 }
@@ -206,5 +211,75 @@ func TestRulesRefusesWrongTypes(t *testing.T) {
 				t.Errorf("Parse accepted %q", extra)
 			}
 		})
+	}
+}
+
+func TestRulesValidBounds(t *testing.T) {
+	t.Parallel()
+	for _, config := range []string{
+		"[rules]\ntimezone = \"UTC\"\n",
+		"[rules]\ntimezone = \"America/Los_Angeles\"\n",
+		"[rules]\ntimezone = \"Europe/London\"\n",
+		"[rules]\ntimezone = \"\"\n",
+		"[rules]\ndue_time = \"00:00\"\n",
+		"[rules]\ndue_time = \"23:59\"\n",
+		"[rules]\ndue_time = \"\"\n",
+		"[rules]\ndue_soon_days = 0\n",
+		"[rules]\ndue_soon_days = 30\n",
+		"[rules]\ntimezone = \"America/Los_Angeles\"\ndue_time = \"08:00\"\ndue_soon_days = 2\n",
+	} {
+		if _, err := Parse([]byte(config)); err != nil {
+			t.Errorf("%q: err = %v, want valid", config, err)
+		}
+	}
+}
+
+func TestRulesInvalid(t *testing.T) {
+	t.Parallel()
+	const zoneHint = "; want an IANA name such as America/Los_Angeles or UTC"
+	const clockHint = " must be a 24-hour time HH:MM, 00:00 to 23:59"
+	tests := []struct {
+		name    string
+		config  string
+		problem string
+	}{
+		{name: "unknown zone", config: "[rules]\ntimezone = \"Mars/Base\"\n", problem: `rules.timezone: unknown time zone "Mars/Base"` + zoneHint},
+		{name: "zone path", config: "[rules]\ntimezone = \"../etc/passwd\"\n", problem: `rules.timezone: unknown time zone "../etc/passwd"` + zoneHint},
+		{name: "one-digit hour", config: "[rules]\ndue_time = \"8:00\"\n", problem: `rules.due_time: "8:00"` + clockHint},
+		{name: "hour 24", config: "[rules]\ndue_time = \"24:00\"\n", problem: `rules.due_time: "24:00"` + clockHint},
+		{name: "minute 60", config: "[rules]\ndue_time = \"08:60\"\n", problem: `rules.due_time: "08:60"` + clockHint},
+		{name: "seconds", config: "[rules]\ndue_time = \"08:00:00\"\n", problem: `rules.due_time: "08:00:00"` + clockHint},
+		{name: "words", config: "[rules]\ndue_time = \"noon\"\n", problem: `rules.due_time: "noon"` + clockHint},
+		{name: "due soon negative", config: "[rules]\ndue_soon_days = -1\n", problem: "rules.due_soon_days must be 0 to 30"},
+		{name: "due soon too many", config: "[rules]\ndue_soon_days = 31\n", problem: "rules.due_soon_days must be 0 to 30"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte(tt.config))
+			var ve *ValidationError
+			if !errors.As(err, &ve) || !slices.Contains(ve.Problems, tt.problem) {
+				t.Errorf("err = %v, want a problem %q", err, tt.problem)
+			}
+		})
+	}
+}
+
+// Parse reports every [rules] problem at once, in key order, and nothing
+// else for a config that sets only [rules].
+func TestRulesReportsEveryProblem(t *testing.T) {
+	t.Parallel()
+	_, err := Parse([]byte("[rules]\ntimezone = \"Mars/Base\"\ndue_time = \"8:00\"\ndue_soon_days = 31\n"))
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err = %v, want *ValidationError", err)
+	}
+	want := []string{
+		`rules.timezone: unknown time zone "Mars/Base"; want an IANA name such as America/Los_Angeles or UTC`,
+		`rules.due_time: "8:00" must be a 24-hour time HH:MM, 00:00 to 23:59`,
+		"rules.due_soon_days must be 0 to 30",
+	}
+	if !slices.Equal(ve.Problems, want) {
+		t.Errorf("problems = %q, want %q", ve.Problems, want)
 	}
 }

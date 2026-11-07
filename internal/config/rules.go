@@ -82,3 +82,19 @@ func parseClock(s string) (hour, minute int, ok bool) {
 	}
 	return t.Hour(), t.Minute(), true
 }
+
+// validate reports each [rules] key that does not parse or lies out of
+// range. An empty timezone is the host's local zone and is not checked.
+func (r RulesConfig) validate(add func(string, ...any)) {
+	if r.Timezone != "" {
+		if _, err := time.LoadLocation(r.Timezone); err != nil {
+			add("rules.timezone: unknown time zone %q; want an IANA name such as America/Los_Angeles or UTC", r.Timezone)
+		}
+	}
+	if _, _, ok := parseClock(r.DueTime); !ok {
+		add("rules.due_time: %q must be a 24-hour time HH:MM, 00:00 to 23:59", r.DueTime)
+	}
+	if d := r.DueSoonDays; d != nil && (*d < 0 || *d > maxDueSoonDays) {
+		add("rules.due_soon_days must be 0 to %d", maxDueSoonDays)
+	}
+}
