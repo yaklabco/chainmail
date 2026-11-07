@@ -47,6 +47,9 @@ type Config struct {
 	Watch        WatchConfig            `toml:"watch"`
 	// Cache is the [cache] table: the local cache of every account.
 	Cache CacheConfig `toml:"cache"`
+	// Rules is the [rules] table: the time zone of rule schedules and when
+	// work item due events fire.
+	Rules RulesConfig `toml:"rules"`
 }
 
 // DefaultMaxRecipients is the most recipients a send may have unless
@@ -472,6 +475,7 @@ func (c *Config) applyDefaults() {
 	c.Policy = c.Policy.WithDefaults()
 	c.Watch.applyDefaults()
 	c.Cache.applyDefaults()
+	c.Rules.applyDefaults()
 	for name, a := range c.Accounts {
 		if a.Username == "" {
 			a.Username = a.Address

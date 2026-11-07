@@ -100,6 +100,9 @@ func TestParseValid(t *testing.T) {
 	if local.SMTP.Security != provider.SecurityStartTLS {
 		t.Errorf("local SMTP security = %v", local.SMTP.Security)
 	}
+	if got, want := describeRules(cfg.RulesSettings()), "Local 08:00 soon 2"; got != want {
+		t.Errorf("RulesSettings() = %s, want the defaults %s", got, want)
+	}
 }
 
 func TestParseDefaults(t *testing.T) {
@@ -110,6 +113,9 @@ func TestParseDefaults(t *testing.T) {
 	}
 	if cfg.Daemon.Socket != DefaultSocket || cfg.Daemon.ClientGroup != DefaultClientGroup {
 		t.Errorf("defaults = %+v", cfg.Daemon)
+	}
+	if got, want := describeRules(cfg.RulesSettings()), "Local 08:00 soon 2"; got != want {
+		t.Errorf("RulesSettings() = %s, want %s", got, want)
 	}
 }
 
@@ -238,6 +244,7 @@ func TestParseRejectsUnknownFields(t *testing.T) {
 		{name: "daemon", config: "[daemon]\nsockett = \"/x\""},
 		{name: "account", config: "[accounts.x]\nprovder = \"hostinger\"\naddress = \"a@b.c\""},
 		{name: "inline imap", config: "[accounts.x]\nprovider = \"hostinger\"\naddress = \"a@b.c\"\nimap = { host = \"h\", prot = 993 }"},
+		{name: "rules", config: "[rules]\ntimezon = \"UTC\""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1008,12 +1015,17 @@ func TestParseIgnoresTheEnvironment(t *testing.T) {
 	t.Setenv("CHAINMAIL_POLICY_ALLOW_EXPUNGE", "true")
 	t.Setenv("POLICY_ALLOW_EXPUNGE", "true")
 	t.Setenv("CHAINMAIL_DAEMON_SOCKET", "/evil.sock")
+	t.Setenv("CHAINMAIL_RULES_DUE_TIME", "23:00")
+	t.Setenv("RULES_TIMEZONE", "UTC")
 	cfg, err := Parse([]byte("[accounts.host]\nprovider = \"hostinger\"\naddress = \"me@example.com\"\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Policy.AllowExpunge || cfg.Daemon.Socket == "/evil.sock" {
 		t.Errorf("environment reached the config: %+v %+v", cfg.Policy, cfg.Daemon)
+	}
+	if cfg.Rules.DueTime != "08:00" || cfg.Rules.Timezone != "" {
+		t.Errorf("environment reached the rules table: %+v", cfg.Rules)
 	}
 }
 
