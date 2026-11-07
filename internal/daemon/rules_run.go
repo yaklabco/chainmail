@@ -24,6 +24,18 @@ const (
 	// detached context, so a run that its deadline or a shutdown ended is
 	// still recorded with what it did.
 	runFinishTimeout = 5 * time.Second
+	// bodyWait bounds a new-mail batch's wait for the bodies its text
+	// rules need (spec 5.2 step 3).
+	bodyWait = 5 * time.Minute
+	// bodyPoll is how often a batch waiting for bodies looks again. The
+	// prefetcher has no signal, so the wait polls.
+	bodyPoll = 5 * time.Second
+	// reasonBodyNotCached is the run reason of a text rule whose message
+	// had no cached body in time.
+	reasonBodyNotCached = "body_not_cached"
+	// bodyNotCachedHint is its fixed hint.
+	bodyNotCachedHint = "the rule's query has text terms, which need message bodies the cache did not hold in time; " +
+		"check [cache] prefetch_bodies, or run the rule by hand later"
 )
 
 // The states a runner reports in RulesStatus. An account without a runner
@@ -332,9 +344,11 @@ func (r *ruleRunner) runBatch(ctx context.Context, b *newBatch) error {
 	return nil
 }
 
-// newRun runs one on_new rule over the batch. A rule that matched nothing
-// writes no run (spec 3.3). It returns a transient failure, after
-// recording the run as interrupted.
+// newRun runs one on_new rule over the batch. A text rule first waits for
+// the bodies it needs, and a message whose body does not come counts as a
+// failed match (amendment 10). A rule that matched nothing writes no run
+// (spec 3.3). It returns a transient failure, after recording the run as
+// interrupted.
 func (r *ruleRunner) newRun(ctx context.Context, rule rules.Rule, b *newBatch, stopped map[string]bool) error {
 	start := r.s.opts.Now()
 	sc, covered, _, err := r.scope(ctx, rule, false)
@@ -347,13 +361,26 @@ func (r *ruleRunner) newRun(ctx context.Context, rule rules.Rule, b *newBatch, s
 	case !covered:
 		return nil
 	}
-	rows, err := r.s.matchBatch(ctx, sc, b.scoped(sc.sources))
-	if err != nil || len(rows) == 0 {
+	uids := b.scoped(sc.sources)
+	var bodyFailed []ref.Ref
+	if sc.needsBodies {
+		if uids, bodyFailed, err = r.bodyGate(ctx, sc, b, uids); err != nil {
+			return err
+		}
+	}
+	rows, err := r.s.matchBatch(ctx, sc, uids)
+	if err != nil {
 		return err
 	}
-	keys := make([]string, len(rows))
-	for i, row := range rows {
-		keys[i] = messageKeyOf(r.acct, row.Ref())
+	keys := make([]string, 0, len(rows)+len(bodyFailed))
+	for _, row := range rows {
+		keys = append(keys, messageKeyOf(r.acct, row.Ref()))
+	}
+	for _, m := range bodyFailed {
+		keys = append(keys, messageKeyOf(r.acct, m))
+	}
+	if len(keys) == 0 {
+		return nil
 	}
 	applied, err := r.s.rules.Applied(ctx, rule.ID, r.acct.Name, keys)
 	if err != nil {
@@ -379,10 +406,76 @@ func (r *ruleRunner) newRun(ctx context.Context, rule rules.Rule, b *newBatch, s
 			stopped[keys[i]] = true
 		}
 	}
+	if cause == nil {
+		for _, key := range keys[len(rows):] {
+			run.Matched++
+			if prev, ok := applied[key]; stopped[key] || (ok && prev.Outcome != rules.AppliedPending) {
+				run.Skipped++
+				continue
+			}
+			run.Failed++
+			if run.Reason == "" {
+				run.Reason, run.Hint = reasonBodyNotCached, bodyNotCachedHint
+			}
+		}
+	}
 	if err := r.settle(ctx, &run, false, cause); err != nil {
 		return err
 	}
 	return cause
+}
+
+// bodyGate splits a text rule's batch messages, uids, into those whose
+// bodies the cache holds, which it returns to match, and those that fail
+// with body_not_cached: a final body failure, any message when the
+// account prefetches no bodies, and one still pending at the batch's body
+// deadline. It waits while any is pending. A message without a row is in
+// neither: it is not matched (amendment 11).
+func (r *ruleRunner) bodyGate(ctx context.Context, sc ruleScope, b *newBatch, uids map[string][]uint32) (map[string][]uint32, []ref.Ref, error) {
+	for {
+		ready := map[string][]uint32{}
+		var failed, pending []ref.Ref
+		for _, src := range sc.sources {
+			list := uids[src.Folder]
+			if len(list) == 0 {
+				continue
+			}
+			states, err := r.s.cache.BodyStates(ctx, r.acct.Name, src, list)
+			if err != nil {
+				return nil, nil, err
+			}
+			for _, uid := range list {
+				st, ok := states[uid]
+				if !ok {
+					continue
+				}
+				m := b.refs[batchKey{folder: src.Folder, uidValidity: src.UIDValidity, uid: uid}]
+				switch st {
+				case cache.BodyHeld:
+					ready[src.Folder] = append(ready[src.Folder], uid)
+				case cache.BodyFailed:
+					failed = append(failed, m)
+				default:
+					pending = append(pending, m)
+				}
+			}
+		}
+		if len(pending) == 0 {
+			return ready, failed, nil
+		}
+		now := r.clock.Now()
+		if b.bodyDeadline.IsZero() {
+			b.bodyDeadline = now.Add(bodyWait)
+		}
+		if !r.ca.PrefetchesBodies() || !now.Before(b.bodyDeadline) {
+			return ready, append(failed, pending...), nil
+		}
+		select {
+		case <-r.clock.After(min(bodyPoll, b.bodyDeadline.Sub(now))):
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+	}
 }
 
 // scope resolves rule on the runner's account. covered is false when the
