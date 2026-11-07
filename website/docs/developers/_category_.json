@@ -1,0 +1,8 @@
+{
+  "label": "Developer guide",
+  "position": 7,
+  "link": {
+    "type": "generated-index",
+    "description": "How chainmail is built inside, how to build and test it, its API, and how to contribute and cut a release."
+  }
+}
