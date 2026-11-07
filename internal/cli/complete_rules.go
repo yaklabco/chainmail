@@ -127,5 +127,14 @@ func (cp *completer) ruleSpecs() map[string]compSpec {
 		"chainmail rule disable": {args: live},
 		"chainmail rule delete":  {args: live},
 		"chainmail rule restore": {args: cp.ruleRefs(1, true)},
+		"chainmail rule dry-run": {args: live, flags: map[string]cobra.CompletionFunc{
+			"file": files, "trigger": fixed(ruleTriggers...), "account": allAccounts,
+		}},
+		"chainmail rule run": {args: live, flags: map[string]cobra.CompletionFunc{"max": noComplete, "account": allAccounts}},
+		"chainmail rule runs": {args: live, flags: map[string]cobra.CompletionFunc{
+			"account": allAccounts, "trigger": fixed(ruleTriggers...), "outcome": fixed(ruleOutcomes...),
+			"limit": noComplete, "before-id": noComplete,
+		}},
+		"chainmail rule status": {args: noComplete},
 	}
 }

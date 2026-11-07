@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"fmt"
 	"io"
 	"slices"
@@ -227,4 +228,76 @@ func ruleListTable(w io.Writer, loc *time.Location, r *chainmailv1.ListRulesResp
 // and restore print: what happened, the rule, and its revision now.
 func ruleChangedText(verb string, r *chainmailv1.Rule) string {
 	return fmt.Sprintf("%s rule %s %s, revision %d\n", verb, termText(r.GetName()), termText(r.GetId()), r.GetRevision())
+}
+
+// ruleDryRunText prints each account's dry run: the counts, the actions
+// every match would get, and the matches the daemon listed, or why the
+// cache could not answer for the account. Accounts are separated by blank
+// lines.
+func ruleDryRunText(w io.Writer, loc *time.Location, r *chainmailv1.DryRunRuleResponse) error {
+	for i, a := range r.GetAccounts() {
+		var b strings.Builder
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		account := termText(a.GetAccount())
+		if reason := a.GetReason(); reason != "" {
+			fmt.Fprintf(&b, "%s: the cache cannot answer completely yet: %s\n", account, termText(reason))
+			if err := writeString(w, b.String()); err != nil {
+				return err
+			}
+			continue
+		}
+		fmt.Fprintf(&b, "%s: %d matched, %d already acted on\n", account, a.GetMatched(), a.GetSkipped())
+		if actions := a.GetActions(); len(actions) > 0 {
+			fmt.Fprintf(&b, "actions: %s\n", ruleActionsText(actions))
+		}
+		matches := a.GetMatches()
+		if len(matches) > 0 {
+			heading := fmt.Sprintf("matches: %d\n", len(matches))
+			if int64(len(matches)) < a.GetMatched() {
+				heading = fmt.Sprintf("matches: %d of %d\n", len(matches), a.GetMatched())
+			}
+			b.WriteString(heading)
+		}
+		if err := writeString(w, b.String()); err != nil {
+			return err
+		}
+		if len(matches) > 0 {
+			if err := ruleMatchesTable(w, loc, matches); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ruleMatchesTable prints a dry run's matches, indented: each message's
+// date, sender, subject and ref. Senders and subjects come from mail, so
+// every value is cleaned for the terminal.
+func ruleMatchesTable(w io.Writer, loc *time.Location, rows []*chainmailv1.MessageRow) error {
+	tw := newTable(w)
+	_, _ = fmt.Fprintln(tw, "  DATE\tFROM\tSUBJECT\tREF")
+	for _, row := range rows {
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n",
+			orDash(shortDate(row.GetDate(), loc)), orDash(clip(termText(firstSender(row.GetFrom())), 30)),
+			orDash(clip(termText(row.GetSubject().GetUntrusted()), 60)), orDash(termText(row.GetRef())))
+	}
+	return tw.Flush()
+}
+
+// ruleStatusTable prints one line per account runner, then when the next
+// scheduled run and the next due check are, or none.
+func ruleStatusTable(w io.Writer, loc *time.Location, r *chainmailv1.RulesStatusResponse) error {
+	tw := newTable(w)
+	_, _ = fmt.Fprintln(tw, "ACCOUNT\tSTATE\tACKED\tLAG\tREASON")
+	for _, s := range r.GetRunners() {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\n",
+			orDash(termText(s.GetAccount())), orDash(termText(s.GetState())), s.GetAckedId(), s.GetLag(), orDash(termText(s.GetReason())))
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	return writeString(w, fmt.Sprintf("next scheduled run: %s\nnext due check: %s\n",
+		cmp.Or(shortDate(r.GetNextScheduledAt(), loc), "none"), cmp.Or(shortDate(r.GetNextDueCheckAt(), loc), "none")))
 }

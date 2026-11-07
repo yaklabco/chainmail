@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -54,6 +56,10 @@ var (
 	ruleOutcomes = []string{"ok", "capped", "failed", "cache_not_ready", "interrupted"}
 )
 
+// ruleRunTimeout bounds rule run and rule dry-run, which may work through
+// a whole cache. The daemon gives a run as long.
+const ruleRunTimeout = 10 * time.Minute
+
 // newRuleCmd builds chainmail rule and its subcommands.
 func newRuleCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	cmd := newGroup("rule", "Sort mail with rules that act on new mail, on a schedule or on demand")
@@ -67,6 +73,10 @@ func newRuleCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		newRuleSwitchCmd(ctx, env, g, false),
 		newRuleDeleteCmd(ctx, env, g),
 		newRuleRestoreCmd(ctx, env, g),
+		newRuleDryRunCmd(ctx, env, g),
+		newRuleRunCmd(ctx, env, g),
+		newRuleRunsCmd(ctx, env, g),
+		newRuleStatusCmd(ctx, env, g),
 	)
 	return cmd
 }
@@ -217,4 +227,135 @@ func newRuleRestoreCmd(ctx context.Context, env Env, g *globals) *cobra.Command 
 		return nil
 	}
 	return cmd
+}
+
+func newRuleDryRunCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	req := &chainmailv1.DryRunRuleRequest{}
+	var file string
+	cmd := &cobra.Command{
+		Use:   "dry-run (<id|name> | -f FILE) [--trigger new|schedule|manual] [--account NAME]",
+		Short: "Show what a rule would match and do, acting on nothing",
+		Args:  rangeArgs(0, 1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			switch {
+			case len(args) == 1 && file != "":
+				return usageError{err: errors.New("give a rule or --file, not both"), hint: helpHint(cmd)}
+			case len(args) == 1:
+				req.Rule = args[0]
+			case file == "":
+				return usageError{err: errors.New("give a rule, or an unsaved rule with --file"), hint: helpHint(cmd)}
+			default:
+				def, _, err := readRuleFile(cmd, file)
+				if err != nil {
+					return err
+				}
+				req.Definition = def
+			}
+			runCtx, cancel := context.WithTimeout(ctx, ruleRunTimeout)
+			defer cancel()
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Rules.DryRunRule(runCtx, connect.NewRequest(req))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			return ruleDryRunText(env.Stdout, env.location(), resp.Msg)
+		},
+	}
+	f := cmd.Flags()
+	f.StringVarP(&file, "file", "f", "", "dry-run the unsaved rule in this rule file")
+	f.StringVar(&req.Trigger, "trigger", "", "new: the newest 200 cached messages per account; schedule or manual: the whole cache (default manual)")
+	f.StringVar(&req.Account, "account", "", "only this account (default: every account the rule covers)")
+	return cmd
+}
+
+func newRuleRunCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	req := &chainmailv1.RunRuleRequest{}
+	cmd := &cobra.Command{
+		Use:   "run <id|name> [--max N] [--account NAME]",
+		Short: "Run a rule now over the whole cache, oldest first, up to its cap",
+		Args:  exactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if req.Max < 0 {
+				return usageError{err: errors.New("--max must not be negative"), hint: helpHint(cmd)}
+			}
+			req.Rule = args[0]
+			runCtx, cancel := context.WithTimeout(ctx, ruleRunTimeout)
+			defer cancel()
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Rules.RunRule(runCtx, connect.NewRequest(req))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			return ruleRunsTable(env.Stdout, env.location(), resp.Msg.GetRuns(), false)
+		},
+	}
+	f := cmd.Flags()
+	f.Int32Var(&req.Max, "max", 0, "act on at most this many messages per account, 1 to 5000 (default: the rule's max_per_run)")
+	f.StringVar(&req.Account, "account", "", "only this account (default: every account the rule covers)")
+	return cmd
+}
+
+func newRuleRunsCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	req := &chainmailv1.ListRuleRunsRequest{}
+	cmd := &cobra.Command{
+		Use:   "runs [<id|name>]",
+		Short: "List rule runs, newest first; runs are kept 30 days",
+		Args:  rangeArgs(0, 1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				req.Rule = args[0]
+			}
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Rules.ListRuleRuns(ctx, connect.NewRequest(req))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			if err := ruleRunsTable(env.Stdout, env.location(), resp.Msg.GetRuns(), true); err != nil {
+				return err
+			}
+			if next := resp.Msg.GetNextBeforeId(); next != 0 {
+				return writeString(env.Stdout, fmt.Sprintf("older runs: pass --before-id %d\n", next))
+			}
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&req.Account, "account", "", "only runs on this account")
+	f.StringVar(&req.Trigger, "trigger", "", "only runs started this way: new, schedule or manual")
+	f.StringVar(&req.Outcome, "outcome", "", "only runs that ended this way: ok, capped, failed, cache_not_ready or interrupted")
+	f.Int32Var(&req.Limit, "limit", 0, "rows per page, 1 to 500 (default 50)")
+	f.Int64Var(&req.BeforeId, "before-id", 0, "only runs older than this ID, from next_before_id")
+	return cmd
+}
+
+func newRuleStatusCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show each account's rule runner, and when the next scheduled run and due check are",
+		Args:  exactArgs(0),
+		RunE: func(_ *cobra.Command, _ []string) error {
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Rules.RulesStatus(ctx, connect.NewRequest(&chainmailv1.RulesStatusRequest{}))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			return ruleStatusTable(env.Stdout, env.location(), resp.Msg)
+		},
+	}
 }

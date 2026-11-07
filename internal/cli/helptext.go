@@ -108,6 +108,9 @@ var examples = map[string]string{
   chainmail rule create -f receipts.toml`,
 	"chainmail rule delete":  `  chainmail rule delete receipts`,
 	"chainmail rule disable": `  chainmail rule disable receipts`,
+	"chainmail rule dry-run": `  chainmail rule dry-run receipts
+  # an unsaved rule, against the newest cached mail
+  chainmail rule dry-run -f receipts.toml --trigger new`,
 	"chainmail rule edit": `  chainmail rule edit receipts --priority 10 --stop
   chainmail rule edit inbox-cleanup --at 07:00
   # change only the keys the file holds
@@ -118,6 +121,11 @@ var examples = map[string]string{
 	"chainmail rule restore": `  # find the ID of a deleted rule, then restore it by that ID
   chainmail rule list --deleted
   chainmail rule restore ru_01jcb7m2k9r8q3v4w5x6y7z8a9`,
+	"chainmail rule run": `  # work through a backlog 100 messages at a time
+  chainmail rule run inbox-cleanup --max 100`,
+	"chainmail rule runs": `  chainmail rule runs
+  chainmail rule runs receipts --outcome failed`,
+	"chainmail rule status": `  chainmail rule status`,
 	"chainmail rule show": `  chainmail rule show receipts --history
   # save a rule as a file to edit
   chainmail rule show receipts --toml > receipts.toml`,
