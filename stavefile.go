@@ -35,7 +35,9 @@ func Generate() error {
 // GenerateCheck fails if gen/ is out of date with proto/, or the command
 // reference with the CLI's help.
 func GenerateCheck() error {
-	st.Deps(Generate, Docs.Commands)
+	// Serial: buf generate empties gen/ before it rewrites it, and the
+	// chainmail build behind Docs.Commands imports gen/.
+	st.SerialDeps(Generate, Docs.Commands)
 	paths := []string{"gen", commandDocsDir}
 	if err := sh.RunV("git", append([]string{"diff", "--exit-code", "--"}, paths...)...); err != nil {
 		return err
