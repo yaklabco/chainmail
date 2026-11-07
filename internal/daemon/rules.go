@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,12 @@ import (
 	"strings"
 	"time"
 
+	"connectrpc.com/connect"
+
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/gen/chainmail/v1/chainmailv1connect"
+	"github.com/yaklabco/chainmail/internal/audit"
+	"github.com/yaklabco/chainmail/internal/items"
 	"github.com/yaklabco/chainmail/internal/rules"
 )
 
@@ -127,4 +134,172 @@ func parseOutcome(s string) (rules.Outcome, error) {
 		return o, nil
 	}
 	return "", errRuleOutcome
+}
+
+// rulesService implements chainmailv1connect.RulesServiceHandler. Every
+// call is audited under the caller's own client kind, and no audit target,
+// error message, hint or log line holds a description, query, folder,
+// label, forward address or note: only IDs, names, field names, accounts,
+// kinds and counts.
+type rulesService struct {
+	// The embed answers the calls Cycle F has not written yet; Cycle F
+	// removes it.
+	chainmailv1connect.UnimplementedRulesServiceHandler
+	s *Server
+}
+
+var _ chainmailv1connect.RulesServiceHandler = (*rulesService)(nil)
+
+// ruleCall runs one rule call the way every handler of the service does:
+// it identifies the caller, gives the call timeout unless the client set a
+// deadline, and runs run, which sets the audit entry's targets as it
+// validates. It then records the entry, so refusals are audited too.
+func ruleCall[Req, Resp any](ctx context.Context, s *Server, req *connect.Request[Req], action string, timeout time.Duration,
+	run func(ctx context.Context, c caller, entry *audit.Entry) (*Resp, error),
+) (*connect.Response[Resp], error) {
+	c, err := callerOf(ctx, req.Header())
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := withDeadline(ctx, timeout)
+	defer cancel()
+	entry := audit.Entry{Action: action}
+	resp, runErr := run(ctx, c, &entry)
+	if err := s.record(ctx, c, entry, runErr); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// pokeRuleScheduler wakes the rule scheduler so it plans again. It never
+// blocks: one pending wakeup covers any number of changes.
+func (s *Server) pokeRuleScheduler() {
+	select {
+	case s.rulesWake <- struct{}{}:
+	default:
+	}
+}
+
+// checkLinkItems refuses link_item actions whose item is unknown or
+// deleted. It reads the items store, so it runs outside any rules store
+// transaction.
+func (s *Server) checkLinkItems(ctx context.Context, acts []rules.Action) error {
+	for _, a := range acts {
+		if a.Kind != rules.ActLinkItem {
+			continue
+		}
+		it, err := s.items.Get(ctx, a.ItemID)
+		switch {
+		case errors.Is(err, items.ErrNotFound):
+			return errLinkItemUnknown
+		case err != nil:
+			return s.itemsErr(err)
+		case !it.DeletedAt.IsZero():
+			return errLinkItemDeleted
+		}
+	}
+	return nil
+}
+
+// CreateRule implements chainmailv1connect.RulesServiceHandler. It is
+// audited as rule.create with the new rule's ID and its number of actions.
+func (r *rulesService) CreateRule(ctx context.Context, req *connect.Request[chainmailv1.CreateRuleRequest]) (*connect.Response[chainmailv1.CreateRuleResponse], error) {
+	return ruleCall(ctx, r.s, req, "rule.create", callTimeout, func(ctx context.Context, c caller, entry *audit.Entry) (*chainmailv1.CreateRuleResponse, error) {
+		entry.Targets = []string{tally("actions", len(req.Msg.GetRule().GetActions()))}
+		d, err := definitionOf(req.Msg.GetRule())
+		if err != nil {
+			return nil, err
+		}
+		if err := d.Validate(r.s.ruleEnv()); err != nil {
+			return nil, err
+		}
+		if err := r.s.checkLinkItems(ctx, d.Actions); err != nil {
+			return nil, err
+		}
+		rule, err := r.s.rules.Create(ctx, actorOf(c), d)
+		if err != nil {
+			return nil, r.s.rulesErr(err)
+		}
+		entry.Targets = []string{"rule=" + rule.ID, tally("actions", len(rule.Actions))}
+		r.s.pokeRuleScheduler()
+		return &chainmailv1.CreateRuleResponse{Rule: ruleProto(rule)}, nil
+	})
+}
+
+// UpdateRule implements chainmailv1connect.RulesServiceHandler. It changes
+// the fields update_mask names, refusing a stale expected_revision, and is
+// audited as rule.update with the rule, the field names and on success the
+// new revision. The store may run the check inside its transaction, so the
+// check only validates; link_item items are checked before.
+func (r *rulesService) UpdateRule(ctx context.Context, req *connect.Request[chainmailv1.UpdateRuleRequest]) (*connect.Response[chainmailv1.UpdateRuleResponse], error) {
+	return ruleCall(ctx, r.s, req, "rule.update", callTimeout, func(ctx context.Context, c caller, entry *audit.Entry) (*chainmailv1.UpdateRuleResponse, error) {
+		m := req.Msg
+		target, refErr := ruleTarget(m.GetRule())
+		fields, fieldsTarget, maskErr := ruleMaskFields(m.GetUpdateMask().GetPaths())
+		entry.Targets = []string{target, fieldsTarget}
+		if err := cmp.Or(refErr, maskErr); err != nil {
+			return nil, err
+		}
+		p, err := patchOf(m.GetPatch(), fields, m.ExpectedRevision)
+		if err != nil {
+			return nil, err
+		}
+		if p.Actions != nil {
+			if err := r.s.checkLinkItems(ctx, *p.Actions); err != nil {
+				return nil, err
+			}
+		}
+		env := r.s.ruleEnv()
+		rule, err := r.s.rules.Update(ctx, actorOf(c), m.GetRule(), p, func(d rules.Definition) error { return d.Validate(env) })
+		if err != nil {
+			return nil, r.s.rulesErr(err)
+		}
+		entry.Targets = []string{"rule=" + rule.ID, fieldsTarget, fmt.Sprintf("revision=%d", rule.Revision)}
+		r.s.pokeRuleScheduler()
+		return &chainmailv1.UpdateRuleResponse{Rule: ruleProto(rule)}, nil
+	})
+}
+
+// DeleteRule implements chainmailv1connect.RulesServiceHandler. Deleting a
+// deleted rule (by ID) changes nothing. Audited as rule.delete.
+func (r *rulesService) DeleteRule(ctx context.Context, req *connect.Request[chainmailv1.DeleteRuleRequest]) (*connect.Response[chainmailv1.DeleteRuleResponse], error) {
+	return ruleCall(ctx, r.s, req, "rule.delete", callTimeout, func(ctx context.Context, c caller, entry *audit.Entry) (*chainmailv1.DeleteRuleResponse, error) {
+		rule, err := r.ruleLifecycle(ctx, c, entry, req.Msg.GetRule(), r.s.rules.Delete)
+		if err != nil {
+			return nil, err
+		}
+		return &chainmailv1.DeleteRuleResponse{Rule: rule}, nil
+	})
+}
+
+// RestoreRule implements chainmailv1connect.RulesServiceHandler. A live
+// rule, or one whose name another live rule took, is refused. Audited as
+// rule.restore.
+func (r *rulesService) RestoreRule(ctx context.Context, req *connect.Request[chainmailv1.RestoreRuleRequest]) (*connect.Response[chainmailv1.RestoreRuleResponse], error) {
+	return ruleCall(ctx, r.s, req, "rule.restore", callTimeout, func(ctx context.Context, c caller, entry *audit.Entry) (*chainmailv1.RestoreRuleResponse, error) {
+		rule, err := r.ruleLifecycle(ctx, c, entry, req.Msg.GetRule(), r.s.rules.Restore)
+		if err != nil {
+			return nil, err
+		}
+		return &chainmailv1.RestoreRuleResponse{Rule: rule}, nil
+	})
+}
+
+// ruleLifecycle runs a delete or a restore of the rule ref names, and sets
+// the entry's targets: the rule, then on success its revision.
+func (r *rulesService) ruleLifecycle(ctx context.Context, c caller, entry *audit.Entry, ref string,
+	op func(context.Context, items.Actor, string) (rules.Rule, error),
+) (*chainmailv1.Rule, error) {
+	target, err := ruleTarget(ref)
+	entry.Targets = []string{target}
+	if err != nil {
+		return nil, err
+	}
+	rule, err := op(ctx, actorOf(c), ref)
+	if err != nil {
+		return nil, r.s.rulesErr(err)
+	}
+	entry.Targets = []string{"rule=" + rule.ID, fmt.Sprintf("revision=%d", rule.Revision)}
+	r.s.pokeRuleScheduler()
+	return ruleProto(rule), nil
 }

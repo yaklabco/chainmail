@@ -196,13 +196,25 @@ type Server struct {
 	// rules keeps the rule definitions, their revisions and runs, and the
 	// act-once table in state.db, and appends rule events to watchLog.
 	rules *rules.Store
-	// rulesClock is the time of the rule runners' waits: Options.Now and
-	// time.After. Internal tests replace it before a runner is made.
+	// rulesClock is the time of the rule runners' waits, the rule
+	// scheduler and the due checker: Options.Now and time.After. Internal
+	// tests replace it before a runner is made or a loop starts.
 	rulesClock watch.Clock
 	// ruleApplied reads the rules' act-once table, for the skipped count
 	// of a dry-run. Nil until the rule store is built, which makes every
 	// dry-run skip nothing.
 	ruleApplied appliedLookup
+	// dueChecker writes the item due events: at each due time, once at
+	// start-up, and inside every items write that changes a due date,
+	// state or deletion, through the items store's due hook.
+	dueChecker *rules.DueChecker
+	// ruleRunners are the rule runners of the accounts with a cache
+	// worker, by account. startWatch fills it before any handler runs, and
+	// it never changes after. An account without a runner runs no rules.
+	ruleRunners map[string]*ruleRunner
+	// rulesWake wakes the rule scheduler after a rule change so it plans
+	// again. It holds at most one wakeup.
+	rulesWake chan struct{}
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -256,14 +268,17 @@ func New(opts Options) (*Server, error) {
 	s.items = items.NewStore(opts.StateDB, s.watchLog, opts.Now)
 	// item: searches resolve item IDs to thread keys through the store.
 	s.itemThreads = s.items
-	// Rules live in state.db beside the items. at schedules follow the
-	// [rules] time zone.
-	s.rules = rules.NewStore(rules.StoreOptions{
-		DB: opts.StateDB, Log: s.watchLog, Now: opts.Now,
-		Location: opts.Config.RulesSettings().Location,
-	})
+	// Rules live in state.db beside the items. at schedules and due times
+	// follow the [rules] time zone.
+	rs := opts.Config.RulesSettings()
+	s.rules = rules.NewStore(rules.StoreOptions{DB: opts.StateDB, Log: s.watchLog, Now: opts.Now, Location: rs.Location})
 	s.ruleApplied = s.rules
+	s.dueChecker = rules.NewDueChecker(opts.StateDB, s.watchLog, opts.Now, rules.DueSettings{
+		Location: rs.Location, At: rules.ClockTime{Hour: rs.DueHour, Minute: rs.DueMinute}, SoonDays: rs.DueSoonDays,
+	})
+	s.dueChecker.SetLogger(opts.Logger)
 	s.rulesClock = daemonClock{now: opts.Now}
+	s.rulesWake = make(chan struct{}, 1)
 	if err := s.openSendState(); err != nil {
 		return nil, err
 	}
@@ -281,6 +296,7 @@ func New(opts Options) (*Server, error) {
 	mux.Handle(chainmailv1connect.NewWatchServiceHandler(&watchService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewCacheServiceHandler(&cacheService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewItemsServiceHandler(&itemsService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
+	mux.Handle(chainmailv1connect.NewRulesServiceHandler(&rulesService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
