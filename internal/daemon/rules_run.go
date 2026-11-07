@@ -36,7 +36,20 @@ const (
 	// bodyNotCachedHint is its fixed hint.
 	bodyNotCachedHint = "the rule's query has text terms, which need message bodies the cache did not hold in time; " +
 		"check [cache] prefetch_bodies, or run the rule by hand later"
+	// matchPageSize is how many matches a scheduled or manual run reads
+	// at once.
+	matchPageSize = 200
+	// ruleCacheNotReadyHint is the fixed hint of a cache_not_ready run.
+	// search_items.go's cacheNotReadyHint answers a refused search.
+	ruleCacheNotReadyHint = "the cache cannot answer this rule completely yet; " +
+		"run it again once chainmail cache status shows the account up to date"
 )
+
+// errRuleAccount refuses a run of a rule on an account it does not cover.
+var errRuleAccount = &argError{
+	msg:  "the rule does not cover that account",
+	hint: "run the rule on an account it names, or on all of its accounts",
+}
 
 // The states a runner reports in RulesStatus. An account without a runner
 // is reported as cache_disabled by the handler.
@@ -78,10 +91,13 @@ type ruleRunner struct {
 	// backoff.
 	clock  watch.Clock
 	jitter func() float64
-	// mu guards st.
+	// mu guards st and jobs.
 	mu sync.Mutex
 	// st is the runner's state, as RulesStatus reports it.
 	st runnerStatus
+	// jobs counts the scheduled and manual runs holding the turn, which
+	// show the runner as running whatever its loop last said.
+	jobs int
 }
 
 // runnerStatus is a runner's state for RulesStatus: one of the runner
@@ -104,11 +120,16 @@ func (s *Server) newRuleRunner(acct config.ResolvedAccount, ca *cache.Account) *
 	}
 }
 
-// status returns the runner's state.
+// status returns the runner's state. While a scheduled or manual run
+// holds the turn, it is running.
 func (r *ruleRunner) status() runnerStatus {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.st
+	st := r.st
+	if r.jobs > 0 {
+		st.State, st.Reason = runnerRunning, ""
+	}
+	return st
 }
 
 func (r *ruleRunner) setState(state, reason string) {
@@ -644,4 +665,98 @@ func failureOf(err error) (string, string) {
 // relocates reports whether rule moves the messages it acts on.
 func relocates(rule rules.Rule) bool {
 	return slices.ContainsFunc(rule.Actions, func(a rules.Action) bool { return a.Kind.Relocates() })
+}
+
+// runRule runs one rule once on this account for TriggerSchedule or
+// TriggerManual, taking the runner's lock. limit 0 means the rule's
+// MaxPerRun. It matches the whole cache oldest first, needs the cache to
+// answer the rule completely (spec 5.3), and returns the run it recorded
+// with a nil error whatever its outcome. An error means the turn was not
+// taken before ctx ended, the rule does not cover the account
+// (errRuleAccount), or the run could not be written.
+func (r *ruleRunner) runRule(ctx context.Context, rule rules.Rule, t rules.Trigger, limit int) (rules.Run, error) {
+	if err := r.take(ctx); err != nil {
+		return rules.Run{}, err
+	}
+	defer r.release()
+	defer r.busy()()
+	if limit <= 0 {
+		limit = rule.MaxPerRun
+	}
+	start := r.s.opts.Now()
+	sc, covered, reason, err := r.scope(ctx, rule, true)
+	transient := err != nil && classifyReason(errDetail(err).GetReason()) == actTransient
+	switch {
+	case err != nil && !transient:
+		return r.scopeFailed(ctx, rule, t, start, err)
+	case err == nil && !covered:
+		return rules.Run{}, errRuleAccount
+	}
+	run, berr := r.begin(ctx, rule, t, start)
+	if berr != nil {
+		return rules.Run{}, berr
+	}
+	switch {
+	case transient:
+		err = r.settle(ctx, &run, false, err)
+	case reason != "":
+		run.Outcome, run.Reason, run.Hint = rules.OutcomeCacheNotReady, reason, ruleCacheNotReadyHint
+		err = r.write(ctx, &run)
+	default:
+		capped, cause := r.page(ctx, rule, sc, &run, limit)
+		err = r.settle(ctx, &run, capped, cause)
+	}
+	return run, err
+}
+
+// page runs rule over the scope oldest first, a page at a time, acting on
+// at most limit messages the act-once table does not skip. It reports
+// whether it stopped at limit with a match left, and the transient
+// failure that ended it.
+func (r *ruleRunner) page(ctx context.Context, rule rules.Rule, sc ruleScope, run *rules.Run, limit int) (bool, error) {
+	var after cache.MatchCursor
+	acted := 0
+	for {
+		rows, err := r.s.matchPage(ctx, sc, after, matchPageSize)
+		if err != nil || len(rows) == 0 {
+			return false, err
+		}
+		after = cache.CursorOf(rows[len(rows)-1])
+		keys := make([]string, len(rows))
+		for i, row := range rows {
+			keys[i] = messageKeyOf(r.acct, row.Ref())
+		}
+		applied, err := r.s.rules.Applied(ctx, rule.ID, r.acct.Name, keys)
+		if err != nil {
+			return false, err
+		}
+		for i, row := range rows {
+			if prev, ok := applied[keys[i]]; ok && prev.Outcome != rules.AppliedPending {
+				run.Matched++
+				run.Skipped++
+				continue
+			}
+			if acted == limit {
+				return true, nil
+			}
+			run.Matched++
+			acted++
+			if _, err := r.apply(ctx, rule, run, row, keys[i], applied); err != nil {
+				return false, err
+			}
+		}
+	}
+}
+
+// busy counts a scheduled or manual run until the func it returns ends
+// it.
+func (r *ruleRunner) busy() func() {
+	r.mu.Lock()
+	r.jobs++
+	r.mu.Unlock()
+	return func() {
+		r.mu.Lock()
+		r.jobs--
+		r.mu.Unlock()
+	}
 }
