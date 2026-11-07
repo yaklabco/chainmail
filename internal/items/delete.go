@@ -64,6 +64,8 @@ func (s *Store) Delete(ctx context.Context, a Actor, id string, cascade bool) ([
 // order, with the revision. With cascade it also restores the descendants
 // deleted at the same instant as the item. The parent must be live and must
 // still be able to hold the item, since it may have been retyped since.
+// A due hook set with SetDueHook runs for the restored items inside the
+// same transaction.
 func (s *Store) Restore(ctx context.Context, a Actor, id string, cascade bool) ([]string, int64, error) {
 	now := s.now().UTC()
 	var (
@@ -98,7 +100,11 @@ func (s *Store) Restore(ctx context.Context, a Actor, id string, cascade bool) (
 			return nil, err
 		}
 		ids = nodeIDs(set)
-		return stampDeleted(ctx, tx, set, sql.NullString{}, revision, now, a, OpRestored)
+		events, err := stampDeleted(ctx, tx, set, sql.NullString{}, revision, now, a, OpRestored)
+		if err != nil {
+			return nil, err
+		}
+		return s.dueEvents(ctx, tx, ids, now, events)
 	})
 	if err != nil {
 		return nil, 0, err

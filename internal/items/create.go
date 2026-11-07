@@ -72,6 +72,9 @@ type NewItem struct {
 // Requests compare after cleaning, so a retry that differs only in spacing
 // the cleaning removes is the same request. Keys are kept for
 // RequestRetention.
+//
+// A due hook set with SetDueHook runs for the new item inside the same
+// transaction. A replay writes nothing, so it runs no hook.
 func (s *Store) Create(ctx context.Context, a Actor, n NewItem) (Item, []Criterion, bool, error) {
 	clean, err := cleanNewItem(n)
 	if err != nil {
@@ -136,7 +139,8 @@ func (s *Store) Create(ctx context.Context, a Actor, n NewItem) (Item, []Criteri
 		if crit, err = criteriaOf(ctx, tx, row.ID); err != nil {
 			return nil, err
 		}
-		return []watch.Event{itemEvent(now, row.ID, row.Type, r, OpCreated, nil)}, nil
+		return s.dueEvents(ctx, tx, []string{row.ID}, now,
+			[]watch.Event{itemEvent(now, row.ID, row.Type, r, OpCreated, nil)})
 	})
 	if err != nil {
 		return Item{}, nil, false, err
