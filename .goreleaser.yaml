@@ -85,7 +85,7 @@ homebrew_casks:
     caveats: |
       chainmail runs as a daemon that holds your mail account credentials.
       To set up an account and start the daemon, follow the quick start:
-        https://github.com/yaklabco/chainmail/blob/main/docs/QUICKSTART.md
+        https://chainmail.sh/docs/getting-started/quick-start
 
 release:
   draft: false

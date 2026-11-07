@@ -1,0 +1,225 @@
+---
+title: Backup and restore
+description: What to back up, how to take a consistent copy of state.db, how to keep the vault key, and how to restore without losing or corrupting data.
+sidebar_position: 6
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+## What to back up
+
+| File | Back up | Why |
+|---|---|---|
+| `vault.age` | yes | Every password, OAuth client secret and refresh token. It is encrypted with the vault key. |
+| `state.db`, with `state.db-wal` when present | yes | The audit log, the event log and watch groups, sync checkpoints, idempotency keys, connection limits and items. |
+| The vault key | yes, kept apart from `vault.age` | Without it `vault.age` cannot be read. See [The vault key](#the-vault-key). |
+| The config | yes | On NixOS it is part of your host's flake. Elsewhere, `/etc/chainmail/config.toml`. It holds no secrets. |
+| `cache.db`, `cache.db-wal`, `cache.db-shm` | no | Rebuilt from the mail servers. See [The cache is rebuildable](#the-cache-is-rebuildable). |
+| `uploads/` | no | Attachments in transit. An upload lasts an hour. |
+
+`state.db` holds no secrets, but item text and refs are private, so keep backups readable by root only.
+
+## The rules that keep a backup safe
+
+`state.db` and the `state.db-wal` beside it, when there is one, are one database. SQLite keeps recent changes in the `-wal` file until it folds them into `state.db`. Every procedure on this page follows from that:
+
+- Never copy `state.db` alone while a `state.db-wal` is beside it, and never copy either while the daemon runs. Use [an online snapshot](#take-an-online-snapshot) for a copy with the daemon running.
+- Put each backup in a new directory. A reused directory can keep an older `state.db-wal` beside the new `state.db`, and a restore would apply that old log and bring back old data with no error.
+- Restore with the daemon stopped, and start it only once the files are in place.
+- Remove the old database's `state.db-wal` and `state.db-shm` before you put a backup in place. A log left from the old database, or copied in after the daemon has opened the restored file, is applied to a database it does not belong to. That can corrupt `state.db`.
+- Open the state files only as the `chainmail` user, never as root. SQLite can create `state.db-wal` and `state.db-shm` owned by root, and the daemon then cannot open its own database.
+
+## Take an online snapshot
+
+SQLite's backup command copies `state.db` consistently while the daemon runs. Run it as the `chainmail` user, which can write in the state directory. `'<backup-dir>'` must be a new directory, for example one named by the date and time. `mkdir` fails when it already exists: stop there and pick a new name.
+
+```sh
+sudo -u chainmail $(nix build --no-link --print-out-paths nixpkgs#sqlite.bin)/bin/sqlite3 -readonly /var/lib/chainmail/state.db '.backup /var/lib/chainmail/state.db.snapshot'
+sudo -u chainmail $(nix build --no-link --print-out-paths nixpkgs#sqlite.bin)/bin/sqlite3 -readonly /var/lib/chainmail/state.db.snapshot 'PRAGMA user_version; PRAGMA integrity_check'
+sudo mkdir -m 0700 '<backup-dir>'
+sudo install -m 0600 /var/lib/chainmail/state.db.snapshot '<backup-dir>'/state.db
+sudo install -m 0600 /var/lib/chainmail/vault.age '<backup-dir>'/vault.age
+sudo rm -f /var/lib/chainmail/state.db.snapshot /var/lib/chainmail/state.db.snapshot-wal /var/lib/chainmail/state.db.snapshot-shm
+```
+
+Good output from the second command is the schema version, then `ok`. The snapshot is one file with nothing in a `-wal`. `vault.age` can be copied as it is, because the daemon replaces it by writing a new file and renaming it into place. Then copy `'<backup-dir>'` off the host as usual.
+
+Where `sqlite3` is installed, as on most hosts other than NixOS, `sudo -u chainmail sqlite3 ...` does the same as the `nix build` form.
+
+## The vault key
+
+Under the NixOS module, the key reaches the daemon as a `systemd-creds` credential sealed with `--with-key=tpm2`. Only that host's TPM can open it. The `.cred` file in your host's flake is therefore no use on another machine, or after the TPM is reset.
+
+Keep the plain age identity as well, offline, such as in a password manager. It is the file you sealed, whose key line starts with `AGE-SECRET-KEY-`. If you no longer have it, the host can still decrypt its credential:
+
+```sh
+sudo systemd-creds decrypt --name=vault-key '<cred-file>' '<output-file>'
+```
+
+`'<cred-file>'` is the `vaultKeyCredential` file and `'<output-file>'` a new file in a private directory. Move the key to its safe place, then remove the file.
+
+To seal the key for a host, run on that host:
+
+```sh
+sudo systemd-creds encrypt --with-key=tpm2 --name=vault-key '<key-file>' chainmail-vault-key.cred
+```
+
+On other hosts the key is the file passed with `--vault-key-file`. Back up that file. The daemon requires it to be owned by the daemon's user with mode `0600` or `0400`, or owned by `root:root` with at most group read.
+
+## Restore
+
+A backup's `state.db` and the `state.db-wal` beside it, if it has one, are one database. Restore them together, with the daemon stopped, and start the daemon only once the files are in place. Getting this wrong loses data or corrupts it:
+
+- A `state.db` restored without its `state.db-wal` lacks every change still in that log: audit rows, events, items changes and the idempotency keys of recent sends. A client that retries such a send with the same key sends it again.
+- A `state.db-wal` left over from the old database, or copied in after the daemon has opened the restored file, is applied to a database it does not belong to. That can corrupt `state.db`.
+
+1. Stop the daemon and check that it stopped. Good output from the second command is `inactive`.
+
+```sh
+sudo systemctl stop chainmail
+systemctl is-active chainmail
+```
+
+2. List the backup, and note whether it has a `state.db-wal`. A snapshot from [Take an online snapshot](#take-an-online-snapshot) never has one.
+
+```sh
+sudo ls -l '<backup-dir>'
+```
+
+3. Remove the old database's write-ahead files and the cache, then put the backup's `state.db` in place. Removing `cache.db` is optional. Without it, the daemon notices that its cache has run past the restored event log, logs `cache group is past the event log's tail; rebuilding the account's cache`, and rebuilds those accounts itself.
+
+```sh
+sudo rm -f /var/lib/chainmail/state.db-wal /var/lib/chainmail/state.db-shm
+sudo rm -f /var/lib/chainmail/cache.db /var/lib/chainmail/cache.db-wal /var/lib/chainmail/cache.db-shm
+sudo install -o chainmail -g chainmail -m 0600 '<backup-dir>'/state.db /var/lib/chainmail/state.db
+```
+
+4. Keep the vault you have. Restore `vault.age` from the backup only when the current one is lost or damaged, because the backup lacks every password, client secret and refresh token set after it was taken. In that case only:
+
+```sh
+sudo install -o chainmail -g chainmail -m 0600 '<backup-dir>'/vault.age /var/lib/chainmail/vault.age
+```
+
+5. Only when the backup has a `state.db-wal`: copy it too, then fold it into `state.db` as the `chainmail` user. Both backup procedures on this page make one-file backups, so a backup with a `state.db-wal` was made some other way. Restore that log only when you know it was copied together with that same `state.db`, at the same moment. A log left from an older backup brings back old data without any error. Good output is `0|0|0`, then `ok`. Do not copy a `state.db-shm` from the backup. SQLite rebuilds it from the log.
+
+```sh
+sudo install -o chainmail -g chainmail -m 0600 '<backup-dir>'/state.db-wal /var/lib/chainmail/state.db-wal
+sudo -u chainmail $(nix build --no-link --print-out-paths nixpkgs#sqlite.bin)/bin/sqlite3 /var/lib/chainmail/state.db 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA integrity_check'
+```
+
+6. Check the files. `state.db` and `vault.age` must be owned by `chainmail chainmail` with mode `-rw-------`, and there must be no `state.db-wal` or `state.db-shm`. Then start the daemon:
+
+```sh
+sudo ls -l /var/lib/chainmail
+sudo systemctl start chainmail
+```
+
+What a restore of an older `state.db` means:
+
+- Audit rows, items changes and events written after the backup are gone.
+- Idempotency keys of sends made after the backup are gone, so a client that retries such a send with the same key sends it again.
+- Watch groups go back to their old positions. A watcher whose position is past the restored log gets a `trimmed` gap and goes on from the newest event. Folders catch up from their old checkpoints, so mail since the backup produces events again.
+
+Then run the [health checks](health.md).
+
+## Take a cold copy
+
+When a short outage is fine, stop the daemon and list its files. Good output from `is-active` is `inactive`:
+
+```sh
+sudo systemctl stop chainmail
+systemctl is-active chainmail
+sudo ls -l /var/lib/chainmail
+```
+
+A clean stop folds the write-ahead log into `state.db`, so the listing shows no `state.db-wal`. If one is there, the daemon did not stop cleanly, and the log holds changes `state.db` lacks. While the daemon is still stopped, fold it in as the `chainmail` user. Good output is `0|0|0`, then `ok`, and the `state.db-wal` and `state.db-shm` are gone afterwards:
+
+```sh
+sudo -u chainmail $(nix build --no-link --print-out-paths nixpkgs#sqlite.bin)/bin/sqlite3 /var/lib/chainmail/state.db 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA integrity_check'
+sudo ls -l /var/lib/chainmail
+```
+
+Then copy the files into a new backup directory and start the daemon. As with a snapshot, `mkdir` fails when the directory already exists, and you pick a new name rather than reuse one:
+
+```sh
+sudo mkdir -m 0700 '<backup-dir>'
+sudo install -m 0600 /var/lib/chainmail/vault.age /var/lib/chainmail/state.db '<backup-dir>'/
+sudo systemctl start chainmail
+```
+
+## Move a dev daemon's state to production
+
+This moves the accounts, secrets and history of a dev daemon from the [quick start](../getting-started/quick-start.mdx) to a production daemon set up as in [Deploy](deploy.mdx). It assumes the quick start's paths, and a production config with the same accounts.
+
+Both daemons must be stopped from step 2 until step 6. The dev `state.db` and its `state.db-wal`, if there is one, are one database. Getting the order wrong loses data or corrupts it:
+
+- A `state.db` copied without its `state.db-wal` lacks every change still in that log: audit rows, events, items and the idempotency keys of recent sends. A client that retries such a send with the same key sends it again.
+- A `state.db-wal` copied in after the production daemon has opened `state.db`, or one from a different moment than its `state.db`, can corrupt the database.
+
+The steps below fold the log into `state.db` first, so only one file moves.
+
+1. The production key must be the dev vault's key, since `vault.age` only opens with the key that wrote it. On NixOS, seal the dev key on the production host, as in [The vault key](#the-vault-key), and point `vaultKeyCredential` at it. On other hosts, install the dev key as the file `--vault-key-file` names.
+2. Stop the dev daemon with Ctrl-C in its terminal, and wait for the shell prompt to come back. The prompt returns only once the daemon has exited.
+3. Stop the production daemon and check that it stopped. Good output from the second command is `inactive`.
+
+```sh
+sudo systemctl stop chainmail
+systemctl is-active chainmail
+```
+
+4. Fold the dev log into `state.db`, then list the dev state directory. Good output is `0|0|0`, then `ok`, and the listing has no `state.db-wal` or `state.db-shm`. `database is locked` means a dev daemon still has the file open: go back to step 2.
+
+```sh
+nix shell nixpkgs#sqlite -c sqlite3 ~/.local/state/chainmail-dev/state.db 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA integrity_check'
+ls -l ~/.local/state/chainmail-dev
+```
+
+5. Remove the production database's write-ahead files, copy the two files in, and check them. `state.db` and `vault.age` must be owned by `chainmail chainmail` with mode `-rw-------`, with no `state.db-wal` or `state.db-shm` beside them.
+
+```sh
+sudo rm -f /var/lib/chainmail/state.db-wal /var/lib/chainmail/state.db-shm
+sudo install -o chainmail -g chainmail -m 0600 ~/.local/state/chainmail-dev/vault.age ~/.local/state/chainmail-dev/state.db /var/lib/chainmail/
+sudo ls -l /var/lib/chainmail
+```
+
+6. Start the production daemon and check it. Name the production socket explicitly, since your client settings may still point at the dev daemon. `admin status` should show `dev mode  false`.
+
+```sh
+sudo systemctl start chainmail
+chainmail admin status --socket /run/chainmail/chainmail.sock
+chainmail accounts list --socket /run/chainmail/chainmail.sock --output table
+```
+
+7. Point your clients at production. Remove the `socket` line from `~/.config/chainmail/cli.toml`, or from `$XDG_CONFIG_HOME/chainmail/cli.toml` when `XDG_CONFIG_HOME` is set to an absolute path. Delete the file if that was its only line. If you set `CHAINMAIL_SOCKET`, remove it from your shell's startup file and clear it in each open shell:
+
+<Tabs groupId="shell">
+<TabItem value="bash" label="bash">
+
+```bash
+unset CHAINMAIL_SOCKET
+```
+
+</TabItem>
+<TabItem value="fish" label="fish">
+
+```fish
+set -e CHAINMAIL_SOCKET
+```
+
+</TabItem>
+</Tabs>
+
+Both point clients at the dev socket and win over the default, so `chainmail mcp` sessions need the same change and a restart. Check that clients now reach production with no flag. `admin status` should again show `dev mode  false`:
+
+```sh
+chainmail admin status
+```
+
+`cache.db` need not move. The production daemon builds its own.
+
+## The cache is rebuildable
+
+`cache.db` is a copy of what the mail servers hold. To drop it, stop the daemon and delete it with its `-wal` and `-shm` files, as in [Restore](#restore). The next start builds it again, within each account's `daily_download`. Items never live in `cache.db`, so deleting it loses none of them.
+
+While the cache rebuilds, searches go to the mail servers, `item:` searches fail with `CACHE_NOT_READY` (see [Item searches refused with CACHE_NOT_READY](items.md#item-searches-refused-with-cache_not_ready)), and on accounts other than Google `has:`, `filename:` and `label:` searches fail with `INVALID_ARGUMENT` (see [The cache in operation](cache.md)). To rebuild without a restart, use `chainmail cache rebuild` (see [Rebuild and evict](cache.md#rebuild-and-evict)).
