@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
@@ -92,5 +93,30 @@ due_soon_days = 0
 	}
 	if got, want := rpcDueLines(t, h), []string{"item_due " + yesterday + ` task 2026-11-06 backlog account=""`}; !slices.Equal(got, want) {
 		t.Errorf("due events = %q, want %q", got, want)
+	}
+}
+
+// TestRulesStatusNextDueCheck checks that RulesStatus reports the due
+// checker's next wake: 08:00 the next day from noon.
+func TestRulesStatusNextDueCheck(t *testing.T) {
+	t.Parallel()
+	h := rpcStart(t)
+	want := time.Date(2026, 11, 8, 8, 0, 0, 0, time.UTC)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err := h.Client.Rules.RulesStatus(t.Context(), connect.NewRequest(&chainmailv1.RulesStatusRequest{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if next := resp.Msg.GetNextDueCheckAt(); next != nil {
+			if !next.AsTime().Equal(want) {
+				t.Errorf("next due check = %v, want %v", next.AsTime(), want)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("RulesStatus reported no next due check within 5s")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
