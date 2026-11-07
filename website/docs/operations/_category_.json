@@ -1,0 +1,8 @@
+{
+  "label": "Operations",
+  "position": 5,
+  "link": {
+    "type": "generated-index",
+    "description": "Deploy a production daemon, check its health, and handle auth, upgrades, backups, watching, the cache, the policy, connection limits and items."
+  }
+}
