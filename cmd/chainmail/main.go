@@ -7,6 +7,10 @@ import (
 	"os/signal"
 	"syscall"
 
+	// The binary carries its own time zone database, so [rules] timezone
+	// works on hosts without zoneinfo.
+	_ "time/tzdata"
+
 	"github.com/yaklabco/chainmail/internal/cli"
 )
 
