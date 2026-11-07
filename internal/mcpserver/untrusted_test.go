@@ -96,3 +96,12 @@ func TestUntrustedPreambleCoversItemText(t *testing.T) {
 		}
 	}
 }
+
+// TestUntrustedPreambleCoversRuleText: the rule tools put rule descriptions,
+// queries and notes between the same markers, so the preamble names them.
+func TestUntrustedPreambleCoversRuleText(t *testing.T) {
+	t.Parallel()
+	if !strings.Contains(untrustedPreamble, "rule text") {
+		t.Errorf("preamble %q lacks %q", untrustedPreamble, "rule text")
+	}
+}
