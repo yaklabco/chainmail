@@ -3,6 +3,8 @@ name: docs
 # chainmail: main to production at https://chainmail.sh, and each pull
 # request to a preview whose URL is posted on the pull request. A pull
 # request from a fork gets no secrets, so it is built but not deployed.
+env:
+  HOMEBREW_NO_ANALYTICS: "1"
 on:
   push:
     branches: [main]
@@ -31,6 +33,43 @@ jobs:
       DEPLOY: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Cache Homebrew downloads
+        id: brew_dl
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/Homebrew
+          key: brew-cache-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-cache-${{ runner.os }}-
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@main
+      - name: Detect Homebrew prefix
+        id: brew
+        run: echo "prefix=$(brew --prefix)" >> "$GITHUB_OUTPUT"
+      - name: Cache Homebrew installation
+        id: brew_install
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ steps.brew.outputs.prefix }}/Cellar
+            ${{ steps.brew.outputs.prefix }}/opt
+            ${{ steps.brew.outputs.prefix }}/bin
+            ${{ steps.brew.outputs.prefix }}/sbin
+            ${{ steps.brew.outputs.prefix }}/lib
+            ${{ steps.brew.outputs.prefix }}/include
+            ${{ steps.brew.outputs.prefix }}/share
+            ${{ steps.brew.outputs.prefix }}/etc
+            ${{ steps.brew.outputs.prefix }}/var
+            ${{ steps.brew.outputs.prefix }}/Homebrew/Library/Taps
+          key: brew-install-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-install-${{ runner.os }}-
+      - name: Install Homebrew tools (only if cache miss)
+        if: steps.brew_install.outputs.cache-hit != 'true'
+        run: |
+          brew upgrade go >& /dev/null || brew install go
+          brew bundle --file=Brewfile
       # The same Node major and Bun version the Nix dev shell gives local runs.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
