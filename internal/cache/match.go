@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -23,6 +24,12 @@ const (
 
 // maxMatchLimit bounds MatchOptions.Limit.
 const maxMatchLimit = 1000
+
+// The fixed refusals of MatchRows. They never carry the value refused.
+var (
+	errMatchLimit = errors.New("matching rows: the limit is outside 1 to 1000")
+	errMatchOrder = errors.New("matching rows: unknown order")
+)
 
 // MatchCursor is a keyset position in MatchRows' order: the arrival time,
 // folder and UID of the last row a page returned. The next page starts
@@ -78,7 +85,7 @@ type MatchOptions struct {
 // returns nil rows and no error.
 func (s *Store) MatchRows(ctx context.Context, account string, w Where, o MatchOptions) ([]Row, error) {
 	if o.Limit < 1 || o.Limit > maxMatchLimit {
-		return nil, fmt.Errorf("matching rows: limit %d is outside 1 to %d", o.Limit, maxMatchLimit)
+		return nil, errMatchLimit
 	}
 	dir, after := "", ">"
 	switch o.Order {
@@ -86,7 +93,7 @@ func (s *Store) MatchRows(ctx context.Context, account string, w Where, o MatchO
 	case NewestFirst:
 		dir, after = " DESC", "<"
 	default:
-		return nil, fmt.Errorf("matching rows: unknown order %d", o.Order)
+		return nil, errMatchOrder
 	}
 	if len(o.Sources) == 0 {
 		return nil, nil

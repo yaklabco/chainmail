@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"errors"
 	"reflect"
 	"slices"
 	"strconv"
@@ -402,5 +403,46 @@ func TestMatchRowsNoMatchIsNil(t *testing.T) {
 	rows, err := s.MatchRows(t.Context(), testAccount, compileMatch(t, "from:nobody", nil), MatchOptions{Sources: matchSources, Limit: 10})
 	if err != nil || rows != nil {
 		t.Errorf("MatchRows = %#v, %v; want nil, nil", rows, err)
+	}
+}
+
+// A refused limit or order reports a fixed text that never echoes the
+// value it refused.
+func TestMatchRowsRefusalsAreFixedText(t *testing.T) {
+	t.Parallel()
+	s, _ := seedMatch(t)
+	for _, tt := range []struct {
+		name string
+		opts []MatchOptions
+		want error
+	}{
+		{
+			name: "limit",
+			opts: []MatchOptions{
+				{Sources: matchSources, Limit: 0},
+				{Sources: matchSources, Limit: -7},
+				{Sources: matchSources, Limit: 1001},
+				{Sources: matchSources, Limit: 123456},
+			},
+			want: errMatchLimit,
+		},
+		{
+			name: "order",
+			opts: []MatchOptions{
+				{Sources: matchSources, Order: MatchOrder(2), Limit: 10},
+				{Sources: matchSources, Order: MatchOrder(77), Limit: 10},
+			},
+			want: errMatchOrder,
+		},
+	} {
+		for _, o := range tt.opts {
+			_, err := s.MatchRows(t.Context(), testAccount, Where{}, o)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("%s %+v: err = %v, want %v", tt.name, o, err, tt.want)
+			}
+			if err.Error() != tt.want.Error() {
+				t.Errorf("%s %+v: err text = %q, want the fixed %q", tt.name, o, err, tt.want)
+			}
+		}
 	}
 }
