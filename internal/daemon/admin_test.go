@@ -506,3 +506,56 @@ func TestReadAuditRejectsInvalidSince(t *testing.T) {
 		t.Errorf("err = %v, want INVALID_ARGUMENT", err)
 	}
 }
+
+// TestReadAuditFiltersByClient checks the client filter alone, with an
+// action filter and across pages, and that a value that cannot be a client
+// kind is refused with fixed text.
+func TestReadAuditFiltersByClient(t *testing.T) {
+	t.Parallel()
+	h := daemontest.Start(t, hostingerConfig, daemontest.Options{})
+	seedAudit(t, h,
+		audit.Entry{Client: "cli", Action: "a"},
+		audit.Entry{Client: "rule", Action: "b"},
+		audit.Entry{Client: "rule", Action: "c"},
+		audit.Entry{Client: "mcp", Action: "d"},
+	)
+	actionsOf := func(req *chainmailv1.ReadAuditRequest) []string {
+		t.Helper()
+		var out []string
+		for {
+			resp, err := readAudit(t, h, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range resp.GetEntries() {
+				out = append(out, e.GetClient()+":"+e.GetAction())
+			}
+			if resp.GetNextBeforeId() == 0 {
+				return out
+			}
+			req.BeforeId = resp.GetNextBeforeId()
+		}
+	}
+	tests := []struct {
+		name string
+		req  *chainmailv1.ReadAuditRequest
+		want []string
+	}{
+		{name: "client", req: &chainmailv1.ReadAuditRequest{Client: "rule"}, want: []string{"rule:c", "rule:b"}},
+		{name: "client and action", req: &chainmailv1.ReadAuditRequest{Client: "rule", Action: "b"}, want: []string{"rule:b"}},
+		{name: "paged", req: &chainmailv1.ReadAuditRequest{Client: "rule", Limit: 1}, want: []string{"rule:c", "rule:b"}},
+		{name: "every client", req: &chainmailv1.ReadAuditRequest{}, want: []string{"mcp:d", "rule:c", "rule:b", "cli:a"}},
+	}
+	for _, tt := range tests {
+		if got := actionsOf(tt.req); !slices.Equal(got, tt.want) {
+			t.Errorf("%s: %v, want %v", tt.name, got, tt.want)
+		}
+	}
+	for _, client := range []string{"Rule", "bad kind", strings.Repeat("a", 33), "(invalid)"} {
+		_, err := readAudit(t, h, &chainmailv1.ReadAuditRequest{Client: client})
+		var cerr *connect.Error
+		if reasonOf(err) != api.ReasonInvalidArgument || !errors.As(err, &cerr) || cerr.Message() != "invalid client kind" {
+			t.Errorf("client %.20q: %v, want INVALID_ARGUMENT with fixed text", client, err)
+		}
+	}
+}
