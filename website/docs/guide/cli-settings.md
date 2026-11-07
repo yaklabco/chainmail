@@ -101,7 +101,7 @@ Some candidates complete locally, without the daemon:
 
 Others come from the daemon, through the same socket, policy and audit as any other command: accounts, folders, Gmail labels, message refs, attachment parts, watch groups, item IDs, criterion IDs, linked threads, secret names and audit actions.
 
-- Message refs list the 20 newest messages in the inbox, or in Drafts for `draft send`, `update` and `delete`. Each has its date, sender and subject. Type the start of a ref, such as `cm1:work:`, to narrow them to one account.
+- Message refs list 20 messages, each with its date, sender and subject. Inbox mail comes first, newest first, then the newest mail from any folder, so a ref still completes when every inbox is empty. `archive` offers inbox mail only, and `draft send`, `update` and `delete` offer drafts only. Type the start of a ref, such as `cm1:work:`, to narrow them to one account.
 - Item IDs list up to 500 items, each with its type and title as the description. `item restore` offers only deleted items.
 - `item:` in a query completes `none` and the IDs of live items.
 - Criterion IDs, and the accounts and thread keys `item unlink` takes, come from the item's view, as `item show` reads it.

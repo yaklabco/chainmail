@@ -379,9 +379,14 @@ func mergeFlagCompletions(sets ...map[string]cobra.CompletionFunc) map[string]co
 func (cp *completer) specs() map[string]compSpec {
 	allAccounts := cp.accounts(nil, 0)
 	compose := mergeFlagCompletions(contentFlagSpecs(), recipientFlagSpecs(), map[string]cobra.CompletionFunc{"subject": noComplete})
-	inboxRefs := cp.refs("in:inbox", unbounded, sender)
-	oneInboxRef := cp.refs("in:inbox", 1, sender)
-	oneDraft := cp.refs("in:drafts", 1, recipient)
+	// A command that reads or acts on any message offers inbox mail, then
+	// the newest mail anywhere, so it still completes once every inbox is
+	// empty. archive, which moves mail out of the inbox, offers inbox mail
+	// only.
+	recentRefs := cp.refs(unbounded, sender, "in:inbox", "")
+	inboxRefs := cp.refs(unbounded, sender, "in:inbox")
+	oneRef := cp.refs(1, sender, "in:inbox", "")
+	oneDraft := cp.refs(1, recipient, "in:drafts")
 	refFolders := cp.folders(folderSpec{accounts: argAccounts})
 	labels := cp.folders(folderSpec{accounts: cp.googleAccounts, keep: labelFolder})
 	existingFolder := cp.folders(folderSpec{accounts: flagAccount, maxArgs: 1})
@@ -438,25 +443,25 @@ func (cp *completer) specs() map[string]compSpec {
 				cobra.CompletionWithDesc("server", "the mail server, skipping the cache"),
 			),
 		}},
-		"chainmail flags": {args: inboxRefs, flags: map[string]cobra.CompletionFunc{
+		"chainmail flags": {args: recentRefs, flags: map[string]cobra.CompletionFunc{
 			"add": fixed(`\Seen`, `\Flagged`, `\Answered`, `\Draft`), "remove": fixed(`\Seen`, `\Flagged`, `\Answered`, `\Draft`),
 		}},
 		"chainmail secret set":    {args: cp.secretNames, flags: map[string]cobra.CompletionFunc{"from-pass": cp.passEntries}},
-		"chainmail get":           {args: inboxRefs},
-		"chainmail thread":        {args: oneInboxRef},
-		"chainmail attachment":    {args: cp.refThenPart(oneInboxRef), flags: map[string]cobra.CompletionFunc{"out": files}},
+		"chainmail get":           {args: recentRefs},
+		"chainmail thread":        {args: oneRef},
+		"chainmail attachment":    {args: cp.refThenPart(oneRef), flags: map[string]cobra.CompletionFunc{"out": files}},
 		"chainmail archive":       {args: inboxRefs},
-		"chainmail trash":         {args: inboxRefs},
-		"chainmail expunge":       {args: inboxRefs},
-		"chainmail read":          {args: inboxRefs},
-		"chainmail unread":        {args: inboxRefs},
-		"chainmail flag":          {args: inboxRefs},
-		"chainmail unflag":        {args: inboxRefs},
-		"chainmail move":          {args: inboxRefs, flags: map[string]cobra.CompletionFunc{"to": refFolders}},
-		"chainmail copy":          {args: inboxRefs, flags: map[string]cobra.CompletionFunc{"to": refFolders}},
-		"chainmail label":         {args: inboxRefs, flags: map[string]cobra.CompletionFunc{"add": labels, "remove": labels}},
-		"chainmail reply":         {args: oneInboxRef, flags: answer},
-		"chainmail forward":       {args: oneInboxRef, flags: answer},
+		"chainmail trash":         {args: recentRefs},
+		"chainmail expunge":       {args: recentRefs},
+		"chainmail read":          {args: recentRefs},
+		"chainmail unread":        {args: recentRefs},
+		"chainmail flag":          {args: recentRefs},
+		"chainmail unflag":        {args: recentRefs},
+		"chainmail move":          {args: recentRefs, flags: map[string]cobra.CompletionFunc{"to": refFolders}},
+		"chainmail copy":          {args: recentRefs, flags: map[string]cobra.CompletionFunc{"to": refFolders}},
+		"chainmail label":         {args: recentRefs, flags: map[string]cobra.CompletionFunc{"add": labels, "remove": labels}},
+		"chainmail reply":         {args: oneRef, flags: answer},
+		"chainmail forward":       {args: oneRef, flags: answer},
 		"chainmail draft send":    {args: oneDraft, flags: map[string]cobra.CompletionFunc{"idempotency-key": noComplete}},
 		"chainmail draft delete":  {args: oneDraft},
 		"chainmail draft update":  {args: oneDraft, flags: compose},

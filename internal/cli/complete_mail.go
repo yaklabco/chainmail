@@ -158,39 +158,58 @@ func sender(r *chainmailv1.MessageRow) string { return firstSender(r.GetFrom()) 
 // recipient describes a row by its first recipient, for drafts.
 func recipient(r *chainmailv1.MessageRow) string { return firstSender(r.GetTo()) }
 
-// refs completes message refs from the newest messages query finds, as
-// up to maxArgs positional arguments. A typed cm1:<account>: prefix limits
-// the search to that account. who picks the person a row's description
-// names.
-func (cp *completer) refs(query string, maxArgs int, who func(*chainmailv1.MessageRow) string) cobra.CompletionFunc {
+// refs completes message refs from the newest messages each query finds,
+// as up to maxArgs positional arguments. It runs queries in order until it
+// has refCompletionLimit candidates, offering each message once, so an
+// earlier query's messages come first. A query that fails after an
+// earlier one found candidates ends the lookup but keeps them. A typed
+// cm1:<account>: prefix limits the search to that account. who picks the
+// person a row's description names.
+func (cp *completer) refs(maxArgs int, who func(*chainmailv1.MessageRow) string, queries ...string) cobra.CompletionFunc {
 	return func(cmd *cobra.Command, args []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {
 		if maxArgs > 0 && len(args) >= maxArgs {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
-		req := &chainmailv1.SearchRequest{QueryString: query, Limit: refCompletionLimit}
+		var accounts []string
 		if parts := strings.Split(toComplete, ":"); len(parts) >= 3 && parts[0] == "cm1" {
-			req.Accounts = []string{parts[1]}
+			accounts = []string{parts[1]}
 		}
-		var rows []*chainmailv1.MessageRow
-		ok := cp.call(cmd, func(ctx context.Context, c *client.Client) error {
-			resp, err := c.Message.Search(ctx, connect.NewRequest(req))
-			if err != nil {
-				return err
+		var out []cobra.Completion
+		seen := map[string]bool{}
+		keep := func(rows []*chainmailv1.MessageRow) {
+			for _, r := range rows {
+				if len(out) == refCompletionLimit {
+					return
+				}
+				v := r.GetRef()
+				if seen[v] || !safeValue(v) || !strings.HasPrefix(v, toComplete) || slices.Contains(args, v) {
+					continue
+				}
+				seen[v] = true
+				desc := shortDate(r.GetDate(), cp.env.location()) + " · " + who(r) + " · " + r.GetSubject().GetUntrusted()
+				out = append(out, cobra.CompletionWithDesc(v, completionText(desc)))
 			}
-			rows = resp.Msg.GetRows()
+		}
+		ok := cp.call(cmd, func(ctx context.Context, c *client.Client) error {
+			for _, q := range queries {
+				if len(out) == refCompletionLimit {
+					return nil
+				}
+				req := &chainmailv1.SearchRequest{QueryString: q, Accounts: accounts, Limit: refCompletionLimit}
+				resp, err := c.Message.Search(ctx, connect.NewRequest(req))
+				if err != nil && len(out) > 0 {
+					cobra.CompDebugln("chainmail: "+err.Error(), false)
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				keep(resp.Msg.GetRows())
+			}
 			return nil
 		})
 		if !ok {
 			return nil, cobra.ShellCompDirectiveNoFileComp
-		}
-		var out []cobra.Completion
-		for _, r := range rows {
-			v := r.GetRef()
-			if !safeValue(v) || !strings.HasPrefix(v, toComplete) || slices.Contains(args, v) {
-				continue
-			}
-			desc := shortDate(r.GetDate(), cp.env.location()) + " · " + who(r) + " · " + r.GetSubject().GetUntrusted()
-			out = append(out, cobra.CompletionWithDesc(v, completionText(desc)))
 		}
 		return out, cobra.ShellCompDirectiveNoFileComp
 	}
