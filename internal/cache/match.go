@@ -74,7 +74,8 @@ type MatchOptions struct {
 // the account, the sources, w.Args, the UID restriction, then w.FTS, the
 // excluded labels, the cursor and the limit. A limit outside
 // 1 to 1000 or an unknown order is an error; empty sources, or a UID
-// restriction that leaves no source a UID, match nothing.
+// restriction that leaves no source a UID, match nothing. Matching nothing
+// returns nil rows and no error.
 func (s *Store) MatchRows(ctx context.Context, account string, w Where, o MatchOptions) ([]Row, error) {
 	if o.Limit < 1 || o.Limit > maxMatchLimit {
 		return nil, fmt.Errorf("matching rows: limit %d is outside 1 to %d", o.Limit, maxMatchLimit)
@@ -136,6 +137,9 @@ func (s *Store) MatchRows(ctx context.Context, account string, w Where, o MatchO
 	rows, err := s.queryRows(ctx, q.String(), args...)
 	if err != nil {
 		return nil, s.fail("matching rows", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
 	}
 	return rows, nil
 }

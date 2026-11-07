@@ -393,3 +393,14 @@ func TestMatchRowsExcludeLabels(t *testing.T) {
 		})
 	}
 }
+
+// A search that matches nothing returns nil, as C6 promises, not an empty
+// slice.
+func TestMatchRowsNoMatchIsNil(t *testing.T) {
+	t.Parallel()
+	s, _ := seedMatch(t)
+	rows, err := s.MatchRows(t.Context(), testAccount, compileMatch(t, "from:nobody", nil), MatchOptions{Sources: matchSources, Limit: 10})
+	if err != nil || rows != nil {
+		t.Errorf("MatchRows = %#v, %v; want nil, nil", rows, err)
+	}
+}
