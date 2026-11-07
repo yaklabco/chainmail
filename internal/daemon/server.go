@@ -276,6 +276,9 @@ func New(opts Options) (*Server, error) {
 	s.dueChecker = rules.NewDueChecker(opts.StateDB, s.watchLog, opts.Now, rules.DueSettings{
 		Location: rs.Location, At: rules.ClockTime{Hour: rs.DueHour, Minute: rs.DueMinute}, SoonDays: rs.DueSoonDays,
 	})
+	// Every items write that changes a due date, state or deletion checks
+	// its items' due stages in its own transaction.
+	s.items.SetDueHook(s.dueChecker.Hook)
 	s.dueChecker.SetLogger(opts.Logger)
 	s.rulesClock = daemonClock{now: opts.Now}
 	s.rulesWake = make(chan struct{}, 1)
