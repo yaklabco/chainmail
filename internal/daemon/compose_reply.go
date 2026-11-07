@@ -87,12 +87,24 @@ func (c *composeService) Forward(ctx context.Context, req *connect.Request[chain
 	}
 	ctx, cancel := withDeadline(ctx, composeTimeout)
 	defer cancel()
-	m := req.Msg
-	res, err := c.answer(ctx, cl, answer{
+	res, err := c.forwardAs(ctx, cl, req.Msg, nil)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&chainmailv1.ForwardResponse{Result: res}), nil
+}
+
+// forwardAs runs a forward as cl. targets follow the original's ref in the
+// audit row, such as the rule and run IDs of a rule's forward; they are
+// not part of the request, so a repeat with other targets and the same
+// idempotency key still replays. The caller sets the deadline. Client
+// calls come through Forward; the daemon's own call it directly.
+func (c *composeService) forwardAs(ctx context.Context, cl caller, m *chainmailv1.ForwardRequest, targets []string) (*chainmailv1.ComposeResult, error) {
+	return c.answer(ctx, cl, answer{
 		action: "forward", ref: m.GetRef(), content: m.GetContent(),
 		to: m.GetTo(), cc: m.GetCc(), bcc: m.GetBcc(), needRecipients: true,
 		dryRun: m.GetDryRun(), draft: m.GetDraft(), key: m.GetIdempotencyKey(), req: m,
-		flag: flagForwarded, attachments: !m.GetNoAttachments(),
+		flag: flagForwarded, attachments: !m.GetNoAttachments(), targets: targets,
 		parts: func(spec *compose.Spec, orig compose.Original, _ string) error {
 			p := compose.Forward(orig, nil)
 			spec.Subject, spec.Quote = p.Subject, p.Quote
@@ -101,10 +113,6 @@ func (c *composeService) Forward(ctx context.Context, req *connect.Request[chain
 			return nil
 		},
 	})
-	if err != nil {
-		return nil, err
-	}
-	return connect.NewResponse(&chainmailv1.ForwardResponse{Result: res}), nil
 }
 
 // answer is a reply or a forward, after the handler read its request.
@@ -126,6 +134,9 @@ type answer struct {
 	attachments bool
 	// parts fills spec from the original. self is the account's address.
 	parts func(spec *compose.Spec, orig compose.Original, self string) error
+	// targets follow the original's ref in the audit row and in the send's
+	// targets, such as a rule's rule= and run=. Client calls have none.
+	targets []string
 }
 
 // answer runs a reply or a forward: the original is read inside build, so
@@ -137,10 +148,10 @@ func (c *composeService) answer(ctx context.Context, cl caller, a answer) (*chai
 	}
 	r, err := ref.Parse(a.ref)
 	if err != nil {
-		entry.Targets = []string{invalidTarget}
+		entry.Targets = slices.Concat([]string{invalidTarget}, a.targets)
 		return nil, c.record(ctx, cl, entry, err)
 	}
-	entry.Account, entry.Targets = r.Account, []string{r.String()}
+	entry.Account, entry.Targets = r.Account, slices.Concat([]string{r.String()}, a.targets)
 	if a.dryRun && a.draft {
 		return nil, c.record(ctx, cl, entry, errDryRunAndDraft)
 	}
@@ -190,7 +201,7 @@ func (c *composeService) answer(ctx context.Context, cl caller, a answer) (*chai
 	return c.run(ctx, sendJob{
 		acct: acct, key: a.key, hash: hash, build: build,
 		after:  func(ctx context.Context) { c.markOriginal(ctx, acct, r, a.flag) },
-		action: a.action, targets: []string{r.String()}, caller: cl,
+		action: a.action, targets: slices.Concat([]string{r.String()}, a.targets), caller: cl,
 	})
 }
 

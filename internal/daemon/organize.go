@@ -87,18 +87,94 @@ type refGroup struct {
 	refs []ref.Ref
 }
 
-// Move implements chainmailv1connect.OrganizeServiceHandler.
-func (o *organizeService) Move(ctx context.Context, req *connect.Request[chainmailv1.MoveRequest]) (*connect.Response[chainmailv1.MoveResponse], error) {
-	folder := req.Msg.GetFolder()
-	outs, err := o.batch(ctx, req.Header(), batchCall{
+// moveCall is the batch call that moves refs to folder, as Move makes it.
+// Its targets hold the destination folder; a caller may append to them.
+func moveCall(refs []string, folder string) batchCall {
+	return batchCall{
 		action:  "move",
-		refs:    req.Msg.GetRefs(),
+		refs:    refs,
 		check:   func() error { return checkName("folder", folder) },
 		targets: []string{folderTarget(folder)},
-		run: func(ctx context.Context, w mailstore.Writer, refs []ref.Ref) []mailstore.RefResult {
-			return w.Move(ctx, refs, folder)
+		run: func(ctx context.Context, w mailstore.Writer, rs []ref.Ref) []mailstore.RefResult {
+			return w.Move(ctx, rs, folder)
 		},
-	})
+	}
+}
+
+// copyCall is the batch call that copies refs to folder, as Copy makes it.
+// Its targets hold the destination folder; a caller may append to them.
+func copyCall(refs []string, folder string) batchCall {
+	return batchCall{
+		action:  "copy",
+		refs:    refs,
+		check:   func() error { return checkName("folder", folder) },
+		targets: []string{folderTarget(folder)},
+		run: func(ctx context.Context, w mailstore.Writer, rs []ref.Ref) []mailstore.RefResult {
+			return w.Copy(ctx, rs, folder)
+		},
+	}
+}
+
+// archiveCall is the batch call that archives refs, as Archive makes it.
+func archiveCall(refs []string) batchCall {
+	return batchCall{action: "archive", refs: refs, run: refsOnly(mailstore.Writer.Archive)}
+}
+
+// trashCall is the batch call that moves refs to Trash, as Trash makes it.
+func trashCall(refs []string) batchCall {
+	return batchCall{action: "trash", refs: refs, run: refsOnly(mailstore.Writer.Trash)}
+}
+
+// flagsCall is the batch call that adds and removes flags on refs, as
+// SetFlags makes it from its request's add and remove. The check puts the
+// system flags in their canonical case, and run stores those.
+func flagsCall(refs, add, remove []string) batchCall {
+	var checkedAdd, checkedRemove []string
+	return batchCall{
+		action: "flags",
+		refs:   refs,
+		check: func() (err error) {
+			if len(add) == 0 && len(remove) == 0 {
+				return &argError{msg: "no flags to add or remove", hint: "pass at least one flag to add or remove"}
+			}
+			if checkedAdd, err = normalizeFlags(add); err != nil {
+				return err
+			}
+			checkedRemove, err = normalizeFlags(remove)
+			return err
+		},
+		run: func(ctx context.Context, w mailstore.Writer, rs []ref.Ref) []mailstore.RefResult {
+			return w.StoreFlags(ctx, rs, checkedAdd, checkedRemove)
+		},
+	}
+}
+
+// labelsCall is the batch call that adds and removes Gmail labels on refs,
+// as SetLabels makes it.
+func labelsCall(refs, add, remove []string) batchCall {
+	return batchCall{
+		action: "labels",
+		refs:   refs,
+		check: func() error {
+			if len(add) == 0 && len(remove) == 0 {
+				return &argError{msg: "no labels to add or remove", hint: "pass at least one label to add or remove"}
+			}
+			for _, l := range slices.Concat(add, remove) {
+				if err := checkName("label", l); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		run: func(ctx context.Context, w mailstore.Writer, rs []ref.Ref) []mailstore.RefResult {
+			return w.StoreLabels(ctx, rs, add, remove)
+		},
+	}
+}
+
+// Move implements chainmailv1connect.OrganizeServiceHandler.
+func (o *organizeService) Move(ctx context.Context, req *connect.Request[chainmailv1.MoveRequest]) (*connect.Response[chainmailv1.MoveResponse], error) {
+	outs, err := o.batch(ctx, req.Header(), moveCall(req.Msg.GetRefs(), req.Msg.GetFolder()))
 	if err != nil {
 		return nil, err
 	}
@@ -107,16 +183,7 @@ func (o *organizeService) Move(ctx context.Context, req *connect.Request[chainma
 
 // Copy implements chainmailv1connect.OrganizeServiceHandler.
 func (o *organizeService) Copy(ctx context.Context, req *connect.Request[chainmailv1.CopyRequest]) (*connect.Response[chainmailv1.CopyResponse], error) {
-	folder := req.Msg.GetFolder()
-	outs, err := o.batch(ctx, req.Header(), batchCall{
-		action:  "copy",
-		refs:    req.Msg.GetRefs(),
-		check:   func() error { return checkName("folder", folder) },
-		targets: []string{folderTarget(folder)},
-		run: func(ctx context.Context, w mailstore.Writer, refs []ref.Ref) []mailstore.RefResult {
-			return w.Copy(ctx, refs, folder)
-		},
-	})
+	outs, err := o.batch(ctx, req.Header(), copyCall(req.Msg.GetRefs(), req.Msg.GetFolder()))
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +192,7 @@ func (o *organizeService) Copy(ctx context.Context, req *connect.Request[chainma
 
 // Archive implements chainmailv1connect.OrganizeServiceHandler.
 func (o *organizeService) Archive(ctx context.Context, req *connect.Request[chainmailv1.ArchiveRequest]) (*connect.Response[chainmailv1.ArchiveResponse], error) {
-	outs, err := o.batch(ctx, req.Header(), batchCall{action: "archive", refs: req.Msg.GetRefs(), run: refsOnly(mailstore.Writer.Archive)})
+	outs, err := o.batch(ctx, req.Header(), archiveCall(req.Msg.GetRefs()))
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +201,7 @@ func (o *organizeService) Archive(ctx context.Context, req *connect.Request[chai
 
 // Trash implements chainmailv1connect.OrganizeServiceHandler.
 func (o *organizeService) Trash(ctx context.Context, req *connect.Request[chainmailv1.TrashRequest]) (*connect.Response[chainmailv1.TrashResponse], error) {
-	outs, err := o.batch(ctx, req.Header(), batchCall{action: "trash", refs: req.Msg.GetRefs(), run: refsOnly(mailstore.Writer.Trash)})
+	outs, err := o.batch(ctx, req.Header(), trashCall(req.Msg.GetRefs()))
 	if err != nil {
 		return nil, err
 	}
@@ -156,24 +223,7 @@ func (o *organizeService) Expunge(ctx context.Context, req *connect.Request[chai
 
 // SetFlags implements chainmailv1connect.OrganizeServiceHandler.
 func (o *organizeService) SetFlags(ctx context.Context, req *connect.Request[chainmailv1.SetFlagsRequest]) (*connect.Response[chainmailv1.SetFlagsResponse], error) {
-	var add, remove []string
-	outs, err := o.batch(ctx, req.Header(), batchCall{
-		action: "flags",
-		refs:   req.Msg.GetRefs(),
-		check: func() (err error) {
-			if len(req.Msg.GetAdd()) == 0 && len(req.Msg.GetRemove()) == 0 {
-				return &argError{msg: "no flags to add or remove", hint: "pass at least one flag to add or remove"}
-			}
-			if add, err = normalizeFlags(req.Msg.GetAdd()); err != nil {
-				return err
-			}
-			remove, err = normalizeFlags(req.Msg.GetRemove())
-			return err
-		},
-		run: func(ctx context.Context, w mailstore.Writer, refs []ref.Ref) []mailstore.RefResult {
-			return w.StoreFlags(ctx, refs, add, remove)
-		},
-	})
+	outs, err := o.batch(ctx, req.Header(), flagsCall(req.Msg.GetRefs(), req.Msg.GetAdd(), req.Msg.GetRemove()))
 	if err != nil {
 		return nil, err
 	}
@@ -182,36 +232,16 @@ func (o *organizeService) SetFlags(ctx context.Context, req *connect.Request[cha
 
 // SetLabels implements chainmailv1connect.OrganizeServiceHandler.
 func (o *organizeService) SetLabels(ctx context.Context, req *connect.Request[chainmailv1.SetLabelsRequest]) (*connect.Response[chainmailv1.SetLabelsResponse], error) {
-	add, remove := req.Msg.GetAdd(), req.Msg.GetRemove()
-	outs, err := o.batch(ctx, req.Header(), batchCall{
-		action: "labels",
-		refs:   req.Msg.GetRefs(),
-		check: func() error {
-			if len(add) == 0 && len(remove) == 0 {
-				return &argError{msg: "no labels to add or remove", hint: "pass at least one label to add or remove"}
-			}
-			for _, l := range slices.Concat(add, remove) {
-				if err := checkName("label", l); err != nil {
-					return err
-				}
-			}
-			return nil
-		},
-		run: func(ctx context.Context, w mailstore.Writer, refs []ref.Ref) []mailstore.RefResult {
-			return w.StoreLabels(ctx, refs, add, remove)
-		},
-	})
+	outs, err := o.batch(ctx, req.Header(), labelsCall(req.Msg.GetRefs(), req.Msg.GetAdd(), req.Msg.GetRemove()))
 	if err != nil {
 		return nil, err
 	}
 	return connect.NewResponse(&chainmailv1.SetLabelsResponse{Outcomes: outs}), nil
 }
 
-// batch runs a batch call: it checks the call, runs each account's refs
-// through one Writer call, at most maxAccountFanOut accounts at once, and
-// records one audit row per account. A ref that fails, fails only its own
-// outcome. A call refused for its arguments still records one row per
-// account, unless it has too few or too many refs to attribute.
+// batch runs a batch call for a client: it identifies the caller, gives
+// the call organizeTimeout when the client set no deadline, and runs it
+// through batchAs.
 func (o *organizeService) batch(ctx context.Context, h http.Header, c batchCall) ([]*chainmailv1.RefOutcome, error) {
 	who, err := callerOf(ctx, h)
 	if err != nil {
@@ -219,6 +249,17 @@ func (o *organizeService) batch(ctx context.Context, h http.Header, c batchCall)
 	}
 	ctx, cancel := withDeadline(ctx, organizeTimeout)
 	defer cancel()
+	return o.batchAs(ctx, who, c)
+}
+
+// batchAs runs a batch call as who: it checks the call, runs each
+// account's refs through one Writer call, at most maxAccountFanOut
+// accounts at once, and records one audit row per account. A ref that
+// fails, fails only its own outcome. A call refused for its arguments
+// still records one row per account, unless it has too few or too many
+// refs to attribute. The caller sets the deadline. Client calls come
+// through batch; the daemon's own, such as a rule's, call it directly.
+func (o *organizeService) batchAs(ctx context.Context, who caller, c batchCall) ([]*chainmailv1.RefOutcome, error) {
 	if err := checkRefCount(c); err != nil {
 		entry := audit.Entry{Action: c.action, Targets: append([]string{tally("refs", len(c.refs))}, c.targets...)}
 		return nil, o.s.record(ctx, who, entry, err)

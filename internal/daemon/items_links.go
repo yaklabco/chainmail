@@ -116,15 +116,40 @@ func (s *Server) itemView(ctx context.Context, id string) (*chainmailv1.GetItemR
 // item.link with the item, the account and the thread key; the link's
 // account is the entry's account.
 func (i *itemsService) LinkThread(ctx context.Context, req *connect.Request[chainmailv1.LinkThreadRequest]) (*connect.Response[chainmailv1.LinkThreadResponse], error) {
-	return itemCall(ctx, i.s, req, "item.link", func(ctx context.Context, c caller, entry *audit.Entry) (*chainmailv1.LinkThreadResponse, error) {
-		target, err := itemTarget("item", req.Msg.GetItemId())
-		entry.Targets = []string{target}
-		if err != nil {
-			return nil, err
-		}
-		resp, err := i.s.linkThread(ctx, actorOf(c), req.Msg, entry)
-		return resp, messageErr(err)
-	})
+	c, err := callerOf(ctx, req.Header())
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := withDeadline(ctx, callTimeout)
+	defer cancel()
+	resp, err := i.s.linkThreadAs(ctx, c, req.Msg, nil)
+	if err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// linkThreadAs runs LinkThread as cl, with the item change recorded under
+// actorOf(cl). Its item.link audit row holds the item, the account and the
+// thread key as far as the call got, then targets, such as a rule's rule=
+// and run=. It returns the action's Connect error after the row is
+// written. The caller sets the deadline. Client calls come through
+// LinkThread; the daemon's own call it directly.
+func (s *Server) linkThreadAs(ctx context.Context, cl caller, m *chainmailv1.LinkThreadRequest, targets []string) (*chainmailv1.LinkThreadResponse, error) {
+	entry := audit.Entry{Action: "item.link"}
+	target, runErr := itemTarget("item", m.GetItemId())
+	entry.Targets = []string{target}
+	var resp *chainmailv1.LinkThreadResponse
+	if runErr == nil {
+		var err error
+		resp, err = s.linkThread(ctx, actorOf(cl), m, &entry)
+		runErr = messageErr(err)
+	}
+	entry.Targets = append(entry.Targets, targets...)
+	if err := s.record(ctx, cl, entry, runErr); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 // linkThread runs LinkThread for a valid item ID. The item is checked
