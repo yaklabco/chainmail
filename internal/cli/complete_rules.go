@@ -61,9 +61,11 @@ func (cp *completer) ruleRefs(maxArgs int, deleted bool) cobra.CompletionFunc {
 // ruleSpecs is how the rule commands complete, by command path. specs
 // merges it in.
 func (cp *completer) ruleSpecs() map[string]compSpec {
+	allAccounts := cp.accounts(nil, 0)
 	live := cp.ruleRefs(1, false)
 	return map[string]compSpec{
 		"chainmail rule":      {args: noComplete},
 		"chainmail rule show": {args: live},
+		"chainmail rule list": {args: noComplete, flags: map[string]cobra.CompletionFunc{"account": allAccounts}},
 	}
 }

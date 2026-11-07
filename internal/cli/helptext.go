@@ -101,6 +101,8 @@ var examples = map[string]string{
 	"chainmail move": `  chainmail move cm1:work:INBOX:7:42 --to Receipts`,
 	"chainmail reply": `  chainmail reply cm1:work:INBOX:7:42 --body "Thanks, paid."
   chainmail reply cm1:work:INBOX:7:42 --all --body-file reply.md --draft`,
+	"chainmail rule list": `  chainmail rule list
+  chainmail rule list --account gmail --disabled`,
 	"chainmail rule show": `  chainmail rule show receipts --history
   # save a rule as a file to edit
   chainmail rule show receipts --toml > receipts.toml`,

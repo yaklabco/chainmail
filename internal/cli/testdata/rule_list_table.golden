@@ -1,0 +1,3 @@
+ID                             NAME             STATE                         PRI  TRIGGERS       ACCOUNTS      NEXT RUN          ACTIONS
+ru_01jcb7m2k9r8q3v4w5x6y7z8a9  receipts         enabled                       50   new, every:6h  gmail, gwork  2026-11-07 15:00  label=Receipts link_item=it_admin_work,anchor forward=boo...
+ru_01jcb7m2k9r8q3v4w5x6y7z8b0  old-newsletters  disabled (repeated_failures)  100  manual         all           -                 move=Old[2J/News

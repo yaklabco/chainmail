@@ -6,6 +6,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/proto"
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 )
@@ -42,11 +43,19 @@ A rule is named by its ID (ru_...) or its name. What rules do is audited
 under client kind rule: chainmail audit --client rule. Rule descriptions
 and queries are untrusted, as mail is: they are often copied from it.`
 
+// The triggers and run outcomes rule commands take, in the order help and
+// completion offer them.
+var (
+	ruleTriggers = []string{"new", "schedule", "manual"}
+	ruleOutcomes = []string{"ok", "capped", "failed", "cache_not_ready", "interrupted"}
+)
+
 // newRuleCmd builds chainmail rule and its subcommands.
 func newRuleCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	cmd := newGroup("rule", "Sort mail with rules that act on new mail, on a schedule or on demand")
 	cmd.Long = ruleHelp
 	cmd.AddCommand(
+		newRuleListCmd(ctx, env, g),
 		newRuleShowCmd(ctx, env, g),
 	)
 	return cmd
@@ -80,5 +89,41 @@ func newRuleShowCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&asTOML, "toml", false, "print the rule as a rule file, the shape rule create -f reads")
 	cmd.Flags().BoolVar(&history, "history", false, "also list the rule's revisions, newest first")
+	return cmd
+}
+
+func newRuleListCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	req := &chainmailv1.ListRulesRequest{}
+	var enabled, disabled bool
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List rules in priority order, lowest first",
+		Args:  exactArgs(0),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			switch {
+			case enabled && disabled:
+				return usageError{err: errors.New("--enabled and --disabled cannot be used together"), hint: helpHint(cmd)}
+			case enabled:
+				req.Enabled = proto.Bool(true)
+			case disabled:
+				req.Enabled = proto.Bool(false)
+			}
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Rules.ListRules(ctx, connect.NewRequest(req))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			return ruleListTable(env.Stdout, env.location(), resp.Msg)
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&req.Account, "account", "", "only rules that cover this account, by name or by covering every account")
+	f.BoolVar(&enabled, "enabled", false, "only enabled rules")
+	f.BoolVar(&disabled, "disabled", false, "only disabled rules")
+	f.BoolVar(&req.Deleted, "deleted", false, "only deleted rules")
 	return cmd
 }

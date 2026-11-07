@@ -196,3 +196,29 @@ func ruleRevisionsTable(w io.Writer, loc *time.Location, revs []*chainmailv1.Rul
 	}
 	return tw.Flush()
 }
+
+// ruleActionsWidth is the most runes of a rule's actions a list line shows.
+const ruleActionsWidth = 60
+
+// ruleActionsText is a rule's actions in order, each in its --action form,
+// separated by spaces.
+func ruleActionsText(actions []*chainmailv1.RuleAction) string {
+	parts := make([]string, len(actions))
+	for i, a := range actions {
+		parts[i] = ruleActionText(a)
+	}
+	return strings.Join(parts, " ")
+}
+
+// ruleListTable prints rule list's rows in the order the daemon sent them.
+func ruleListTable(w io.Writer, loc *time.Location, r *chainmailv1.ListRulesResponse) error {
+	tw := newTable(w)
+	_, _ = fmt.Fprintln(tw, "ID\tNAME\tSTATE\tPRI\tTRIGGERS\tACCOUNTS\tNEXT RUN\tACTIONS")
+	for _, rule := range r.GetRules() {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+			termText(rule.GetId()), termText(rule.GetName()), ruleState(rule), rule.GetPriority(),
+			ruleTriggersText(rule), ruleAccountsText(rule), orDash(shortDate(rule.GetNextRunAt(), loc)),
+			orDash(clip(ruleActionsText(rule.GetActions()), ruleActionsWidth)))
+	}
+	return tw.Flush()
+}
