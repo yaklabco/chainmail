@@ -14,6 +14,7 @@ import (
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 	"github.com/yaklabco/chainmail/gen/chainmail/v1/chainmailv1connect"
 	"github.com/yaklabco/chainmail/internal/audit"
+	"github.com/yaklabco/chainmail/internal/config"
 	"github.com/yaklabco/chainmail/internal/items"
 	"github.com/yaklabco/chainmail/internal/rules"
 )
@@ -142,9 +143,6 @@ func parseOutcome(s string) (rules.Outcome, error) {
 // label, forward address or note: only IDs, names, field names, accounts,
 // kinds and counts.
 type rulesService struct {
-	// The embed answers the calls Cycle F has not written yet; Cycle F
-	// removes it.
-	chainmailv1connect.UnimplementedRulesServiceHandler
 	s *Server
 }
 
@@ -383,4 +381,237 @@ func (r *rulesService) ListRules(ctx context.Context, req *connect.Request[chain
 		}
 		return resp, nil
 	})
+}
+
+// ruleRunAccounts is the accounts a run of d acts on: every
+// account it covers, or only account when set, which must be one of them.
+func (s *Server) ruleRunAccounts(d rules.Definition, account string) ([]config.ResolvedAccount, error) {
+	accts, err := s.ruleAccounts(d)
+	if err != nil {
+		return nil, err
+	}
+	if account == "" {
+		return accts, nil
+	}
+	for _, a := range accts {
+		if a.Name == account {
+			return []config.ResolvedAccount{a}, nil
+		}
+	}
+	return nil, errRuleAccount
+}
+
+// dryRunSubject is what a dry run matches: a saved rule's ID and
+// definition, or an unsaved definition, validated, with no ID.
+func (s *Server) dryRunSubject(ctx context.Context, m *chainmailv1.DryRunRuleRequest) (string, rules.Definition, error) {
+	if m.GetRule() != "" {
+		rule, err := s.rules.Get(ctx, m.GetRule())
+		if err != nil {
+			return "", rules.Definition{}, s.rulesErr(err)
+		}
+		return rule.ID, rule.Definition, nil
+	}
+	d, err := definitionOf(m.GetDefinition())
+	if err != nil {
+		return "", rules.Definition{}, err
+	}
+	if err := d.Validate(s.ruleEnv()); err != nil {
+		return "", rules.Definition{}, err
+	}
+	return "", d, nil
+}
+
+// DryRunRule implements chainmailv1connect.RulesServiceHandler. It matches
+// a saved rule, or an unsaved definition, without acting or writing.
+// Audited as rule.dry_run with the rule or "unsaved", the trigger, and the
+// number of accounts and matches.
+func (r *rulesService) DryRunRule(ctx context.Context, req *connect.Request[chainmailv1.DryRunRuleRequest]) (*connect.Response[chainmailv1.DryRunRuleResponse], error) {
+	return ruleCall(ctx, r.s, req, "rule.dry_run", runRuleTimeout, func(ctx context.Context, _ caller, entry *audit.Entry) (*chainmailv1.DryRunRuleResponse, error) {
+		m := req.Msg
+		var (
+			target string
+			refErr error
+		)
+		switch {
+		case (m.GetRule() == "") == (m.GetDefinition() == nil):
+			target, refErr = "rule="+invalidTarget, errDryRunSource
+		case m.GetRule() != "":
+			target, refErr = ruleTarget(m.GetRule())
+		default:
+			target = "rule=unsaved"
+		}
+		trigger, trigErr := parseTrigger(m.GetTrigger(), rules.TriggerManual)
+		accountErr := r.s.ruleAccountArg(m.GetAccount())
+		if accountErr == nil {
+			entry.Account = m.GetAccount()
+		}
+		entry.Targets = []string{target, enumTarget("trigger", trigger, trigErr)}
+		if err := cmp.Or(refErr, trigErr, accountErr); err != nil {
+			return nil, err
+		}
+		ruleID, d, err := r.s.dryRunSubject(ctx, m)
+		if err != nil {
+			return nil, err
+		}
+		if ruleID != "" {
+			entry.Targets[0] = "rule=" + ruleID
+		}
+		resp, err := r.s.dryRun(ctx, ruleID, d, trigger, m.GetAccount())
+		if err != nil {
+			return nil, err
+		}
+		var matched int64
+		for _, a := range resp.GetAccounts() {
+			matched += a.GetMatched()
+		}
+		entry.Targets = append(entry.Targets, tally("accounts", len(resp.GetAccounts())), fmt.Sprintf("matched=%d", matched))
+		return resp, nil
+	})
+}
+
+// RunRule implements chainmailv1connect.RulesServiceHandler. It runs a
+// live rule once on every account it covers, or the one named, through
+// each account's runner, within 10 minutes unless the client set a
+// deadline. A disabled rule runs, since the call is explicit. Audited as
+// rule.run with the rule, max and the number of runs.
+func (r *rulesService) RunRule(ctx context.Context, req *connect.Request[chainmailv1.RunRuleRequest]) (*connect.Response[chainmailv1.RunRuleResponse], error) {
+	return ruleCall(ctx, r.s, req, "rule.run", runRuleTimeout, func(ctx context.Context, _ caller, entry *audit.Entry) (*chainmailv1.RunRuleResponse, error) {
+		m := req.Msg
+		target, refErr := ruleTarget(m.GetRule())
+		limit := int(m.GetMax())
+		var maxErr error
+		if limit < 0 || limit > rules.MaxMaxPerRun {
+			maxErr = errRuleMax
+		}
+		accountErr := r.s.ruleAccountArg(m.GetAccount())
+		if accountErr == nil {
+			entry.Account = m.GetAccount()
+		}
+		entry.Targets = []string{target, tally("max", limit)}
+		if err := cmp.Or(refErr, maxErr, accountErr); err != nil {
+			return nil, err
+		}
+		rule, err := r.s.rules.Get(ctx, m.GetRule())
+		if err != nil {
+			return nil, r.s.rulesErr(err)
+		}
+		entry.Targets[0] = "rule=" + rule.ID
+		if !rule.DeletedAt.IsZero() {
+			return nil, errRuleDeleted
+		}
+		accts, err := r.s.ruleRunAccounts(rule.Definition, m.GetAccount())
+		if err != nil {
+			return nil, err
+		}
+		runs, err := r.s.runOnAccounts(ctx, rule, accts, rules.TriggerManual, limit)
+		entry.Targets = append(entry.Targets, tally("runs", len(runs)))
+		if err != nil {
+			return nil, err
+		}
+		return &chainmailv1.RunRuleResponse{Runs: ruleRunsProto(runs)}, nil
+	})
+}
+
+// ListRuleRuns implements chainmailv1connect.RulesServiceHandler: runs
+// newest first, paged by before_id. Audited as rule.runs with the set
+// filters and the number of rows.
+func (r *rulesService) ListRuleRuns(ctx context.Context, req *connect.Request[chainmailv1.ListRuleRunsRequest]) (*connect.Response[chainmailv1.ListRuleRunsResponse], error) {
+	return ruleCall(ctx, r.s, req, "rule.runs", callTimeout, func(ctx context.Context, _ caller, entry *audit.Entry) (*chainmailv1.ListRuleRunsResponse, error) {
+		m := req.Msg
+		var refErr error
+		if m.GetRule() != "" {
+			var target string
+			target, refErr = ruleTarget(m.GetRule())
+			entry.Targets = append(entry.Targets, target)
+		}
+		trigger, trigErr := parseTrigger(m.GetTrigger(), "")
+		if m.GetTrigger() != "" {
+			entry.Targets = append(entry.Targets, enumTarget("trigger", trigger, trigErr))
+		}
+		outcome, outErr := parseOutcome(m.GetOutcome())
+		if m.GetOutcome() != "" {
+			entry.Targets = append(entry.Targets, enumTarget("outcome", outcome, outErr))
+		}
+		var limitErr, beforeErr error
+		if l := m.GetLimit(); l < 0 || l > maxRuleRunsLimit {
+			limitErr = errRuleRunsLimit
+		}
+		if m.GetBeforeId() < 0 {
+			beforeErr = errRuleBeforeID
+		}
+		accountErr := r.s.ruleAccountArg(m.GetAccount())
+		if accountErr == nil {
+			entry.Account = m.GetAccount()
+		}
+		if err := cmp.Or(refErr, accountErr, trigErr, outErr, limitErr, beforeErr); err != nil {
+			return nil, err
+		}
+		q := rules.RunQuery{Account: m.GetAccount(), Trigger: trigger, Outcome: outcome, Limit: int(m.GetLimit()), BeforeID: m.GetBeforeId()}
+		if m.GetRule() != "" {
+			rule, err := r.s.rules.Get(ctx, m.GetRule())
+			if err != nil {
+				return nil, r.s.rulesErr(err)
+			}
+			entry.Targets[0] = "rule=" + rule.ID
+			q.RuleID = rule.ID
+		}
+		runs, next, err := r.s.rules.ListRuns(ctx, q)
+		if err != nil {
+			return nil, r.s.rulesErr(err)
+		}
+		entry.Targets = append(entry.Targets, tally("rows", len(runs)))
+		return &chainmailv1.ListRuleRunsResponse{Runs: ruleRunsProto(runs), NextBeforeId: next}, nil
+	})
+}
+
+// RulesStatus implements chainmailv1connect.RulesServiceHandler. Audited
+// as rule.status with the number of runners reported.
+func (r *rulesService) RulesStatus(ctx context.Context, req *connect.Request[chainmailv1.RulesStatusRequest]) (*connect.Response[chainmailv1.RulesStatusResponse], error) {
+	return ruleCall(ctx, r.s, req, "rule.status", callTimeout, func(ctx context.Context, _ caller, entry *audit.Entry) (*chainmailv1.RulesStatusResponse, error) {
+		resp, err := r.s.rulesStatus(ctx)
+		if err != nil {
+			return nil, err
+		}
+		entry.Targets = []string{tally("runners", len(resp.GetRunners()))}
+		return resp, nil
+	})
+}
+
+// rulesStatus reports every configured account in name order: its
+// runner's state, acknowledged position and lag behind the log's tail, or
+// cache_disabled for an account with no runner; then the next scheduled
+// run and the due checker's next wake.
+func (s *Server) rulesStatus(ctx context.Context) (*chainmailv1.RulesStatusResponse, error) {
+	tail, err := s.watchLog.Tail(ctx)
+	if err != nil {
+		return nil, s.watchLogErr(err)
+	}
+	names := s.opts.Config.AccountNames()
+	resp := &chainmailv1.RulesStatusResponse{Runners: make([]*chainmailv1.RulesRunnerStatus, 0, len(names))}
+	for _, name := range names {
+		st := &chainmailv1.RulesRunnerStatus{Account: name, State: runnerCacheDisabled}
+		if r := s.ruleRunners[name]; r != nil {
+			rs := r.status()
+			st.State, st.AckedId, st.Lag, st.Reason = rs.State, rs.AckedID, runnerLag(tail, rs.AckedID), rs.Reason
+		}
+		resp.Runners = append(resp.Runners, st)
+	}
+	next, ok, err := s.rules.NextScheduled(ctx)
+	if err != nil {
+		return nil, s.rulesErr(err)
+	}
+	if ok {
+		resp.NextScheduledAt = timestamp(next)
+	}
+	resp.NextDueCheckAt = timestamp(s.dueChecker.NextWake())
+	return resp, nil
+}
+
+// runnerLag is how many events lie past a runner's acknowledged position,
+// 0 before it has one.
+func runnerLag(tail, acked int64) int64 {
+	if acked < 0 || tail <= acked {
+		return 0
+	}
+	return tail - acked
 }
