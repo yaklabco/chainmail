@@ -21,20 +21,47 @@ import (
 // Default runs the full local check.
 var Default = Check
 
+// Prereq groups the prerequisite targets
+type Prereq st.Namespace
+
+// Default is the default target for the prereq namespace.
+func (Prereq) Default() error {
+	st.Deps(Prereq.All)
+
+	return nil
+}
+
+// All runs all prerequisite targets.
+func (Prereq) All() error {
+	st.Deps(Prereq.Brew)
+
+	return nil
+}
+
+// Brew installs tools from Brewfile via Homebrew
+func (Prereq) Brew() error {
+	return sh.Run("brew", "bundle", "--file=Brewfile")
+}
+
 // Check runs everything CI runs: generated code check, lint, changelog
 // validation, tests and build.
 func Check() {
+	st.Deps(Prereq.All)
 	st.SerialDeps(GenerateCheck, Lint, Changelog, Test.Unit, Test.Stavefile, Build)
 }
 
 // Generate regenerates Protobuf and Connect code into gen/.
 func Generate() error {
+	st.Deps(Prereq.All)
+
 	return sh.RunV("buf", "generate")
 }
 
 // GenerateCheck fails if gen/ is out of date with proto/, or the command
 // reference with the CLI's help.
 func GenerateCheck() error {
+	st.Deps(Prereq.All)
+
 	// Serial: buf generate empties gen/ before it rewrites it, and the
 	// chainmail build behind Docs.Commands imports gen/.
 	st.SerialDeps(Generate, Docs.Commands)
@@ -60,11 +87,15 @@ const commandDocsDir = "website/docs/reference/commands"
 
 // Commands writes the command reference pages from the CLI's help.
 func (Docs) Commands() error {
+	st.Deps(Prereq.All)
+
 	return sh.RunV("go", "run", "./cmd/chainmail", "docs", commandDocsDir)
 }
 
 // Build builds the docs site into website/build.
 func (Docs) Build() error {
+	st.Deps(Prereq.All)
+
 	if err := sh.RunWithV(nil, "website", "bun", "install", "--frozen-lockfile"); err != nil {
 		return err
 	}
@@ -73,6 +104,8 @@ func (Docs) Build() error {
 
 // Serve runs the docs site locally with live reload.
 func (Docs) Serve() error {
+	st.Deps(Prereq.All)
+
 	if err := sh.RunWithV(nil, "website", "bun", "install", "--frozen-lockfile"); err != nil {
 		return err
 	}
@@ -81,6 +114,8 @@ func (Docs) Serve() error {
 
 // Lint runs buf lint and golangci-lint.
 func Lint() error {
+	st.Deps(Prereq.All)
+
 	if err := sh.RunV("buf", "lint"); err != nil {
 		return err
 	}
@@ -92,6 +127,8 @@ type Test st.Namespace
 
 // Unit runs unit and component tests with the race detector.
 func (Test) Unit() error {
+	st.Deps(Prereq.All)
+
 	return sh.RunV("go", "test", "-race", "-p", parallelism(), "./...")
 }
 
@@ -99,6 +136,8 @@ func (Test) Unit() error {
 // Release makes before it tags. The stave build tag keeps them out of
 // Test.Unit.
 func (Test) Stavefile() error {
+	st.Deps(Prereq.All)
+
 	return sh.RunV("go", "test", "-race", "-tags", "stave", "-count=1", ".")
 }
 
@@ -107,6 +146,8 @@ func (Test) Stavefile() error {
 // search to catch up, so a full run takes far longer than go test's default
 // 10 minute timeout.
 func (Test) Live() error {
+	st.Deps(Prereq.All)
+
 	return sh.RunV("go", "test", "-tags", "live", "-count=1", "-timeout", "120m", "-v", "./internal/live/")
 }
 
@@ -115,12 +156,16 @@ func (Test) Live() error {
 // the MCP server run as chainmail mcp against Dovecot. Each test binary
 // starts and removes its own container.
 func (Test) Integration() error {
+	st.Deps(Prereq.All)
+
 	return sh.RunV("go", "test", "-race", "-tags", "integration", "-count=1", "-timeout", "15m",
 		"-p", parallelism(), "-parallel", parallelism(), "./internal/mailstore/imapstore/", "./internal/daemon/", "./internal/mcpserver/")
 }
 
 // Build compiles bin/chainmail without cgo.
 func Build() error {
+	st.Deps(Prereq.All)
+
 	return sh.RunWithV(map[string]string{"CGO_ENABLED": "0"}, "",
 		"go", "build", "-trimpath", "-ldflags", ldflags(), "-o", "bin/chainmail", "./cmd/chainmail")
 }
@@ -157,6 +202,8 @@ var (
 
 // Changelog validates CHANGELOG.md against the Keep a Changelog format.
 func Changelog() error {
+	st.Deps(Prereq.All)
+
 	if err := validateChangelog(changelogFile); err != nil {
 		return err
 	}
@@ -172,6 +219,8 @@ func Changelog() error {
 // Every check runs before the tag is created. A pushed tag whose release
 // goreleaser cannot publish blocks every later run until it is deleted.
 func Release() error {
+	st.Deps(Prereq.All)
+
 	if err := checkReleaseEnv(); err != nil {
 		return err
 	}
@@ -225,6 +274,8 @@ func checkReleaseEnv() error {
 // Snapshot builds the release archives and the Cask into dist/ as Release
 // would, without tagging, pushing or publishing anything.
 func Snapshot() error {
+	st.Deps(Prereq.All)
+
 	tag, err := nextReleaseTag()
 	if err != nil {
 		return err
