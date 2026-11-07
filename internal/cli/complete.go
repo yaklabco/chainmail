@@ -471,6 +471,7 @@ func (cp *completer) specs() map[string]compSpec {
 		"chainmail folder rename": {args: existingFolder},
 	}
 	maps.Copy(specs, cp.itemSpecs())
+	maps.Copy(specs, cp.ruleSpecs())
 	return specs
 }
 
