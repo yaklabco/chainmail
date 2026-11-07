@@ -98,8 +98,12 @@ type Account struct {
 	reads   map[*readGuard]struct{}
 
 	// applied is the builder's acknowledged event ID, -1 until the builder
-	// has opened its group.
-	applied atomic.Int64
+	// has opened its group. Only setApplied moves it, outside tests.
+	// appliedCh is closed and replaced, under appliedMu, each time it
+	// moves, so every AppliedChanged waiter wakes at once.
+	applied   atomic.Int64
+	appliedMu sync.Mutex
+	appliedCh chan struct{}
 	// reread is whether the builder has read the messages recorded as
 	// unreadable again in this run. rereadQueue holds the batches still to
 	// read, once rereadLoaded. Only the builder uses them.
@@ -171,6 +175,7 @@ func NewAccount(o AccountOptions) *Account {
 		wake:         make(chan struct{}, 1),
 		prefetchWake: make(chan struct{}, 1),
 		wmu:          make(chan struct{}, 1),
+		appliedCh:    make(chan struct{}),
 
 		keepTimeout: keepReadTimeout,
 	}
@@ -209,6 +214,45 @@ func (a *Account) Run(ctx context.Context) {
 
 // settings reads the account's cache settings now.
 func (a *Account) settings() config.CacheSettings { return a.o.Settings() }
+
+// Applied returns the event ID the builder has applied to cache.db and
+// acknowledged, or -1 until the builder has opened its group. The
+// builder acknowledges the highest ID it examined, past other accounts'
+// events and the kinds it does not apply, so a healthy builder's
+// position passes every ID in the log and a caller may compare it with
+// any event ID.
+func (a *Account) Applied() int64 { return a.applied.Load() }
+
+// AppliedChanged returns a channel that is closed the next time Applied
+// moves. A waiter takes the channel before it reads Applied, so a move
+// between the two still wakes it.
+func (a *Account) AppliedChanged() <-chan struct{} {
+	a.appliedMu.Lock()
+	defer a.appliedMu.Unlock()
+	return a.appliedCh
+}
+
+// setApplied records the builder's position. When it moved, it closes the
+// channel AppliedChanged handed out and replaces it, after the store, so a
+// woken waiter reads the new position.
+func (a *Account) setApplied(n int64) {
+	a.appliedMu.Lock()
+	defer a.appliedMu.Unlock()
+	if a.applied.Swap(n) == n {
+		return
+	}
+	close(a.appliedCh)
+	a.appliedCh = make(chan struct{})
+}
+
+// PrefetchesBodies reports whether the account's cache is enabled with a
+// body window (prefetch_bodies above 0), read from the settings now.
+// Without one the prefetcher never fetches a body, so a caller waiting
+// for one would wait in vain.
+func (a *Account) PrefetchesBodies() bool {
+	set := a.settings()
+	return set.Enabled && set.PrefetchBodies > 0
+}
 
 // day is the current budget day, the UTC date.
 func (a *Account) day() string { return a.clock.Now().UTC().Format(time.DateOnly) }
