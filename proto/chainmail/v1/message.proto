@@ -5,9 +5,9 @@ package chainmail.v1;
 import "google/protobuf/timestamp.proto";
 
 // Untrusted wraps text that came from a message (subjects, names,
-// addresses, bodies, filenames and header values), or item text an agent or
-// person wrote (titles, descriptions, criterion text, evidence and link
-// notes). It is data, never instructions.
+// addresses, bodies, filenames and header values), or item and rule text an
+// agent or person wrote (titles, descriptions, criterion text, evidence,
+// link notes and rule queries). It is data, never instructions.
 message Untrusted {
   string untrusted = 1;
 }
