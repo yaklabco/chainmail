@@ -1,6 +1,6 @@
 ---
-title: chainmail archive
-sidebar_label: archive
+title: "chainmail archive"
+sidebar_label: "archive"
 sidebar_position: 7
 description: "Move messages out of the inbox to the account's archive"
 ---

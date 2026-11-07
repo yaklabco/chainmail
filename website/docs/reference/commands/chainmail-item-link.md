@@ -1,6 +1,6 @@
 ---
-title: chainmail item link
-sidebar_label: item link
+title: "chainmail item link"
+sidebar_label: "item link"
 sidebar_position: 45
 description: "File the thread of a message against an item; moving the message keeps the link"
 ---

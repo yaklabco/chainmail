@@ -1,6 +1,6 @@
 ---
-title: chainmail unflag
-sidebar_label: unflag
+title: "chainmail unflag"
+sidebar_label: "unflag"
 sidebar_position: 64
 description: "Unstar messages: remove \\Flagged"
 ---

@@ -1,6 +1,6 @@
 ---
-title: chainmail copy
-sidebar_label: copy
+title: "chainmail copy"
+sidebar_label: "copy"
 sidebar_position: 17
 description: "Copy messages to a folder"
 ---

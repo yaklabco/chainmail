@@ -1,6 +1,6 @@
 ---
-title: chainmail search
-sidebar_label: search
+title: "chainmail search"
+sidebar_label: "search"
 sidebar_position: 57
 description: "Search mail on every account, newest first"
 ---
@@ -41,7 +41,7 @@ date, so newer\_than:1d there matches since the start of yesterday.
 Each account is answered from the local cache when the cache can answer
 the whole query and is fresh, and by its mail server otherwise. The table
 output ends with a source line naming which answered each account.
---source cache answers from the cache even when it is incomplete or stale,
+\--source cache answers from the cache even when it is incomplete or stale,
 and says why; --source server skips the cache.
 
 The shell removes quotes, so quote the whole query when it holds a phrase

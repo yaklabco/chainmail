@@ -1,6 +1,6 @@
 ---
-title: chainmail accounts
-sidebar_label: accounts
+title: "chainmail accounts"
+sidebar_label: "accounts"
 sidebar_position: 1
 description: "List, test and probe configured accounts"
 ---

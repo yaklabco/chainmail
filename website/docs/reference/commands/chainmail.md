@@ -1,6 +1,6 @@
 ---
-title: chainmail
-sidebar_label: chainmail
+title: "chainmail"
+sidebar_label: "chainmail"
 sidebar_position: 0
 description: "Email for AI agents, behind a policy daemon"
 ---

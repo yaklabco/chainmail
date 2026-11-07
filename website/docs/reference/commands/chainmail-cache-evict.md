@@ -1,6 +1,6 @@
 ---
-title: chainmail cache evict
-sidebar_label: cache evict
+title: "chainmail cache evict"
+sidebar_label: "cache evict"
 sidebar_position: 13
 description: "Run a body eviction sweep now and report what it freed"
 ---

@@ -1,6 +1,6 @@
 ---
-title: chainmail draft delete
-sidebar_label: draft delete
+title: "chainmail draft delete"
+sidebar_label: "draft delete"
 sidebar_position: 21
 description: "Delete a draft (moved to Trash unless policy allows expunge)"
 ---

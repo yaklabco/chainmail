@@ -1,6 +1,6 @@
 ---
-title: chainmail daemon
-sidebar_label: daemon
+title: "chainmail daemon"
+sidebar_label: "daemon"
 sidebar_position: 18
 description: "Run the chainmail daemon"
 ---

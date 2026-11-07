@@ -1,6 +1,6 @@
 ---
-title: chainmail item delete
-sidebar_label: item delete
+title: "chainmail item delete"
+sidebar_label: "item delete"
 sidebar_position: 44
 description: "Delete an item, softly; --cascade deletes the items below it too"
 ---

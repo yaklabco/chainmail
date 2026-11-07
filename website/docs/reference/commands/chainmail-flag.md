@@ -1,6 +1,6 @@
 ---
-title: chainmail flag
-sidebar_label: flag
+title: "chainmail flag"
+sidebar_label: "flag"
 sidebar_position: 25
 description: "Star messages: add \\Flagged"
 ---

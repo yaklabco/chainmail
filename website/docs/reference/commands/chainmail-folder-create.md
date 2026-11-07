@@ -1,6 +1,6 @@
 ---
-title: chainmail folder create
-sidebar_label: folder create
+title: "chainmail folder create"
+sidebar_label: "folder create"
 sidebar_position: 28
 description: "Create a folder, and its parents when missing"
 ---

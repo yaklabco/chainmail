@@ -1,6 +1,6 @@
 ---
-title: chainmail item block
-sidebar_label: item block
+title: "chainmail item block"
+sidebar_label: "item block"
 sidebar_position: 35
 description: "Record that an item is blocked by another; --remove clears it"
 ---

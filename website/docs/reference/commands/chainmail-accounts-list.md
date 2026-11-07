@@ -1,6 +1,6 @@
 ---
-title: chainmail accounts list
-sidebar_label: accounts list
+title: "chainmail accounts list"
+sidebar_label: "accounts list"
 sidebar_position: 2
 description: "List accounts and whether they can log in"
 ---

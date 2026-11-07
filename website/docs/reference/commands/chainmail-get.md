@@ -1,6 +1,6 @@
 ---
-title: chainmail get
-sidebar_label: get
+title: "chainmail get"
+sidebar_label: "get"
 sidebar_position: 33
 description: "Read up to 50 messages"
 ---
@@ -9,7 +9,7 @@ description: "Read up to 50 messages"
 
 Read up to 50 messages by ref. Each ref succeeds or fails on its own.
 
---full keeps quoted text and signatures and does not cut the body at body\_limit. --raw writes one message's original bytes, and refuses a terminal.
+\--full keeps quoted text and signatures and does not cut the body at body\_limit. --raw writes one message's original bytes, and refuses a terminal.
 
 ## Usage
 

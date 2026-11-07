@@ -1,6 +1,6 @@
 ---
-title: chainmail completion
-sidebar_label: completion
+title: "chainmail completion"
+sidebar_label: "completion"
 sidebar_position: 16
 description: "Print a shell completion script"
 ---

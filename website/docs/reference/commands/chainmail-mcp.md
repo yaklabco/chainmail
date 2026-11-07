@@ -1,6 +1,6 @@
 ---
-title: chainmail mcp
-sidebar_label: mcp
+title: "chainmail mcp"
+sidebar_label: "mcp"
 sidebar_position: 53
 description: "Serve chainmail's tools to an AI agent over MCP on stdio"
 ---

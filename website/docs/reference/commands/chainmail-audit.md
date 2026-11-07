@@ -1,6 +1,6 @@
 ---
-title: chainmail audit
-sidebar_label: audit
+title: "chainmail audit"
+sidebar_label: "audit"
 sidebar_position: 9
 description: "Show the daemon's audit log, newest first"
 ---

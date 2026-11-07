@@ -1,6 +1,6 @@
 ---
-title: chainmail send
-sidebar_label: send
+title: "chainmail send"
+sidebar_label: "send"
 sidebar_position: 60
 description: "Send a new message"
 ---
@@ -18,14 +18,14 @@ HTML file as the body, with --body as its text part when given.
 
 Each --attach file is attached. Each --inline NAME=F shows the image F
 where the body refers to NAME, as in !\[chart\](chart.png) with
---inline chart.png=./chart.png.
+\--inline chart.png=./chart.png.
 
 Running the same send again within 7 days reports the first send instead
 of sending twice: without --idempotency-key, the key is derived from the
 account, recipients, subject, body and files. To send identical content
 again on purpose, pass a new --idempotency-key.
 
---dry-run writes the message as MIME to stdout instead of sending it. It
+\--dry-run writes the message as MIME to stdout instead of sending it. It
 refuses a terminal unless --output json, which prints it as a JSON string.
 
 ## Usage

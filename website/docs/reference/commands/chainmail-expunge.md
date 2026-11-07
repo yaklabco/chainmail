@@ -1,6 +1,6 @@
 ---
-title: chainmail expunge
-sidebar_label: expunge
+title: "chainmail expunge"
+sidebar_label: "expunge"
 sidebar_position: 24
 description: "Delete messages for good (disabled unless policy allows it)"
 ---

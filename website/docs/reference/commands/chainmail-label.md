@@ -1,6 +1,6 @@
 ---
-title: chainmail label
-sidebar_label: label
+title: "chainmail label"
+sidebar_label: "label"
 sidebar_position: 52
 description: "Add and remove Gmail labels"
 ---

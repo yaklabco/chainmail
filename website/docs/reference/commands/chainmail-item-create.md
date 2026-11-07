@@ -1,6 +1,6 @@
 ---
-title: chainmail item create
-sidebar_label: item create
+title: "chainmail item create"
+sidebar_label: "item create"
 sidebar_position: 36
 description: "Create a work item; a task with no --parent goes to the inbox"
 ---

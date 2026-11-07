@@ -1,6 +1,6 @@
 ---
-title: chainmail item criteria
-sidebar_label: item criteria
+title: "chainmail item criteria"
+sidebar_label: "item criteria"
 sidebar_position: 37
 description: "Add, edit, remove, order and tick an item's acceptance criteria"
 ---

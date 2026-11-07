@@ -1,6 +1,6 @@
 ---
-title: chainmail item criteria untick
-sidebar_label: item criteria untick
+title: "chainmail item criteria untick"
+sidebar_label: "item criteria untick"
 sidebar_position: 43
 description: "Untick a criterion and drop its evidence"
 ---

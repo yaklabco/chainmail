@@ -1,6 +1,6 @@
 ---
-title: chainmail cache status
-sidebar_label: cache status
+title: "chainmail cache status"
+sidebar_label: "cache status"
 sidebar_position: 15
 description: "Show each account's cache state, backfill progress, bodies and budget"
 ---

@@ -1,6 +1,6 @@
 ---
-title: chainmail item list
-sidebar_label: item list
+title: "chainmail item list"
+sidebar_label: "item list"
 sidebar_position: 46
 description: "List items in tree order; --inbox lists the tasks still to sort"
 ---

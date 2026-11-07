@@ -1,6 +1,6 @@
 ---
-title: chainmail item show
-sidebar_label: item show
+title: "chainmail item show"
+sidebar_label: "item show"
 sidebar_position: 49
 description: "Show an item with its criteria, place in the tree, blockers and linked threads"
 ---

@@ -1,6 +1,6 @@
 ---
-title: chainmail watch
-sidebar_label: watch
+title: "chainmail watch"
+sidebar_label: "watch"
 sidebar_position: 67
 description: "Stream mail events as they happen, one per line"
 ---
@@ -36,7 +36,7 @@ heartbeat it saw. It stops with an error only when the daemon refuses the
 request, such as a bad group name or an unknown account. An account that
 needs a login does not stop it: the watch goes on, and an auth\_required
 status event says what to run.
---once stops at the first heartbeat, which comes once every event already
+\--once stops at the first heartbeat, which comes once every event already
 in the log has been printed.
 
 Subjects, names and addresses in new and item\_mail events come from the

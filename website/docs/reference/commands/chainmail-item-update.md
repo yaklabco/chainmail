@@ -1,6 +1,6 @@
 ---
-title: chainmail item update
-sidebar_label: item update
+title: "chainmail item update"
+sidebar_label: "item update"
 sidebar_position: 51
 description: "Change an item's fields; --clear unsets those that can be unset"
 ---

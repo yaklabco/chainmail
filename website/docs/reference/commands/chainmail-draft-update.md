@@ -1,6 +1,6 @@
 ---
-title: chainmail draft update
-sidebar_label: draft update
+title: "chainmail draft update"
+sidebar_label: "draft update"
 sidebar_position: 23
 description: "Replace a draft with a new version"
 ---
@@ -12,8 +12,8 @@ one deleted. The new version has a new ref, which is printed; the old ref
 is gone.
 
 It takes send's recipient, subject, body and attachment options, without
---account (the draft's account is used) and without --draft, --dry-run or
---idempotency-key. The whole message is replaced, so give every recipient, the
+\--account (the draft's account is used) and without --draft, --dry-run or
+\--idempotency-key. The whole message is replaced, so give every recipient, the
 subject and the body again. A reply saved as a draft stays a reply.
 
 ## Usage

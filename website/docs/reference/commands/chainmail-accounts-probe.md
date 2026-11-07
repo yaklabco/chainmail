@@ -1,6 +1,6 @@
 ---
-title: chainmail accounts probe
-sidebar_label: accounts probe
+title: "chainmail accounts probe"
+sidebar_label: "accounts probe"
 sidebar_position: 3
 description: "Measure how many IMAP connections accounts allow, and size their pools from it"
 ---

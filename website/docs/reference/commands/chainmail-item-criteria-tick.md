@@ -1,6 +1,6 @@
 ---
-title: chainmail item criteria tick
-sidebar_label: item criteria tick
+title: "chainmail item criteria tick"
+sidebar_label: "item criteria tick"
 sidebar_position: 42
 description: "Tick a criterion, with evidence that it is met"
 ---

@@ -1,6 +1,6 @@
 ---
-title: chainmail thread
-sidebar_label: thread
+title: "chainmail thread"
+sidebar_label: "thread"
 sidebar_position: 62
 description: "Read a message's whole thread, oldest first"
 ---

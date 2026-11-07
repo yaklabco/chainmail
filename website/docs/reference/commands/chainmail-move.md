@@ -1,6 +1,6 @@
 ---
-title: chainmail move
-sidebar_label: move
+title: "chainmail move"
+sidebar_label: "move"
 sidebar_position: 54
 description: "Move messages to a folder"
 ---

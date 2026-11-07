@@ -1,6 +1,6 @@
 ---
-title: chainmail accounts test
-sidebar_label: accounts test
+title: "chainmail accounts test"
+sidebar_label: "accounts test"
 sidebar_position: 4
 description: "Log in to an account's IMAP and SMTP servers"
 ---

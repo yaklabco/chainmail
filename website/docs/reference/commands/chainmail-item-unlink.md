@@ -1,6 +1,6 @@
 ---
-title: chainmail item unlink
-sidebar_label: item unlink
+title: "chainmail item unlink"
+sidebar_label: "item unlink"
 sidebar_position: 50
 description: "Remove a thread's link from an item; item show lists the account and thread key"
 ---

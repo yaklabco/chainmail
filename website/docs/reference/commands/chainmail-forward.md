@@ -1,6 +1,6 @@
 ---
-title: chainmail forward
-sidebar_label: forward
+title: "chainmail forward"
+sidebar_label: "forward"
 sidebar_position: 32
 description: "Forward a message, with its attachments"
 ---
@@ -19,7 +19,7 @@ instead of sending twice: without --idempotency-key, the key is derived
 from the ref, the recipients, the body and files, and --no-attachments. To send
 again on purpose, pass a new --idempotency-key.
 
---draft saves the forward to Drafts instead of sending it. --dry-run
+\--draft saves the forward to Drafts instead of sending it. --dry-run
 writes it as MIME to stdout, as send --dry-run does. Policy holds apply
 as for send.
 

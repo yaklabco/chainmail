@@ -1,6 +1,6 @@
 ---
-title: chainmail draft
-sidebar_label: draft
+title: "chainmail draft"
+sidebar_label: "draft"
 sidebar_position: 19
 description: "Save, change, send and delete drafts"
 ---

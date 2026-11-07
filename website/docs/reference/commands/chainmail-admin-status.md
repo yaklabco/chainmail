@@ -1,6 +1,6 @@
 ---
-title: chainmail admin status
-sidebar_label: admin status
+title: "chainmail admin status"
+sidebar_label: "admin status"
 sidebar_position: 6
 description: "Show the daemon's version, uptime, stored secret names, sync state and cache state"
 ---

@@ -1,6 +1,6 @@
 ---
-title: chainmail folder delete
-sidebar_label: folder delete
+title: "chainmail folder delete"
+sidebar_label: "folder delete"
 sidebar_position: 29
 description: "Delete a folder; INBOX and role folders are refused (disabled unless policy allows it)"
 ---

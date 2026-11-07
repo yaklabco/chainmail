@@ -1,6 +1,6 @@
 ---
-title: chainmail draft send
-sidebar_label: draft send
+title: "chainmail draft send"
+sidebar_label: "draft send"
 sidebar_position: 22
 description: "Send a draft and remove it from Drafts"
 ---

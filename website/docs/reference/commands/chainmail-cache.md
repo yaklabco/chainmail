@@ -1,6 +1,6 @@
 ---
-title: chainmail cache
-sidebar_label: cache
+title: "chainmail cache"
+sidebar_label: "cache"
 sidebar_position: 12
 description: "Show and maintain the local mail cache"
 ---

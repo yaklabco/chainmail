@@ -1,6 +1,6 @@
 ---
-title: chainmail reply
-sidebar_label: reply
+title: "chainmail reply"
+sidebar_label: "reply"
 sidebar_position: 56
 description: "Reply to a message, quoting it"
 ---
@@ -11,7 +11,7 @@ Reply to a message, quoting it under the new text.
 
 The reply goes to the original's Reply-To, or else its From. --all adds
 the original's To and Cc, less this account's own address. --to, --cc and
---bcc add more recipients. The account is the one the message is on. The
+\--bcc add more recipients. The account is the one the message is on. The
 body options are as for send, and a body is required.
 
 Running the same command again within 7 days reports the first reply
@@ -19,7 +19,7 @@ instead of sending twice: without --idempotency-key, the key is derived
 from the ref, the recipients, the body and files, and --all. To send
 again on purpose, pass a new --idempotency-key.
 
---draft saves the reply to Drafts instead of sending it. --dry-run writes
+\--draft saves the reply to Drafts instead of sending it. --dry-run writes
 it as MIME to stdout, as send --dry-run does. Policy holds apply as for
 send.
 

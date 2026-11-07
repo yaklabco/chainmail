@@ -1,6 +1,6 @@
 ---
-title: chainmail flags
-sidebar_label: flags
+title: "chainmail flags"
+sidebar_label: "flags"
 sidebar_position: 26
 description: "Add and remove flags such as \\Seen, \\Flagged and keywords"
 ---

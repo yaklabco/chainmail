@@ -1,6 +1,6 @@
 ---
-title: chainmail admin
-sidebar_label: admin
+title: "chainmail admin"
+sidebar_label: "admin"
 sidebar_position: 5
 description: "Daemon administration"
 ---

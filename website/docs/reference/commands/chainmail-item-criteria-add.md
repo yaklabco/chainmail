@@ -1,6 +1,6 @@
 ---
-title: chainmail item criteria add
-sidebar_label: item criteria add
+title: "chainmail item criteria add"
+sidebar_label: "item criteria add"
 sidebar_position: 38
 description: "Add criteria to the end of an item's list, in order"
 ---

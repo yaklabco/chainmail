@@ -1,6 +1,6 @@
 ---
-title: chainmail read
-sidebar_label: read
+title: "chainmail read"
+sidebar_label: "read"
 sidebar_position: 55
 description: "Mark messages read: add \\Seen"
 ---

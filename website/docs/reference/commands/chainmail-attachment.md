@@ -1,6 +1,6 @@
 ---
-title: chainmail attachment
-sidebar_label: attachment
+title: "chainmail attachment"
+sidebar_label: "attachment"
 sidebar_position: 8
 description: "Download one attachment, by the part number get lists"
 ---

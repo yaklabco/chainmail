@@ -1,6 +1,6 @@
 ---
-title: chainmail watch groups
-sidebar_label: watch groups
+title: "chainmail watch groups"
+sidebar_label: "watch groups"
 sidebar_position: 68
 description: "List watch groups with their acknowledged event, lag and last use"
 ---

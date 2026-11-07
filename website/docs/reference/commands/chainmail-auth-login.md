@@ -1,6 +1,6 @@
 ---
-title: chainmail auth login
-sidebar_label: auth login
+title: "chainmail auth login"
+sidebar_label: "auth login"
 sidebar_position: 11
 description: "Run the OAuth2 consent flow for an account"
 ---

@@ -1,6 +1,6 @@
 ---
-title: chainmail unread
-sidebar_label: unread
+title: "chainmail unread"
+sidebar_label: "unread"
 sidebar_position: 65
 description: "Mark messages unread: remove \\Seen"
 ---

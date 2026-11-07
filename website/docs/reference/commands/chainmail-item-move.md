@@ -1,6 +1,6 @@
 ---
-title: chainmail item move
-sidebar_label: item move
+title: "chainmail item move"
+sidebar_label: "item move"
 sidebar_position: 47
 description: "Move an item under another, or to the top of the tree with --root"
 ---

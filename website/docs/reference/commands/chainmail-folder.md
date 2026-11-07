@@ -1,6 +1,6 @@
 ---
-title: chainmail folder
-sidebar_label: folder
+title: "chainmail folder"
+sidebar_label: "folder"
 sidebar_position: 27
 description: "Create, rename and delete folders"
 ---

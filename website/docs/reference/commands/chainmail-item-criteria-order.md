@@ -1,6 +1,6 @@
 ---
-title: chainmail item criteria order
-sidebar_label: item criteria order
+title: "chainmail item criteria order"
+sidebar_label: "item criteria order"
 sidebar_position: 40
 description: "Put an item's criteria in a new order, naming every one once"
 ---

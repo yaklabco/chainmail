@@ -1,6 +1,6 @@
 ---
-title: chainmail item criteria remove
-sidebar_label: item criteria remove
+title: "chainmail item criteria remove"
+sidebar_label: "item criteria remove"
 sidebar_position: 41
 description: "Remove criteria from an item"
 ---

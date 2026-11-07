@@ -1,6 +1,6 @@
 ---
-title: chainmail item restore
-sidebar_label: item restore
+title: "chainmail item restore"
+sidebar_label: "item restore"
 sidebar_position: 48
 description: "Bring back a deleted item; --cascade brings back the items deleted with it"
 ---

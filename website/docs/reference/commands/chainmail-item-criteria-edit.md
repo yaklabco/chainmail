@@ -1,6 +1,6 @@
 ---
-title: chainmail item criteria edit
-sidebar_label: item criteria edit
+title: "chainmail item criteria edit"
+sidebar_label: "item criteria edit"
 sidebar_position: 39
 description: "Change the text of one criterion"
 ---

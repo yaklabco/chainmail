@@ -1,6 +1,6 @@
 ---
-title: chainmail folders
-sidebar_label: folders
+title: "chainmail folders"
+sidebar_label: "folders"
 sidebar_position: 31
 description: "List folders and their message counts"
 ---

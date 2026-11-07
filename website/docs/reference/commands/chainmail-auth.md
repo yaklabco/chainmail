@@ -1,6 +1,6 @@
 ---
-title: chainmail auth
-sidebar_label: auth
+title: "chainmail auth"
+sidebar_label: "auth"
 sidebar_position: 10
 description: "Log in to OAuth2 accounts"
 ---

@@ -1,6 +1,6 @@
 ---
-title: chainmail item
-sidebar_label: item
+title: "chainmail item"
+sidebar_label: "item"
 sidebar_position: 34
 description: "Keep work items and file mail threads against them"
 ---

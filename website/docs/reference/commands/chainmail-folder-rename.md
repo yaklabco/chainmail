@@ -1,6 +1,6 @@
 ---
-title: chainmail folder rename
-sidebar_label: folder rename
+title: "chainmail folder rename"
+sidebar_label: "folder rename"
 sidebar_position: 30
 description: "Rename a folder"
 ---

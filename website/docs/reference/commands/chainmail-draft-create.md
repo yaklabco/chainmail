@@ -1,6 +1,6 @@
 ---
-title: chainmail draft create
-sidebar_label: draft create
+title: "chainmail draft create"
+sidebar_label: "draft create"
 sidebar_position: 20
 description: "Save a new message to Drafts"
 ---
