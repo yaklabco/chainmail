@@ -70,6 +70,18 @@ var leftOut = map[string]string{
 	chainmailv1connect.WatchServiceDeleteGroupProcedure:        "group administration for operators",
 	chainmailv1connect.CacheServiceRebuildCacheProcedure:       "an operator action that drops cached mail and downloads it again",
 	chainmailv1connect.CacheServiceEvictCacheProcedure:         "an operator action; the daemon evicts bodies on its own",
+	// Temporary: the rules tools task replaces these with toolRPC rows,
+	// keeping ListRuleRuns and RulesStatus here with their own reasons.
+	chainmailv1connect.RulesServiceCreateRuleProcedure:   "tools land with the rules tools task",
+	chainmailv1connect.RulesServiceUpdateRuleProcedure:   "tools land with the rules tools task",
+	chainmailv1connect.RulesServiceDeleteRuleProcedure:   "tools land with the rules tools task",
+	chainmailv1connect.RulesServiceRestoreRuleProcedure:  "tools land with the rules tools task",
+	chainmailv1connect.RulesServiceGetRuleProcedure:      "tools land with the rules tools task",
+	chainmailv1connect.RulesServiceListRulesProcedure:    "tools land with the rules tools task",
+	chainmailv1connect.RulesServiceDryRunRuleProcedure:   "tools land with the rules tools task",
+	chainmailv1connect.RulesServiceRunRuleProcedure:      "tools land with the rules tools task",
+	chainmailv1connect.RulesServiceListRuleRunsProcedure: "tools land with the rules tools task",
+	chainmailv1connect.RulesServiceRulesStatusProcedure:  "tools land with the rules tools task",
 }
 
 // ignored lists request fields no tool sets, keyed "<procedure> <field path>", and why.
@@ -90,6 +102,7 @@ var agentServices = []protoreflect.ServiceDescriptor{
 	chainmailv1.File_chainmail_v1_watch_proto.Services().ByName("WatchService"),
 	chainmailv1.File_chainmail_v1_cache_proto.Services().ByName("CacheService"),
 	chainmailv1.File_chainmail_v1_items_proto.Services().ByName("ItemsService"),
+	chainmailv1.File_chainmail_v1_rules_proto.Services().ByName("RulesService"),
 }
 
 func procedure(sd protoreflect.ServiceDescriptor, md protoreflect.MethodDescriptor) string {
