@@ -304,8 +304,9 @@ func tailOf(ctx context.Context, q queryer) (int64, error) {
 
 // Trim deletes events older than retention, then the oldest beyond
 // maxEvents, then client groups not seen for longer than retention. Cache
-// groups (IsCacheGroup) never expire: the daemon owns them and recreates
-// none of their state, so a long pause of the cache must not reset it. It
+// groups (IsCacheGroup) and rules groups (IsRulesGroup) never expire: the
+// daemon owns them and recreates none of their state, so a long pause of
+// the cache or of a rule runner must not reset them to the tail. It
 // returns the number of events deleted. Both event trims remove only a
 // prefix of IDs, oldest first, so the trimmed gap in Read reports every
 // loss: an event older than retention that follows a retained one (a
@@ -349,7 +350,7 @@ func (l *Log) Trim(ctx context.Context, retention time.Duration, maxEvents int) 
 		}
 	}
 	if _, err := l.db.ExecContext(ctx,
-		"DELETE FROM event_groups WHERE last_seen_at < ? AND name NOT LIKE 'cache.%'", cutoff); err != nil {
+		"DELETE FROM event_groups WHERE last_seen_at < ? AND name NOT LIKE 'cache.%' AND name NOT LIKE 'rules.%'", cutoff); err != nil {
 		return deleted, fmt.Errorf("pruning groups: %w", err)
 	}
 	return deleted, nil
@@ -602,10 +603,12 @@ func (l *Log) DeleteGroup(ctx context.Context, name string) (bool, error) {
 const maxGroupName = 64
 
 // ValidGroupName reports whether name is a valid client group name:
-// ^[a-z0-9][a-z0-9._-]{0,63}$, not starting with "cache.", which is
-// reserved for the daemon's cache groups (IsCacheGroup).
+// ^[a-z0-9][a-z0-9._-]{0,63}$, not starting with "cache." or "rules.",
+// which are reserved for the daemon's cache groups (IsCacheGroup) and rule
+// runner groups (IsRulesGroup).
 func ValidGroupName(name string) bool {
-	if name == "" || len(name) > maxGroupName || strings.HasPrefix(name, cacheGroupPrefix) {
+	if name == "" || len(name) > maxGroupName ||
+		strings.HasPrefix(name, cacheGroupPrefix) || strings.HasPrefix(name, rulesGroupPrefix) {
 		return false
 	}
 	for i := range len(name) {
