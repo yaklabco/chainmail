@@ -434,6 +434,12 @@ func (cp *completer) specs() map[string]compSpec {
 		"chainmail audit": {args: noComplete, flags: map[string]cobra.CompletionFunc{
 			"account": allAccounts, "limit": noComplete, "before-id": noComplete,
 			"since": fixed("1h", "24h", "168h"), "action": cp.auditActions,
+			"client": fixed(
+				cobra.CompletionWithDesc("cli", "the chainmail command"),
+				cobra.CompletionWithDesc("mcp", "agents over chainmail mcp"),
+				cobra.CompletionWithDesc("rule", "what rules did"),
+				cobra.CompletionWithDesc("daemon", "the daemon's own work"),
+			),
 		}},
 		"chainmail search": {args: cp.searchTerms, flags: map[string]cobra.CompletionFunc{
 			"account": allAccounts, "cursor": noComplete, "limit": noComplete,

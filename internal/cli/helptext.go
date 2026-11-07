@@ -22,7 +22,9 @@ var examples = map[string]string{
   chainmail attachment cm1:work:INBOX:7:42 2 --out - > invoice.pdf`,
 	"chainmail audit": `  chainmail audit
   chainmail audit --since 2h --action send
-  chainmail audit --account work --limit 20`,
+  chainmail audit --account work --limit 20
+  # what rules did today
+  chainmail audit --client rule`,
 	"chainmail auth login":  `  chainmail auth login gmail`,
 	"chainmail cache evict": `  chainmail cache evict`,
 	"chainmail cache rebuild": `  # rebuild every account whose cache is enabled

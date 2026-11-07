@@ -65,6 +65,7 @@ func TestCompleteStatic(t *testing.T) {
 		{name: "second kind", args: []string{"watch", "--kind", "new,f"}, want: []string{"new,flags"}, dir: cobra.ShellCompDirectiveNoFileComp | cobra.ShellCompDirectiveNoSpace},
 		{name: "system flags", args: []string{"flags", "x", "--add", `\S`}, want: []string{`\Seen`}, dir: cobra.ShellCompDirectiveNoFileComp},
 		{name: "audit since", args: []string{"audit", "--since", ""}, want: []string{"1h", "24h", "168h"}, dir: cobra.ShellCompDirectiveNoFileComp},
+		{name: "audit client", args: []string{"audit", "--client", ""}, want: []string{"cli", "mcp", "rule", "daemon"}, dir: cobra.ShellCompDirectiveNoFileComp},
 		{name: "subject", args: []string{"send", "--subject", ""}, want: []string{}, dir: cobra.ShellCompDirectiveNoFileComp},
 		{name: "no positional args", args: []string{"version", ""}, want: []string{}, dir: cobra.ShellCompDirectiveNoFileComp},
 		{name: "attach", args: []string{"send", "--attach", ""}, want: []string{}, dir: cobra.ShellCompDirectiveDefault},
