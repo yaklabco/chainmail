@@ -1,0 +1,79 @@
+name: docs
+# Builds the docs site and deploys it to the Cloudflare Pages project
+# chainmail: main to production at https://chainmail.sh, and each pull
+# request to a preview whose URL is posted on the pull request. A pull
+# request from a fork gets no secrets, so it is built but not deployed.
+on:
+  push:
+    branches: [main]
+    paths:
+      - website/**
+      - CHANGELOG.md
+      - .github/workflows/docs.yml
+  pull_request:
+    paths:
+      - website/**
+      - CHANGELOG.md
+      - .github/workflows/docs.yml
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+  deployments: write
+  pull-requests: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Deploy from main and from branches of this repository only.
+      DEPLOY: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # The same Node major and Bun version the Nix dev shell gives local runs.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+        working-directory: website
+      - run: bun run build
+        working-directory: website
+      # Pages names a preview after its branch. The branch name comes from
+      # the pull request, so only letters, digits and hyphens reach the
+      # deploy command.
+      - name: Pick the Pages branch
+        id: branch
+        if: env.DEPLOY == 'true'
+        env:
+          HEAD_REF: ${{ github.head_ref || 'main' }}
+        run: |
+          branch=$(printf '%s' "$HEAD_REF" | tr -c 'A-Za-z0-9-' '-')
+          echo "name=$branch" >> "$GITHUB_OUTPUT"
+      - name: Deploy to Cloudflare Pages
+        id: deploy
+        if: env.DEPLOY == 'true'
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: 4.152.0
+          gitHubToken: ${{ github.token }}
+          command: pages deploy website/build --project-name chainmail --branch ${{ steps.branch.outputs.name }}
+      - name: Comment the preview URL
+        if: env.DEPLOY == 'true' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          URL: ${{ steps.deploy.outputs.deployment-url }}
+          ALIAS: ${{ steps.deploy.outputs.pages-deployment-alias-url }}
+        run: |
+          body="Docs preview: $URL"
+          if [ -n "$ALIAS" ]; then
+            body="$body (latest for this branch: $ALIAS)"
+          fi
+          gh pr comment "$PR" --body "$body" --edit-last --create-if-none
