@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/gen/chainmail/v1/chainmailv1connect"
 	"github.com/yaklabco/chainmail/internal/api"
 	"github.com/yaklabco/chainmail/internal/rules"
 )
@@ -619,5 +621,167 @@ func TestRuleSummaries(t *testing.T) {
 		if tt.got != tt.want {
 			t.Errorf("%s: summary = %q, want %q", tt.name, tt.got, tt.want)
 		}
+	}
+}
+
+// ruleNoCall fails the test if the fake daemon received any RulesService call.
+func ruleNoCall(t *testing.T, f *fakeDaemon) {
+	t.Helper()
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c.Procedure, "/chainmail.v1.RulesService/") {
+			t.Errorf("the request reached the daemon: %s %v", c.Procedure, c.Msg)
+		}
+	}
+}
+
+// TestRuleToolRequests checks each tool sends the request its input means,
+// over the wire, with every field of the shared definition mapped.
+func TestRuleToolRequests(t *testing.T) {
+	t.Parallel()
+	every := map[string]any{
+		"name": "stripe-receipts", "description": "Stripe receipts", "accounts": []string{"work", "home"},
+		"query": "from:stripe.com subject:receipt", "on_new": true, "schedule": "at:07:00", "priority": 50, "stop": true,
+		"actions": []map[string]any{
+			{"kind": "label", "label": "Receipts"},
+			{"kind": "link_item", "item_id": "it_01jc0story", "anchor": true},
+			{"kind": "forward", "to": []string{"books@x.test"}, "note": "FYI"},
+			{"kind": "archive"},
+		},
+		"max_per_run": 200, "enabled": false,
+	}
+	everyDef := &chainmailv1.RuleDefinition{
+		Name: "stripe-receipts", Description: "Stripe receipts", Accounts: []string{"work", "home"},
+		Query: "from:stripe.com subject:receipt", OnNew: true, Schedule: "at:07:00", Priority: proto.Int32(50), Stop: true,
+		Actions: []*chainmailv1.RuleAction{
+			{Kind: "label", Label: "Receipts"},
+			{Kind: "link_item", ItemId: "it_01jc0story", Anchor: true},
+			{Kind: "forward", To: []string{"books@x.test"}, Note: "FYI"},
+			{Kind: "archive"},
+		},
+		MaxPerRun: 200, Enabled: proto.Bool(false),
+	}
+	tests := []struct {
+		name string
+		tool string
+		args map[string]any
+		proc string
+		want proto.Message
+	}{
+		{
+			name: "create with every field", tool: "create_rule", args: every,
+			proc: chainmailv1connect.RulesServiceCreateRuleProcedure, want: &chainmailv1.CreateRuleRequest{Rule: everyDef},
+		},
+		{
+			name: "create with defaults", tool: "create_rule",
+			args: map[string]any{"name": "tidy", "query": "in:inbox is:read older_than:30d", "schedule": "every:1d", "actions": []map[string]any{{"kind": "archive"}}},
+			proc: chainmailv1connect.RulesServiceCreateRuleProcedure,
+			want: &chainmailv1.CreateRuleRequest{Rule: &chainmailv1.RuleDefinition{
+				Name: "tidy", Query: "in:inbox is:read older_than:30d", Schedule: "every:1d", Actions: []*chainmailv1.RuleAction{{Kind: "archive"}},
+			}},
+		},
+		{
+			name: "update switches a rule off at a revision", tool: "update_rule",
+			args: map[string]any{"rule": "stripe-receipts", "enabled": false, "expected_revision": 3},
+			proc: chainmailv1connect.RulesServiceUpdateRuleProcedure,
+			want: &chainmailv1.UpdateRuleRequest{
+				Rule: "stripe-receipts", Patch: &chainmailv1.RuleDefinition{Enabled: proto.Bool(false)},
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"enabled"}}, ExpectedRevision: proto.Int64(3),
+			},
+		},
+		{
+			name: "get", tool: "get_rule", args: map[string]any{"rule": "stripe-receipts"},
+			proc: chainmailv1connect.RulesServiceGetRuleProcedure, want: &chainmailv1.GetRuleRequest{Rule: "stripe-receipts"},
+		},
+		{
+			name: "get with history", tool: "get_rule", args: map[string]any{"rule": "ru_01jc0stripe", "history": true},
+			proc: chainmailv1connect.RulesServiceGetRuleProcedure, want: &chainmailv1.GetRuleRequest{Rule: "ru_01jc0stripe", History: true},
+		},
+		{
+			name: "list everything", tool: "list_rules", args: map[string]any{},
+			proc: chainmailv1connect.RulesServiceListRulesProcedure, want: &chainmailv1.ListRulesRequest{},
+		},
+		{
+			name: "list with every filter", tool: "list_rules", args: map[string]any{"account": "work", "enabled": false, "deleted": true},
+			proc: chainmailv1connect.RulesServiceListRulesProcedure,
+			want: &chainmailv1.ListRulesRequest{Account: "work", Enabled: proto.Bool(false), Deleted: true},
+		},
+		{
+			name: "delete", tool: "delete_rule", args: map[string]any{"rule": "stripe-receipts"},
+			proc: chainmailv1connect.RulesServiceDeleteRuleProcedure, want: &chainmailv1.DeleteRuleRequest{Rule: "stripe-receipts"},
+		},
+		{
+			name: "restore", tool: "restore_rule", args: map[string]any{"rule": "ru_01jc0stripe"},
+			proc: chainmailv1connect.RulesServiceRestoreRuleProcedure, want: &chainmailv1.RestoreRuleRequest{Rule: "ru_01jc0stripe"},
+		},
+		{
+			name: "dry-run a saved rule as new mail", tool: "dry_run_rule", args: map[string]any{"rule": "stripe-receipts", "trigger": "new", "account": "work"},
+			proc: chainmailv1connect.RulesServiceDryRunRuleProcedure,
+			want: &chainmailv1.DryRunRuleRequest{Rule: "stripe-receipts", Trigger: "new", Account: "work"},
+		},
+		{
+			name: "dry-run an unsaved rule", tool: "dry_run_rule", args: map[string]any{"definition": every},
+			proc: chainmailv1connect.RulesServiceDryRunRuleProcedure, want: &chainmailv1.DryRunRuleRequest{Definition: everyDef},
+		},
+		{
+			name: "run with defaults", tool: "run_rule", args: map[string]any{"rule": "tidy"},
+			proc: chainmailv1connect.RulesServiceRunRuleProcedure, want: &chainmailv1.RunRuleRequest{Rule: "tidy"},
+		},
+		{
+			name: "run with every field", tool: "run_rule", args: map[string]any{"rule": "tidy", "max": 25, "account": "work"},
+			proc: chainmailv1connect.RulesServiceRunRuleProcedure, want: &chainmailv1.RunRuleRequest{Rule: "tidy", Max: 25, Account: "work"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnv(t, &fakeDaemon{}, latest) // unfaked RPCs answer Unimplemented; the request is still recorded
+			e.call(t, tt.tool, tt.args)
+			if got := e.fake.lastCall(t, tt.proc).Msg; !proto.Equal(got, tt.want) {
+				t.Errorf("request = %v, want %v", got, tt.want)
+			}
+			if c := e.fake.lastCall(t, tt.proc); c.Client != "mcp" {
+				t.Errorf("client kind = %q, want mcp", c.Client)
+			}
+		})
+	}
+}
+
+// TestRuleToolsRefuseLocally: input the schema accepts but the tools refuse
+// never reaches the daemon.
+func TestRuleToolsRefuseLocally(t *testing.T) {
+	t.Parallel()
+	archive := []map[string]any{{"kind": "archive"}}
+	tests := []struct {
+		name, tool string
+		args       map[string]any
+		inMessage  string
+	}{
+		{name: "unknown action kind", tool: "create_rule", args: map[string]any{"name": "r", "query": "q", "actions": []map[string]any{{"kind": "delete"}}}, inMessage: `action 1: unknown kind "delete"`},
+		{name: "stray argument", tool: "create_rule", args: map[string]any{"name": "r", "query": "q", "actions": []map[string]any{{"kind": "archive", "folder": "Old"}}}, inMessage: "action 1 (archive) takes no folder"},
+		{name: "priority", tool: "create_rule", args: map[string]any{"name": "r", "query": "q", "priority": 1000001, "actions": archive}, inMessage: "priority must be -1000000 to 1000000"},
+		{name: "max_per_run", tool: "create_rule", args: map[string]any{"name": "r", "query": "q", "max_per_run": 5001, "actions": archive}, inMessage: "max_per_run must be 1 to 5000"},
+		{name: "nothing to update", tool: "update_rule", args: map[string]any{"rule": "r"}, inMessage: "give at least one field to change"},
+		{name: "an unclearable field", tool: "update_rule", args: map[string]any{"rule": "r", "clear": []string{"query"}}, inMessage: `clear cannot name "query"`},
+		{name: "a forward with no addresses", tool: "update_rule", args: map[string]any{"rule": "r", "actions": []map[string]any{{"kind": "forward"}}}, inMessage: "action 1 (forward) needs to"},
+		{name: "a dry run of nothing", tool: "dry_run_rule", args: map[string]any{}, inMessage: "give rule"},
+		{
+			name: "a dry run of two rules", tool: "dry_run_rule",
+			args:      map[string]any{"rule": "r", "definition": map[string]any{"name": "r", "query": "q", "actions": archive}},
+			inMessage: "not both",
+		},
+		{name: "an unknown trigger", tool: "dry_run_rule", args: map[string]any{"rule": "r", "trigger": "hourly"}, inMessage: `trigger must be new, schedule or manual, got "hourly"`},
+		{name: "max above", tool: "run_rule", args: map[string]any{"rule": "r", "max": 5001}, inMessage: "max must be 1 to 5000"},
+		{name: "max below", tool: "run_rule", args: map[string]any{"rule": "r", "max": -1}, inMessage: "max must be 1 to 5000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnv(t, &fakeDaemon{}, latest)
+			body := wantError(t, e.call(t, tt.tool, tt.args), api.ReasonInvalidArgument)
+			if !strings.Contains(body.Message, tt.inMessage) {
+				t.Errorf("message %q lacks %q", body.Message, tt.inMessage)
+			}
+			ruleNoCall(t, e.fake)
+		})
 	}
 }
