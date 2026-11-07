@@ -7,8 +7,11 @@ import (
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/client"
+	"github.com/yaklabco/chainmail/internal/rules"
 )
 
 const ruleHelp = `Rules act on mail by themselves. A rule matches messages with the search
@@ -39,9 +42,10 @@ query, on_new, schedule, priority, stop, max_per_run and enabled, with one
 folder, item_id, anchor, to and note. rule show --toml prints a rule in
 that shape. rule edit -f changes only the keys the file holds.
 
-A rule is named by its ID (ru_...) or its name. What rules do is audited
-under client kind rule: chainmail audit --client rule. Rule descriptions
-and queries are untrusted, as mail is: they are often copied from it.`
+A rule is named by its ID (ru_...) or its name. rule restore takes the ID
+alone, which rule list --deleted shows. What rules do is audited under
+client kind rule: chainmail audit --client rule. Rule descriptions and
+queries are untrusted, as mail is: they are often copied from it.`
 
 // The triggers and run outcomes rule commands take, in the order help and
 // completion offer them.
@@ -58,6 +62,11 @@ func newRuleCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		newRuleListCmd(ctx, env, g),
 		newRuleShowCmd(ctx, env, g),
 		newRuleCreateCmd(ctx, env, g),
+		newRuleEditCmd(ctx, env, g),
+		newRuleSwitchCmd(ctx, env, g, true),
+		newRuleSwitchCmd(ctx, env, g, false),
+		newRuleDeleteCmd(ctx, env, g),
+		newRuleRestoreCmd(ctx, env, g),
 	)
 	return cmd
 }
@@ -126,5 +135,86 @@ func newRuleListCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	f.BoolVar(&enabled, "enabled", false, "only enabled rules")
 	f.BoolVar(&disabled, "disabled", false, "only disabled rules")
 	f.BoolVar(&req.Deleted, "deleted", false, "only deleted rules")
+	return cmd
+}
+
+// ruleCall sends one request naming rule, by ID or name, and returns the
+// response and the rule it holds.
+type ruleCall func(ctx context.Context, c *client.Client, rule string) (proto.Message, *chainmailv1.Rule, error)
+
+// newRuleRefCmd builds a command that takes one rule, sends call, and
+// prints the response, or on a table verb and the rule.
+func newRuleRefCmd(ctx context.Context, env Env, g *globals, use, short, verb string, call ruleCall) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: short,
+		Args:  exactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			c := g.client(env)
+			defer c.Close()
+			msg, rule, err := call(ctx, c, args[0])
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, msg)
+			}
+			return writeString(env.Stdout, ruleChangedText(verb, rule))
+		},
+	}
+}
+
+// newRuleSwitchCmd builds rule enable, or with enable false rule disable:
+// an UpdateRule of the enabled field alone.
+func newRuleSwitchCmd(ctx context.Context, env Env, g *globals, enable bool) *cobra.Command {
+	use, short, verb := "enable <id|name>", "Turn a rule on; this clears an automatic disable and its failure count", "enabled"
+	if !enable {
+		use, short, verb = "disable <id|name>", "Turn a rule off until rule enable turns it on", "disabled"
+	}
+	return newRuleRefCmd(ctx, env, g, use, short, verb, func(ctx context.Context, c *client.Client, rule string) (proto.Message, *chainmailv1.Rule, error) {
+		req := &chainmailv1.UpdateRuleRequest{
+			Rule:       rule,
+			Patch:      &chainmailv1.RuleDefinition{Enabled: proto.Bool(enable)},
+			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"enabled"}},
+		}
+		resp, err := c.Rules.UpdateRule(ctx, connect.NewRequest(req))
+		if err != nil {
+			return nil, nil, err
+		}
+		return resp.Msg, resp.Msg.GetRule(), nil
+	})
+}
+
+func newRuleDeleteCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	return newRuleRefCmd(ctx, env, g, "delete <id|name>", "Delete a rule, softly; rule restore brings it back", "deleted",
+		func(ctx context.Context, c *client.Client, rule string) (proto.Message, *chainmailv1.Rule, error) {
+			resp, err := c.Rules.DeleteRule(ctx, connect.NewRequest(&chainmailv1.DeleteRuleRequest{Rule: rule}))
+			if err != nil {
+				return nil, nil, err
+			}
+			return resp.Msg, resp.Msg.GetRule(), nil
+		})
+}
+
+// newRuleRestoreCmd builds rule restore. It takes a rule ID alone, never a
+// name: a live rule may hold a deleted rule's name by now.
+func newRuleRestoreCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	cmd := newRuleRefCmd(ctx, env, g, "restore <id>", "Bring back a deleted rule by its ID; rule list --deleted shows it", "restored",
+		func(ctx context.Context, c *client.Client, rule string) (proto.Message, *chainmailv1.Rule, error) {
+			resp, err := c.Rules.RestoreRule(ctx, connect.NewRequest(&chainmailv1.RestoreRuleRequest{Rule: rule}))
+			if err != nil {
+				return nil, nil, err
+			}
+			return resp.Msg, resp.Msg.GetRule(), nil
+		})
+	cmd.Args = func(cmd *cobra.Command, args []string) error {
+		if err := exactArgs(1)(cmd, args); err != nil {
+			return err
+		}
+		if !rules.ValidID(args[0]) {
+			return usageError{err: errors.New("restore takes a rule ID (ru_...), not a name"), hint: "find it with chainmail rule list --deleted"}
+		}
+		return nil
+	}
 	return cmd
 }

@@ -106,8 +106,18 @@ var examples = map[string]string{
   # archive read inbox mail older than 30 days, once a day
   chainmail rule create --name inbox-cleanup --query 'in:inbox is:read older_than:30d' --every 1d --action archive
   chainmail rule create -f receipts.toml`,
+	"chainmail rule delete":  `  chainmail rule delete receipts`,
+	"chainmail rule disable": `  chainmail rule disable receipts`,
+	"chainmail rule edit": `  chainmail rule edit receipts --priority 10 --stop
+  chainmail rule edit inbox-cleanup --at 07:00
+  # change only the keys the file holds
+  chainmail rule edit receipts -f receipts.toml`,
+	"chainmail rule enable": `  chainmail rule enable receipts`,
 	"chainmail rule list": `  chainmail rule list
   chainmail rule list --account gmail --disabled`,
+	"chainmail rule restore": `  # find the ID of a deleted rule, then restore it by that ID
+  chainmail rule list --deleted
+  chainmail rule restore ru_01jcb7m2k9r8q3v4w5x6y7z8a9`,
 	"chainmail rule show": `  chainmail rule show receipts --history
   # save a rule as a file to edit
   chainmail rule show receipts --toml > receipts.toml`,

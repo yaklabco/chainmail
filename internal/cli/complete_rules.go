@@ -120,5 +120,12 @@ func (cp *completer) ruleSpecs() map[string]compSpec {
 		"chainmail rule show":   {args: live},
 		"chainmail rule list":   {args: noComplete, flags: map[string]cobra.CompletionFunc{"account": allAccounts}},
 		"chainmail rule create": {args: noComplete, flags: cp.ruleFieldSpecs(allAccounts)},
+		"chainmail rule edit": {args: live, flags: mergeFlagCompletions(cp.ruleFieldSpecs(allAccounts), map[string]cobra.CompletionFunc{
+			"expected-revision": noComplete,
+		})},
+		"chainmail rule enable":  {args: live},
+		"chainmail rule disable": {args: live},
+		"chainmail rule delete":  {args: live},
+		"chainmail rule restore": {args: cp.ruleRefs(1, true)},
 	}
 }

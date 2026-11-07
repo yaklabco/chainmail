@@ -9,6 +9,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 )
@@ -160,5 +161,104 @@ func newRuleCreateCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	}
 	addRuleFlags(cmd, rf)
 	cmd.Flags().BoolVar(&disabled, "disabled", false, "create the rule turned off, to turn on later with rule enable")
+	return cmd
+}
+
+// ruleEditFlags are rule edit's field flags: the shared ones and the two
+// that clear a field, in the order a conflict with --file names them.
+var ruleEditFlags = []string{
+	"name", "description", "account", "all-accounts", "query", "on-new", "every", "at", "no-schedule",
+	"priority", "stop", "max-per-run", "action", "note",
+}
+
+// ruleFlagPaths maps each of rule edit's field flags to the UpdateRule
+// mask path it changes.
+var ruleFlagPaths = map[string]string{
+	"name": "name", "description": "description", "account": "accounts", "all-accounts": "accounts",
+	"query": "query", "on-new": "on_new", "every": "schedule", "at": "schedule", "no-schedule": "schedule",
+	"priority": "priority", "stop": "stop", "max-per-run": "max_per_run", "action": "actions", "note": "actions",
+}
+
+// patch is rule edit's patch and mask: the rule file's and the keys it
+// holds when --file is given, else the field flags' and the fields they
+// set. Nothing to change is a usage error.
+func (rf *ruleFlags) patch(cmd *cobra.Command, noSchedule, allAccounts bool) (*chainmailv1.RuleDefinition, []string, error) {
+	f := cmd.Flags()
+	if rf.file != "" {
+		if err := fileConflict(cmd, ruleEditFlags); err != nil {
+			return nil, nil, err
+		}
+		def, paths, err := readRuleFile(cmd, rf.file)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(paths) == 0 {
+			return nil, nil, usageError{err: errors.New("nothing to change: the rule file holds no keys"), hint: helpHint(cmd)}
+		}
+		return def, paths, nil
+	}
+	switch {
+	case noSchedule && (f.Changed("every") || f.Changed("at")):
+		return nil, nil, usageError{err: errors.New("--no-schedule cannot be used with --every or --at"), hint: helpHint(cmd)}
+	case allAccounts && f.Changed("account"):
+		return nil, nil, usageError{err: errors.New("--all-accounts and --account cannot be used together"), hint: helpHint(cmd)}
+	}
+	def, err := rf.definition(cmd)
+	if err != nil {
+		return nil, nil, err
+	}
+	set := map[string]bool{}
+	for _, name := range ruleEditFlags {
+		off := (name == "no-schedule" && !noSchedule) || (name == "all-accounts" && !allAccounts)
+		if f.Changed(name) && !off {
+			set[ruleFlagPaths[name]] = true
+		}
+	}
+	var paths []string
+	for _, p := range ruleMaskOrder {
+		if set[p] {
+			paths = append(paths, p)
+		}
+	}
+	if len(paths) == 0 {
+		return nil, nil, usageError{err: errors.New("nothing to change: give a field flag or --file"), hint: helpHint(cmd)}
+	}
+	return def, paths, nil
+}
+
+func newRuleEditCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
+	rf := &ruleFlags{}
+	var noSchedule, allAccounts bool
+	var expected int64
+	cmd := &cobra.Command{
+		Use:   "edit <id|name> (field flags | -f FILE)",
+		Short: "Change a rule's fields from flags, or the keys a rule file holds",
+		Args:  exactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			patch, paths, err := rf.patch(cmd, noSchedule, allAccounts)
+			if err != nil {
+				return err
+			}
+			req := &chainmailv1.UpdateRuleRequest{Rule: args[0], Patch: patch, UpdateMask: &fieldmaskpb.FieldMask{Paths: paths}}
+			if cmd.Flags().Changed("expected-revision") {
+				req.ExpectedRevision = proto.Int64(expected)
+			}
+			c := g.client(env)
+			defer c.Close()
+			resp, err := c.Rules.UpdateRule(ctx, connect.NewRequest(req))
+			if err != nil {
+				return err
+			}
+			if !g.table() {
+				return writeProto(env.Stdout, resp.Msg)
+			}
+			return writeString(env.Stdout, ruleChangedText("updated", resp.Msg.GetRule()))
+		},
+	}
+	addRuleFlags(cmd, rf)
+	f := cmd.Flags()
+	f.BoolVar(&allAccounts, "all-accounts", false, "make the rule cover every account")
+	f.BoolVar(&noSchedule, "no-schedule", false, "take the rule off its schedule")
+	f.Int64Var(&expected, "expected-revision", 0, "refuse the change if the rule is no longer at this revision")
 	return cmd
 }
