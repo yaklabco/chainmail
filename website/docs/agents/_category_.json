@@ -1,0 +1,1 @@
+{ "label": "Agents (MCP)", "position": 4, "link": { "type": "generated-index", "description": "Serve chainmail to an AI agent over the Model Context Protocol, and handle what its tools return." } }
