@@ -303,3 +303,84 @@ func (r *rulesService) ruleLifecycle(ctx context.Context, c caller, entry *audit
 	r.s.pokeRuleScheduler()
 	return ruleProto(rule), nil
 }
+
+// ruleAccountArg checks a request's optional account: empty passes, an
+// invalid name is INVALID_ARGUMENT and an unknown one NOT_FOUND.
+func (s *Server) ruleAccountArg(name string) error {
+	if name == "" {
+		return nil
+	}
+	_, err := s.resolveAccounts([]string{name})
+	return err
+}
+
+// GetRule implements chainmailv1connect.RulesServiceHandler: the rule, its
+// last runs, its counts over the retained runs and, with history, its
+// revisions newest first. Audited as rule.get.
+func (r *rulesService) GetRule(ctx context.Context, req *connect.Request[chainmailv1.GetRuleRequest]) (*connect.Response[chainmailv1.GetRuleResponse], error) {
+	return ruleCall(ctx, r.s, req, "rule.get", callTimeout, func(ctx context.Context, _ caller, entry *audit.Entry) (*chainmailv1.GetRuleResponse, error) {
+		m := req.Msg
+		target, err := ruleTarget(m.GetRule())
+		entry.Targets = []string{target}
+		if m.GetHistory() {
+			entry.Targets = append(entry.Targets, "history=1")
+		}
+		if err != nil {
+			return nil, err
+		}
+		rule, err := r.s.rules.Get(ctx, m.GetRule())
+		if err != nil {
+			return nil, r.s.rulesErr(err)
+		}
+		entry.Targets[0] = "rule=" + rule.ID
+		runs, err := r.s.rules.RecentRuns(ctx, rule.ID, ruleRunsShown)
+		if err != nil {
+			return nil, r.s.rulesErr(err)
+		}
+		counts, err := r.s.rules.Counts(ctx, rule.ID)
+		if err != nil {
+			return nil, r.s.rulesErr(err)
+		}
+		resp := &chainmailv1.GetRuleResponse{Rule: ruleProto(rule), Runs: ruleRunsProto(runs), Counts: ruleCountsProto(counts)}
+		if m.GetHistory() {
+			revs, err := r.s.rules.Revisions(ctx, rule.ID, ruleRevisionsShown)
+			if err != nil {
+				return nil, r.s.rulesErr(err)
+			}
+			resp.Revisions = ruleRevisionsProto(revs)
+		}
+		return resp, nil
+	})
+}
+
+// ListRules implements chainmailv1connect.RulesServiceHandler. Rules come
+// in priority, then ID, order. Audited as rule.list with the set filters
+// and the number of rows; a valid account filter is the entry's account.
+func (r *rulesService) ListRules(ctx context.Context, req *connect.Request[chainmailv1.ListRulesRequest]) (*connect.Response[chainmailv1.ListRulesResponse], error) {
+	return ruleCall(ctx, r.s, req, "rule.list", callTimeout, func(ctx context.Context, _ caller, entry *audit.Entry) (*chainmailv1.ListRulesResponse, error) {
+		m := req.Msg
+		accountErr := r.s.ruleAccountArg(m.GetAccount())
+		if accountErr == nil {
+			entry.Account = m.GetAccount()
+		}
+		if m.Enabled != nil {
+			entry.Targets = append(entry.Targets, fmt.Sprintf("enabled=%t", m.GetEnabled()))
+		}
+		if m.GetDeleted() {
+			entry.Targets = append(entry.Targets, "deleted=1")
+		}
+		if accountErr != nil {
+			return nil, accountErr
+		}
+		list, err := r.s.rules.List(ctx, rules.ListQuery{Account: m.GetAccount(), Enabled: m.Enabled, Deleted: m.GetDeleted()})
+		if err != nil {
+			return nil, r.s.rulesErr(err)
+		}
+		entry.Targets = append(entry.Targets, tally("rows", len(list)))
+		resp := &chainmailv1.ListRulesResponse{Rules: make([]*chainmailv1.Rule, 0, len(list))}
+		for _, rule := range list {
+			resp.Rules = append(resp.Rules, ruleProto(rule))
+		}
+		return resp, nil
+	})
+}
