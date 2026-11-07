@@ -32,13 +32,17 @@ func Generate() error {
 	return sh.RunV("buf", "generate")
 }
 
-// GenerateCheck fails if gen/ is out of date with proto/.
+// GenerateCheck fails if gen/ is out of date with proto/, or the command
+// reference with the CLI's help.
 func GenerateCheck() error {
-	st.Deps(Generate)
-	if err := sh.RunV("git", "diff", "--exit-code", "--", "gen"); err != nil {
+	// Serial: buf generate empties gen/ before it rewrites it, and the
+	// chainmail build behind Docs.Commands imports gen/.
+	st.SerialDeps(Generate, Docs.Commands)
+	paths := []string{"gen", commandDocsDir}
+	if err := sh.RunV("git", append([]string{"diff", "--exit-code", "--"}, paths...)...); err != nil {
 		return err
 	}
-	untracked, err := sh.Output("git", "status", "--porcelain", "--", "gen")
+	untracked, err := sh.Output("git", append([]string{"status", "--porcelain", "--"}, paths...)...)
 	if err != nil {
 		return err
 	}
@@ -46,6 +50,33 @@ func GenerateCheck() error {
 		return errors.New("generated files not committed:\n" + untracked)
 	}
 	return nil
+}
+
+// Docs groups the docs site's targets.
+type Docs st.Namespace
+
+// commandDocsDir is where the generated command reference lives.
+const commandDocsDir = "website/docs/reference/commands"
+
+// Commands writes the command reference pages from the CLI's help.
+func (Docs) Commands() error {
+	return sh.RunV("go", "run", "./cmd/chainmail", "docs", commandDocsDir)
+}
+
+// Build builds the docs site into website/build.
+func (Docs) Build() error {
+	if err := sh.RunWithV(nil, "website", "bun", "install", "--frozen-lockfile"); err != nil {
+		return err
+	}
+	return sh.RunWithV(nil, "website", "bun", "run", "build")
+}
+
+// Serve runs the docs site locally with live reload.
+func (Docs) Serve() error {
+	if err := sh.RunWithV(nil, "website", "bun", "install", "--frozen-lockfile"); err != nil {
+		return err
+	}
+	return sh.RunWithV(nil, "website", "bun", "run", "start")
 }
 
 // Lint runs buf lint and golangci-lint.

@@ -162,6 +162,7 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 		newItemCmd(ctx, env, g),
 		skipSettings(newCompletionCmd()),
 		skipSettings(newManCmd()),
+		skipSettings(newDocsCmd()),
 	)
 	root.AddCommand(newOrganizeCmds(ctx, env, g)...)
 	root.AddGroup(commandGroups...)
