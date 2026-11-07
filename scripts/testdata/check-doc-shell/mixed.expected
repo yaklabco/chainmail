@@ -1,0 +1,5 @@
+scripts/testdata/check-doc-shell/mixed.md:7: bash rejects this block
+scripts/testdata/check-doc-shell/mixed.md:11: fish rejects this block
+scripts/testdata/check-doc-shell/mixed.md:19: bash rejects this block
+scripts/testdata/check-doc-shell/mixed.md:27: fish rejects this block
+scripts/testdata/check-doc-shell/mixed.md:42: bash rejects this block
