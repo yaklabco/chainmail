@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -327,5 +329,43 @@ func TestNewWiresRules(t *testing.T) {
 	}
 	if _, ok := s.rulesClock.(daemonClock); !ok {
 		t.Errorf("rulesClock = %T, want daemonClock", s.rulesClock)
+	}
+}
+
+// A rule that stays due warns once per revision; the scheduler's later
+// tries of the same revision log at debug, so a stuck rule cannot fill the
+// log with a warning a minute.
+func TestRuleSchedulerWarnsOncePerRevision(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 11, 7, 8, 30, 0, 0, time.UTC)
+	s, clk := schedServer(t, t0)
+	var buf syncBuffer
+	s.opts.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	stuck := schedRule(t, s, "stuck", "every:1h", func(d *rules.Definition) {
+		d.Accounts, d.Query = []string{"host"}, "account:work"
+	})
+	clk.set(t0.Add(2 * time.Hour))
+	warned := schedWarned{}
+	count := func(level string) int {
+		n := 0
+		for line := range strings.Lines(buf.String()) {
+			if strings.Contains(line, "level="+level) && strings.Contains(line, "covers no account") {
+				n++
+			}
+		}
+		return n
+	}
+	for range 3 {
+		if d := s.ruleSchedulerPass(t.Context(), warned); d != ruleSchedulerRetry {
+			t.Errorf("pass waits %v, want %v", d, ruleSchedulerRetry)
+		}
+	}
+	if w, d := count("WARN"), count("DEBUG"); w != 1 || d != 2 {
+		t.Errorf("after 3 passes: %d warnings and %d debug lines, want 1 and 2", w, d)
+	}
+	warned[stuck.ID] = stuck.Revision - 1 // as if the rule changed since
+	s.ruleSchedulerPass(t.Context(), warned)
+	if w := count("WARN"); w != 2 {
+		t.Errorf("after a new revision: %d warnings, want 2", w)
 	}
 }

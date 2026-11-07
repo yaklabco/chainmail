@@ -3,6 +3,8 @@ package daemon
 import (
 	"cmp"
 	"context"
+	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -22,6 +24,7 @@ func (s *Server) runOnAccounts(ctx context.Context, rule rules.Rule, accts []con
 		wg.Go(func() {
 			if r := s.ruleRunners[acct.Name]; r != nil {
 				runs[i], errs[i] = r.runRule(ctx, rule, t, limit)
+				errs[i] = s.runnerErr(errs[i])
 				return
 			}
 			runs[i], errs[i] = s.recordCacheDisabled(ctx, rule, acct.Name, t)
@@ -35,6 +38,21 @@ func (s *Server) runOnAccounts(ctx context.Context, rule rules.Rule, accts []con
 		}
 	}
 	return out, cmp.Or(errs...)
+}
+
+// runnerErr is the error to report for a runner's runRule error. A
+// refusal, such as errRuleAccount, passes unchanged. Anything else comes
+// from the rules store, whose text can quote its driver, so it goes
+// through rulesErr like every other store failure. A context error keeps
+// its code there, since rulesErr keeps the cause.
+func (s *Server) runnerErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := errors.AsType[*argError](err); ok {
+		return err
+	}
+	return s.rulesErr(err)
 }
 
 // recordCacheDisabled records a run of rule on an account with no runner:
@@ -91,13 +109,29 @@ func (s *Server) startRuleRunners(ctx context.Context, accts []config.ResolvedAc
 	}
 }
 
+// schedWarned holds, by rule ID, the revision of each rule the scheduler
+// has warned about, so a rule that stays due warns once per revision and
+// its later tries log at debug. Only the scheduler goroutine uses it.
+type schedWarned map[string]int64
+
+// level is the level to log a scheduler failure of rule at: warn the
+// first time for its revision, debug after.
+func (w schedWarned) level(rule rules.Rule) slog.Level {
+	if rev, ok := w[rule.ID]; ok && rev == rule.Revision {
+		return slog.LevelDebug
+	}
+	w[rule.ID] = rule.Revision
+	return slog.LevelWarn
+}
+
 // runRuleScheduler runs each scheduled rule when its next run comes, until
 // ctx ends. It sleeps on the rules clock until the earliest next run,
 // for at most ruleSchedulerIdle, and wakes early when a rule changes. A
 // rule whose next run passed while the daemon was down runs once.
 func (s *Server) runRuleScheduler(ctx context.Context) {
+	warned := schedWarned{}
 	for {
-		wait := s.ruleSchedulerPass(ctx)
+		wait := s.ruleSchedulerPass(ctx, warned)
 		select {
 		case <-ctx.Done():
 			return
@@ -109,7 +143,7 @@ func (s *Server) runRuleScheduler(ctx context.Context) {
 
 // ruleSchedulerPass runs every due rule once, in priority order, and
 // returns how long to sleep before the next pass.
-func (s *Server) ruleSchedulerPass(ctx context.Context) time.Duration {
+func (s *Server) ruleSchedulerPass(ctx context.Context, warned schedWarned) time.Duration {
 	due, err := s.rules.DueScheduled(ctx, s.rulesClock.Now())
 	if err != nil {
 		if ctx.Err() == nil {
@@ -121,7 +155,7 @@ func (s *Server) ruleSchedulerPass(ctx context.Context) time.Duration {
 		if ctx.Err() != nil {
 			return ruleSchedulerRetry
 		}
-		s.runScheduled(ctx, rule)
+		s.runScheduled(ctx, rule, warned)
 	}
 	next, ok, err := s.rules.NextScheduled(ctx)
 	switch {
@@ -145,22 +179,27 @@ func (s *Server) ruleSchedulerPass(ctx context.Context) time.Duration {
 
 // runScheduled runs one due rule on each account it covers, within
 // runRuleTimeout, through each account's runner. Each run's finish sets the
-// rule's next run. Failures are logged by reason, never with rule text.
-func (s *Server) runScheduled(ctx context.Context, rule rules.Rule) {
+// rule's next run. Failures are logged by reason, never with rule text, at
+// the level warned gives, and a run that works forgets the rule's warning.
+func (s *Server) runScheduled(ctx context.Context, rule rules.Rule, warned schedWarned) {
 	ctx, cancel := context.WithTimeout(ctx, runRuleTimeout)
 	defer cancel()
 	accts, err := s.ruleAccounts(rule.Definition)
 	switch {
 	case err != nil:
 		if ctx.Err() == nil {
-			s.opts.Logger.Warn("a scheduled rule's accounts did not resolve", "rule", rule.ID, "reason", apiReason(err))
+			s.opts.Logger.Log(ctx, warned.level(rule), "a scheduled rule's accounts did not resolve", "rule", rule.ID, "reason", apiReason(err))
 		}
 		return
 	case len(accts) == 0:
-		s.opts.Logger.Warn("a scheduled rule covers no account it can run on", "rule", rule.ID)
+		s.opts.Logger.Log(ctx, warned.level(rule), "a scheduled rule covers no account it can run on", "rule", rule.ID)
 		return
 	}
-	if _, err := s.runOnAccounts(ctx, rule, accts, rules.TriggerSchedule, 0); err != nil && ctx.Err() == nil {
-		s.opts.Logger.Warn("a scheduled rule run failed", "rule", rule.ID, "reason", apiReason(err))
+	_, err = s.runOnAccounts(ctx, rule, accts, rules.TriggerSchedule, 0)
+	switch {
+	case err == nil:
+		delete(warned, rule.ID)
+	case ctx.Err() == nil:
+		s.opts.Logger.Log(ctx, warned.level(rule), "a scheduled rule run failed", "rule", rule.ID, "reason", apiReason(err))
 	}
 }

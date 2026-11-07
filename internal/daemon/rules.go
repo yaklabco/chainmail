@@ -119,10 +119,10 @@ func ruleMaskFields(paths []string) ([]string, string, error) {
 }
 
 // parseTrigger checks a trigger name. Empty is empty's value: manual for a
-// dry run, every trigger for a runs filter. Any other name is refused:
-// errRuleTrigger for a dry run, errRunsTrigger for a runs filter, each
-// with the hint that fits its empty value.
-func parseTrigger(s string, empty rules.Trigger) (rules.Trigger, error) {
+// dry run, every trigger for a runs filter. Any other name is refused
+// with refuse, whose hint should fit empty: errRuleTrigger for a dry run,
+// errRunsTrigger for a runs filter.
+func parseTrigger(s string, empty rules.Trigger, refuse error) (rules.Trigger, error) {
 	if s == "" {
 		return empty, nil
 	}
@@ -130,10 +130,7 @@ func parseTrigger(s string, empty rules.Trigger) (rules.Trigger, error) {
 	case rules.TriggerNew, rules.TriggerSchedule, rules.TriggerManual:
 		return t, nil
 	}
-	if empty == "" {
-		return "", errRunsTrigger
-	}
-	return "", errRuleTrigger
+	return "", refuse
 }
 
 // parseOutcome checks a runs filter's outcome. Empty means every outcome.
@@ -430,7 +427,9 @@ func (s *Server) dryRunSubject(ctx context.Context, m *chainmailv1.DryRunRuleReq
 }
 
 // DryRunRule implements chainmailv1connect.RulesServiceHandler. It matches
-// a saved rule, or an unsaved definition, without acting or writing.
+// a saved rule, or an unsaved definition, without acting or writing. A
+// deleted saved rule can be dry-run by ID, to see what it would do before
+// it is restored; RunRule refuses one, since a run acts.
 // Audited as rule.dry_run with the rule or "unsaved", the trigger, and the
 // number of accounts and matches.
 func (r *rulesService) DryRunRule(ctx context.Context, req *connect.Request[chainmailv1.DryRunRuleRequest]) (*connect.Response[chainmailv1.DryRunRuleResponse], error) {
@@ -448,7 +447,7 @@ func (r *rulesService) DryRunRule(ctx context.Context, req *connect.Request[chai
 		default:
 			target = "rule=unsaved"
 		}
-		trigger, trigErr := parseTrigger(m.GetTrigger(), rules.TriggerManual)
+		trigger, trigErr := parseTrigger(m.GetTrigger(), rules.TriggerManual, errRuleTrigger)
 		accountErr := r.s.ruleAccountArg(m.GetAccount())
 		if accountErr == nil {
 			entry.Account = m.GetAccount()
@@ -480,8 +479,11 @@ func (r *rulesService) DryRunRule(ctx context.Context, req *connect.Request[chai
 // RunRule implements chainmailv1connect.RulesServiceHandler. It runs a
 // live rule once on every account it covers, or the one named, through
 // each account's runner, within 10 minutes unless the client set a
-// deadline. A disabled rule runs, since the call is explicit. Audited as
-// rule.run with the rule, max and the number of runs.
+// deadline. A disabled rule runs, since the call is explicit. If any
+// account's run fails, the call returns the first failure in account
+// order and no runs, although the other accounts' runs are recorded and
+// may have acted: ListRuleRuns shows them, and the audit entry counts them.
+// Audited as rule.run with the rule, max and the number of runs.
 func (r *rulesService) RunRule(ctx context.Context, req *connect.Request[chainmailv1.RunRuleRequest]) (*connect.Response[chainmailv1.RunRuleResponse], error) {
 	return ruleCall(ctx, r.s, req, "rule.run", runRuleTimeout, func(ctx context.Context, _ caller, entry *audit.Entry) (*chainmailv1.RunRuleResponse, error) {
 		m := req.Msg
@@ -532,7 +534,7 @@ func (r *rulesService) ListRuleRuns(ctx context.Context, req *connect.Request[ch
 			target, refErr = ruleTarget(m.GetRule())
 			entry.Targets = append(entry.Targets, target)
 		}
-		trigger, trigErr := parseTrigger(m.GetTrigger(), "")
+		trigger, trigErr := parseTrigger(m.GetTrigger(), "", errRunsTrigger)
 		if m.GetTrigger() != "" {
 			entry.Targets = append(entry.Targets, enumTarget("trigger", trigger, trigErr))
 		}
@@ -573,7 +575,10 @@ func (r *rulesService) ListRuleRuns(ctx context.Context, req *connect.Request[ch
 }
 
 // RulesStatus implements chainmailv1connect.RulesServiceHandler. Audited
-// as rule.status with the number of runners reported.
+// as rule.status with the number of runners reported. The scheduler starts
+// with watch, so while watch is off (DisableWatch, or no watched account)
+// scheduled rules do not run and next_scheduled_at can lie in the past;
+// RunRule still runs a rule by hand.
 func (r *rulesService) RulesStatus(ctx context.Context, req *connect.Request[chainmailv1.RulesStatusRequest]) (*connect.Response[chainmailv1.RulesStatusResponse], error) {
 	return ruleCall(ctx, r.s, req, "rule.status", callTimeout, func(ctx context.Context, _ caller, entry *audit.Entry) (*chainmailv1.RulesStatusResponse, error) {
 		resp, err := r.s.rulesStatus(ctx)
