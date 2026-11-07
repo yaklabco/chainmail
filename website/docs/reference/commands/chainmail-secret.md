@@ -1,7 +1,7 @@
 ---
 title: "chainmail secret"
 sidebar_label: "secret"
-sidebar_position: 58
+sidebar_position: 71
 description: "Store secrets in the daemon's vault"
 ---
 

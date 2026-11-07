@@ -56,6 +56,7 @@ chainmail get cm1:work:INBOX:7:42
 - [chainmail move](./chainmail-move.md): Move messages to a folder
 - [chainmail read](./chainmail-read.md): Mark messages read: add \\Seen
 - [chainmail reply](./chainmail-reply.md): Reply to a message, quoting it
+- [chainmail rule](./chainmail-rule.md): Sort mail with rules that act on new mail, on a schedule or on demand
 - [chainmail search](./chainmail-search.md): Search mail on every account, newest first
 - [chainmail secret](./chainmail-secret.md): Store secrets in the daemon's vault
 - [chainmail send](./chainmail-send.md): Send a new message
