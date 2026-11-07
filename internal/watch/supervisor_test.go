@@ -714,16 +714,16 @@ func TestSupervisorReconnectsAfterDrop(t *testing.T) {
 	r.waitFor("INBOX reconnecting", supStatus("INBOX", StateReconnecting))
 	fs.Add(supMsg("INBOX", "during one"))
 	fs.Add(supMsg("INBOX", "during two"))
-	r.clock.expectAfter(t, backoff(0, 0.5))
-	r.clock.Advance(backoff(0, 0.5)) // this reconnect fails
-	r.clock.expectAfter(t, backoff(1, 0.5))
+	r.clock.expectAfter(t, Backoff(0, 0.5))
+	r.clock.Advance(Backoff(0, 0.5)) // this reconnect fails
+	r.clock.expectAfter(t, Backoff(1, 0.5))
 	if n := fs.WatchConns(); n != 0 {
 		t.Errorf("WatchConns() during the outage = %d, want 0", n)
 	}
 	if row := r.row("INBOX"); row.State != StateReconnecting || row.LastError != "SERVER_UNAVAILABLE" {
 		t.Errorf("row = state %q last_error %q, want reconnecting and SERVER_UNAVAILABLE", row.State, row.LastError)
 	}
-	r.clock.Advance(backoff(1, 0.5))
+	r.clock.Advance(Backoff(1, 0.5))
 	r.waitFor("new event for during one", supNew("INBOX", "during one"))
 	r.waitFor("new event for during two", supNew("INBOX", "during two"))
 	r.waitFor("INBOX watching again", supStatus("INBOX", StateWatching))
@@ -738,8 +738,8 @@ func TestSupervisorReconnectsAfterDrop(t *testing.T) {
 	r.waitIdle("INBOX")
 	fs.DropWatches()
 	r.waitFor("INBOX reconnecting again", supStatus("INBOX", StateReconnecting))
-	r.clock.expectAfter(t, backoff(0, 0.5))
-	r.clock.Advance(backoff(0, 0.5))
+	r.clock.expectAfter(t, Backoff(0, 0.5))
+	r.clock.Advance(Backoff(0, 0.5))
 	r.waitFor("INBOX watching after the second outage", supStatus("INBOX", StateWatching))
 }
 
@@ -849,8 +849,8 @@ func TestSupervisorGmailReresolvesAllMail(t *testing.T) {
 	fs.FailWatch(&mailstore.FolderNotFoundError{Name: supAllMail, Requested: supAllMail})
 	fs.DropWatches()
 	r.waitFor("All Mail reconnecting", supStatus(supAllMail, StateReconnecting))
-	r.clock.expectAfter(t, backoff(0, 0.5))
-	r.clock.Advance(backoff(0, 0.5))
+	r.clock.expectAfter(t, Backoff(0, 0.5))
+	r.clock.Advance(Backoff(0, 0.5))
 	e := r.waitFor("All Mail error", supStatus(supAllMail, StateError))
 	if e.Detail != reasonFolderNotFound {
 		t.Errorf("detail = %q, want %q", e.Detail, reasonFolderNotFound)
@@ -1114,13 +1114,13 @@ func TestSupervisorPollerBacksOffOutages(t *testing.T) {
 			fs.Add(supMsg("Sent", "during")) // STATUS shows a change, so the pass runs
 			r.clock.Advance(acct.SyncPoll)
 			r.waitFor("Sent reconnecting", supStatus("Sent", StateReconnecting))
-			r.clock.expectAfter(t, backoff(0, 0.5))
+			r.clock.expectAfter(t, Backoff(0, 0.5))
 			if row := r.row("Sent"); row.State != StateReconnecting || row.LastError != tt.reason {
 				t.Errorf("row = state %q last_error %q, want reconnecting and %s", row.State, row.LastError, tt.reason)
 			}
-			r.clock.Advance(backoff(0, 0.5))
-			r.clock.expectAfter(t, backoff(1, 0.5))
-			r.clock.Advance(backoff(1, 0.5))
+			r.clock.Advance(Backoff(0, 0.5))
+			r.clock.expectAfter(t, Backoff(1, 0.5))
+			r.clock.Advance(Backoff(1, 0.5))
 			r.clock.expectAfter(t, acct.SyncPoll) // Backoff(2, 0.5) is 4s, capped at the 3s poll
 
 			fs.Fail(tt.method, nil)
@@ -1140,7 +1140,7 @@ func TestSupervisorPollerBacksOffOutages(t *testing.T) {
 			fs.Add(supMsg("Sent", "later"))
 			r.clock.Advance(acct.SyncPoll)
 			r.waitFor("Sent reconnecting again", supStatus("Sent", StateReconnecting))
-			r.clock.expectAfter(t, backoff(0, 0.5))
+			r.clock.expectAfter(t, Backoff(0, 0.5))
 		})
 	}
 }
@@ -1189,8 +1189,8 @@ func TestSupervisorRetriesFailedStatusWrites(t *testing.T) {
 			if n := supCount(r.all(), supStatus("INBOX", StateWatching)); n != 0 {
 				t.Fatalf("%d watching events after the failed write, want 0:%s", n, supDump(r.all()))
 			}
-			r.clock.expectAfter(t, backoff(0, 0.5))
-			r.clock.Advance(backoff(0, 0.5))
+			r.clock.expectAfter(t, Backoff(0, 0.5))
+			r.clock.Advance(Backoff(0, 0.5))
 			r.waitFor("INBOX watching", supStatus("INBOX", StateWatching))
 			r.waitIdle("INBOX")
 			if n := supCount(r.all(), supStatus("INBOX", StateWatching)); n != 1 {
@@ -1254,18 +1254,18 @@ func TestSupervisorRepairsPartialStatusTransition(t *testing.T) {
 				fs.FailWatch(fmt.Errorf("%w: test outage", mailstore.ErrUnavailable)) // one-shot: the first reconnect
 			}
 			fs.DropWatches()
-			r.clock.expectAfter(t, backoff(0, 0.5))
+			r.clock.expectAfter(t, Backoff(0, 0.5))
 			if !failed.Load() {
 				t.Fatal("publishing reconnecting never failed")
 			}
 			if row := r.row("INBOX"); row.State != StateReconnecting || row.LastError != "SERVER_UNAVAILABLE" {
 				t.Fatalf("row after the half-written transition = state %q last_error %q, want reconnecting and SERVER_UNAVAILABLE", row.State, row.LastError)
 			}
-			r.clock.Advance(backoff(0, 0.5))
+			r.clock.Advance(Backoff(0, 0.5))
 			if tt.failReconnect {
 				r.waitFor("INBOX reconnecting, published on the next attempt", supStatus("INBOX", StateReconnecting))
-				r.clock.expectAfter(t, backoff(1, 0.5))
-				r.clock.Advance(backoff(1, 0.5))
+				r.clock.expectAfter(t, Backoff(1, 0.5))
+				r.clock.Advance(Backoff(1, 0.5))
 			}
 			r.waitIdle("INBOX") // the new connection has passed and settled
 			if row := r.row("INBOX"); row.State != StateWatching || row.LastError != "" {
@@ -1311,11 +1311,11 @@ func TestSupervisorPollerBackoffStartsAfterTheFailure(t *testing.T) {
 	fs.Fail("FolderState", fmt.Errorf("%w: STATUS timed out", mailstore.ErrUnavailable))
 	r.clock.Advance(acct.SyncPoll) // the STATUS takes 5s, then fails
 	r.waitFor("Sent reconnecting", supStatus("Sent", StateReconnecting))
-	r.clock.expectAfter(t, backoff(0, 0.5))
+	r.clock.expectAfter(t, Backoff(0, 0.5))
 	slow.slow.Store(false)
 	fs.Fail("FolderState", nil)
 	calls := fs.Calls("FolderState")
-	r.clock.Advance(backoff(0, 0.5) - time.Millisecond)
+	r.clock.Advance(Backoff(0, 0.5) - time.Millisecond)
 	if got := fs.Calls("FolderState"); got != calls {
 		t.Fatalf("FolderState ran %d times before the backoff ran out, want 0", got-calls)
 	}
@@ -1557,8 +1557,8 @@ func TestSupervisorLogsTheBudgetOnAConnLimit(t *testing.T) {
 	if strings.Contains(got, "hello") {
 		t.Errorf("logs carry the server's text:\n%s", got)
 	}
-	r.clock.expectAfter(t, backoff(0, 0.5))
-	r.clock.Advance(backoff(0, 0.5))
+	r.clock.expectAfter(t, Backoff(0, 0.5))
+	r.clock.Advance(Backoff(0, 0.5))
 	r.waitFor("INBOX watching after the refusal", supStatus("INBOX", StateWatching))
 }
 
