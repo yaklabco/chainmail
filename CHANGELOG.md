@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The README is a short introduction, and the quick start and runbook moved to chainmail.sh.
 
+### Fixed
+
+- Tab completion of message refs no longer offers nothing when the inbox is empty. Commands that read or act on any message, such as `get`, `thread`, `reply` and `move`, offer inbox mail first and then the newest mail from any folder. `archive` still offers inbox mail only.
+
 ## [0.1.0] - 2026-11-06
 
 ### Added

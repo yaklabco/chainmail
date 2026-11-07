@@ -95,7 +95,7 @@ func (cp *completer) itemSpecs() map[string]compSpec {
 		"chainmail item criteria untick": {args: byPosition(noComplete, cp.items(0), cp.criteria)},
 		"chainmail item block":           {args: cp.items(2)},
 		"chainmail item link": {
-			args:  byPosition(noComplete, cp.items(0), cp.refs("in:inbox", 0, sender)),
+			args:  byPosition(noComplete, cp.items(0), cp.refs(0, sender, "in:inbox", "")),
 			flags: map[string]cobra.CompletionFunc{"note": noComplete},
 		},
 		"chainmail item unlink": {args: byPosition(noComplete, cp.items(0), cp.linkAccounts, cp.linkThreads)},
