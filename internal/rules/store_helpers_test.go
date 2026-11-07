@@ -366,3 +366,27 @@ func runIDs(runs []Run) []int64 {
 	}
 	return out
 }
+
+// appliedRow reads the act-once row of one key, and whether it exists.
+func (r *storeRig) appliedRow(t *testing.T, ruleID, account, key string) (AppliedRow, bool) {
+	t.Helper()
+	got, err := r.store.Applied(t.Context(), ruleID, account, []string{key})
+	if err != nil {
+		t.Fatalf("Applied: %v", err)
+	}
+	row, ok := got[key]
+	return row, ok
+}
+
+// wantApplied fails the test unless the act-once row of key exists and is
+// want, with its time compared by instant.
+func (r *storeRig) wantApplied(t *testing.T, ruleID, account, key string, want AppliedRow) {
+	t.Helper()
+	got, ok := r.appliedRow(t, ruleID, account, key)
+	if !ok {
+		t.Fatalf("no act-once row for %s %s %s, want %+v", ruleID, account, key, want)
+	}
+	if got.Outcome != want.Outcome || got.Note != want.Note || got.RunID != want.RunID || !got.At.Equal(want.At) {
+		t.Errorf("act-once row %s %s %s = %+v, want %+v", ruleID, account, key, got, want)
+	}
+}
