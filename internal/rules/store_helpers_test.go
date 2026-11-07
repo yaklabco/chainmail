@@ -295,3 +295,17 @@ func wantRefused(t *testing.T, err, want error) {
 		t.Fatalf("err = %v, want %v", err, want)
 	}
 }
+
+// otherActor makes the writes a test tells apart from storeActor's.
+var otherActor = items.Actor{UID: 1001, Client: "mcp"}
+
+// storePtr returns a pointer to a copy of v, for Patch fields.
+func storePtr[T any](v T) *T { return &v }
+
+// exec runs a statement behind the Store's back.
+func (r *storeRig) exec(t *testing.T, query string, args ...any) {
+	t.Helper()
+	if _, err := r.db.ExecContext(t.Context(), query, args...); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+}

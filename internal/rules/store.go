@@ -139,6 +139,12 @@ const ruleColumns = "id, name, description, accounts, query, on_new, schedule, p
 	"max_per_run, enabled, disabled_reason, revision, created_at, updated_at, deleted_at, created_by, " +
 	"updated_by, next_run_at, last_run_at, failed_runs"
 
+// ruleUpdate rewrites every column but id, in ruleColumns order, then the id.
+const ruleUpdate = "UPDATE rules SET name = ?, description = ?, accounts = ?, query = ?, on_new = ?, " +
+	"schedule = ?, priority = ?, stop = ?, actions = ?, max_per_run = ?, enabled = ?, disabled_reason = ?, " +
+	"revision = ?, created_at = ?, updated_at = ?, deleted_at = ?, created_by = ?, updated_by = ?, " +
+	"next_run_at = ?, last_run_at = ?, failed_runs = ? WHERE id = ?"
+
 // storedRule is a rule as rule_revisions keeps it in JSON, and the shape
 // scanRule fills from a row. Times are FormatTime text, "" for none.
 type storedRule struct {
@@ -286,6 +292,21 @@ func insertRule(ctx context.Context, tx *sql.Tx, r Rule) error {
 	return nil
 }
 
+// saveRule rewrites the row of r.ID with r in tx.
+func saveRule(ctx context.Context, tx *sql.Tx, r Rule) error {
+	vals, err := ruleValues(r)
+	if err != nil {
+		return err
+	}
+	args := make([]any, 0, len(vals))
+	args = append(args, vals[1:]...)
+	args = append(args, vals[0])
+	if _, err := tx.ExecContext(ctx, ruleUpdate, args...); err != nil {
+		return fmt.Errorf("rules: saving a rule: %w", err)
+	}
+	return nil
+}
+
 // findRule looks rule up through q: by ID when it passes ValidID, else by
 // live name. Not found is ErrNotFound.
 func findRule(ctx context.Context, q queryer, rule string) (Rule, error) {
@@ -347,6 +368,15 @@ func recordChange(ctx context.Context, tx *sql.Tx, id, change, actor, reason str
 		Rule: &watch.RuleChange{RuleID: r.ID, Name: r.Name, Change: change, Revision: r.Revision, Actor: actor, Reason: reason},
 	}
 	return r, []watch.Event{e}, nil
+}
+
+// commitChange saves r, which already carries its new revision, then
+// records the change as recordChange does.
+func commitChange(ctx context.Context, tx *sql.Tx, r Rule, change, actor, reason string, at time.Time) (Rule, []watch.Event, error) {
+	if err := saveRule(ctx, tx, r); err != nil {
+		return Rule{}, nil, err
+	}
+	return recordChange(ctx, tx, r.ID, change, actor, reason, at)
 }
 
 // canonical is d normalized, on copies of its slices, with empty accounts
