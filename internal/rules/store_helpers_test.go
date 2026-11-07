@@ -309,3 +309,12 @@ func (r *storeRig) exec(t *testing.T, query string, args ...any) {
 		t.Fatalf("exec: %v", err)
 	}
 }
+
+// ruleIDs is the IDs of rules, in order.
+func ruleIDs(rules []Rule) []string {
+	var out []string
+	for _, r := range rules {
+		out = append(out, r.ID)
+	}
+	return out
+}
