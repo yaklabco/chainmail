@@ -368,3 +368,34 @@ func TestReadItemKinds(t *testing.T) {
 		})
 	}
 }
+
+// rule and due events survive Publish and Read with every field intact.
+// None has an account, folder or ref.
+func TestRuleAndDuePayloadRoundTrip(t *testing.T) {
+	t.Parallel()
+	l, _, _ := newLog(t)
+	at := time.Date(2026, 11, 7, 8, 0, 0, 123456789, time.UTC)
+	in := []Event{
+		{At: at, Kind: KindRule, Rule: &RuleChange{RuleID: "ru_01", Name: "receipts", Change: "created", Revision: 1, Actor: "1000/cli"}},
+		{At: at, Kind: KindRule, Rule: &RuleChange{RuleID: "ru_01", Name: "receipts", Change: "disabled", Revision: 4, Actor: "1000/rule", Reason: "all_failed"}},
+		{At: at, Kind: KindItemDueSoon, Due: &ItemDue{ItemID: "it_01", Type: "task", DueDate: "2026-11-09", State: "backlog", ParentID: "it_admin_work"}},
+		{At: at, Kind: KindItemDue, Due: &ItemDue{ItemID: "it_02", Type: "story", DueDate: "2026-11-07", State: "in-progress"}},
+		{At: at, Kind: KindItemOverdue, Due: &ItemDue{ItemID: "it_03", Type: "bug", DueDate: "2026-11-01", State: "in-review", ParentID: "it_01"}},
+	}
+	stored := publish(t, l, in...)
+	page, err := l.Read(t.Context(), Query{Filter: Filter{Kinds: []Kind{KindRule, KindItemDueSoon, KindItemDue, KindItemOverdue}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != len(stored) {
+		t.Fatalf("read %d events, want %d", len(page.Events), len(stored))
+	}
+	for i, got := range page.Events {
+		if !reflect.DeepEqual(got, stored[i]) {
+			t.Errorf("event %d:\n got %+v\nwant %+v", i, got, stored[i])
+		}
+		if got.Account != "" || got.Folder != "" || got.Ref != "" {
+			t.Errorf("event %d has account %q, folder %q, ref %q, want none", i, got.Account, got.Folder, got.Ref)
+		}
+	}
+}

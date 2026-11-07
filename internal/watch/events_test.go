@@ -70,6 +70,31 @@ func TestEncodePayload(t *testing.T) {
 			want: `{"item_id":"it_01","from_self":false,"message":{"date":"0001-01-01T00:00:00Z","internal_date":"0001-01-01T00:00:00Z",` +
 				`"from":null,"to":null,"subject":"s","flags":null,"size":0,"has_attachment":false}}`,
 		},
+		{
+			name: "rule",
+			e:    Event{Kind: KindRule, Rule: &RuleChange{RuleID: "ru_01", Name: "receipts", Change: "created", Revision: 1, Actor: "1000/cli"}},
+			want: `{"rule":{"rule_id":"ru_01","name":"receipts","change":"created","revision":1,"actor":"1000/cli"}}`,
+		},
+		{
+			name: "rule disabled by the runner",
+			e:    Event{Kind: KindRule, Rule: &RuleChange{RuleID: "ru_01", Name: "receipts", Change: "disabled", Revision: 4, Actor: "1000/rule", Reason: "all_failed"}},
+			want: `{"rule":{"rule_id":"ru_01","name":"receipts","change":"disabled","revision":4,"actor":"1000/rule","reason":"all_failed"}}`,
+		},
+		{
+			name: "item_due_soon",
+			e:    Event{Kind: KindItemDueSoon, Due: &ItemDue{ItemID: "it_01", Type: "task", DueDate: "2026-11-09", State: "backlog", ParentID: "it_admin_work"}},
+			want: `{"due":{"item_id":"it_01","type":"task","due_date":"2026-11-09","state":"backlog","parent_id":"it_admin_work"}}`,
+		},
+		{
+			name: "item_due without a parent",
+			e:    Event{Kind: KindItemDue, Due: &ItemDue{ItemID: "it_02", Type: "story", DueDate: "2026-11-07", State: "in-progress"}},
+			want: `{"due":{"item_id":"it_02","type":"story","due_date":"2026-11-07","state":"in-progress"}}`,
+		},
+		{
+			name: "item_overdue",
+			e:    Event{Kind: KindItemOverdue, Due: &ItemDue{ItemID: "it_03", Type: "bug", DueDate: "2026-11-01", State: "in-review"}},
+			want: `{"due":{"item_id":"it_03","type":"bug","due_date":"2026-11-01","state":"in-review"}}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -96,6 +121,10 @@ func TestEncodePayloadRejects(t *testing.T) {
 		{name: "item without change", e: Event{Kind: KindItem}, want: "item event has no change"},
 		{name: "item_mail without message", e: Event{Kind: KindItemMail, Ref: "r", ItemID: "it_01"}, want: "item_mail event for r has no message"},
 		{name: "item_mail without item", e: Event{Kind: KindItemMail, Ref: "r", Message: &Message{}}, want: "item_mail event for r has no item"},
+		{name: "rule without change", e: Event{Kind: KindRule}, want: "rule event has no change"},
+		{name: "item_due_soon without due", e: Event{Kind: KindItemDueSoon}, want: "item_due_soon event has no due item"},
+		{name: "item_due without due", e: Event{Kind: KindItemDue}, want: "item_due event has no due item"},
+		{name: "item_overdue without due", e: Event{Kind: KindItemOverdue}, want: "item_overdue event has no due item"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -146,6 +175,11 @@ func TestDecodePayloadRoundTrip(t *testing.T) {
 			Snippet:  &snippet,
 		}}},
 		{"item_mail with only a subject", Event{Kind: KindItemMail, ItemID: "it_02", Message: &Message{Subject: "bare"}}},
+		{"rule created", Event{Kind: KindRule, Rule: &RuleChange{RuleID: "ru_01", Name: "receipts", Change: "created", Revision: 1, Actor: "1000/cli"}}},
+		{"rule disabled with a reason", Event{Kind: KindRule, Rule: &RuleChange{RuleID: "ru_01", Name: "receipts", Change: "disabled", Revision: 6, Actor: "1000/rule", Reason: "repeated_failures"}}},
+		{"item_due_soon with a parent", Event{Kind: KindItemDueSoon, Due: &ItemDue{ItemID: "it_01", Type: "task", DueDate: "2026-11-09", State: "backlog", ParentID: "it_00"}}},
+		{"item_due", Event{Kind: KindItemDue, Due: &ItemDue{ItemID: "it_02", Type: "feature", DueDate: "2026-11-07", State: "in-progress"}}},
+		{"item_overdue", Event{Kind: KindItemOverdue, Due: &ItemDue{ItemID: "it_03", Type: "support-ticket", DueDate: "2026-10-30", State: "in-review"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -176,7 +210,7 @@ func TestDecodePayloadRejects(t *testing.T) {
 	if err := decodePayload(&e, "{}"); err == nil || !strings.Contains(err.Error(), `unknown kind "moved"`) {
 		t.Errorf("unknown kind: err = %v, want a kind error", err)
 	}
-	for _, kind := range []Kind{KindItem, KindItemMail} {
+	for _, kind := range []Kind{KindItem, KindItemMail, KindRule, KindItemDueSoon, KindItemDue, KindItemOverdue} {
 		e = Event{ID: 9, Kind: kind}
 		if err := decodePayload(&e, "["); err == nil || !strings.Contains(err.Error(), "decoding event 9 payload") {
 			t.Errorf("bad %s JSON: err = %v, want a decoding error", kind, err)
@@ -197,5 +231,28 @@ func TestItemChangeHoldsNoText(t *testing.T) {
 	want := []string{"ItemID", "Type", "Revision", "Op", "Fields"}
 	if !slices.Equal(got, want) {
 		t.Errorf("ItemChange fields = %v, want %v", got, want)
+	}
+}
+
+// Rule and due events reach every reader that opts in, outside any
+// untrusted wrapping, so RuleChange and ItemDue must never carry rule text
+// or item text. A new field here is a deliberate decision that updates
+// these lists.
+func TestRuleAndDuePayloadsHoldNoText(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		typ  reflect.Type
+		want []string
+	}{
+		{reflect.TypeFor[RuleChange](), []string{"RuleID", "Name", "Change", "Revision", "Actor", "Reason"}},
+		{reflect.TypeFor[ItemDue](), []string{"ItemID", "Type", "DueDate", "State", "ParentID"}},
+	} {
+		var got []string
+		for i := range tt.typ.NumField() {
+			got = append(got, tt.typ.Field(i).Name)
+		}
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("%s fields = %v, want %v", tt.typ.Name(), got, tt.want)
+		}
 	}
 }
