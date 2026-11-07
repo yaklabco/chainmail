@@ -63,6 +63,9 @@ var (
 	errRuleRunsLimit   = &argError{msg: "limit must be 0 to 500", hint: "0 means 50"}
 	errRuleBeforeID    = &argError{msg: "before_id must be 0 or more", hint: "pass next_before_id from the previous page"}
 	errRuleDeleted     = &argError{msg: "the rule is deleted", hint: "restore it first: chainmail rule restore <id>"}
+	// errRunsTrigger refuses a runs filter's trigger. Its message is
+	// errRuleTrigger's, but empty means every trigger here.
+	errRunsTrigger = &argError{msg: "trigger must be new, schedule or manual", hint: "leave trigger empty for every trigger"}
 )
 
 // rulesErr is the error to report for a failed rules store call. The
@@ -116,7 +119,9 @@ func ruleMaskFields(paths []string) ([]string, string, error) {
 }
 
 // parseTrigger checks a trigger name. Empty is empty's value: manual for a
-// dry run, every trigger for a runs filter.
+// dry run, every trigger for a runs filter. Any other name is refused:
+// errRuleTrigger for a dry run, errRunsTrigger for a runs filter, each
+// with the hint that fits its empty value.
 func parseTrigger(s string, empty rules.Trigger) (rules.Trigger, error) {
 	if s == "" {
 		return empty, nil
@@ -124,6 +129,9 @@ func parseTrigger(s string, empty rules.Trigger) (rules.Trigger, error) {
 	switch t := rules.Trigger(s); t {
 	case rules.TriggerNew, rules.TriggerSchedule, rules.TriggerManual:
 		return t, nil
+	}
+	if empty == "" {
+		return "", errRunsTrigger
 	}
 	return "", errRuleTrigger
 }

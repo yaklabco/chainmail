@@ -160,6 +160,8 @@ func TestListRuleRuns(t *testing.T) {
 			t.Errorf("%s: %v, want %v", tt.name, err, tt.code)
 		}
 	}
+	_, err := h.Client.Rules.ListRuleRuns(t.Context(), connect.NewRequest(&chainmailv1.ListRuleRunsRequest{Trigger: "later"}))
+	wantItemErr(t, "trigger hint", err, connect.CodeInvalidArgument, api.ReasonInvalidArgument, "leave trigger empty for every trigger")
 	rows := rpcAudit(t, h, "rule.runs")
 	if len(rows) < 2 || rows[1].Targets != itemTargets(t, "rule="+a.GetId(), "rows=3") {
 		t.Errorf("audit = %+v", rows)
