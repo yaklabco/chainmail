@@ -444,6 +444,17 @@ type batchMatch struct {
 	bodyFailed []ref.Ref
 }
 
+// scopeFailed is newMatch's answer when scoping the rule failed with err:
+// a transient failure ends the batch, and any other is kept for newAct to
+// record as the run's permanent failure.
+func (m batchMatch) scopeFailed(err error) (batchMatch, bool, error) {
+	if classifyReason(errDetail(err).GetReason()) == actTransient {
+		return m, false, err
+	}
+	m.scopeErr = err
+	return m, true, nil
+}
+
 // newMatch matches one on_new rule against the batch. A text rule first
 // drops the messages its query rules out on their headers and labels
 // alone, then waits for the bodies the rest need, and a message whose body
@@ -456,11 +467,8 @@ func (r *ruleRunner) newMatch(ctx context.Context, rule rules.Rule, b *newBatch)
 	m := batchMatch{rule: rule, start: r.s.opts.Now()}
 	sc, covered, reason, err := r.scope(ctx, rule, false)
 	switch {
-	case err != nil && classifyReason(errDetail(err).GetReason()) == actTransient:
-		return m, false, err
 	case err != nil:
-		m.scopeErr = err
-		return m, true, nil
+		return m.scopeFailed(err)
 	case !covered:
 		return m, false, nil
 	case reason == reasonCacheDisabled:
