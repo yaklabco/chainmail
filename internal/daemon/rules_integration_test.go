@@ -335,7 +335,8 @@ func itRuns(t *testing.T, h *daemontest.Harness, rule, account, trigger string) 
 
 // itWaitRuns polls ListRuleRuns until rule has at least n finished runs on
 // account for trigger and returns the finished ones, newest first. A run
-// under way, or left by a daemon that stopped, reads as interrupted.
+// under way, or left by a daemon that stopped, reads as interrupted and is
+// not counted; itQuietRuns counts it.
 func itWaitRuns(t *testing.T, h *daemontest.Harness, rule, account, trigger string, n int, within time.Duration) []*chainmailv1.RuleRun {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), within)
@@ -360,12 +361,22 @@ func itWaitRuns(t *testing.T, h *daemontest.Harness, rule, account, trigger stri
 }
 
 // itQuietRuns watches rule's runs on account for trigger for within and
-// fails the test as soon as their number is not n.
+// fails the test as soon as their number is not n. Unlike itWaitRuns, it
+// counts every run, one under way included, so a run that has only just
+// started is already one too many. The failure says how many of the runs
+// read as interrupted, which is how a run under way reads.
 func itQuietRuns(t *testing.T, h *daemontest.Harness, rule, account, trigger string, n int, within time.Duration) {
 	t.Helper()
 	for deadline := time.Now().Add(within); time.Now().Before(deadline); time.Sleep(itPoll) {
 		if runs := itRuns(t, h, rule, account, trigger); len(runs) != n {
-			t.Fatalf("%s has %d %s runs on %s, want %d: %v", rule, len(runs), trigger, account, n, runs)
+			under := 0
+			for _, r := range runs {
+				if r.GetOutcome() == "interrupted" {
+					under++
+				}
+			}
+			t.Fatalf("%s has %d %s runs on %s, %d of them under way or interrupted, want %d: %v",
+				rule, len(runs), trigger, account, under, n, runs)
 		}
 	}
 }
@@ -807,20 +818,19 @@ func checkItRestart(t *testing.T, dove *dovecot.Server) {
 	case <-time.After(itPollWithin):
 		t.Fatalf("no forward reached SMTP within %v of the restart", itPollWithin)
 	}
+	// A graceful stop waits for the send in flight, whose context is
+	// detached from the request: it must not return while SMTP holds the
+	// reply.
 	stopped := make(chan error, 1)
 	go func() { stopped <- h2.Stop() }()
-	var stopErr error
-	returned := false
 	select {
-	case stopErr = <-stopped:
-		returned = true
+	case err := <-stopped:
+		t.Errorf("the stop returned (%v) while SMTP held a forward's reply, want it to wait for the send", err)
+		stopped <- err
 	case <-time.After(itHoldRelease):
 	}
 	hold.free()
-	if !returned {
-		stopErr = <-stopped
-	}
-	if stopErr != nil {
+	if stopErr := <-stopped; stopErr != nil {
 		t.Fatalf("stopping the daemon mid batch: %v", stopErr)
 	}
 	sent := len(sink.Messages())
@@ -954,47 +964,43 @@ func checkItSchedule(t *testing.T, dove *dovecot.Server) {
 	restarted := opts
 	restarted.Reuse = h
 	h2 := daemontest.Start(t, cfg, restarted)
-	runs := itWaitRuns(t, h2, rule.GetId(), "dove", "schedule", 2, itPollWithin)
+	// The first run before the downtime, and the catch-up: two runs, not
+	// six. A cache_not_ready catch-up adds its one retry.
+	want := 2
+	runs := itWaitRuns(t, h2, rule.GetId(), "dove", "schedule", want, itPollWithin)
 	catchUp := runs[0]
 	if catchUp.GetOutcome() == "cache_not_ready" {
 		// The start-up run met the cache before its first sync pass. It
 		// retries five minutes later instead of an interval out (amendment
 		// 7), and is not repeated meanwhile.
 		t.Logf("the catch-up run found the cache not ready (%s), as a run at start-up can", catchUp.GetReason())
+		if len(runs) != want {
+			t.Fatalf("%d finished schedule runs after the restart, want %d, the catch-up once: %v", len(runs), want, runs)
+		}
 		retry := catchUp.GetFinishedAt().AsTime().Add(5 * time.Minute)
 		if next := itGetRule(t, h2, rule.GetId()).GetNextRunAt().AsTime(); !itNear(next, retry) {
 			t.Errorf("next run after a catch-up the cache could not answer = %v, want five minutes after it, %v", next, retry)
 		}
-		itQuietRuns(t, h2, rule.GetId(), "dove", "schedule", 2, itQuiet)
+		itQuietRuns(t, h2, rule.GetId(), "dove", "schedule", want, itQuiet)
 		itWaitCacheComplete(t, h2, "dove", "in:inbox")
 		clock.Advance(5*time.Minute + time.Second)
+		itWaitCacheComplete(t, h2, "dove", "in:inbox")
 		itUpdateRule(t, h2, poke.GetId(), &chainmailv1.RuleDefinition{Description: "Wakes the scheduler again"}, "description")
-		runs = itWaitRuns(t, h2, rule.GetId(), "dove", "schedule", 3, itRunWithin)
+		want++
+		runs = itWaitRuns(t, h2, rule.GetId(), "dove", "schedule", want, itRunWithin)
 		catchUp = runs[0]
 	}
-	// The catch-up skips the two digests the first run flagged. The cache
-	// counts as complete while its builder lags the log by less than
-	// [cache] fresh_lag, so a run at start-up can miss the digest the first
-	// pass has just found: it then applies nothing, and the next run takes
-	// the digest.
-	if catchUp.GetOutcome() != "ok" || catchUp.GetSkipped() != 2 || catchUp.GetApplied() > 1 || catchUp.GetFailed() != 0 ||
-		catchUp.GetMatched() != catchUp.GetSkipped()+catchUp.GetApplied() {
-		t.Errorf("catch-up run = %v, want outcome ok, 2 skipped by the act-once table, at most the new digest applied", catchUp)
+	if len(runs) != want {
+		t.Fatalf("%d finished schedule runs after the restart, want %d: missed runs were repeated: %v", len(runs), want, runs)
 	}
-	itQuietRuns(t, h2, rule.GetId(), "dove", "schedule", len(runs), itQuiet)
+	// The catch-up takes the digest that arrived during the downtime and
+	// skips the two the first run flagged.
+	if catchUp.GetOutcome() != "ok" || catchUp.GetMatched() != 3 || catchUp.GetSkipped() != 2 || catchUp.GetApplied() != 1 || catchUp.GetFailed() != 0 {
+		t.Errorf("catch-up run = %v, want outcome ok, 3 matched, 2 skipped by the act-once table, 1 applied", catchUp)
+	}
+	itQuietRuns(t, h2, rule.GetId(), "dove", "schedule", want, itQuiet)
 	if next := itGetRule(t, h2, rule.GetId()).GetNextRunAt().AsTime(); !itNear(next, catchUp.GetFinishedAt().AsTime().Add(time.Hour)) {
 		t.Errorf("next run after the catch-up = %v, want an hour after it, %v", next, catchUp.GetFinishedAt().AsTime().Add(time.Hour))
-	}
-	if catchUp.GetApplied() == 0 {
-		t.Logf("the catch-up run matched before the cache held the new digest (run %d); the next run takes it", catchUp.GetId())
-		itWaitCacheComplete(t, h2, "dove", "in:inbox")
-		clock.Advance(time.Hour + time.Second)
-		itWaitCacheComplete(t, h2, "dove", "in:inbox")
-		itUpdateRule(t, h2, poke.GetId(), &chainmailv1.RuleDefinition{Description: "Wakes the scheduler for the next run"}, "description")
-		next := itWaitRuns(t, h2, rule.GetId(), "dove", "schedule", len(runs)+1, itRunWithin)[0]
-		if next.GetOutcome() != "ok" || next.GetMatched() != 3 || next.GetSkipped() != 2 || next.GetApplied() != 1 || next.GetFailed() != 0 {
-			t.Errorf("run after the catch-up = %v, want outcome ok, 3 matched, 2 skipped, 1 applied", next)
-		}
 	}
 	// Each digest is flagged, once, and nothing else.
 	starred = itServerRows(t, h2, "dove", "in:inbox is:starred")
