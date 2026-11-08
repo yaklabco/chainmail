@@ -149,3 +149,51 @@ func TestMarkAppliedCopiesEveryRulesRowToTheAlias(t *testing.T) {
 		t.Errorf("%d rows for g:9, want 1", n)
 	}
 }
+
+// TestMarkAppliedWritesEveryAliasAtOnce checks spec amendment 6 for a rule
+// that both copies and relocates: the acting row and the rows at every
+// alias commit in one transaction, so a failure writing any of them writes
+// none, and an acting rule's row already at an alias, as the runner writes
+// it right after a copy, is upserted without error.
+func TestMarkAppliedWritesEveryAliasAtOnce(t *testing.T) {
+	t.Parallel()
+	r := newStoreRig(t)
+	ctx := t.Context()
+	const old, copied, moved = "i:7:10:INBOX", "i:7:4:Saved", "i:7:3:Archive"
+	if err := r.store.MarkApplied(ctx, "ru_b", "work", old, 1, AppliedDone, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	bRow, _ := r.appliedRow(t, "ru_b", "work", old)
+	if err := r.store.MarkPending(ctx, "ru_a", "work", old, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.store.MarkApplied(ctx, "ru_a", "work", copied, 2, AppliedDone, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.db.ExecContext(ctx,
+		`CREATE TRIGGER refuse_moved BEFORE INSERT ON rule_applied WHEN NEW.message_key = '`+moved+`'
+		 BEGIN SELECT RAISE(ABORT, 'refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.store.MarkApplied(ctx, "ru_a", "work", old, 3, AppliedHeld, NoteReplayed, copied, moved); err == nil {
+		t.Fatal("MarkApplied wrote through a refused alias")
+	}
+	if row, _ := r.appliedRow(t, "ru_a", "work", old); row.Outcome != AppliedPending {
+		t.Errorf("acting row after a failed alias = %+v, want it still pending", row)
+	}
+	if _, ok := r.appliedRow(t, "ru_b", "work", copied); ok {
+		t.Error("another rule's row reached the copy although the move's alias failed")
+	}
+	if _, err := r.db.ExecContext(ctx, `DROP TRIGGER refuse_moved`); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.store.MarkApplied(ctx, "ru_a", "work", old, 3, AppliedHeld, NoteReplayed, copied, moved, ""); err != nil {
+		t.Fatalf("MarkApplied with two aliases: %v", err)
+	}
+	aRow := AppliedRow{Outcome: AppliedHeld, Note: NoteReplayed, RunID: 3, At: r.clock.Last()}
+	for _, key := range []string{old, copied, moved} {
+		r.wantApplied(t, "ru_a", "work", key, aRow)
+	}
+	r.wantApplied(t, "ru_b", "work", copied, bRow)
+	r.wantApplied(t, "ru_b", "work", moved, bRow)
+}
