@@ -385,7 +385,9 @@ func TestEventEditRequests(t *testing.T) {
 			},
 		},
 		{
-			name: "every field",
+			// --start reads the event, to learn whether it is all day.
+			name:    "every field",
+			readsIt: true,
 			args: []string{
 				"--etag", "x", "--title", "T", "--start", "2026-11-10 10:00", "--end", "2026-11-10 11:00", "--tz", "UTC",
 				"--location", "L", "--description", "D", "--attendee", "a@example.com", "--rrule", "",
@@ -437,6 +439,102 @@ func TestEventEditRequests(t *testing.T) {
 	}
 }
 
+// An edit of an all-day event's times keeps it all day: it takes dates,
+// whole days and calendar-day arithmetic, sent as 00:00 UTC of the dates
+// (Amendment 17), and all_day stays out of the mask. --timed makes it timed.
+func TestEventEditKeepsAllDay(t *testing.T) {
+	t.Parallel()
+	day := func(month time.Month, d int) time.Time { return time.Date(2026, month, d, 0, 0, 0, 0, time.UTC) }
+	// The day before daylight saving time starts in New York, 8 March 2026.
+	current := &chainmailv1.CalendarEvent{
+		Ref: calRef2, Account: "home", CalendarId: "personal", Start: ts(day(time.March, 7)), End: ts(day(time.March, 8)),
+		AllDay: true, Etag: `"e2"`,
+	}
+	mask := func(paths ...string) *fieldmaskpb.FieldMask { return &fieldmaskpb.FieldMask{Paths: paths} }
+	tests := []struct {
+		name string
+		args []string
+		want *chainmailv1.UpdateEventRequest
+	}{
+		{
+			name: "a duration in days across the change to daylight saving time",
+			args: []string{"--duration", "2d"},
+			want: &chainmailv1.UpdateEventRequest{Ref: calRef2, Etag: `"e2"`, UpdateMask: mask("end"), End: ts(day(time.March, 9))},
+		},
+		{
+			name: "a new first date and two days",
+			args: []string{"--start", "2026-03-07", "--duration", "2d"},
+			want: &chainmailv1.UpdateEventRequest{
+				Ref: calRef2, Etag: `"e2"`, UpdateMask: mask("start", "end"), Start: ts(day(time.March, 7)), End: ts(day(time.March, 9)),
+			},
+		},
+		{
+			name: "a new first date keeps the number of days",
+			args: []string{"--start", "2026-03-20"},
+			want: &chainmailv1.UpdateEventRequest{
+				Ref: calRef2, Etag: `"e2"`, UpdateMask: mask("start", "end"), Start: ts(day(time.March, 20)), End: ts(day(time.March, 21)),
+			},
+		},
+		{
+			name: "a new last date, included",
+			args: []string{"--end", "2026-03-09"},
+			want: &chainmailv1.UpdateEventRequest{Ref: calRef2, Etag: `"e2"`, UpdateMask: mask("end"), End: ts(day(time.March, 10))},
+		},
+		{
+			name: "made timed",
+			args: []string{"--timed", "--start", "2026-03-07 09:00", "--duration", "1h"},
+			want: &chainmailv1.UpdateEventRequest{
+				Ref: calRef2, Etag: `"e2"`, UpdateMask: mask("start", "end", "all_day"),
+				Start: ts(time.Date(2026, 3, 7, 14, 0, 0, 0, time.UTC)), End: ts(time.Date(2026, 3, 7, 15, 0, 0, 0, time.UTC)),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeCalendar{event: func(*chainmailv1.GetEventRequest) (*chainmailv1.GetEventResponse, error) {
+				return &chainmailv1.GetEventResponse{Event: current}, nil
+			}}
+			got := runCal(t, f, append([]string{"--output", "table", "event", "edit", calRef2}, tt.args...)...)
+			if got.code != 0 {
+				t.Fatalf("event edit: %+v", got)
+			}
+			want := []proto.Message{&chainmailv1.GetEventRequest{Ref: calRef2}, tt.want}
+			if reqs := f.requests(); !slices.EqualFunc(reqs, want, proto.Equal) {
+				t.Errorf("requests = %v, want %v", reqs, want)
+			}
+		})
+	}
+
+	refused := []struct {
+		name string
+		args []string
+		msg  string
+	}{
+		{name: "a time for an all-day event", args: []string{"--start", "2026-03-07 09:00"}, msg: "--timed"},
+		{name: "a time as the last date", args: []string{"--end", "2026-03-09 09:00"}, msg: "--timed"},
+		{name: "part days", args: []string{"--duration", "36h"}, msg: "whole days"},
+		{name: "timed with no end", args: []string{"--timed", "--start", "2026-03-07 09:00"}, msg: "give --end or --duration"},
+	}
+	for _, tt := range refused {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeCalendar{event: func(*chainmailv1.GetEventRequest) (*chainmailv1.GetEventResponse, error) {
+				return &chainmailv1.GetEventResponse{Event: current}, nil
+			}}
+			got := runCal(t, f, append([]string{"event", "edit", calRef2}, tt.args...)...)
+			if got.code != api.ExitUsage || !strings.Contains(errorMessage(t, got.stderr), tt.msg) {
+				t.Errorf("%v: %+v, want exit 2 with %q", tt.args, got, tt.msg)
+			}
+			for _, req := range f.requests() {
+				if _, ok := req.(*chainmailv1.UpdateEventRequest); ok {
+					t.Errorf("%v sent %v, want no update", tt.args, req)
+				}
+			}
+		})
+	}
+}
+
 func TestEventEditUsageErrors(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -448,6 +546,8 @@ func TestEventEditUsageErrors(t *testing.T) {
 		{name: "attendees and none", args: []string{"--attendee", "a@example.com", "--no-attendees"}, msg: "--attendee and --no-attendees cannot be used together"},
 		{name: "end and duration", args: []string{"--end", "2026-11-10 10:00", "--duration", "1h"}, msg: "--end and --duration cannot be used together"},
 		{name: "all day without dates", args: []string{"--all-day"}, msg: "--all-day needs --start"},
+		{name: "timed without times", args: []string{"--timed"}, msg: "--timed needs --start"},
+		{name: "all day and timed", args: []string{"--all-day", "--timed", "--start", "2026-11-10"}, msg: "--all-day and --timed cannot be used together"},
 		{name: "no ref", args: nil, msg: "accepts 1 arg"},
 	}
 	for _, tt := range tests {

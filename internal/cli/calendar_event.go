@@ -58,6 +58,12 @@ start. --attendee replaces the whole attendee list, and --no-attendees
 clears it. An empty value, such as --location "", clears that field; an
 empty --rrule removes the recurrence.
 
+An all-day event stays all day: its --start and --end take dates, --end
+the last day, and --duration whole days such as 2d. To read whether the
+event is all day, a change of times reads the event first. --all-day
+with dates makes a timed event all day, and --timed with times and
+--end or --duration makes an all-day event timed.
+
 The change is refused with EVENT_CONFLICT when the event changed since
 the etag was read. Without --etag the CLI reads the event first and uses
 the etag it has now.
@@ -74,6 +80,7 @@ type eventFlags struct {
 	title, start, end, duration, tz, location, description, rrule string
 	attendees                                                     []string
 	allDay                                                        bool
+	timed                                                         bool // event edit only
 }
 
 func addEventFlags(cmd *cobra.Command, ef *eventFlags) {
@@ -90,15 +97,26 @@ func addEventFlags(cmd *cobra.Command, ef *eventFlags) {
 	f.StringVar(&ef.tz, "tz", "", "the event's IANA zone, also used to read times without a zone (default: this machine's zone for reading, the daemon's [calendar] timezone for the event)")
 }
 
+// dayRule says whether --start and --end take all-day dates, and if so
+// why, for the usage error a time gets. The empty rule takes times.
+type dayRule string
+
+const (
+	timedTimes dayRule = ""
+	allDayFlag dayRule = "--all-day takes dates"
+	allDayKept dayRule = "the event is all day, so it takes dates (add --timed to give it times)"
+)
+
 // parseStart reads --start. An all-day start must be a date, and is
 // 00:00 UTC of that date, as the wire carries all-day dates.
-func (ef *eventFlags) parseStart(cmd *cobra.Command, loc *time.Location, allDay bool) (time.Time, error) {
+func (ef *eventFlags) parseStart(cmd *cobra.Command, loc *time.Location, rule dayRule) (time.Time, error) {
+	allDay := rule != timedTimes
 	ct, err := parseCalTime(cmd, "start", ef.start, loc)
 	if err != nil {
 		return time.Time{}, err
 	}
 	if allDay && !ct.dateOnly {
-		return time.Time{}, usageError{err: errors.New("--all-day takes dates: give --start as a date, such as 2026-11-10"), hint: helpHint(cmd)}
+		return time.Time{}, usageError{err: errors.New(string(rule) + ": give --start as a date, such as 2026-11-10"), hint: helpHint(cmd)}
 	}
 	if allDay {
 		return utcDate(ct.t), nil
@@ -108,7 +126,8 @@ func (ef *eventFlags) parseStart(cmd *cobra.Command, loc *time.Location, allDay 
 
 // parseEnd reads --end or --duration after start. It reports false when
 // neither was given.
-func (ef *eventFlags) parseEnd(cmd *cobra.Command, start time.Time, loc *time.Location, allDay bool) (time.Time, bool, error) {
+func (ef *eventFlags) parseEnd(cmd *cobra.Command, start time.Time, loc *time.Location, rule dayRule) (time.Time, bool, error) {
+	allDay := rule != timedTimes
 	usage := func(msg string) error { return usageError{err: errors.New(msg), hint: helpHint(cmd)} }
 	f := cmd.Flags()
 	switch {
@@ -118,7 +137,7 @@ func (ef *eventFlags) parseEnd(cmd *cobra.Command, start time.Time, loc *time.Lo
 			return time.Time{}, false, err
 		}
 		if allDay && !ct.dateOnly {
-			return time.Time{}, false, usage("--all-day takes dates: give --end as the last day, such as 2026-11-12")
+			return time.Time{}, false, usage(string(rule) + ": give --end as the last day, such as 2026-11-12")
 		}
 		end := ct.t
 		if ct.dateOnly {
@@ -243,11 +262,15 @@ func (ef *eventFlags) createRequest(cmd *cobra.Command, env Env) (*chainmailv1.C
 	if err != nil {
 		return nil, err
 	}
-	start, err := ef.parseStart(cmd, loc, ef.allDay)
+	rule := timedTimes
+	if ef.allDay {
+		rule = allDayFlag
+	}
+	start, err := ef.parseStart(cmd, loc, rule)
 	if err != nil {
 		return nil, err
 	}
-	end, ok, err := ef.parseEnd(cmd, start, loc, ef.allDay)
+	end, ok, err := ef.parseEnd(cmd, start, loc, rule)
 	switch {
 	case err != nil:
 		return nil, err
@@ -293,7 +316,7 @@ var eventMaskOrder = []string{"title", "start", "end", "time_zone", "all_day", "
 // eventFlagPaths maps each of event edit's field flags to the mask path it
 // changes. --start and --duration may set end as well.
 var eventFlagPaths = map[string]string{
-	"title": "title", "start": "start", "end": "end", "duration": "end", "tz": "time_zone", "all-day": "all_day",
+	"title": "title", "start": "start", "end": "end", "duration": "end", "tz": "time_zone", "all-day": "all_day", "timed": "all_day",
 	"location": "location", "description": "description", "attendee": "attendees", "no-attendees": "attendees", "rrule": "recurrence_rule",
 }
 
@@ -355,8 +378,9 @@ func newEventEditCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			r := &eventReader{ctx: ctx, c: c, ref: args[0]}
 			req := &chainmailv1.UpdateEventRequest{
 				Ref: args[0], Title: ef.title, TimeZone: ef.tz, Location: ef.location, Description: ef.description,
-				RecurrenceRule: ef.rrule, AllDay: ef.allDay,
+				RecurrenceRule: ef.rrule,
 			}
+			_, req.AllDay = ef.allDayChange(cmd)
 			if !noAttendees {
 				req.Attendees = ef.attendees
 			}
@@ -384,6 +408,7 @@ func newEventEditCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	addEventFlags(cmd, &ef)
 	f := cmd.Flags()
 	f.BoolVar(&noAttendees, "no-attendees", false, "remove every attendee")
+	f.BoolVar(&ef.timed, "timed", false, "make an all-day event a timed one, with times for --start and --end or --duration")
 	f.StringVar(&etag, "etag", "", "refuse the change if the event no longer has this etag (default: the etag it has now)")
 	return cmd
 }
@@ -396,8 +421,12 @@ func (ef *eventFlags) editPaths(cmd *cobra.Command, noAttendees bool) ([]string,
 	switch {
 	case noAttendees && f.Changed("attendee"):
 		return nil, usage("--attendee and --no-attendees cannot be used together")
+	case f.Changed("all-day") && f.Changed("timed"):
+		return nil, usage("--all-day and --timed cannot be used together")
 	case f.Changed("all-day") && !f.Changed("start"):
 		return nil, usage("--all-day needs --start: give the event's new dates or times")
+	case f.Changed("timed") && !f.Changed("start"):
+		return nil, usage("--timed needs --start: give the event's new times")
 	}
 	if err := endConflict(cmd); err != nil {
 		return nil, err
@@ -415,47 +444,70 @@ func (ef *eventFlags) editPaths(cmd *cobra.Command, noAttendees bool) ([]string,
 	return paths, nil
 }
 
+// allDayChange reports whether event edit's --all-day or --timed sets the
+// event's all-day state, and to what.
+func (ef *eventFlags) allDayChange(cmd *cobra.Command) (set, allDay bool) {
+	f := cmd.Flags()
+	switch {
+	case f.Changed("all-day"):
+		return true, ef.allDay
+	case f.Changed("timed"):
+		return true, !ef.timed
+	}
+	return false, false
+}
+
 // editTimes sets the start and end of req from --start, --end and
-// --duration, reading the event when the change depends on its times, and
-// returns paths with end added when the change sets it.
+// --duration, and returns paths with end added when the change sets it.
+//
+// The event keeps its all-day state unless --all-day or --timed changes
+// it, so a change of times reads the event to learn that state, unless one
+// of those flags gives it. An all-day event takes dates and whole days,
+// counted as calendar days and sent as 00:00 UTC of the dates. Without
+// --end or --duration, a new --start keeps the event's length.
 func (ef *eventFlags) editTimes(cmd *cobra.Command, r *eventReader, loc *time.Location, req *chainmailv1.UpdateEventRequest, paths []string) ([]string, error) {
 	f := cmd.Flags()
-	allDay := f.Changed("all-day") && ef.allDay
-	var start time.Time
+	if !f.Changed("start") && !f.Changed("end") && !f.Changed("duration") {
+		return paths, nil
+	}
+	set, allDay := ef.allDayChange(cmd)
+	toTimed, toAllDay := set && !allDay, set && allDay
+	rule := timedTimes
 	switch {
-	case f.Changed("start"):
-		t, err := ef.parseStart(cmd, loc, allDay)
+	case toAllDay:
+		rule = allDayFlag
+	case !toTimed:
+		ev, err := r.get()
+		if err != nil {
+			return nil, err
+		}
+		if ev.GetAllDay() {
+			rule = allDayKept
+		}
+	}
+	var start time.Time
+	if f.Changed("start") {
+		t, err := ef.parseStart(cmd, loc, rule)
 		if err != nil {
 			return nil, err
 		}
 		start = t
 		req.Start = timestamppb.New(start)
-	case f.Changed("duration"):
+	} else {
+		// A new end or duration alone counts from the start the event has.
 		ev, err := r.get()
 		if err != nil {
 			return nil, err
 		}
 		start = ev.GetStart().AsTime()
-	case f.Changed("end"):
-		// A new end alone: the daemon checks it against the start it has.
-		ct, err := parseCalTime(cmd, "end", ef.end, loc)
-		if err != nil {
-			return nil, err
-		}
-		end := ct.t
-		if ct.dateOnly {
-			end = nextDay(ct.t)
-		}
-		req.End = timestamppb.New(end)
-		return paths, nil
-	default:
-		return paths, nil
 	}
-	end, ok, err := ef.parseEnd(cmd, start, loc, allDay)
+	end, ok, err := ef.parseEnd(cmd, start, loc, rule)
 	switch {
 	case err != nil:
 		return nil, err
-	case !ok && allDay:
+	case !ok && toTimed:
+		return nil, usageError{err: errors.New("give --end or --duration with --timed: the event's new length"), hint: helpHint(cmd)}
+	case !ok && toAllDay:
 		end = nextDay(start)
 	case !ok:
 		// --start alone moves the event and keeps its length.
@@ -463,7 +515,12 @@ func (ef *eventFlags) editTimes(cmd *cobra.Command, r *eventReader, loc *time.Lo
 		if err != nil {
 			return nil, err
 		}
-		end = start.Add(ev.GetEnd().AsTime().Sub(ev.GetStart().AsTime()))
+		length := ev.GetEnd().AsTime().Sub(ev.GetStart().AsTime())
+		end = start.Add(length)
+		if rule != timedTimes {
+			// All-day dates are UTC midnights, so the length is whole days.
+			end = start.AddDate(0, 0, max(1, int(length.Round(24*time.Hour)/(24*time.Hour))))
+		}
 	}
 	req.End = timestamppb.New(end)
 	if !slices.Contains(paths, "end") {
