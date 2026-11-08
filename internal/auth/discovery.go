@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -62,6 +63,12 @@ func (m *Manager) discover(ctx context.Context, issuer string) (oauth2.Endpoint,
 	req.Header.Set("Accept", "application/json")
 	resp, err := m.discoveryClient.Do(req)
 	if err != nil {
+		// net/http names the Location of a redirect it stopped following,
+		// such as the eleventh, in place of the URL asked for. The Location
+		// is the server's text, so the error names the URL asked for.
+		if ue, ok := errors.AsType[*url.Error](err); ok {
+			ue.URL = req.URL.String()
+		}
 		return oauth2.Endpoint{}, err
 	}
 	defer func() { _ = resp.Body.Close() }() // the document is read or refused already

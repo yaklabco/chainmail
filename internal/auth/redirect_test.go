@@ -30,14 +30,18 @@ func sinkServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 	return srv, &n
 }
 
+// locationLeak marks the Location header of a refused redirect, which is the
+// server's text and must not reach an error.
+const locationLeak = "location-leak-6a2d"
+
 // A token endpoint never legitimately redirects a POST. A 307 or 308 would
 // make net/http send the form again, with the refresh token, the code and
 // the PKCE verifier, so no redirect is followed, to another host or to the
-// same one.
+// same one. The refusal does not quote the Location, even a malformed one.
 func TestTokenRequestsFollowNoRedirect(t *testing.T) {
 	t.Parallel()
 	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
-		for _, target := range []string{"another host", "same host"} {
+		for _, target := range []string{"another host", "same host", "malformed"} {
 			t.Run(fmt.Sprintf("%d to %s", status, target), func(t *testing.T) {
 				t.Parallel()
 				sink, sunk := sinkServer(t)
@@ -48,11 +52,13 @@ func TestTokenRequestsFollowNoRedirect(t *testing.T) {
 						http.NotFound(w, r)
 						return
 					}
-					loc := sink.URL + "/token"
-					if target == "same host" {
-						loc = "/elsewhere"
-					}
-					http.Redirect(w, r, loc, status)
+					loc := map[string]string{
+						"another host": sink.URL + "/token?" + locationLeak,
+						"same host":    "/elsewhere?" + locationLeak,
+						"malformed":    "http://bad host/?" + locationLeak,
+					}[target]
+					w.Header().Set("Location", loc)
+					w.WriteHeader(status)
 				}))
 				t.Cleanup(tokens.Close)
 				ep := oauth2.Endpoint{AuthURL: tokens.URL + "/auth", TokenURL: tokens.URL + "/token", AuthStyle: oauth2.AuthStyleInParams}
@@ -64,6 +70,9 @@ func TestTokenRequestsFollowNoRedirect(t *testing.T) {
 				if !errors.Is(err, auth.ErrTokenEndpoint) {
 					t.Errorf("refresh err = %v, want ErrTokenEndpoint", err)
 				}
+				if err != nil {
+					requireNoSecrets(t, "refresh error", err.Error(), locationLeak)
+				}
 				ch, err := f.m.BeginLogin(t.Context(), "gm")
 				if err != nil {
 					t.Fatal(err)
@@ -71,6 +80,9 @@ func TestTokenRequestsFollowNoRedirect(t *testing.T) {
 				err = f.m.FinishLogin(t.Context(), "gm", oauthtest.RedirectFor(t, ch.URL, oauthtest.Code))
 				if !errors.Is(err, auth.ErrTokenEndpoint) {
 					t.Errorf("exchange err = %v, want ErrTokenEndpoint", err)
+				}
+				if err != nil {
+					requireNoSecrets(t, "exchange error", err.Error(), locationLeak)
 				}
 				if sunk.Load() != 0 || sameHost.Load() != 0 {
 					t.Errorf("redirect targets got %d (other host) and %d (same host) requests, want none", sunk.Load(), sameHost.Load())
@@ -90,7 +102,8 @@ func tlsDiscoveryIssuer(t *testing.T, location func(srv *httptest.Server) string
 		issuer := srv.URL + "/realms/r"
 		switch r.URL.Path {
 		case "/realms/r/.well-known/openid-configuration":
-			http.Redirect(w, r, location(srv), http.StatusFound)
+			w.Header().Set("Location", location(srv))
+			w.WriteHeader(http.StatusFound)
 		case "/moved":
 			writeJSON(w, map[string]string{"issuer": issuer, "authorization_endpoint": issuer + "/auth", "token_endpoint": issuer + "/token"})
 		default:
@@ -104,6 +117,7 @@ func tlsDiscoveryIssuer(t *testing.T, location func(srv *httptest.Server) string
 // Discovery follows a redirect only on the same host and scheme, so the
 // endpoints it trusts come from the issuer. A redirect to plain http or to
 // another host is refused, even when the document there names the issuer.
+// No refusal quotes the Location, which is the server's text.
 func TestIssuerDiscoveryRedirects(t *testing.T) {
 	t.Parallel()
 	// elsewhere serves a document naming whichever issuer asked, at
@@ -127,16 +141,36 @@ func TestIssuerDiscoveryRedirects(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			other, n, otherIssuer := elsewhere(t, newServer)
-			issuer, client := tlsDiscoveryIssuer(t, func(*httptest.Server) string { return other.URL + "/moved" })
+			issuer, client := tlsDiscoveryIssuer(t, func(*httptest.Server) string { return other.URL + "/moved?" + locationLeak })
 			otherIssuer.Store(&issuer)
 			m, _ := issuerManager(t, issuer, auth.WithHTTPClient(client))
 			_, err := m.BeginLogin(t.Context(), "mw")
 			if !errors.Is(err, auth.ErrTokenEndpoint) {
 				t.Errorf("BeginLogin err = %v, want ErrTokenEndpoint", err)
 			}
+			if err != nil {
+				requireNoSecrets(t, "discovery error", err.Error(), locationLeak)
+			}
 			if n.Load() != 0 {
 				t.Errorf("the redirect target got %d requests, want none", n.Load())
 			}
+		})
+	}
+	for name, location := range map[string]func(srv *httptest.Server) string{
+		"malformed location": func(*httptest.Server) string { return "https://bad host/?" + locationLeak },
+		"redirect loop": func(srv *httptest.Server) string {
+			return srv.URL + "/realms/r/.well-known/openid-configuration?" + locationLeak
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			issuer, client := tlsDiscoveryIssuer(t, location)
+			m, _ := issuerManager(t, issuer, auth.WithHTTPClient(client))
+			_, err := m.BeginLogin(t.Context(), "mw")
+			if !errors.Is(err, auth.ErrTokenEndpoint) {
+				t.Fatalf("BeginLogin err = %v, want ErrTokenEndpoint", err)
+			}
+			requireNoSecrets(t, "discovery error", err.Error(), locationLeak)
 		})
 	}
 	t.Run("same host and scheme", func(t *testing.T) {

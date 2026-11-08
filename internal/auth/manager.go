@@ -167,8 +167,8 @@ func NewManager(cfg *config.Config, store SecretStore, opts ...Option) *Manager 
 	for _, opt := range opts {
 		opt(m)
 	}
-	m.tokenClient = withRedirectPolicy(m.httpClient, refuseRedirect)
-	m.discoveryClient = withRedirectPolicy(m.httpClient, sameHostRedirect)
+	m.tokenClient = withRedirectPolicy(m.httpClient, nil, errTokenRedirect, refuseRedirect)
+	m.discoveryClient = withRedirectPolicy(m.httpClient, sameOrigin, errRedirectHost, sameHostRedirect)
 	return m
 }
 

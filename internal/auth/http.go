@@ -102,15 +102,55 @@ func secureURL(u *url.URL) bool {
 	return u.Scheme == "https" || (u.Scheme == "http" && config.IsLoopbackHost(u.Hostname()))
 }
 
-// withRedirectPolicy returns a copy of c that follows redirects only as
-// policy allows. The copy shares c's transport, timeout and cookie jar.
-func withRedirectPolicy(c *http.Client, policy func(*http.Request, []*http.Request) error) *http.Client {
+// withRedirectPolicy returns a copy of c that follows only the redirects
+// allow accepts, nil meaning none, and that checkRedirect then lets
+// through. Its transport is c's, or http.DefaultTransport, under a
+// redirectGuard; its timeout and cookie jar are c's.
+func withRedirectPolicy(c *http.Client, allow func(from, to *url.URL) bool, refused error,
+	checkRedirect func(*http.Request, []*http.Request) error,
+) *http.Client {
 	out := *c
-	out.CheckRedirect = policy
+	base := c.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	out.Transport = redirectGuard{base: base, allow: allow, refused: refused}
+	out.CheckRedirect = checkRedirect
 	return &out
 }
 
-// refuseRedirect follows no redirect.
+// redirectGuard refuses a redirect response before net/http reads its
+// Location. net/http quotes the Location of a redirect that CheckRedirect
+// refuses, or that does not parse, in its error, and the Location is the
+// server's text. A refusal here carries only the request's own URL and
+// refused.
+type redirectGuard struct {
+	base    http.RoundTripper
+	allow   func(from, to *url.URL) bool
+	refused error
+}
+
+// RoundTrip sends req and passes on its response, unless it is a redirect
+// that allow does not accept.
+func (g redirectGuard) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := g.base.RoundTrip(req)
+	if err != nil || resp.StatusCode < http.StatusMultipleChoices || resp.StatusCode >= http.StatusBadRequest {
+		return resp, err
+	}
+	if g.allow != nil {
+		if to, err := req.URL.Parse(resp.Header.Get("Location")); err == nil && g.allow(req.URL, to) {
+			return resp, nil
+		}
+	}
+	_ = resp.Body.Close() // the redirect is refused unread
+	return nil, g.refused
+}
+
+// sameOrigin accepts a redirect to the scheme and host it came from.
+func sameOrigin(from, to *url.URL) bool { return to.Scheme == from.Scheme && to.Host == from.Host }
+
+// refuseRedirect follows no redirect. redirectGuard refuses every redirect
+// of a token request first; this is the backstop.
 func refuseRedirect(*http.Request, []*http.Request) error { return errTokenRedirect }
 
 // sameHostRedirect follows a redirect only to the scheme and host of the
