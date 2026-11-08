@@ -192,6 +192,10 @@ type Server struct {
 	// itemThreads resolves item: search terms into thread keys. Nil when
 	// the daemon has no item store, which makes item: an invalid argument.
 	itemThreads itemResolver
+	// ruleApplied reads the rules' act-once table, for the skipped count
+	// of a dry-run. Nil until the rule store is built, which makes every
+	// dry-run skip nothing.
+	ruleApplied appliedLookup
 }
 
 // New wires up a Server. Call Serve to run it.
