@@ -80,6 +80,18 @@ var leftOut = map[string]string{
 	chainmailv1connect.CacheServiceEvictCacheProcedure:         "an operator action; the daemon evicts bodies on its own",
 	chainmailv1connect.RulesServiceListRuleRunsProcedure:       "run history for operators; get_rule returns a rule's last 10 runs and its counts",
 	chainmailv1connect.RulesServiceRulesStatusProcedure:        "an operator diagnostic of the rule runners and the scheduler",
+	// The calendar tools land in SP9 task 10, which replaces these entries
+	// with toolRPC rows.
+	chainmailv1connect.CalendarServiceListCalendarsProcedure: "tools land in T10",
+	chainmailv1connect.CalendarServiceAgendaProcedure:        "tools land in T10",
+	chainmailv1connect.CalendarServiceGetEventProcedure:      "tools land in T10",
+	chainmailv1connect.CalendarServiceListInvitesProcedure:   "tools land in T10",
+	chainmailv1connect.CalendarServiceGetInviteProcedure:     "tools land in T10",
+	chainmailv1connect.CalendarServiceFreeBusyProcedure:      "tools land in T10",
+	chainmailv1connect.CalendarServiceRespondProcedure:       "tools land in T10",
+	chainmailv1connect.CalendarServiceCreateEventProcedure:   "tools land in T10",
+	chainmailv1connect.CalendarServiceUpdateEventProcedure:   "tools land in T10",
+	chainmailv1connect.CalendarServiceCancelEventProcedure:   "tools land in T10",
 }
 
 // ignored lists request fields no tool sets, keyed "<procedure> <field path>", and why.
@@ -101,6 +113,7 @@ var agentServices = []protoreflect.ServiceDescriptor{
 	chainmailv1.File_chainmail_v1_cache_proto.Services().ByName("CacheService"),
 	chainmailv1.File_chainmail_v1_items_proto.Services().ByName("ItemsService"),
 	chainmailv1.File_chainmail_v1_rules_proto.Services().ByName("RulesService"),
+	chainmailv1.File_chainmail_v1_calendar_proto.Services().ByName("CalendarService"),
 }
 
 func procedure(sd protoreflect.ServiceDescriptor, md protoreflect.MethodDescriptor) string {

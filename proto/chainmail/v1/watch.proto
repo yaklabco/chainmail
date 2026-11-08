@@ -6,23 +6,25 @@ import "chainmail/v1/message.proto";
 import "google/protobuf/timestamp.proto";
 
 // WatchFilter selects events. Empty fields match everything, except that
-// the opt-in kinds (item, item_mail, rule, item_due_soon, item_due and
-// item_overdue) come only to a reader that names them in kinds, or, for
-// every opt-in kind but rule, sets item. Status and gap events pass a kinds
-// filter unless kinds names them.
+// the opt-in kinds (item, item_mail, rule, item_due_soon, item_due,
+// item_overdue, invite, event_changed, event_cancelled and invite_reply)
+// come only to a reader that names them in kinds, or, for item, item_mail
+// and the due kinds, sets item. Status and gap events pass a kinds filter
+// unless kinds names them.
 message WatchFilter {
   repeated string accounts = 1;
   // new, flags, expunged, status, gap, item, item_mail, rule,
-  // item_due_soon, item_due or item_overdue. Empty matches every kind but
-  // the opt-in ones.
+  // item_due_soon, item_due, item_overdue, invite, event_changed,
+  // event_cancelled or invite_reply. Empty matches every kind but the
+  // opt-in ones.
   repeated string kinds = 2;
   // A folder name or label. inbox also matches the Gmail label \Inbox.
-  // Item, rule and due events always pass it.
+  // Item, rule, due and calendar events always pass it.
   string in = 3;
   // An item ID. Limits item, item_mail and due events to that item and
   // every live item below it, resolved when the read starts, and drops new,
-  // flags, expunged and rule events. With no kinds it returns item,
-  // item_mail, due, status and gap events.
+  // flags, expunged, rule and calendar events. With no kinds it returns
+  // item, item_mail, due, status and gap events.
   string item = 4;
 }
 
@@ -32,12 +34,15 @@ message WatchEvent {
   int64 id = 1;
   google.protobuf.Timestamp at = 2;
   // new, flags, expunged, status, gap, item, item_mail, rule,
-  // item_due_soon, item_due or item_overdue.
+  // item_due_soon, item_due, item_overdue, invite, event_changed,
+  // event_cancelled or invite_reply.
   string kind = 3;
   // Empty for item, rule, item_due_soon, item_due and item_overdue, which
   // belong to no account.
   string account = 4;
+  // Empty for calendar events, which belong to no folder.
   string folder = 5;
+  // Calendar events: the ce_ ref of the event or instance.
   string ref = 6;
   // new and item_mail: the search row summary of the message.
   MessageRow message = 7;
@@ -65,6 +70,9 @@ message WatchEvent {
   // item_due_soon, item_due and item_overdue: the item that reached the
   // stage the kind names. It never holds item text.
   WorkItemDue due = 18;
+  // invite, event_changed, event_cancelled and invite_reply: what changed
+  // on the calendar event ref names. It never holds event text.
+  CalendarChange calendar = 19;
 }
 
 // WorkItemChange is the payload of an item event. It never holds item text.
@@ -115,6 +123,31 @@ message WorkItemDue {
   string state = 4;
   // Empty for a root, or for a task in the inbox.
   string parent_id = 5;
+}
+
+// CalendarChange is the payload of the invite, event_changed,
+// event_cancelled and invite_reply events. It never holds event text: read
+// the event with GetEvent.
+message CalendarChange {
+  // The ce_ ref of the event or instance.
+  string ref = 1;
+  // invite from mail: the message the invite came in.
+  string message_ref = 2;
+  // Empty for an invite that came only by mail.
+  string calendar_id = 3;
+  // invite and event_changed: the start and end, the new ones for
+  // event_changed. event_cancelled: the start.
+  google.protobuf.Timestamp start = 4;
+  google.protobuf.Timestamp end = 5;
+  // invite: the organizer's address. Its name is never set.
+  Address organizer = 6;
+  // event_changed: the changed field names, such as start, end, location,
+  // recurrence or attendees. Never their values.
+  repeated string fields = 7;
+  // invite_reply: the attendee who answered. Its name is never set.
+  Address attendee = 8;
+  // invite_reply: the attendee's new PARTSTAT, such as ACCEPTED.
+  string partstat = 9;
 }
 
 // SubscribeRequest starts a stream. Set at most one of group and since.

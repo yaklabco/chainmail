@@ -72,8 +72,11 @@ type GetCacheStatusResponse struct {
 	// The size of cache.db: page_count times page_size.
 	SizeBytes int64 `protobuf:"varint,1,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
 	// The [cache] max_size cap.
-	MaxSizeBytes  int64                 `protobuf:"varint,2,opt,name=max_size_bytes,json=maxSizeBytes,proto3" json:"max_size_bytes,omitempty"`
-	Accounts      []*AccountCacheStatus `protobuf:"bytes,3,rep,name=accounts,proto3" json:"accounts,omitempty"`
+	MaxSizeBytes int64                 `protobuf:"varint,2,opt,name=max_size_bytes,json=maxSizeBytes,proto3" json:"max_size_bytes,omitempty"`
+	Accounts     []*AccountCacheStatus `protobuf:"bytes,3,rep,name=accounts,proto3" json:"accounts,omitempty"`
+	// The calendar cache of every account with a calendar store, or of those
+	// named.
+	Calendars     []*AccountCalendarStatus `protobuf:"bytes,4,rep,name=calendars,proto3" json:"calendars,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -125,6 +128,13 @@ func (x *GetCacheStatusResponse) GetMaxSizeBytes() int64 {
 func (x *GetCacheStatusResponse) GetAccounts() []*AccountCacheStatus {
 	if x != nil {
 		return x.Accounts
+	}
+	return nil
+}
+
+func (x *GetCacheStatusResponse) GetCalendars() []*AccountCalendarStatus {
+	if x != nil {
+		return x.Calendars
 	}
 	return nil
 }
@@ -227,6 +237,95 @@ func (x *AccountCacheStatus) GetFolders() []*FolderCacheStatus {
 	return nil
 }
 
+// AccountCalendarStatus is the calendar cache of one account.
+type AccountCalendarStatus struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Account string                 `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
+	// ready, syncing, auth_required or error.
+	State      string                 `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	LastSyncAt *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=last_sync_at,json=lastSyncAt,proto3" json:"last_sync_at,omitempty"`
+	// Calendars synced.
+	Calendars int64 `protobuf:"varint,4,opt,name=calendars,proto3" json:"calendars,omitempty"`
+	// Events cached.
+	Events int64 `protobuf:"varint,5,opt,name=events,proto3" json:"events,omitempty"`
+	// An api reason code, never server text.
+	LastError     string `protobuf:"bytes,6,opt,name=last_error,json=lastError,proto3" json:"last_error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AccountCalendarStatus) Reset() {
+	*x = AccountCalendarStatus{}
+	mi := &file_chainmail_v1_cache_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AccountCalendarStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AccountCalendarStatus) ProtoMessage() {}
+
+func (x *AccountCalendarStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_chainmail_v1_cache_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AccountCalendarStatus.ProtoReflect.Descriptor instead.
+func (*AccountCalendarStatus) Descriptor() ([]byte, []int) {
+	return file_chainmail_v1_cache_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *AccountCalendarStatus) GetAccount() string {
+	if x != nil {
+		return x.Account
+	}
+	return ""
+}
+
+func (x *AccountCalendarStatus) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *AccountCalendarStatus) GetLastSyncAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastSyncAt
+	}
+	return nil
+}
+
+func (x *AccountCalendarStatus) GetCalendars() int64 {
+	if x != nil {
+		return x.Calendars
+	}
+	return 0
+}
+
+func (x *AccountCalendarStatus) GetEvents() int64 {
+	if x != nil {
+		return x.Events
+	}
+	return 0
+}
+
+func (x *AccountCalendarStatus) GetLastError() string {
+	if x != nil {
+		return x.LastError
+	}
+	return ""
+}
+
 // FolderCacheStatus is the cache of one synced folder.
 type FolderCacheStatus struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
@@ -266,7 +365,7 @@ type FolderCacheStatus struct {
 
 func (x *FolderCacheStatus) Reset() {
 	*x = FolderCacheStatus{}
-	mi := &file_chainmail_v1_cache_proto_msgTypes[3]
+	mi := &file_chainmail_v1_cache_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -278,7 +377,7 @@ func (x *FolderCacheStatus) String() string {
 func (*FolderCacheStatus) ProtoMessage() {}
 
 func (x *FolderCacheStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_cache_proto_msgTypes[3]
+	mi := &file_chainmail_v1_cache_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -291,7 +390,7 @@ func (x *FolderCacheStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FolderCacheStatus.ProtoReflect.Descriptor instead.
 func (*FolderCacheStatus) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_cache_proto_rawDescGZIP(), []int{3}
+	return file_chainmail_v1_cache_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *FolderCacheStatus) GetFolder() string {
@@ -410,7 +509,7 @@ type RebuildCacheRequest struct {
 
 func (x *RebuildCacheRequest) Reset() {
 	*x = RebuildCacheRequest{}
-	mi := &file_chainmail_v1_cache_proto_msgTypes[4]
+	mi := &file_chainmail_v1_cache_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -422,7 +521,7 @@ func (x *RebuildCacheRequest) String() string {
 func (*RebuildCacheRequest) ProtoMessage() {}
 
 func (x *RebuildCacheRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_cache_proto_msgTypes[4]
+	mi := &file_chainmail_v1_cache_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -435,7 +534,7 @@ func (x *RebuildCacheRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RebuildCacheRequest.ProtoReflect.Descriptor instead.
 func (*RebuildCacheRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_cache_proto_rawDescGZIP(), []int{4}
+	return file_chainmail_v1_cache_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *RebuildCacheRequest) GetAccount() string {
@@ -462,7 +561,7 @@ type RebuildCacheResponse struct {
 
 func (x *RebuildCacheResponse) Reset() {
 	*x = RebuildCacheResponse{}
-	mi := &file_chainmail_v1_cache_proto_msgTypes[5]
+	mi := &file_chainmail_v1_cache_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -474,7 +573,7 @@ func (x *RebuildCacheResponse) String() string {
 func (*RebuildCacheResponse) ProtoMessage() {}
 
 func (x *RebuildCacheResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_cache_proto_msgTypes[5]
+	mi := &file_chainmail_v1_cache_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -487,7 +586,7 @@ func (x *RebuildCacheResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RebuildCacheResponse.ProtoReflect.Descriptor instead.
 func (*RebuildCacheResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_cache_proto_rawDescGZIP(), []int{5}
+	return file_chainmail_v1_cache_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RebuildCacheResponse) GetFolders() []string {
@@ -505,7 +604,7 @@ type EvictCacheRequest struct {
 
 func (x *EvictCacheRequest) Reset() {
 	*x = EvictCacheRequest{}
-	mi := &file_chainmail_v1_cache_proto_msgTypes[6]
+	mi := &file_chainmail_v1_cache_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -517,7 +616,7 @@ func (x *EvictCacheRequest) String() string {
 func (*EvictCacheRequest) ProtoMessage() {}
 
 func (x *EvictCacheRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_cache_proto_msgTypes[6]
+	mi := &file_chainmail_v1_cache_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -530,7 +629,7 @@ func (x *EvictCacheRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EvictCacheRequest.ProtoReflect.Descriptor instead.
 func (*EvictCacheRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_cache_proto_rawDescGZIP(), []int{6}
+	return file_chainmail_v1_cache_proto_rawDescGZIP(), []int{7}
 }
 
 type EvictCacheResponse struct {
@@ -543,7 +642,7 @@ type EvictCacheResponse struct {
 
 func (x *EvictCacheResponse) Reset() {
 	*x = EvictCacheResponse{}
-	mi := &file_chainmail_v1_cache_proto_msgTypes[7]
+	mi := &file_chainmail_v1_cache_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -555,7 +654,7 @@ func (x *EvictCacheResponse) String() string {
 func (*EvictCacheResponse) ProtoMessage() {}
 
 func (x *EvictCacheResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_cache_proto_msgTypes[7]
+	mi := &file_chainmail_v1_cache_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -568,7 +667,7 @@ func (x *EvictCacheResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EvictCacheResponse.ProtoReflect.Descriptor instead.
 func (*EvictCacheResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_cache_proto_rawDescGZIP(), []int{7}
+	return file_chainmail_v1_cache_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *EvictCacheResponse) GetBodiesEvicted() uint64 {
@@ -591,12 +690,13 @@ const file_chainmail_v1_cache_proto_rawDesc = "" +
 	"\n" +
 	"\x18chainmail/v1/cache.proto\x12\fchainmail.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"3\n" +
 	"\x15GetCacheStatusRequest\x12\x1a\n" +
-	"\baccounts\x18\x01 \x03(\tR\baccounts\"\x9b\x01\n" +
+	"\baccounts\x18\x01 \x03(\tR\baccounts\"\xde\x01\n" +
 	"\x16GetCacheStatusResponse\x12\x1d\n" +
 	"\n" +
 	"size_bytes\x18\x01 \x01(\x03R\tsizeBytes\x12$\n" +
 	"\x0emax_size_bytes\x18\x02 \x01(\x03R\fmaxSizeBytes\x12<\n" +
-	"\baccounts\x18\x03 \x03(\v2 .chainmail.v1.AccountCacheStatusR\baccounts\"\x87\x02\n" +
+	"\baccounts\x18\x03 \x03(\v2 .chainmail.v1.AccountCacheStatusR\baccounts\x12A\n" +
+	"\tcalendars\x18\x04 \x03(\v2#.chainmail.v1.AccountCalendarStatusR\tcalendars\"\x87\x02\n" +
 	"\x12AccountCacheStatus\x12\x18\n" +
 	"\aaccount\x18\x01 \x01(\tR\aaccount\x12\x18\n" +
 	"\aenabled\x18\x02 \x01(\bR\aenabled\x12\x14\n" +
@@ -605,7 +705,16 @@ const file_chainmail_v1_cache_proto_rawDesc = "" +
 	"\fbudget_bytes\x18\x05 \x01(\x03R\vbudgetBytes\x12\x1d\n" +
 	"\n" +
 	"last_error\x18\x06 \x01(\tR\tlastError\x129\n" +
-	"\afolders\x18\a \x03(\v2\x1f.chainmail.v1.FolderCacheStatusR\afolders\"\xad\x04\n" +
+	"\afolders\x18\a \x03(\v2\x1f.chainmail.v1.FolderCacheStatusR\afolders\"\xda\x01\n" +
+	"\x15AccountCalendarStatus\x12\x18\n" +
+	"\aaccount\x18\x01 \x01(\tR\aaccount\x12\x14\n" +
+	"\x05state\x18\x02 \x01(\tR\x05state\x12<\n" +
+	"\flast_sync_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"lastSyncAt\x12\x1c\n" +
+	"\tcalendars\x18\x04 \x01(\x03R\tcalendars\x12\x16\n" +
+	"\x06events\x18\x05 \x01(\x03R\x06events\x12\x1d\n" +
+	"\n" +
+	"last_error\x18\x06 \x01(\tR\tlastError\"\xad\x04\n" +
 	"\x11FolderCacheStatus\x12\x16\n" +
 	"\x06folder\x18\x01 \x01(\tR\x06folder\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12\x18\n" +
@@ -657,33 +766,36 @@ func file_chainmail_v1_cache_proto_rawDescGZIP() []byte {
 	return file_chainmail_v1_cache_proto_rawDescData
 }
 
-var file_chainmail_v1_cache_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_chainmail_v1_cache_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_chainmail_v1_cache_proto_goTypes = []any{
 	(*GetCacheStatusRequest)(nil),  // 0: chainmail.v1.GetCacheStatusRequest
 	(*GetCacheStatusResponse)(nil), // 1: chainmail.v1.GetCacheStatusResponse
 	(*AccountCacheStatus)(nil),     // 2: chainmail.v1.AccountCacheStatus
-	(*FolderCacheStatus)(nil),      // 3: chainmail.v1.FolderCacheStatus
-	(*RebuildCacheRequest)(nil),    // 4: chainmail.v1.RebuildCacheRequest
-	(*RebuildCacheResponse)(nil),   // 5: chainmail.v1.RebuildCacheResponse
-	(*EvictCacheRequest)(nil),      // 6: chainmail.v1.EvictCacheRequest
-	(*EvictCacheResponse)(nil),     // 7: chainmail.v1.EvictCacheResponse
-	(*timestamppb.Timestamp)(nil),  // 8: google.protobuf.Timestamp
+	(*AccountCalendarStatus)(nil),  // 3: chainmail.v1.AccountCalendarStatus
+	(*FolderCacheStatus)(nil),      // 4: chainmail.v1.FolderCacheStatus
+	(*RebuildCacheRequest)(nil),    // 5: chainmail.v1.RebuildCacheRequest
+	(*RebuildCacheResponse)(nil),   // 6: chainmail.v1.RebuildCacheResponse
+	(*EvictCacheRequest)(nil),      // 7: chainmail.v1.EvictCacheRequest
+	(*EvictCacheResponse)(nil),     // 8: chainmail.v1.EvictCacheResponse
+	(*timestamppb.Timestamp)(nil),  // 9: google.protobuf.Timestamp
 }
 var file_chainmail_v1_cache_proto_depIdxs = []int32{
 	2, // 0: chainmail.v1.GetCacheStatusResponse.accounts:type_name -> chainmail.v1.AccountCacheStatus
-	3, // 1: chainmail.v1.AccountCacheStatus.folders:type_name -> chainmail.v1.FolderCacheStatus
-	8, // 2: chainmail.v1.FolderCacheStatus.last_applied_at:type_name -> google.protobuf.Timestamp
-	0, // 3: chainmail.v1.CacheService.GetCacheStatus:input_type -> chainmail.v1.GetCacheStatusRequest
-	4, // 4: chainmail.v1.CacheService.RebuildCache:input_type -> chainmail.v1.RebuildCacheRequest
-	6, // 5: chainmail.v1.CacheService.EvictCache:input_type -> chainmail.v1.EvictCacheRequest
-	1, // 6: chainmail.v1.CacheService.GetCacheStatus:output_type -> chainmail.v1.GetCacheStatusResponse
-	5, // 7: chainmail.v1.CacheService.RebuildCache:output_type -> chainmail.v1.RebuildCacheResponse
-	7, // 8: chainmail.v1.CacheService.EvictCache:output_type -> chainmail.v1.EvictCacheResponse
-	6, // [6:9] is the sub-list for method output_type
-	3, // [3:6] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	3, // 1: chainmail.v1.GetCacheStatusResponse.calendars:type_name -> chainmail.v1.AccountCalendarStatus
+	4, // 2: chainmail.v1.AccountCacheStatus.folders:type_name -> chainmail.v1.FolderCacheStatus
+	9, // 3: chainmail.v1.AccountCalendarStatus.last_sync_at:type_name -> google.protobuf.Timestamp
+	9, // 4: chainmail.v1.FolderCacheStatus.last_applied_at:type_name -> google.protobuf.Timestamp
+	0, // 5: chainmail.v1.CacheService.GetCacheStatus:input_type -> chainmail.v1.GetCacheStatusRequest
+	5, // 6: chainmail.v1.CacheService.RebuildCache:input_type -> chainmail.v1.RebuildCacheRequest
+	7, // 7: chainmail.v1.CacheService.EvictCache:input_type -> chainmail.v1.EvictCacheRequest
+	1, // 8: chainmail.v1.CacheService.GetCacheStatus:output_type -> chainmail.v1.GetCacheStatusResponse
+	6, // 9: chainmail.v1.CacheService.RebuildCache:output_type -> chainmail.v1.RebuildCacheResponse
+	8, // 10: chainmail.v1.CacheService.EvictCache:output_type -> chainmail.v1.EvictCacheResponse
+	8, // [8:11] is the sub-list for method output_type
+	5, // [5:8] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_chainmail_v1_cache_proto_init() }
@@ -697,7 +809,7 @@ func file_chainmail_v1_cache_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chainmail_v1_cache_proto_rawDesc), len(file_chainmail_v1_cache_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
