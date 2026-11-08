@@ -1,0 +1,9 @@
+size  1.0 MiB of 2.0 GiB
+
+ACCOUNT  CACHE  STATE  BUDGET TODAY    ERROR
+gm       on     ready  0 B of 1.0 GiB  -
+
+ACCOUNT     CALENDAR STATE  LAST SYNC         CALENDARS  EVENTS  ERROR
+gm          ready           2026-11-02 08:59  3          412     -
+mailwright  auth_required   -                 0          0       AUTH_REQUIRED
+odd[2J      syncing         -                 0          0       -
