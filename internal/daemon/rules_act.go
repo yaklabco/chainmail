@@ -237,11 +237,10 @@ func (s *Server) runAction(ctx context.Context, ruleID string, a rules.Action, a
 }
 
 // organizeStep runs a one-ref organize call as ruleCaller() with the rule
-// targets in place of the call's own, and reads its one outcome. A move
-// or copy call targets its folder, which here is copied from the rule, so
-// it is left out: the rule and run name the revision that holds it.
+// targets after the call's own, and reads its one outcome. A move or copy
+// keeps its validated folder= target, as socket callers' rows do.
 func (s *Server) organizeStep(ctx context.Context, c batchCall, targets []string) actionStep {
-	c.targets = slices.Clone(targets)
+	c.targets = slices.Concat(c.targets, targets)
 	outs, err := (&organizeService{s: s}).batchAs(ctx, ruleCaller(), c)
 	if err != nil {
 		return stepOf(err)
