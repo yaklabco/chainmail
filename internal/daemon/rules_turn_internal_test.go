@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 	"strings"
@@ -58,7 +59,9 @@ func waitInTake(t *testing.T, id string) {
 func TestRuleStepReadsOwedWritesOnItsTurn(t *testing.T) {
 	t.Parallel()
 	g := newRunnerRig(t, "host", nil)
-	ctx := t.Context()
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(t.Context())
+	joinAtCleanup(t, cancel, &wg)
 	rule := g.newRule(t, "host", "copy-then-flag", func(d *rules.Definition) {
 		d.Query, d.Actions = "subject:lunch", []rules.Action{{Kind: rules.ActCopy, Folder: "Archive"}, {Kind: rules.ActFlag}}
 	})
@@ -76,7 +79,6 @@ func TestRuleStepReadsOwedWritesOnItsTurn(t *testing.T) {
 	}
 	last := g.publish(t, lunch)
 
-	var wg sync.WaitGroup
 	var manual rules.Run
 	var manualErr, stepErr error
 	// The manual run takes the turn, meets the owed drop, and waits on the
@@ -97,7 +99,7 @@ func TestRuleStepReadsOwedWritesOnItsTurn(t *testing.T) {
 	}
 	g.fk.FailWrite("StoreFlags", mailstore.ErrUnavailable)
 	retry.fire <- g.clk.Now()
-	wg.Wait()
+	waitWorkers(t, &wg)
 
 	if manualErr != nil || manual.Outcome != rules.OutcomeInterrupted || manual.Reason != api.ReasonServerUnavailable {
 		t.Fatalf("manual run = %+v, %v, want interrupted with SERVER_UNAVAILABLE", manual, manualErr)
@@ -127,7 +129,9 @@ func TestRuleStepReadsOwedWritesOnItsTurn(t *testing.T) {
 func TestRuleStepAcksOnTheTurnThatDrained(t *testing.T) {
 	t.Parallel()
 	g := newRunnerRig(t, "host", nil)
-	ctx := t.Context()
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(t.Context())
+	joinAtCleanup(t, cancel, &wg)
 	// The batch's first rule leaves a drop owed: its copy is refused for
 	// good, and state.db will not drop the pending row yet.
 	g.newRule(t, "host", "copy-nowhere", func(d *rules.Definition) {
@@ -159,7 +163,6 @@ func TestRuleStepAcksOnTheTurnThatDrained(t *testing.T) {
 	}
 	last := g.publish(t, g.refs["host lunch"], notes)
 
-	var wg sync.WaitGroup
 	var manual rules.Run
 	var manualErr, stepErr error
 	wg.Go(func() { stepErr = g.step(ctx) })
@@ -179,7 +182,7 @@ func TestRuleStepAcksOnTheTurnThatDrained(t *testing.T) {
 	}
 	g.clk.advance(bodyWait)
 	body.fire <- g.clk.Now()
-	wg.Wait()
+	waitWorkers(t, &wg)
 
 	if stepErr != nil {
 		t.Fatal(stepErr)
@@ -221,7 +224,7 @@ func TestRuleStepAcksOnTheTurnThatDrained(t *testing.T) {
 		}
 		w.fire <- g.clk.Now()
 	}
-	wg.Wait()
+	waitWorkers(t, &wg)
 	if reason, _ := failureOf(heldErr); reason != api.ReasonInternal {
 		t.Fatalf("held step = %v, want an INTERNAL failure", heldErr)
 	}
@@ -240,5 +243,44 @@ func TestRuleStepAcksOnTheTurnThatDrained(t *testing.T) {
 	copied := g.foundIn(t, "host", "Archive", "inv42@x")
 	if row, ok := g.appliedRow(t, manualRule.ID, "host", keyOf(false, copied)); !ok || row.Outcome != rules.AppliedDone {
 		t.Errorf("the manual copy's row = %+v, %t, want applied", row, ok)
+	}
+}
+
+// workerBound bounds how long a turn test waits for its workers to finish.
+const workerBound = 10 * time.Second
+
+// waitGroupWithin reports whether wg finishes within d. On a timeout the
+// goroutine waiting on wg outlives the call, which only a failing test
+// sees.
+func waitGroupWithin(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// joinAtCleanup cancels the workers' context and joins them, within
+// workerBound, when the test ends on any path, so a failed assertion never
+// leaves a worker running while the rig closes.
+func joinAtCleanup(t *testing.T, cancel context.CancelFunc, wg *sync.WaitGroup) {
+	t.Helper()
+	t.Cleanup(func() {
+		cancel()
+		if !waitGroupWithin(wg, workerBound) {
+			t.Errorf("workers did not stop within %v of cleanup", workerBound)
+		}
+	})
+}
+
+// waitWorkers waits for the workers to finish, failing the test after
+// workerBound so a locking regression fails fast instead of hanging.
+func waitWorkers(t *testing.T, wg *sync.WaitGroup) {
+	t.Helper()
+	if !waitGroupWithin(wg, workerBound) {
+		t.Fatalf("workers did not finish within %v", workerBound)
 	}
 }
