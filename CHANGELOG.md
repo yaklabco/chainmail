@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The README is a short introduction, and the quick start and runbook moved to chainmail.sh.
 - The manual has the landing page's look, and the chainmail gopher is redrawn.
+- The manual's tables and diagrams are restyled to match, and a diagram too wide for the page opens at full size.
 
 ### Fixed
 

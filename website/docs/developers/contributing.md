@@ -91,7 +91,8 @@ A change to behaviour updates the docs in the same pull request. The pages are M
 - Mark a shell block `sh` only when it runs unchanged in both bash and fish. A command that needs shell state, such as an exported variable, goes in an `.mdx` page as a pair of `bash` and `fish` tabs with `groupId="shell"`. `scripts/check-doc-shell.sh` checks each block with its shells, and CI runs it.
 - Use example.com, example.org and example.net for addresses and hosts in examples.
 - Write `<placeholder>` text in prose inside backticks, since a bare angle bracket in Markdown is HTML.
-- Use Mermaid for diagrams.
+- Use Mermaid for diagrams. Draw them top to bottom (`flowchart TD`), so they fit the column. A diagram that is still too wide gets an Expand button that shows it at full size.
+- Write a table cell that answers a question as a bare `yes` or `no`. The site draws it as a check or a dash. A two-column table whose rows each start with inline code becomes a list of terms, which stacks on phones.
 
 `nix develop -c go tool stave docs:serve` shows the manual with live reload, and `site:serve` shows the landing page.
 

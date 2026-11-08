@@ -141,3 +141,5 @@ nix develop -c go tool stave pages
 ```
 
 Each runs `bun install --frozen-lockfile` first. The manual's build copies the root `CHANGELOG.md` into `website/docs/reference/changelog.md`, which is not committed, and fails on any broken link between pages. CI also runs `scripts/check-pages-links.sh pages-dist`, which fails on any link in the assembled site that points to no file. [Contributing](./contributing.md) has the rules for writing pages.
+
+The manual's tables and diagrams get their look from `website/plugins/`. `rehype-tables.mjs` adds the markup the table styles need, `mermaid-theme.mjs` themes the diagrams, and `diagram-expand.mjs` adds the Expand button to a diagram that has to shrink to fit. `bun run test` in `website/` runs their tests, and CI runs it too.

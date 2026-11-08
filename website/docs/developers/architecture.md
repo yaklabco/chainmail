@@ -19,7 +19,7 @@ chainmail is one Go binary, `chainmail`, built from `cmd/chainmail`. It runs as 
 The daemon is the only process that holds secrets or talks to a mail server. The clients hold no secrets and no mail logic. The [security model](../concepts/security-model.md) explains why the boundary sits there.
 
 ```mermaid
-flowchart LR
+flowchart TD
   subgraph clients[Clients, any user the peer check allows]
     CLI[chainmail CLI<br/>internal/cli]
     MCP[chainmail mcp<br/>internal/mcpserver]
@@ -209,7 +209,7 @@ The build decides before the dial does. So a held send still reaches Drafts whil
 The watch engine, the event log and the cache form one pipeline, all in the daemon.
 
 ```mermaid
-flowchart LR
+flowchart TD
   M[IMAP server] -- IDLE or poll --> Sup[watch.Supervisor<br/>one per account]
   Sup -- sync pass --> E[watch.Engine]
   E -- one transaction --> Log[(events,<br/>sync_folders, sync_uids)]

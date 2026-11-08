@@ -113,5 +113,7 @@ jobs:
         working-directory: website
       - run: bun run typecheck
         working-directory: website
+      - run: bun run test
+        working-directory: website
       - run: scripts/build-pages.sh
       - run: scripts/check-pages-links.sh pages-dist

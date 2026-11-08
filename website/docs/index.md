@@ -12,7 +12,7 @@ chainmail is email for AI agents. It is one Go binary that lets agents read, sen
 chainmail is for people who want an AI agent to work with their mail without handing it their accounts. A send to anyone off the allowlist is held as a draft for you to review, so an agent cannot mail a stranger on its own. chainmail runs on any Linux and on macOS. In production the daemon runs as its own system user, so the agent's user cannot read the vault.
 
 ```mermaid
-flowchart LR
+flowchart TD
   A[AI agent] -- MCP over stdio --> M[chainmail mcp]
   C[chainmail CLI] -- ConnectRPC --> S((Unix socket))
   M -- ConnectRPC --> S
