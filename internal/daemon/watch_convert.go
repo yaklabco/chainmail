@@ -74,13 +74,15 @@ func groupProto(g watch.GroupInfo) *chainmailv1.GroupStatus {
 
 // calendarChangeProto builds the API form of a calendar event's payload.
 // The addresses come from a calendar server or an invite, so they are
-// untrusted; no name is ever set. A time that does not parse is left unset.
+// untrusted; no name is ever set. The PARTSTAT comes from the server too,
+// so only its documented values pass and any other is OTHER, as
+// CalendarService returns it. A time that does not parse is left unset.
 func calendarChangeProto(c *watch.CalendarChange) *chainmailv1.CalendarChange {
 	return &chainmailv1.CalendarChange{
 		Ref: c.Ref, MessageRef: c.MessageRef, CalendarId: c.CalendarID,
 		Start: rfc3339Proto(c.Start), End: rfc3339Proto(c.End),
 		Organizer: emailProto(c.Organizer), Fields: c.Fields,
-		Attendee: emailProto(c.Attendee), Partstat: c.PartStat,
+		Attendee: emailProto(c.Attendee), Partstat: knownToken(c.PartStat, partStats),
 	}
 }
 
