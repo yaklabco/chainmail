@@ -203,7 +203,8 @@ func responseStatus(p calendar.PartStat) string {
 }
 
 // parseTime reads an event time as UTC. An all-day date is 00:00 UTC of the
-// date. tzid is the event's IANA zone, "" for UTC or a zone Go cannot load.
+// date. A dateTime without an offset is a local time in timeZone. tzid is
+// the event's IANA zone, "" for UTC or a zone Go cannot load.
 func parseTime(t *apiTime) (at time.Time, allDay bool, tzid string, err error) {
 	if t == nil {
 		return time.Time{}, false, "", errBadResponse
@@ -214,9 +215,26 @@ func parseTime(t *apiTime) (at time.Time, allDay bool, tzid string, err error) {
 	}
 	d, err := time.Parse(time.RFC3339, t.DateTime)
 	if err != nil {
-		return time.Time{}, false, "", err
+		// Google takes, and may send, a dateTime without an offset when
+		// timeZone names the zone it is in.
+		loc, lerr := loadZone(t.TimeZone)
+		if lerr != nil {
+			return time.Time{}, false, "", err
+		}
+		if d, err = time.ParseInLocation("2006-01-02T15:04:05", t.DateTime, loc); err != nil {
+			return time.Time{}, false, "", err
+		}
 	}
 	return d.UTC(), false, zoneName(t.TimeZone), nil
+}
+
+// loadZone loads the IANA zone tz. "" and "Local" are refused: the host's
+// zone says nothing about the event's.
+func loadZone(tz string) (*time.Location, error) {
+	if tz == "" || strings.EqualFold(tz, "local") {
+		return nil, errBadResponse
+	}
+	return time.LoadLocation(tz)
 }
 
 // zoneName returns tz when it is an IANA zone other than UTC that Go can
@@ -399,4 +417,28 @@ func attendeesJSON(atts []calendar.Attendee, known map[string]map[string]any) []
 		out = append(out, m)
 	}
 	return out
+}
+
+// patchTime is eventTime for a PATCH. Google merges a nested object into the
+// stored one, so the fields of the other kind are sent as JSON null: an
+// event that switches between timed and all-day would otherwise keep its
+// old date or dateTime next to the new one.
+func patchTime(t time.Time, tzid string, allDay bool) map[string]any {
+	m := eventTime(t, tzid, allDay)
+	if allDay {
+		m["dateTime"], m["timeZone"] = nil, nil
+	} else {
+		m["date"] = nil
+	}
+	return m
+}
+
+// calendarZone returns a calendar's timeZone when Go can load it, UTC and
+// its aliases included, else "". Unlike an event's TZID, a calendar's zone
+// is kept as Google names it: "UTC" is a zone, not an unknown one.
+func calendarZone(tz string) string {
+	if _, err := loadZone(tz); err != nil {
+		return ""
+	}
+	return tz
 }

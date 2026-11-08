@@ -8,7 +8,10 @@
 //     showDeleted, singleEvents=false and iCalUID, which matches a series's
 //     master and every exception of it, cancelled ones included, even when
 //     an exception carries no iCalUID of its own. A sync token from before
-//     InvalidateSyncTokens, or one the fake did not issue, answers 410.
+//     InvalidateSyncTokens, one the fake did not issue, or one of another
+//     calendar answers 410. A listing is frozen at its first page, so a
+//     change between pages does not shift the later ones, and its page
+//     tokens answer 400 on another calendar or with another query.
 //     Cancelled instances of a series are listed even without showDeleted,
 //     as Google does with singleEvents=false; deleted events need
 //     showDeleted or a sync token.
@@ -23,10 +26,17 @@
 //     notFound error, as Google answers for a calendar it cannot see.
 //
 // Writes to a calendar whose access role is reader or freeBusyReader answer
-// 403 requiredAccessLevel. PATCH merges top-level fields and a JSON null
-// removes one, as Google's patch semantics do. Every request is recorded,
+// 403 requiredAccessLevel. PATCH follows Google's patch semantics: nested
+// objects merge, arrays are replaced whole and a JSON null removes a field.
+// A start or end left with both date and dateTime, or neither, or a start
+// and end of different kinds, answer 400. Every request is recorded,
 // including its sendUpdates parameter, so tests can prove what a write asked
 // Google to send.
+//
+// An event with more attendees than a request's maxAttendees, or than
+// SetMaxAttendees allows, is shown with only the participant and
+// attendeesOmitted set. A PATCH with attendeesOmitted true updates only the
+// attendees it names, as Google's participant-only update does.
 //
 // Tests can make it fail: Inject answers matching requests with a fixed
 // status, body and headers, or blocks them until the client gives up.
@@ -116,8 +126,12 @@ type Server struct {
 	reqs     []Request
 	faults   []Fault
 	pageSize int
+	maxAtt   int
 	token    string
 	gen      int
+	issued   int
+	listings map[string]*listing
+	syncs    map[string]syncState
 	etags    int
 	now      func() time.Time
 }
@@ -137,11 +151,13 @@ type storedEvent struct {
 func Start(t testing.TB) *Server {
 	t.Helper()
 	s := &Server{
-		t:     t,
-		cals:  map[string]*fakeCalendar{},
-		busy:  map[string][]Busy{},
-		now:   func() time.Time { return time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC) },
-		etags: 3393000,
+		t:        t,
+		cals:     map[string]*fakeCalendar{},
+		busy:     map[string][]Busy{},
+		listings: map[string]*listing{},
+		syncs:    map[string]syncState{},
+		now:      func() time.Time { return time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC) },
+		etags:    3393000,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+BasePath+"/users/me/calendarList", s.calendarList)
@@ -165,6 +181,16 @@ func (s *Server) SetPageSize(n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pageSize = n
+}
+
+// SetMaxAttendees makes every event the fake shows list only the
+// participant (the attendee with self set) and set attendeesOmitted when it
+// has more than n attendees, as Google does for a request with maxAttendees
+// n. Zero turns it off.
+func (s *Server) SetMaxAttendees(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxAtt = n
 }
 
 // RequireToken makes every request need "Authorization: Bearer tok".
@@ -457,11 +483,32 @@ func (s *Server) writable(w http.ResponseWriter, c *fakeCalendar) bool {
 	return false
 }
 
-// listPage is the cursor a page token carries.
-type listPage struct {
-	offset, snapshot, since, gen int
-	showDeleted                  bool
-	uid                          string
+// listing is one events.list, frozen at its first page: later pages serve
+// the same items, whatever changes in between, as a snapshot would. Its page
+// tokens are good only for the same calendar and query.
+type listing struct {
+	cal, query string
+	gen        int
+	items      []map[string]any
+	syncToken  string
+}
+
+// syncState is what a sync token the fake issued stands for.
+type syncState struct {
+	cal      string
+	gen, seq int
+}
+
+// listQueryKey is the part of an events.list query its page tokens are
+// bound to.
+func listQueryKey(q url.Values) string {
+	k := url.Values{}
+	for _, name := range []string{"showDeleted", "iCalUID", "syncToken", "maxAttendees"} {
+		if q.Has(name) {
+			k[name] = q[name]
+		}
+	}
+	return k.Encode()
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
@@ -476,37 +523,39 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid", "singleEvents is not supported by the fake")
 		return
 	}
-	cur := listPage{snapshot: c.seq, since: -1, gen: s.gen, showDeleted: q.Get("showDeleted") == "true", uid: q.Get("iCalUID")}
-	if tok := q.Get("syncToken"); tok != "" {
-		gen, seq, ok := parseSyncToken(tok)
-		if !ok || gen != s.gen || seq > c.seq {
-			writeError(w, http.StatusGone, "fullSyncRequired", "Sync token is no longer valid, a full sync is required.")
-			return
-		}
-		cur.since = seq
-		cur.showDeleted = true
-	}
+	key := listQueryKey(q)
 	if pt := q.Get("pageToken"); pt != "" {
-		p, ok := parsePageToken(pt)
-		if !ok {
+		l, offset, ok := s.parsePageToken(pt)
+		if !ok || l.cal != c.ID || l.query != key {
 			writeError(w, http.StatusBadRequest, "invalid", "Invalid page token")
 			return
 		}
-		if p.gen != s.gen {
+		if l.gen != s.gen {
 			writeError(w, http.StatusGone, "fullSyncRequired", "Sync token is no longer valid, a full sync is required.")
 			return
 		}
-		cur = p
+		s.writePage(w, r, c, pt[:strings.LastIndexByte(pt, ':')], l, offset)
+		return
 	}
+	since, showDeleted := -1, q.Get("showDeleted") == "true"
+	if tok := q.Get("syncToken"); tok != "" {
+		st, ok := s.syncs[tok]
+		if !ok || st.cal != c.ID || st.gen != s.gen || st.seq > c.seq {
+			writeError(w, http.StatusGone, "fullSyncRequired", "Sync token is no longer valid, a full sync is required.")
+			return
+		}
+		since, showDeleted = st.seq, true
+	}
+	uid := q.Get("iCalUID")
 	ids := make([]string, 0, len(c.events))
 	for id, se := range c.events {
-		if se.seq > cur.snapshot || se.seq <= cur.since {
+		if se.seq <= since {
 			continue
 		}
-		if cur.uid != "" && c.uidOf(se.obj) != cur.uid {
+		if uid != "" && c.uidOf(se.obj) != uid {
 			continue
 		}
-		if !cur.showDeleted && isDeleted(se.obj) {
+		if !showDeleted && isDeleted(se.obj) {
 			continue
 		}
 		ids = append(ids, id)
@@ -517,24 +566,31 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		return strings.Compare(a, b)
 	})
-	if cur.offset > len(ids) {
-		cur.offset = len(ids)
+	l := &listing{cal: c.ID, query: key, gen: s.gen, items: make([]map[string]any, 0, len(ids))}
+	for _, id := range ids {
+		l.items = append(l.items, s.view(r, c.events[id].obj))
 	}
-	end := min(cur.offset+s.pageLimit(r), len(ids))
-	items := make([]map[string]any, 0, end-cur.offset)
-	for _, id := range ids[cur.offset:end] {
-		items = append(items, c.events[id].obj)
-	}
-	resp := map[string]any{"kind": "calendar#events", "summary": c.Summary, "items": items}
+	s.issued++
+	l.syncToken = "sync:" + strconv.Itoa(s.issued)
+	s.syncs[l.syncToken] = syncState{cal: c.ID, gen: s.gen, seq: c.seq}
+	s.issued++
+	name := "pg:" + strconv.Itoa(s.issued)
+	s.listings[name] = l
+	s.writePage(w, r, c, name, l, 0)
+}
+
+// writePage answers the page of l that starts at offset. s.mu is held.
+func (s *Server) writePage(w http.ResponseWriter, r *http.Request, c *fakeCalendar, name string, l *listing, offset int) {
+	offset = min(offset, len(l.items))
+	end := min(offset+s.pageLimit(r), len(l.items))
+	resp := map[string]any{"kind": "calendar#events", "summary": c.Summary, "items": l.items[offset:end]}
 	if c.TimeZone != "" {
 		resp["timeZone"] = c.TimeZone
 	}
-	if end < len(ids) {
-		next := cur
-		next.offset = end
-		resp["nextPageToken"] = pageToken(next)
+	if end < len(l.items) {
+		resp["nextPageToken"] = name + ":" + strconv.Itoa(end)
 	} else {
-		resp["nextSyncToken"] = fmt.Sprintf("sync:%d:%d", s.gen, cur.snapshot)
+		resp["nextSyncToken"] = l.syncToken
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -551,7 +607,7 @@ func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "notFound", "Not Found")
 		return
 	}
-	writeJSON(w, http.StatusOK, obj)
+	writeJSON(w, http.StatusOK, s.view(r, obj))
 }
 
 func (s *Server) insertEvent(w http.ResponseWriter, r *http.Request) {
@@ -581,6 +637,10 @@ func (s *Server) insertEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, ok := obj["start"]; !ok {
 		writeError(w, http.StatusBadRequest, "required", "Missing start time.")
+		return
+	}
+	if !validTimes(obj) {
+		writeError(w, http.StatusBadRequest, "invalid", "Invalid start or end time.")
 		return
 	}
 	if _, ok := obj["iCalUID"]; !ok {
@@ -626,9 +686,14 @@ func (s *Server) patchEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delete(patch, "id")
+	patchParticipants(obj, patch)
 	mergePatch(obj, patch)
+	if !validTimes(obj) {
+		writeError(w, http.StatusBadRequest, "invalid", "Invalid start or end time.")
+		return
+	}
 	s.store(c, id, obj)
-	writeJSON(w, http.StatusOK, obj)
+	writeJSON(w, http.StatusOK, s.view(r, obj))
 }
 
 func (s *Server) deleteEvent(w http.ResponseWriter, r *http.Request) {
@@ -792,51 +857,65 @@ func isDeleted(obj map[string]any) bool {
 	return obj["status"] == "cancelled" && !instance
 }
 
-func parseSyncToken(tok string) (gen, seq int, ok bool) {
-	parts := strings.Split(tok, ":")
-	if len(parts) != 3 || parts[0] != "sync" {
-		return 0, 0, false
+// parsePageToken returns the listing and offset of a page token the fake
+// issued. s.mu is held.
+func (s *Server) parsePageToken(tok string) (*listing, int, bool) {
+	i := strings.LastIndexByte(tok, ':')
+	if i < 0 {
+		return nil, 0, false
 	}
-	gen, err1 := strconv.Atoi(parts[1])
-	seq, err2 := strconv.Atoi(parts[2])
-	return gen, seq, err1 == nil && err2 == nil && seq >= 0
+	l, ok := s.listings[tok[:i]]
+	offset, err := strconv.Atoi(tok[i+1:])
+	if !ok || err != nil || offset < 0 {
+		return nil, 0, false
+	}
+	return l, offset, true
 }
 
-func pageToken(p listPage) string {
-	return fmt.Sprintf("pg:%d:%d:%d:%d:%t:%s", p.offset, p.snapshot, p.since, p.gen, p.showDeleted, url.QueryEscape(p.uid))
-}
-
-func parsePageToken(tok string) (listPage, bool) {
-	parts := strings.SplitN(tok, ":", 7)
-	if len(parts) != 7 || parts[0] != "pg" {
-		return listPage{}, false
-	}
-	var p listPage
-	var err error
-	nums := []*int{&p.offset, &p.snapshot, &p.since, &p.gen}
-	for i, n := range nums {
-		if *n, err = strconv.Atoi(parts[i+1]); err != nil {
-			return listPage{}, false
-		}
-	}
-	if p.showDeleted, err = strconv.ParseBool(parts[5]); err != nil {
-		return listPage{}, false
-	}
-	if p.uid, err = url.QueryUnescape(parts[6]); err != nil {
-		return listPage{}, false
-	}
-	return p, p.offset >= 0
-}
-
-// mergePatch applies a patch's top-level fields to obj; null removes one.
+// mergePatch applies patch to obj as Google's patch semantics do (JSON merge
+// patch, RFC 7396): a nested object merges into the object it names, an
+// array replaces the stored one whole, and a JSON null removes the field.
 func mergePatch(obj, patch map[string]any) {
 	for k, v := range patch {
-		if v == nil {
+		switch pv := v.(type) {
+		case nil:
 			delete(obj, k)
-			continue
+		case map[string]any:
+			cur, ok := obj[k].(map[string]any)
+			if !ok {
+				cur = map[string]any{}
+			}
+			mergePatch(cur, pv)
+			obj[k] = cur
+		default:
+			obj[k] = v
 		}
-		obj[k] = v
 	}
+}
+
+// validTimes reports whether obj's start and end are each a date or a
+// dateTime, not both and not neither, and of the same kind. An event with no
+// start (a cancelled instance) passes.
+func validTimes(obj map[string]any) bool {
+	kind := func(field string) (allDay, present, ok bool) {
+		v, found := obj[field]
+		if !found {
+			return false, false, true
+		}
+		m, isMap := v.(map[string]any)
+		if !isMap {
+			return false, true, false
+		}
+		_, date := m["date"]
+		_, dateTime := m["dateTime"]
+		return date, true, date != dateTime
+	}
+	sAll, sOK, sValid := kind("start")
+	eAll, eOK, eValid := kind("end")
+	if !sValid || !eValid {
+		return false
+	}
+	return !sOK || !eOK || sAll == eAll
 }
 
 func deepCopy(m map[string]any) map[string]any {
@@ -892,4 +971,58 @@ func (c *fakeCalendar) uidOf(obj map[string]any) any {
 		}
 	}
 	return nil
+}
+
+// view is the copy of obj a response shows: with more attendees than the
+// request's maxAttendees or SetMaxAttendees allow, only the participant is
+// listed and attendeesOmitted is set. s.mu is held.
+func (s *Server) view(r *http.Request, obj map[string]any) map[string]any {
+	out := deepCopy(obj)
+	limit := s.maxAtt
+	if n, err := strconv.Atoi(r.URL.Query().Get("maxAttendees")); err == nil && n > 0 && (limit == 0 || n < limit) {
+		limit = n
+	}
+	atts, _ := out["attendees"].([]any)
+	if limit <= 0 || len(atts) <= limit {
+		return out
+	}
+	mine := []any{}
+	for _, a := range atts {
+		if m, ok := a.(map[string]any); ok && m["self"] == true {
+			mine = append(mine, m)
+		}
+	}
+	out["attendees"] = mine
+	out["attendeesOmitted"] = true
+	return out
+}
+
+// patchParticipants applies a PATCH that sets attendeesOmitted: each
+// attendee it names merges into the stored attendee with that address, and
+// the rest of the list stays. Attendees not on the event are ignored. It
+// removes both fields from patch. s.mu is held.
+func patchParticipants(obj, patch map[string]any) {
+	omitted, _ := patch["attendeesOmitted"].(bool)
+	delete(patch, "attendeesOmitted")
+	if !omitted {
+		return
+	}
+	given, _ := patch["attendees"].([]any)
+	delete(patch, "attendees")
+	stored, _ := obj["attendees"].([]any)
+	for _, g := range given {
+		gm, ok := g.(map[string]any)
+		if !ok {
+			continue
+		}
+		email, _ := gm["email"].(string)
+		for _, a := range stored {
+			am, ok := a.(map[string]any)
+			if se, _ := am["email"].(string); ok && strings.EqualFold(se, email) {
+				delete(gm, "email")
+				mergePatch(am, gm)
+				break
+			}
+		}
+	}
 }

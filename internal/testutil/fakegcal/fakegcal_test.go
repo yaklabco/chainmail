@@ -302,3 +302,226 @@ func mustJSON(t *testing.T, v any) string {
 	}
 	return string(b)
 }
+
+func TestPatchMergesNestedObjects(t *testing.T) {
+	srv, c := setup(t)
+	srv.AddEvent("me@example.com", single("merge1"))
+	path := "/calendars/" + url.PathEscape("me@example.com") + "/events/merge1"
+
+	// A nested object merges: a date without nulling dateTime leaves both,
+	// which Google refuses.
+	code, _ := c.do("PATCH", path, nil, nil, map[string]any{
+		"start": map[string]any{"date": "2026-11-10"}, "end": map[string]any{"date": "2026-11-11"},
+	})
+	if code != http.StatusBadRequest {
+		t.Errorf("date over a dateTime without null: %d, want 400", code)
+	}
+	ev, _ := srv.Event("me@example.com", "merge1")
+	if start := ev["start"].(map[string]any); start["dateTime"] != "2026-11-10T09:00:00-08:00" || start["date"] != nil {
+		t.Errorf("refused patch changed the event: %v", start)
+	}
+
+	// Nulling the other fields converts the event to all-day.
+	code, out := c.do("PATCH", path, nil, nil, map[string]any{
+		"start": map[string]any{"date": "2026-11-10", "dateTime": nil, "timeZone": nil},
+		"end":   map[string]any{"date": "2026-11-11", "dateTime": nil, "timeZone": nil},
+	})
+	if code != 200 {
+		t.Fatalf("to all-day: %d %v", code, out)
+	}
+	if start := out["start"].(map[string]any); len(start) != 1 || start["date"] != "2026-11-10" {
+		t.Errorf("all-day start = %v", start)
+	}
+
+	// Back to timed: the date is nulled, the other fields of the object
+	// merge in.
+	code, out = c.do("PATCH", path, nil, nil, map[string]any{
+		"start": map[string]any{"date": nil, "dateTime": "2026-11-10T10:00:00-08:00", "timeZone": "America/Los_Angeles"},
+		"end":   map[string]any{"date": nil, "dateTime": "2026-11-10T11:00:00-08:00", "timeZone": "America/Los_Angeles"},
+	})
+	if code != 200 {
+		t.Fatalf("to timed: %d %v", code, out)
+	}
+	if start := out["start"].(map[string]any); len(start) != 2 || start["dateTime"] != "2026-11-10T10:00:00-08:00" {
+		t.Errorf("timed start = %v", start)
+	}
+
+	// A nested field merges without touching its siblings, and arrays are
+	// replaced whole.
+	srv.ChangeEvent("me@example.com", "merge1", map[string]any{"attendees": []any{
+		map[string]any{"email": "a@example.org"}, map[string]any{"email": "b@example.org"},
+	}})
+	code, out = c.do("PATCH", path, nil, nil, map[string]any{
+		"start":     map[string]any{"timeZone": "America/New_York"},
+		"attendees": []any{map[string]any{"email": "b@example.org"}},
+	})
+	if code != 200 {
+		t.Fatalf("nested merge: %d %v", code, out)
+	}
+	if start := out["start"].(map[string]any); start["dateTime"] != "2026-11-10T10:00:00-08:00" || start["timeZone"] != "America/New_York" {
+		t.Errorf("merged start = %v", start)
+	}
+	if got := out["attendees"].([]any); len(got) != 1 {
+		t.Errorf("array not replaced: %v", got)
+	}
+
+	// Start and end must be of one kind.
+	if code, _ := c.do("PATCH", path, nil, nil, map[string]any{
+		"start": map[string]any{"date": "2026-11-10", "dateTime": nil, "timeZone": nil},
+	}); code != http.StatusBadRequest {
+		t.Errorf("all-day start with a timed end: %d, want 400", code)
+	}
+}
+
+func withAttendees(id string) map[string]any {
+	ev := single(id)
+	ev["attendees"] = []any{
+		map[string]any{"email": "boss@example.org", "organizer": true, "responseStatus": "accepted"},
+		map[string]any{"email": "me@example.com", "self": true, "responseStatus": "needsAction", "additionalGuests": 1},
+		map[string]any{"email": "ann@example.org", "responseStatus": "tentative"},
+	}
+	return ev
+}
+
+func TestAttendeesOmitted(t *testing.T) {
+	srv, c := setup(t)
+	srv.AddEvent("me@example.com", withAttendees("omit1"))
+	path := "/calendars/" + url.PathEscape("me@example.com") + "/events/omit1"
+
+	// Over the limit, only the participant is shown and attendeesOmitted is
+	// set, as Google answers with maxAttendees.
+	code, ev := c.do("GET", path, url.Values{"maxAttendees": {"2"}}, nil, nil)
+	if code != 200 || ev["attendeesOmitted"] != true || len(ev["attendees"].([]any)) != 1 {
+		t.Fatalf("maxAttendees=2: %d %v", code, ev)
+	}
+	srv.SetMaxAttendees(2)
+	code, ev = c.do("GET", path, nil, nil, nil)
+	if code != 200 || ev["attendeesOmitted"] != true || len(ev["attendees"].([]any)) != 1 {
+		t.Fatalf("SetMaxAttendees(2): %d %v", code, ev)
+	}
+	code, page := c.do("GET", "/calendars/"+url.PathEscape("me@example.com")+"/events", nil, nil, nil)
+	if it := page["items"].([]any)[0].(map[string]any); code != 200 || it["attendeesOmitted"] != true || len(it["attendees"].([]any)) != 1 {
+		t.Fatalf("list with SetMaxAttendees(2): %d %v", code, page)
+	}
+	srv.SetMaxAttendees(0)
+
+	// attendeesOmitted on a PATCH updates only the attendees it names.
+	code, out := c.do("PATCH", path, nil, nil, map[string]any{
+		"attendeesOmitted": true,
+		"attendees":        []any{map[string]any{"email": "ME@example.com", "responseStatus": "accepted"}},
+	})
+	if code != 200 {
+		t.Fatalf("participant patch: %d %v", code, out)
+	}
+	stored, _ := srv.Event("me@example.com", "omit1")
+	atts := stored["attendees"].([]any)
+	if len(atts) != 3 {
+		t.Fatalf("participant patch replaced the list: %v", atts)
+	}
+	self := atts[1].(map[string]any)
+	if self["responseStatus"] != "accepted" || self["additionalGuests"] != float64(1) || self["email"] != "me@example.com" {
+		t.Errorf("self after participant patch = %v", self)
+	}
+	if _, ok := stored["attendeesOmitted"]; ok {
+		t.Error("attendeesOmitted stored on the event")
+	}
+
+	// Without it the array is replaced.
+	if code, _ := c.do("PATCH", path, nil, nil, map[string]any{
+		"attendees": []any{map[string]any{"email": "me@example.com", "responseStatus": "declined"}},
+	}); code != 200 {
+		t.Fatalf("plain patch: %d", code)
+	}
+	stored, _ = srv.Event("me@example.com", "omit1")
+	if n := len(stored["attendees"].([]any)); n != 1 {
+		t.Errorf("plain attendee patch kept %d attendees, want 1", n)
+	}
+}
+
+// listAll reads every page of an events.list and returns the ids and the
+// sync token. between runs after the first page.
+func listAll(t *testing.T, c client, path string, q url.Values, between func()) ([]string, string) {
+	t.Helper()
+	var got []string
+	for first := true; ; first = false {
+		code, page := c.do("GET", path, q, nil, nil)
+		if code != 200 {
+			t.Fatalf("list: %d %v", code, page)
+		}
+		got = append(got, items(t, page)...)
+		if first && between != nil {
+			between()
+		}
+		next, ok := page["nextPageToken"].(string)
+		if !ok {
+			tok, _ := page["nextSyncToken"].(string)
+			return got, tok
+		}
+		q.Set("pageToken", next)
+	}
+}
+
+func TestEventsPagesAreFrozen(t *testing.T) {
+	srv, c := setup(t)
+	srv.SetPageSize(1)
+	for _, id := range []string{"aaaaa1", "aaaaa2", "aaaaa3"} {
+		srv.AddEvent("me@example.com", single(id))
+	}
+	path := "/calendars/" + url.PathEscape("me@example.com") + "/events"
+	// A change after the first page must not shift the later pages.
+	got, token := listAll(t, c, path, url.Values{"showDeleted": {"true"}}, func() {
+		srv.ChangeEvent("me@example.com", "aaaaa1", map[string]any{"summary": "changed"})
+		srv.AddEvent("me@example.com", single("aaaaa4"))
+	})
+	if strings.Join(got, ",") != "aaaaa1,aaaaa2,aaaaa3" {
+		t.Fatalf("listing with a change between pages = %v", got)
+	}
+	// What changed during the listing comes with the next sync.
+	got, _ = listAll(t, c, path, url.Values{"syncToken": {token}}, nil)
+	if strings.Join(got, ",") != "aaaaa1,aaaaa4" {
+		t.Errorf("sync after the listing = %v, want aaaaa1,aaaaa4", got)
+	}
+}
+
+func TestEventsTokensAreBound(t *testing.T) {
+	srv, c := setup(t)
+	srv.SetPageSize(1)
+	for _, id := range []string{"aaaaa1", "aaaaa2"} {
+		srv.AddEvent("me@example.com", single(id))
+		srv.AddEvent("team#ro@group.calendar.google.com", single(id))
+	}
+	mine := "/calendars/" + url.PathEscape("me@example.com") + "/events"
+	team := "/calendars/" + url.PathEscape("team#ro@group.calendar.google.com") + "/events"
+
+	code, page := c.do("GET", mine, url.Values{"showDeleted": {"true"}}, nil, nil)
+	if code != 200 {
+		t.Fatalf("list: %d", code)
+	}
+	pt := page["nextPageToken"].(string)
+	for name, tc := range map[string]struct {
+		path string
+		q    url.Values
+	}{
+		"another calendar": {team, url.Values{"showDeleted": {"true"}, "pageToken": {pt}}},
+		"another query":    {mine, url.Values{"pageToken": {pt}}},
+		"never issued":     {mine, url.Values{"showDeleted": {"true"}, "pageToken": {"pg:999:0"}}},
+	} {
+		if code, _ := c.do("GET", tc.path, tc.q, nil, nil); code != http.StatusBadRequest {
+			t.Errorf("page token from %s: %d, want 400", name, code)
+		}
+	}
+	if code, _ := c.do("GET", mine, url.Values{"showDeleted": {"true"}, "pageToken": {pt}}, nil, nil); code != 200 {
+		t.Errorf("page token on its own listing: %d, want 200", code)
+	}
+
+	_, token := listAll(t, c, mine, url.Values{"showDeleted": {"true"}}, nil)
+	if code, _ := c.do("GET", team, url.Values{"syncToken": {token}}, nil, nil); code != http.StatusGone {
+		t.Errorf("sync token of another calendar: %d, want 410", code)
+	}
+	if code, _ := c.do("GET", mine, url.Values{"syncToken": {"sync:0:0"}}, nil, nil); code != http.StatusGone {
+		t.Errorf("sync token never issued: %d, want 410", code)
+	}
+	if code, _ := c.do("GET", mine, url.Values{"syncToken": {token}}, nil, nil); code != 200 {
+		t.Errorf("sync token on its own calendar: %d, want 200", code)
+	}
+}

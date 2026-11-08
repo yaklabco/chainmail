@@ -193,7 +193,7 @@ func TestSyncFullThenIncremental(t *testing.T) {
 		t.Errorf("override = %+v", moved)
 	}
 	cancelled := got["series1@20261124T170000Z"]
-	if cancelled.Status != calendar.StatusCancelled || cancelled.ProviderID != "series1" {
+	if cancelled.Status != calendar.StatusCancelled || cancelled.ProviderID != "series1" || cancelled.UID != master.UID {
 		t.Errorf("cancelled instance = %+v", cancelled)
 	}
 
@@ -231,7 +231,12 @@ func TestSyncFullThenIncremental(t *testing.T) {
 	if len(upd) != 2 || upd["single1"].Summary != "Review v2" || upd["series1@20261215T170000Z"].Status != calendar.StatusCancelled {
 		t.Errorf("incremental upserts = %+v", inc.Upserts)
 	}
-	last, _ := srv.LastRequest("GET")
+	// The cancelled instance came alone, with no iCalUID: it still carries
+	// its series's UID.
+	if uid := upd["series1@20261215T170000Z"].UID; uid != "series1@example.org" {
+		t.Errorf("incremental cancelled override UID = %q", uid)
+	}
+	last := lastList(srv)
 	if last.Query.Get("syncToken") != ch.Token || last.Query.Get("showDeleted") != "true" {
 		t.Errorf("incremental query = %v", last.Query)
 	}
@@ -338,6 +343,139 @@ func TestSyncDeletedSeriesDropsItsOverrides(t *testing.T) {
 	for _, ev := range inc.Upserts {
 		if ev.ProviderID == "series1" {
 			t.Errorf("upsert of a row of a deleted series: %+v", ev)
+		}
+	}
+}
+
+func TestSyncOffsetlessTimes(t *testing.T) {
+	st, srv := newStore(t)
+	// Google takes a dateTime without an offset when timeZone names the
+	// zone, and may send one back that way.
+	srv.AddEvent(me, map[string]any{
+		"id": "local1", "iCalUID": "local1@example.org",
+		"start": map[string]any{"dateTime": "2026-11-10T09:00:00", "timeZone": la},
+		"end":   map[string]any{"dateTime": "2026-11-10T18:30:00.000", "timeZone": "Europe/London"},
+	})
+	srv.AddEvent(me, seriesEvent("series1"))
+	srv.AddEvent(me, map[string]any{
+		"id": "series1_20261117T170000Z", "recurringEventId": "series1", "iCalUID": "series1@example.org",
+		"originalStartTime": map[string]any{"dateTime": "2026-11-17T09:00:00", "timeZone": la},
+		"start":             map[string]any{"dateTime": "2026-11-17T12:00:00", "timeZone": "America/New_York"},
+		"end":               map[string]any{"dateTime": "2026-11-17T12:30:00", "timeZone": "America/New_York"},
+	})
+	srv.AddEvent(me, map[string]any{
+		"id": "utc1", "iCalUID": "utc1@example.org",
+		"start": map[string]any{"dateTime": "2026-11-10T09:00:00", "timeZone": "UTC"},
+		"end":   map[string]any{"dateTime": "2026-11-10T10:00:00", "timeZone": "UTC"},
+	})
+	ch, err := st.Sync(ctx(t), me, "")
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	got := byKey(ch.Upserts)
+	if l := got["local1"]; !l.Start.Equal(utc(2026, 11, 10, 17, 0)) || !l.End.Equal(utc(2026, 11, 10, 18, 30)) || l.TZID != la || l.Start.Location() != time.UTC {
+		t.Errorf("offsetless event = %v to %v in %q", l.Start, l.End, l.TZID)
+	}
+	if ov, ok := got["series1@20261117T170000Z"]; !ok || !ov.Start.Equal(utc(2026, 11, 17, 17, 0)) {
+		t.Errorf("offsetless override = %+v (found %v)", ov, ok)
+	}
+	if u := got["utc1"]; !u.Start.Equal(utc(2026, 11, 10, 9, 0)) || u.TZID != "" {
+		t.Errorf("offsetless UTC event = %v in %q", u.Start, u.TZID)
+	}
+
+	// Without a zone an offsetless time cannot be read.
+	srv.AddEvent(me, map[string]any{
+		"id": "nozone1", "start": map[string]any{"dateTime": "2026-11-10T09:00:00"}, "end": map[string]any{"dateTime": "2026-11-10T10:00:00"},
+	})
+	if _, err := st.Sync(ctx(t), me, ""); !errors.Is(err, calstore.ErrUnavailable) {
+		t.Errorf("offsetless time without a zone: err = %v, want ErrUnavailable", err)
+	}
+}
+
+// lastList is the last events.list request.
+func lastList(srv *fakegcal.Server) fakegcal.Request {
+	reqs := srv.Requests()
+	for i := len(reqs) - 1; i >= 0; i-- {
+		if reqs[i].Method == "GET" && strings.HasSuffix(reqs[i].Path, "/events") {
+			return reqs[i]
+		}
+	}
+	return fakegcal.Request{}
+}
+
+func TestSyncCancelledOverridesShareTheSeriesUID(t *testing.T) {
+	st, srv := newStore(t)
+	srv.AddEvent(me, seriesEvent("series1"))
+	srv.AddEvent(me, seriesEvent("series2"))
+	ch, err := st.Sync(ctx(t), me, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Instances cancelled since: Google lists them alone, without iCalUID.
+	srv.AddEvent(me, cancelledInstance("series1", "20261117T170000Z", "2026-11-17T09:00:00-08:00"))
+	srv.AddEvent(me, cancelledInstance("series1", "20261124T170000Z", "2026-11-24T09:00:00-08:00"))
+	srv.AddEvent(me, cancelledInstance("series2", "20261117T170000Z", "2026-11-17T09:00:00-08:00"))
+	// And one of a series that no longer exists.
+	srv.AddEvent(me, cancelledInstance("ghost1", "20261117T170000Z", "2026-11-17T09:00:00-08:00"))
+	before := len(srv.Requests())
+	inc, err := st.Sync(ctx(t), me, ch.Token)
+	if err != nil {
+		t.Fatalf("incremental Sync: %v", err)
+	}
+	if len(inc.Upserts) != 3 {
+		t.Fatalf("upserts = %+v, want the three cancelled instances of live series", inc.Upserts)
+	}
+	for _, ev := range inc.Upserts {
+		if want := ev.ProviderID + "@example.org"; ev.UID != want {
+			t.Errorf("override %s@%v UID = %q, want %q", ev.ProviderID, ev.RecurrenceID, ev.UID, want)
+		}
+	}
+	if !slices.Equal(inc.Deletes, []string{"ghost1"}) {
+		t.Errorf("Deletes = %v, want [ghost1]", inc.Deletes)
+	}
+	// One read per series, not per instance.
+	var reads []string
+	for _, r := range srv.Requests()[before:] {
+		if r.Method == "GET" && !strings.HasSuffix(r.Path, "/events") {
+			reads = append(reads, r.Path)
+		}
+	}
+	slices.Sort(reads)
+	want := []string{"/calendars/" + me + "/events/ghost1", "/calendars/" + me + "/events/series1", "/calendars/" + me + "/events/series2"}
+	if !slices.Equal(reads, want) {
+		t.Errorf("series reads = %v, want %v", reads, want)
+	}
+}
+
+func TestSyncTooManyOrphansSyncsInFull(t *testing.T) {
+	st, srv := newStore(t)
+	const n = 51 // one more series than a Sync reads
+	for i := range n {
+		srv.AddEvent(me, seriesEvent("series"+itoa(i)))
+	}
+	ch, err := st.Sync(ctx(t), me, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range n {
+		srv.AddEvent(me, cancelledInstance("series"+itoa(i), "20261117T170000Z", "2026-11-17T09:00:00-08:00"))
+	}
+	before := len(srv.Requests())
+	inc, err := st.Sync(ctx(t), me, ch.Token)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if !inc.Full || len(inc.Upserts) != 2*n {
+		t.Errorf("Full %v with %d upserts, want a full sync of %d", inc.Full, len(inc.Upserts), 2*n)
+	}
+	for _, ev := range inc.Upserts {
+		if ev.UID != ev.ProviderID+"@example.org" {
+			t.Errorf("%s@%v UID = %q", ev.ProviderID, ev.RecurrenceID, ev.UID)
+		}
+	}
+	for _, r := range srv.Requests()[before:] {
+		if r.Method == "GET" && !strings.HasSuffix(r.Path, "/events") {
+			t.Errorf("read a series one by one: %s", r.Path)
 		}
 	}
 }

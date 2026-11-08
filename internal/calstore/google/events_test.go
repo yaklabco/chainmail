@@ -82,7 +82,7 @@ func TestGetEvent(t *testing.T) {
 	if _, ok := got["series1@20261117T170000Z"]; !ok {
 		t.Errorf("moved override missing: %v", slices.Collect(maps.Keys(got)))
 	}
-	if c := got["series1@20261124T170000Z"]; c.Status != calendar.StatusCancelled {
+	if c := got["series1@20261124T170000Z"]; c.Status != calendar.StatusCancelled || c.UID != "series1@example.org" {
 		t.Errorf("cancelled override = %+v", c)
 	}
 	for _, ev := range series {
@@ -360,18 +360,27 @@ func TestRespondSeries(t *testing.T) {
 		t.Errorf("respond request %s If-Match %q query %v", req.Path, req.IfMatch, req.Query)
 	}
 	b := body(t, req)
-	if k := keys(b); !slices.Equal(k, []string{"attendees"}) {
+	if k := keys(b); !slices.Equal(k, []string{"attendees", "attendeesOmitted"}) {
 		t.Errorf("respond patched %v", k)
 	}
 	self := attendee(t, b, me)
 	if self["responseStatus"] != "accepted" || self["comment"] != "see you" || self["additionalGuests"] != float64(1) {
 		t.Errorf("self attendee = %v", self)
 	}
-	if boss := attendee(t, b, "boss@example.org"); boss["responseStatus"] != "accepted" {
+	// A participant-only update: only self is sent, and the other attendees
+	// stay as they were.
+	if b["attendeesOmitted"] != true || len(b["attendees"].([]any)) != 1 {
+		t.Errorf("respond body is not a participant-only update: %v", b)
+	}
+	stored, _ := srv.Event(me, "single1")
+	if boss := attendee(t, stored, "boss@example.org"); boss["responseStatus"] != "accepted" {
 		t.Errorf("organizer attendee changed: %v", boss)
 	}
-	if opt := attendee(t, b, "opt@example.org"); opt["responseStatus"] != "tentative" {
+	if opt := attendee(t, stored, "opt@example.org"); opt["responseStatus"] != "tentative" {
 		t.Errorf("other attendee changed: %v", opt)
+	}
+	if n := len(stored["attendees"].([]any)); n != 3 {
+		t.Errorf("stored event has %d attendees, want 3", n)
 	}
 	var mine calendar.PartStat
 	for _, a := range got.Attendees {
@@ -498,5 +507,157 @@ func TestEventPathEscapesIDs(t *testing.T) {
 	}
 	if _, err := st.Sync(ctx(t), readOnly, ""); err != nil {
 		t.Fatalf("sync of a calendar id with #: %v", err)
+	}
+}
+
+func TestPutUpdateSwitchesAllDay(t *testing.T) {
+	st, srv := newStore(t)
+	srv.AddEvent(me, timedEvent("single1"))
+	ev := getOne(t, st, "single1")
+
+	// Timed to all-day: date replaces dateTime and timeZone.
+	ev.AllDay, ev.TZID = true, ""
+	ev.Start, ev.End = utc(2026, 11, 10, 0, 0), utc(2026, 11, 11, 0, 0)
+	got, err := st.Put(ctx(t), me, ev, ev.ETag, calendar.NotifyNone)
+	if err != nil {
+		t.Fatalf("to all-day: %v", err)
+	}
+	stored, _ := srv.Event(me, "single1")
+	if s := stored["start"].(map[string]any); len(s) != 1 || s["date"] != "2026-11-10" {
+		t.Errorf("stored all-day start = %v", s)
+	}
+	if e := stored["end"].(map[string]any); len(e) != 1 || e["date"] != "2026-11-11" {
+		t.Errorf("stored all-day end = %v", e)
+	}
+	if !got.AllDay || !got.Start.Equal(ev.Start) || !got.End.Equal(ev.End) || got.TZID != "" {
+		t.Errorf("all-day event = %+v", got)
+	}
+
+	// All-day to timed: dateTime and timeZone replace date.
+	got.AllDay, got.TZID = false, la
+	got.Start, got.End = utc(2026, 11, 10, 18, 0), utc(2026, 11, 10, 19, 0)
+	back, err := st.Put(ctx(t), me, got, got.ETag, calendar.NotifyNone)
+	if err != nil {
+		t.Fatalf("to timed: %v", err)
+	}
+	stored, _ = srv.Event(me, "single1")
+	if s := stored["start"].(map[string]any); len(s) != 2 || s["dateTime"] != "2026-11-10T10:00:00-08:00" || s["timeZone"] != la {
+		t.Errorf("stored timed start = %v", s)
+	}
+	if back.AllDay || !back.Start.Equal(got.Start) || !back.End.Equal(got.End) || back.TZID != la {
+		t.Errorf("timed event = %+v", back)
+	}
+}
+
+func TestRespondOmittedAttendees(t *testing.T) {
+	st, srv := newStore(t)
+	srv.AddEvent(me, timedEvent("single1"))
+	// Google shows only the participant of a large event.
+	srv.SetMaxAttendees(2)
+	if _, err := st.Respond(ctx(t), me, "single1", calendar.Response{Self: me, PartStat: calendar.PartStatAccepted}); err != nil {
+		t.Fatalf("Respond with omitted attendees: %v", err)
+	}
+	stored, _ := srv.Event(me, "single1")
+	if n := len(stored["attendees"].([]any)); n != 3 {
+		t.Fatalf("respond dropped attendees: %d left, want 3", n)
+	}
+	self := attendee(t, stored, me)
+	if self["responseStatus"] != "accepted" || self["comment"] != "earlier note" || self["additionalGuests"] != float64(1) {
+		t.Errorf("self attendee = %v", self)
+	}
+	if boss := attendee(t, stored, "boss@example.org"); boss["responseStatus"] != "accepted" {
+		t.Errorf("organizer attendee changed: %v", boss)
+	}
+
+	// Google may leave the participant out too when it omits attendees;
+	// the answer still goes as a participant-only update by address.
+	noFlag := timedEvent("single2")
+	for _, a := range noFlag["attendees"].([]any) {
+		delete(a.(map[string]any), "self")
+	}
+	srv.AddEvent(me, noFlag)
+	if _, err := st.Respond(ctx(t), me, "single2", calendar.Response{Self: me, PartStat: calendar.PartStatDeclined, Comment: "away"}); err != nil {
+		t.Fatalf("Respond when the participant is not shown: %v", err)
+	}
+	req, _ := srv.LastRequest("PATCH")
+	if b := body(t, req); b["attendeesOmitted"] != true || len(b["attendees"].([]any)) != 1 {
+		t.Errorf("respond body = %v", b)
+	}
+	stored, _ = srv.Event(me, "single2")
+	if n := len(stored["attendees"].([]any)); n != 3 {
+		t.Fatalf("respond dropped attendees: %d left, want 3", n)
+	}
+	if self := attendee(t, stored, me); self["responseStatus"] != "declined" || self["comment"] != "away" {
+		t.Errorf("self attendee = %v", self)
+	}
+}
+
+func TestPutUpdateExceptionOfOtherKind(t *testing.T) {
+	st, srv := newStore(t)
+	// A timed series whose 17 November instance became all-day.
+	srv.AddEvent(me, seriesEvent("series1"))
+	toAllDay := exception("series1", "20261117T170000Z", "2026-11-17T09:00:00-08:00", "2026-11-17T11:00:00-08:00")
+	toAllDay["start"] = map[string]any{"date": "2026-11-17"}
+	toAllDay["end"] = map[string]any{"date": "2026-11-18"}
+	srv.AddEvent(me, toAllDay)
+	// An all-day series whose 19 November instance became timed.
+	srv.AddEvent(me, map[string]any{
+		"id": "daily1", "iCalUID": "daily1@example.org",
+		"start": map[string]any{"date": "2026-11-12"}, "end": map[string]any{"date": "2026-11-13"},
+		"recurrence": []any{"RRULE:FREQ=WEEKLY"},
+	})
+	srv.AddEvent(me, map[string]any{
+		"id": "daily1_20261119", "recurringEventId": "daily1", "iCalUID": "daily1@example.org",
+		"originalStartTime": map[string]any{"date": "2026-11-19"},
+		"start":             map[string]any{"dateTime": "2026-11-19T09:00:00-08:00", "timeZone": la},
+		"end":               map[string]any{"dateTime": "2026-11-19T10:00:00-08:00", "timeZone": la},
+	})
+
+	cases := []struct {
+		series, key, wantPath string
+		allDay                bool
+	}{
+		{"series1", "series1@20261117T170000Z", "/calendars/" + me + "/events/series1_20261117T170000Z", true},
+		{"daily1", "daily1@20261119T000000Z", "/calendars/" + me + "/events/daily1_20261119", false},
+	}
+	for _, tc := range cases {
+		evs, err := st.GetEvent(ctx(t), me, tc.series)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ov, ok := byKey(evs)[tc.key]
+		if !ok || ov.AllDay != tc.allDay {
+			t.Fatalf("%s: override %+v (found %v)", tc.key, ov, ok)
+		}
+		// With the instance JSON in Raw, and without it.
+		for _, keepRaw := range []bool{true, false} {
+			ev := ov
+			if !keepRaw {
+				ev.Raw = nil
+			}
+			ev.Location = "Room " + tc.key
+			got, err := st.Put(ctx(t), me, ev, ev.ETag, calendar.NotifyNone)
+			if err != nil {
+				t.Fatalf("%s (raw %v): %v", tc.key, keepRaw, err)
+			}
+			req, _ := srv.LastRequest("PATCH")
+			if req.Path != tc.wantPath {
+				t.Errorf("%s (raw %v): patched %s, want %s", tc.key, keepRaw, req.Path, tc.wantPath)
+			}
+			ov = got
+		}
+	}
+}
+
+func TestGetEventOverrideUID(t *testing.T) {
+	st, srv := newStore(t)
+	srv.AddEvent(me, seriesEvent("series1"))
+	srv.AddEvent(me, cancelledInstance("series1", "20261124T170000Z", "2026-11-24T09:00:00-08:00"))
+	evs, err := st.GetEvent(ctx(t), me, "series1_20261124T170000Z")
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("GetEvent of a cancelled instance: %+v, %v", evs, err)
+	}
+	if evs[0].UID != "series1@example.org" || evs[0].ProviderID != "series1" {
+		t.Errorf("cancelled instance = %+v", evs[0])
 	}
 }

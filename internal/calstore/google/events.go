@@ -15,6 +15,8 @@ import (
 // GetEvent returns one event: a single event, or a series master followed
 // by its exceptions (cancelled instances among them). Google keeps a
 // deleted event for a while; GetEvent returns it with Status CANCELLED.
+// Every override carries its series's UID, which Google leaves out of
+// cancelled instances.
 func (s *Store) GetEvent(ctx context.Context, calID, providerID string) ([]calendar.Event, error) {
 	data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, providerID), limit: maxEventBytes})
 	if err != nil {
@@ -23,6 +25,12 @@ func (s *Store) GetEvent(ctx context.Context, calID, providerID string) ([]calen
 	ev, a, err := decodeEvent(data)
 	if err != nil {
 		return nil, err
+	}
+	if ev.UID == "" && !ev.RecurrenceID.IsZero() {
+		// One instance, asked for by its instance id.
+		if ev.UID, err = s.seriesUID(ctx, calID, ev.ProviderID); err != nil {
+			return nil, err
+		}
 	}
 	out := []calendar.Event{ev}
 	if !ev.IsMaster() || a.ICalUID == "" {
@@ -33,6 +41,9 @@ func (s *Store) GetEvent(ctx context.Context, calID, providerID string) ([]calen
 	q.Set("iCalUID", a.ICalUID)
 	err = s.listEvents(ctx, calID, q, false, func(ex calendar.Event, xa apiEvent) {
 		if xa.RecurringEventID == providerID {
+			if ex.UID == "" {
+				ex.UID = a.ICalUID
+			}
 			out = append(out, ex)
 		}
 	}, func(string) {})
@@ -56,7 +67,11 @@ func (s *Store) Put(ctx context.Context, calID string, ev calendar.Event, etag s
 	}
 	target := ev.ProviderID
 	if !ev.RecurrenceID.IsZero() {
-		target = InstanceID(ev.ProviderID, ev.RecurrenceID, ev.AllDay)
+		id, err := s.instanceID(ctx, calID, ev.ProviderID, ev.RecurrenceID, ev.Raw)
+		if err != nil {
+			return calendar.Event{}, err
+		}
+		target = id
 	}
 	var old *calendar.Event
 	if len(ev.Raw) > 0 {
@@ -129,10 +144,10 @@ func patchBody(ev calendar.Event, old *calendar.Event, known map[string]map[stri
 	}
 	sameZone := old != nil && ev.AllDay == old.AllDay && ev.TZID == old.TZID
 	if differs(sameZone && ev.Start.Equal(old.Start)) {
-		b["start"] = eventTime(ev.Start, ev.TZID, ev.AllDay)
+		b["start"] = patchTime(ev.Start, ev.TZID, ev.AllDay)
 	}
 	if differs(sameZone && ev.End.Equal(old.End)) {
-		b["end"] = eventTime(ev.End, ev.TZID, ev.AllDay)
+		b["end"] = patchTime(ev.End, ev.TZID, ev.AllDay)
 	}
 	if differs(old != nil && ev.Transparent == old.Transparent) {
 		b["transparency"] = "opaque"
@@ -177,7 +192,9 @@ func sameRecurrence(a, b calendar.Event) bool {
 
 // Respond sets r.Self's responseStatus, and comment when r.Comment is set,
 // on the event or on the instance r.RecurrenceID names, with
-// sendUpdates=all so Google tells the organizer. It reads the event first
+// sendUpdates=all so Google tells the organizer. It sends a participant-only
+// update (attendeesOmitted true with only the self attendee), so attendees
+// Google left out of the event it read are kept. It reads the event first
 // and patches with If-Match on the etag it read, so a change in between
 // gives calstore.ErrConflict.
 func (s *Store) Respond(ctx context.Context, calID, providerID string, r calendar.Response) (calendar.Event, error) {
@@ -190,40 +207,48 @@ func (s *Store) Respond(ctx context.Context, calID, providerID string, r calenda
 	}
 	target := providerID
 	if !r.RecurrenceID.IsZero() {
-		data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, providerID), limit: maxEventBytes})
+		id, err := s.instanceID(ctx, calID, providerID, r.RecurrenceID, nil)
 		if err != nil {
 			return calendar.Event{}, err
 		}
-		master, _, err := decodeEvent(data)
-		if err != nil {
-			return calendar.Event{}, err
-		}
-		target = InstanceID(providerID, r.RecurrenceID, master.AllDay)
+		target = id
 	}
 	data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, target), limit: maxEventBytes})
 	if err != nil {
 		return calendar.Event{}, err
 	}
 	var cur struct {
-		ETag      string           `json:"etag"`
-		Attendees []map[string]any `json:"attendees"`
+		ETag             string           `json:"etag"`
+		Attendees        []map[string]any `json:"attendees"`
+		AttendeesOmitted bool             `json:"attendeesOmitted"`
 	}
 	if err := json.Unmarshal(data, &cur); err != nil {
 		return calendar.Event{}, errBadResponse
 	}
-	self := slices.IndexFunc(cur.Attendees, func(a map[string]any) bool {
+	idx := slices.IndexFunc(cur.Attendees, func(a map[string]any) bool {
 		email, _ := a["email"].(string)
 		return strings.EqualFold(email, r.Self)
 	})
-	if self < 0 {
+	var self map[string]any
+	switch {
+	case idx >= 0:
+		self = cur.Attendees[idx] // keeps the fields chainmail does not model
+	case cur.AttendeesOmitted:
+		// Google may not show the participant of a large event; it matches
+		// the update to the attendee by address.
+		self = map[string]any{"email": r.Self}
+	default:
 		return calendar.Event{}, fmt.Errorf("%w: the account is not an attendee", ErrRequest)
 	}
-	cur.Attendees[self]["responseStatus"] = status
+	self["responseStatus"] = status
 	if r.Comment != "" {
-		cur.Attendees[self]["comment"] = r.Comment
+		self["comment"] = r.Comment
 	}
+	// A participant-only update: PATCH replaces arrays, so sending the list
+	// as read would drop every attendee Google left out of it.
+	body := map[string]any{"attendees": []map[string]any{self}, "attendeesOmitted": true}
 	return s.write(ctx, call{
-		method: "PATCH", path: eventPath(calID, target), body: map[string]any{"attendees": cur.Attendees},
+		method: "PATCH", path: eventPath(calID, target), body: body,
 		ifMatch: cur.ETag, query: sendQuery(calendar.NotifySend), write: true,
 	})
 }
@@ -251,4 +276,29 @@ func (s *Store) write(ctx context.Context, c call) (calendar.Event, error) {
 
 func sendQuery(mode calendar.Notify) url.Values {
 	return url.Values{"sendUpdates": {sendUpdates(mode)}}
+}
+
+// instanceID is the id of the instance rid of the series id. Google names an
+// instance by the kind of its original start (originalStartTime), which is
+// the series's kind, not by its current one: an exception moved from timed
+// to all-day keeps its timed id. raw, the instance's JSON when the caller has
+// it, gives the id directly; otherwise the master is read for its kind.
+func (s *Store) instanceID(ctx context.Context, calID, id string, rid time.Time, raw []byte) (string, error) {
+	if len(raw) > 0 {
+		var a apiEvent
+		if json.Unmarshal(raw, &a) == nil && a.ID != "" && a.RecurringEventID == id {
+			if orig, _, _, err := parseTime(a.OriginalStartTime); err == nil && orig.Equal(rid) {
+				return a.ID, nil
+			}
+		}
+	}
+	data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, id), limit: maxEventBytes})
+	if err != nil {
+		return "", err
+	}
+	master, _, err := decodeEvent(data)
+	if err != nil {
+		return "", err
+	}
+	return InstanceID(id, rid, master.AllDay), nil
 }

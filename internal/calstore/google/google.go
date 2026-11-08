@@ -10,9 +10,11 @@
 //   - Events are listed with singleEvents=false, so a series comes as its
 //     master and its exceptions. An exception becomes an override: the
 //     master's ProviderID with RecurrenceID from originalStartTime. A
-//     cancelled instance is a CANCELLED override. A cancelled event that is
-//     not an instance was deleted and becomes a Delete, and the cancelled
-//     instances listed with a deleted series are dropped.
+//     cancelled instance is a CANCELLED override. Every override carries
+//     its master's UID, read from the master when Google leaves it out. A
+//     cancelled event that is not an instance was deleted and becomes a
+//     Delete, and the cancelled instances listed with a deleted series are
+//     dropped.
 //   - Raw is the event JSON. Updates PATCH only the fields that differ from
 //     Raw, and keep what Google knows of each attendee (comments, guests,
 //     flags) that chainmail does not model.
@@ -124,7 +126,9 @@ func ObjectID(uid string) string {
 }
 
 // InstanceID is Google's id of the instance of series id that starts at
-// rid: id_YYYYMMDDTHHMMSSZ, or id_YYYYMMDD for an all-day series.
+// rid: id_YYYYMMDDTHHMMSSZ, or id_YYYYMMDD for an all-day series. allDay is
+// the series's kind (the instance's originalStartTime), not the kind an
+// exception has now.
 func InstanceID(id string, rid time.Time, allDay bool) string {
 	if allDay {
 		return id + "_" + rid.UTC().Format("20060102")
