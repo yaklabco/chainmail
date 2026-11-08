@@ -209,8 +209,11 @@ type Server struct {
 	// state or deletion, through the items store's due hook.
 	dueChecker *rules.DueChecker
 	// ruleRunners are the rule runners of the accounts with a cache
-	// worker, by account. startWatch fills it before any handler runs, and
-	// it never changes after. An account without a runner runs no rules.
+	// worker, by account. startWatch fills it before startBackground starts
+	// the rule scheduler and before any handler runs, and it never changes
+	// after. An account without a runner acts on no rule: its scheduled and
+	// manual runs are recorded as cache_not_ready with the reason
+	// cache_disabled.
 	ruleRunners map[string]*ruleRunner
 	// rulesWake wakes the rule scheduler after a rule change so it plans
 	// again. It holds at most one wakeup.
@@ -351,10 +354,16 @@ func (s *Server) Serve(ctx context.Context) error {
 	// returns.
 	s.openCache(base)
 	defer s.closeCache()
-	defer s.startBackground(base)()
 	// Supervisors start once sends are recovered, on base, so a shutdown
-	// cancels them with the requests. drain joins them.
+	// cancels them with the requests. drain joins them. They start before
+	// the background loops, since the rule scheduler among those reads
+	// the rule runners startWatch records.
 	s.startWatch(base)
+	// The background loops, the rule scheduler among them, stop and are
+	// joined when Serve returns, after drain and before closeCache, so
+	// none outlives the stores or state.db, which the caller closes after
+	// Serve.
+	defer s.startBackground(base)()
 	s.httpSrv.BaseContext = func(net.Listener) context.Context { return base }
 	errc := make(chan error, 1)
 	go func() { errc <- s.httpSrv.Serve(s.opts.Listener) }()

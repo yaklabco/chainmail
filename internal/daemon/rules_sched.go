@@ -10,6 +10,7 @@ import (
 
 	"github.com/yaklabco/chainmail/internal/config"
 	"github.com/yaklabco/chainmail/internal/rules"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // runOnAccounts runs rule once on each of accts, all at once: through the
@@ -76,9 +77,14 @@ func (s *Server) recordCacheDisabled(ctx context.Context, rule rules.Rule, accou
 }
 
 const (
-	// ruleSchedulerIdle is the scheduler's longest sleep. A rule change
-	// wakes it sooner.
+	// ruleSchedulerIdle is the longest the scheduler waits between passes.
+	// A rule change wakes it sooner.
 	ruleSchedulerIdle = time.Hour
+	// ruleSchedulerMaxSleep bounds each of the scheduler's sleeps. It reads
+	// the wall clock after every sleep, so a machine that slept through a
+	// rule's time, which pauses the monotonic clock a timer runs on, runs
+	// the rule within ruleSchedulerMaxSleep of resuming.
+	ruleSchedulerMaxSleep = 5 * time.Minute
 	// ruleSchedulerRetry is the scheduler's sleep after a failure, or when
 	// a rule stays due after its pass because it covers no account it can
 	// run on, so such a rule cannot spin the loop.
@@ -125,20 +131,43 @@ func (w schedWarned) level(rule rules.Rule) slog.Level {
 }
 
 // runRuleScheduler runs each scheduled rule when its next run comes, until
-// ctx ends. It sleeps on the rules clock until the earliest next run,
-// for at most ruleSchedulerIdle, and wakes early when a rule changes. A
-// rule whose next run passed while the daemon was down runs once.
+// ctx ends. It waits until the earliest next run, for at most
+// ruleSchedulerIdle, and wakes early when a rule changes. A rule whose
+// next run passed while the daemon was down runs once.
 func (s *Server) runRuleScheduler(ctx context.Context) {
 	warned := schedWarned{}
 	for {
 		wait := s.ruleSchedulerPass(ctx, warned)
-		select {
-		case <-ctx.Done():
+		if !s.ruleSchedulerSleep(ctx, wallNow(s.rulesClock).Add(wait)) {
 			return
-		case <-s.rulesClock.After(wait):
-		case <-s.rulesWake:
 		}
 	}
+}
+
+// ruleSchedulerSleep waits on the rules clock until the wall clock reaches
+// wake or a rule change wakes the scheduler, sleeping at most
+// ruleSchedulerMaxSleep at a time. It returns false when ctx ends first.
+func (s *Server) ruleSchedulerSleep(ctx context.Context, wake time.Time) bool {
+	for {
+		wait := wake.Sub(wallNow(s.rulesClock))
+		if wait <= 0 {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-s.rulesWake:
+			return true
+		case <-s.rulesClock.After(min(wait, ruleSchedulerMaxSleep)):
+		}
+	}
+}
+
+// wallNow is clock's time without its monotonic reading, so comparisons
+// with it follow the wall clock, which keeps running while the machine
+// sleeps.
+func wallNow(clock watch.Clock) time.Time {
+	return clock.Now().Round(0)
 }
 
 // ruleSchedulerPass runs every due rule once, in priority order, and

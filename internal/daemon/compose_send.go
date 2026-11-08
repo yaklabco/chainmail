@@ -88,11 +88,14 @@ func (s *Server) openSendState() error {
 }
 
 // startBackground runs the idempotency pruner, the upload sweeper, the
-// event log trimmer, the item tables' trimmer, the due checker and, with a
-// cache, the evictor and the cache housekeeping until ctx ends or the
-// returned stop is called. stop waits for all of them to return. The
-// trimmers and the due checker run with DisableWatch too, since the log and
-// its handlers still work then.
+// event log trimmer, the item tables' trimmer, the due checker, the rule
+// scheduler and, with a cache, the evictor and the cache housekeeping
+// until ctx ends or the returned stop is called. stop waits for all of
+// them to return. The trimmers, the due checker and the rule scheduler
+// run with DisableWatch too, since the log and its handlers still work
+// then: a scheduled run on an account with no rule runner is recorded as
+// cache_not_ready with the reason cache_disabled. The scheduler reads
+// ruleRunners, so Serve calls startWatch first.
 func (s *Server) startBackground(ctx context.Context) (stop func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
@@ -104,6 +107,7 @@ func (s *Server) startBackground(ctx context.Context) (stop func()) {
 	wg.Go(func() { s.watchLog.Run(ctx, s.trimInterval, settings.Retention, settings.MaxEvents) })
 	wg.Go(func() { s.runItemsTrim(ctx, s.trimInterval, settings.Retention) })
 	wg.Go(func() { s.dueChecker.Run(ctx, s.rulesClock) })
+	wg.Go(func() { s.runRuleScheduler(ctx) })
 	if s.cacheEvictor != nil {
 		wg.Go(func() { s.cacheEvictor.Run(ctx) })
 		wg.Go(func() { s.runCacheHousekeeping(ctx) })

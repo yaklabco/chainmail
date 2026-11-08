@@ -105,6 +105,26 @@ func nextSchedWait(t *testing.T, clk *schedClock) schedWait {
 	}
 }
 
+// schedSleepsUntil checks that the scheduler, having asked w, sleeps
+// toward wake at most ruleSchedulerMaxSleep at a time: its first sleep is
+// the lesser of the two, and woken a second before wake it sleeps the last
+// second instead of running a pass. It returns that last wait, for the
+// test to fire once it has moved clk to wake.
+func schedSleepsUntil(t *testing.T, clk *schedClock, w schedWait, wake time.Time) schedWait {
+	t.Helper()
+	if want := min(wake.Sub(clk.Now()), ruleSchedulerMaxSleep); w.d != want {
+		t.Errorf("the scheduler sleeps %v, want %v toward %v", w.d, want, wake)
+	}
+	early := wake.Add(-time.Second)
+	clk.set(early)
+	w.fire <- early
+	last := nextSchedWait(t, clk)
+	if last.d != time.Second {
+		t.Errorf("woken a second before %v the scheduler sleeps %v, want 1s", wake, last.d)
+	}
+	return last
+}
+
 // schedRule creates a scheduled rule on the store directly, changed by
 // edit when it is not nil.
 func schedRule(t *testing.T, s *Server, name, schedule string, edit func(*rules.Definition)) rules.Rule {
@@ -166,10 +186,7 @@ func TestRuleSchedulerFiresEachDueRuleOnce(t *testing.T) {
 			clk.set(st.at)
 			w.fire <- st.at
 		}
-		w = nextSchedWait(t, clk)
-		if w.d != st.wait {
-			t.Errorf("step %d: waits %v, want %v", i, w.d, st.wait)
-		}
+		w = schedSleepsUntil(t, clk, nextSchedWait(t, clk), st.at.Add(st.wait))
 		if n := len(schedRuns(t, s, hourly.ID)); n != st.hourly {
 			t.Errorf("step %d: hourly ran %d times, want %d", i, n, st.hourly)
 		}
@@ -195,23 +212,21 @@ func TestRuleSchedulerCatchesUpOnce(t *testing.T) {
 	hourly := schedRule(t, s, "hourly", "every:1h", nil)
 	clk.set(t0.Add(5 * time.Hour))
 	startScheduler(t, s)
-	if w := nextSchedWait(t, clk); w.d != time.Hour {
-		t.Errorf("waits %v after catching up, want 1h", w.d)
-	}
+	// After catching up it sleeps until an hour from now.
+	schedSleepsUntil(t, clk, nextSchedWait(t, clk), t0.Add(6*time.Hour))
 	if n := len(schedRuns(t, s, hourly.ID)); n != 2 {
 		t.Errorf("hourly ran %d times, want once on each of 2 accounts", n)
 	}
 }
 
-// With no scheduled rule the scheduler sleeps its longest; a rule change
-// over the API wakes it to plan again.
+// With no scheduled rule the scheduler waits its longest, in sleeps of at
+// most ruleSchedulerMaxSleep; a rule change over the API wakes it to plan
+// again.
 func TestRuleSchedulerReplansOnRuleChanges(t *testing.T) {
 	t.Parallel()
 	s, clk := schedServer(t, time.Date(2026, 11, 7, 8, 30, 0, 0, time.UTC))
 	startScheduler(t, s)
-	if w := nextSchedWait(t, clk); w.d != ruleSchedulerIdle {
-		t.Errorf("idle wait = %v, want %v", w.d, ruleSchedulerIdle)
-	}
+	schedSleepsUntil(t, clk, nextSchedWait(t, clk), clk.Now().Add(ruleSchedulerIdle))
 	rs := &rulesService{s: s}
 	ctx := peerContext(t.Context())
 	if _, err := rs.CreateRule(ctx, connect.NewRequest(&chainmailv1.CreateRuleRequest{Rule: &chainmailv1.RuleDefinition{
@@ -219,17 +234,17 @@ func TestRuleSchedulerReplansOnRuleChanges(t *testing.T) {
 	}})); err != nil {
 		t.Fatal(err)
 	}
-	if w := nextSchedWait(t, clk); w.d != 15*time.Minute {
-		t.Errorf("after the create the scheduler waits %v, want 15m", w.d)
-	}
+	// The create wakes the scheduler, which plans the new rule's first
+	// run 15 minutes from now.
+	schedSleepsUntil(t, clk, nextSchedWait(t, clk), clk.Now().Add(15*time.Minute))
 	if _, err := rs.UpdateRule(ctx, connect.NewRequest(&chainmailv1.UpdateRuleRequest{
 		Rule: "often", Patch: &chainmailv1.RuleDefinition{}, UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"enabled"}},
 	})); err != nil {
 		t.Fatal(err)
 	}
-	if w := nextSchedWait(t, clk); w.d != ruleSchedulerIdle {
-		t.Errorf("after disabling the scheduler waits %v, want %v", w.d, ruleSchedulerIdle)
-	}
+	// Disabled, the rule leaves nothing scheduled, so the scheduler waits
+	// its longest again.
+	schedSleepsUntil(t, clk, nextSchedWait(t, clk), clk.Now().Add(ruleSchedulerIdle))
 	s.pokeRuleScheduler()
 	s.pokeRuleScheduler() // a second poke while one is pending must not block
 	nextSchedWait(t, clk)
@@ -255,7 +270,7 @@ func TestRuleSchedulerRetriesARuleThatStaysDue(t *testing.T) {
 }
 
 // startWatch starts a rule runner for each account with a cache worker,
-// and stopWatch joins them and the scheduler.
+// and stopWatch joins them. The scheduler starts in startBackground.
 func TestStartWatchStartsRuleRunners(t *testing.T) {
 	t.Parallel()
 	s, _ := newCacheServerOptions(t, cacheConfig, Options{
@@ -269,16 +284,21 @@ func TestStartWatchStartsRuleRunners(t *testing.T) {
 	}
 }
 
-// startBackground runs the due checker on the rules clock: it scans, then
-// plans its wake for the next due time, 08:00 the next day from noon, and
-// sleeps toward it five minutes at a time.
+// startBackground runs the due checker and the rule scheduler on the rules
+// clock. The due checker scans, then plans its wake for the next due time,
+// 08:00 the next day from noon, and sleeps toward it five minutes at a
+// time. The scheduler, with no rule, sleeps five minutes at a time too.
+// Both waits are read, in whichever order they come, before the due
+// checker's wake is.
 func TestStartBackgroundRunsTheDueChecker(t *testing.T) {
 	t.Parallel()
 	s, clk := schedServer(t, time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC))
 	stop := s.startBackground(t.Context())
 	defer stop()
-	if w := nextSchedWait(t, clk); w.d != 5*time.Minute {
-		t.Errorf("the due checker waits %v, want 5m", w.d)
+	for range 2 {
+		if w := nextSchedWait(t, clk); w.d != 5*time.Minute {
+			t.Errorf("a background loop waits %v, want 5m", w.d)
+		}
 	}
 	if got, want := s.dueChecker.NextWake(), time.Date(2026, 11, 8, 8, 0, 0, 0, time.UTC); !got.Equal(want) {
 		t.Errorf("the due checker wakes at %v, want %v", got, want)
@@ -451,5 +471,75 @@ func waitFinishedRuns(t *testing.T, s *Server, ruleID string, n int) []rules.Run
 			t.Fatalf("%d of %d runs finished within 5s", finished, n)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A daemon that watches no account still runs its scheduled rules: Serve
+// starts the scheduler with the background loops, so a due rule runs on
+// each account it covers as a cache_not_ready run with the reason
+// cache_disabled, and its next run moves past now. Serve then stops and
+// joins the scheduler before it returns, so the test's state.db, which
+// closes at cleanup after Serve, is never used after it closes.
+func TestServeRunsScheduledRulesWithoutWatch(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 11, 7, 8, 30, 0, 0, time.UTC)
+	clk := &schedClock{now: t0, waits: make(chan schedWait, 8)}
+	s, _ := newTestServerOptions(t, schedConfig, Options{Now: clk.Now, DisableWatch: true})
+	s.rulesClock = clk
+	hourly := schedRule(t, s, "hourly", "every:1h", nil) // next 09:30
+	now := t0.Add(90 * time.Minute)
+	clk.set(now)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Serve: %v", err)
+		}
+	})
+	want := now.Add(time.Hour)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, err := s.rules.Get(t.Context(), hourly.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.NextRunAt.Equal(want) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("next run = %v after 5s, want %v: the scheduler did not run the due rule", got.NextRunAt, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	runs := waitFinishedRuns(t, s, hourly.ID, 2)
+	if n := len(schedRuns(t, s, hourly.ID)); n != 2 || len(runs) != 2 {
+		t.Errorf("hourly ran %d times, want once on each of 2 accounts", n)
+	}
+}
+
+// The scheduler sleeps at most ruleSchedulerMaxSleep at a time and reads
+// the wall clock after each sleep, so a machine that wakes from suspend
+// past a rule's time, which the monotonic timers never saw pass, runs the
+// rule within that bound of resuming, not after the rest of a long sleep.
+func TestRuleSchedulerSleepFollowsTheWallClock(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 11, 7, 8, 30, 0, 0, time.UTC)
+	s, clk := schedServer(t, t0)
+	evening := schedRule(t, s, "evening", "at:20:00", nil)
+	startScheduler(t, s)
+	w := nextSchedWait(t, clk)
+	if w.d != 5*time.Minute {
+		t.Fatalf("the scheduler sleeps %v, want 5m at most", w.d)
+	}
+	resumed := time.Date(2026, 11, 7, 21, 0, 0, 0, time.UTC)
+	clk.set(resumed)
+	w.fire <- resumed
+	if w := nextSchedWait(t, clk); w.d != 5*time.Minute {
+		t.Errorf("after the run the scheduler sleeps %v, want 5m", w.d)
+	}
+	if n := len(schedRuns(t, s, evening.ID)); n != 2 {
+		t.Errorf("evening ran %d times after the resume, want once on each of 2 accounts", n)
 	}
 }
