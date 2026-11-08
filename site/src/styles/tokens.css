@@ -1,0 +1,267 @@
+/* The page tokens and the page CSS, from mock 2. Loaded after the kit stylesheets: layout.css resets --ly-scale. */
+:root {
+  --p-bg: #090d16; --p-surface: #111827; --p-ink: #f3f1ea; --p-muted: #87898a;
+  --p-accent: #d4a84b; --p-accent-ink: #090d16; --p-action: #d4a84b; --p-action-ink: #090d16;
+  --p-inv-bg: #f3f1ea; --p-inv-surface: #e0dfd9; --p-inv-ink: #090d16; --p-inv-muted: #56595e;
+  --p-inv-accent: #090d16; --p-inv-accent-ink: #f3f1ea; --p-inv-action: #090d16; --p-inv-action-ink: #f3f1ea;
+  --font-display: "Instrument Sans Variable", "Instrument Sans", system-ui, sans-serif;
+  --font-text: "Instrument Sans Variable", "Instrument Sans", system-ui, sans-serif;
+  --font-mono: "DM Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --display-weight: 500;
+  --display-tracking: -0.028em;
+  --display-tracking-xl: -0.036em;
+  --display-stretch: 96%;
+  --ly-scale: 1.04;
+}
+
+/* ---------------------------------------------------------------- page CSS: only inside the visuals */
+
+/* the windows: one dark surface for every terminal and app window on the page, set on the kit's .ui tokens */
+.cm-win {
+  --fx-bg: #0d1220; --fx-surface: #141b2b; --fx-ink: #ecebe4; --fx-muted: #8f97a6; --fx-accent: #d4a84b; --fx-accent-ink: #090d16;
+  --ui-font: var(--font-text); --ui-radius: 12px;
+  --cm-str: #d9d6c8; --cm-key: #9aa3b4; --cm-dim: #6f7787;
+  overflow: hidden; color: var(--u-ink); text-align: left;
+}
+.cm-bar { display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 14px; border-bottom: 1px solid var(--u-line); background: color-mix(in oklab, var(--u-bg) 92%, black); }
+.cm-bar__title { font: 400 13px/1 var(--font-mono); color: var(--u-muted); white-space: nowrap; overflow: hidden; text-overflow: clip; }
+.cm-bar__title b { font-weight: 500; color: var(--u-ink); }
+.cm-tag { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px; border-radius: 6px; flex: none;
+          font: 400 12px/1 var(--font-mono); color: var(--u-muted); box-shadow: inset 0 0 0 1px var(--u-line-2); white-space: nowrap; }
+.cm-tag::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #7fae86; }
+.cm-tag--plain::before { display: none; }
+.cm-mono { font-family: var(--font-mono); }
+.cm-at { letter-spacing: 0; }
+
+/* the agent transcript (hero): Claude Code's shape, a prompt, tool calls with their results, the answer */
+.cm-term__body { padding: 18px 22px 32px; display: grid; gap: 12px; font: 400 13px/20px var(--font-mono); }
+.hero__art .cm-term__body { padding-right: calc(var(--ly-cut-room) + 6px); }
+.cm-user { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 4px; padding: 10px 12px; border-radius: 8px;
+           background: color-mix(in oklab, var(--u-ink) 6%, var(--u-bg)); color: var(--u-ink); }
+.cm-user > span:first-child { color: var(--u-muted); }
+.cm-step { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 4px; }
+.cm-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 7px; background: #7fae86; }
+.cm-dot--say { background: var(--u-ink); }
+.cm-tool { color: var(--u-ink); }
+.cm-tool b { font-weight: 500; }
+.cm-tool i { font-style: normal; color: var(--u-muted); }
+.cm-args { color: var(--cm-key); padding-left: 2ch; text-indent: -2ch; }
+.cm-args s { text-decoration: none; color: var(--cm-str); }
+.cm-res { display: grid; grid-template-columns: 22px minmax(0, 1fr); margin-top: 4px; color: var(--u-muted); }
+.cm-res::before { content: ""; width: 10px; height: 11px; margin: 0 0 0 4px; border-left: 1px solid var(--cm-dim); border-bottom: 1px solid var(--cm-dim); }
+.cm-res b { font-weight: 400; color: var(--u-ink); }
+/* the one coloured moment: the held result in the gold */
+.cm-held { margin-top: 6px; padding: 8px 12px 8px 10px; border-radius: 6px; color: var(--u-ink);
+           background: color-mix(in oklab, var(--u-accent) 11%, var(--u-bg)); box-shadow: inset 2px 0 0 var(--u-accent); grid-template-columns: minmax(0, 1fr); }
+.cm-held::before { display: none; }
+.cm-held .k { color: var(--cm-key); }
+.cm-held .gold { color: var(--u-accent); }
+.cm-input { margin-top: 6px; height: 40px; display: flex; align-items: center; padding: 0 12px; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--u-line-2); color: var(--u-muted); }
+.cm-say p { margin: 0; font: 400 15px/24px var(--font-text); color: var(--u-ink); letter-spacing: -0.003em; }
+.cm-say .cm-dot { margin-top: 9px; }
+
+/* the hero frame: the sage lit ground with one soft light */
+.hero__art { background:
+    radial-gradient(70% 60% at 18% 10%, color-mix(in oklab, var(--ground-surface) 85%, white), transparent 70%),
+    radial-gradient(70% 55% at 92% 100%, color-mix(in oklab, var(--ground-bg) 70%, var(--ground-accent)), transparent 72%),
+    var(--ground-bg); }
+.hero__art > .ly-piece--main { border-radius: 12px; bottom: -48px; }
+.hero__art .cm-bar { padding-right: var(--ly-cut-room); }
+.hero__art > .ly-piece--note { left: var(--s-6); bottom: var(--s-6); width: 304px; z-index: 2; }
+/* the Drafts card: where the held reply waits, in a mail client's light colours */
+.cm-draft { --fx-bg: #fbfaf6; --fx-ink: #14171c; --fx-muted: #5b616b; padding: 14px 16px 16px; display: grid; gap: 6px; color: var(--u-ink); }
+.cm-draft__head { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--u-muted); }
+.cm-draft__head svg { width: 16px; height: 16px; }
+.cm-draft__head .ui-spacer { flex: 1; }
+.cm-draft__subj { font: 500 15px/20px var(--font-text); }
+.cm-draft__to { font: 400 13px/18px var(--font-text); color: var(--u-muted); }
+.cm-draft__to b { font-weight: 400; color: var(--u-ink); }
+.cm-draft__body { font: 400 13px/19px var(--font-text); color: color-mix(in oklab, var(--u-ink) 82%, var(--u-bg)); }
+.cm-draft__to { display: flex; align-items: center; gap: 4px; }
+.cm-draft__flags { display: flex; gap: 6px; margin-left: auto; }
+.cm-draft__flags span { font: 400 12px/22px var(--font-mono); padding: 0 7px; border-radius: 5px; color: var(--u-muted); box-shadow: inset 0 0 0 1px var(--u-line-2); }
+/* under 1280 the window is narrow and its answer runs low: the Drafts card would cover it, so the window shows alone */
+@media (max-width: 1279px) { .hero__art > .ly-piece--note { display: none; } }
+@media (max-width: 639px) {
+  .hero__art .cm-phone-hide { display: none; }
+  .hero__art .cm-term__body { gap: 12px; padding: 14px 16px 24px; padding-right: calc(var(--ly-cut-room) + 2px); }
+}
+
+/* #search: the app window, the result list beside the open thread (app-frame recipe) */
+.app.ui { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); margin-top: var(--s-7); background: var(--u-bg); border: 1px solid var(--u-border); border-radius: var(--u-r); box-shadow: var(--u-shadow); }
+.app > .app__pane { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+.app > .app__pane + .app__pane { border-left: 1px solid var(--u-line); }
+.app > .app__pane > .ui-panel { width: 100%; border: 0; border-radius: 0; box-shadow: none; }
+.app > .app__pane::after { content: ""; position: absolute; inset: auto 0 0 0; height: 64px; background: linear-gradient(transparent, var(--u-bg)); pointer-events: none; }
+@media (min-width: 1024px) and (max-width: 1279px) { .app.ui { grid-template-columns: minmax(0, 4fr) minmax(0, 8fr); } }
+@media (max-width: 1023px) {
+  .app.ui { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .app > .app__pane--list { max-height: 252px; }
+  .app > .app__pane--list::after { display: none; }
+  .app > .app__pane + .app__pane { border-left: 0; border-top: 1px solid var(--u-line); }
+}
+@media (max-width: 639px) {
+  .app.ui { grid-template-rows: minmax(0, 1fr); }
+  .app > .app__pane--list { display: none; }
+  .app > .app__pane + .app__pane { border-top: 0; }
+}
+.cm-cmd { padding: 14px 18px 12px; font: 400 13px/20px var(--font-mono); color: var(--u-ink); border-bottom: 1px solid var(--u-line); }
+.cm-cmd .p { color: var(--u-muted); }
+.cm-cmd s { text-decoration: none; color: var(--cm-str); }
+.cm-cmd__sum { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-top: 8px; color: var(--u-muted); }
+.cm-rows { display: grid; }
+.cm-row { display: grid; grid-template-columns: 72px minmax(0, 1fr) 36px; column-gap: 12px; row-gap: 2px; align-items: baseline;
+          padding: 10px 18px; border-bottom: 1px solid var(--u-line); position: relative; }
+.cm-row__acct { grid-row: span 2; font: 400 12px/20px var(--font-mono); color: var(--u-muted); }
+.cm-row__from { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cm-row__age { font: 400 12px/20px var(--font-mono); color: var(--u-muted); text-align: right; }
+.cm-row__subj { grid-column: 2 / -1; color: var(--u-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cm-row.is-on { background: color-mix(in oklab, var(--u-ink) 5%, var(--u-bg)); }
+.cm-row.is-on::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; background: var(--u-accent); }
+.cm-row.is-on .cm-row__acct { color: var(--u-ink); }
+.cm-thread__head { display: flex; align-items: center; gap: 12px; padding: 14px 22px; border-bottom: 1px solid var(--u-line); }
+.cm-thread__head h4 { margin: 0; font: 500 16px/22px var(--font-text); letter-spacing: -0.01em; color: var(--u-ink); white-space: nowrap; }
+.cm-thread__head .meta { font: 400 12px/20px var(--font-mono); color: var(--u-muted); white-space: nowrap; overflow: hidden; }
+.cm-thread__head .ui-spacer { flex: 1; }
+.cm-msgs { display: grid; }
+.cm-msg { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; column-gap: 12px; align-items: center; padding: 11px 22px; border-bottom: 1px solid var(--u-line); }
+.cm-msg .ui-avatar { width: 28px; height: 28px; }
+.cm-msg__who { font-weight: 500; white-space: nowrap; }
+.cm-msg__who span { font-weight: 400; color: var(--u-muted); margin-left: 8px; }
+.cm-msg__date { font: 400 12px/20px var(--font-mono); color: var(--u-muted); white-space: nowrap; }
+.cm-msg__snip { grid-column: 2 / -1; color: var(--u-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cm-msg--open { align-items: start; padding-bottom: 18px; border-bottom: 0; }
+.cm-msg--open .cm-msg__to { grid-column: 2 / -1; color: var(--u-muted); font-size: 13px; }
+.cm-body { grid-column: 2 / -1; margin-top: 14px; padding: 14px 16px; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--u-line-2); display: grid; gap: 10px; }
+.cm-body__mark { display: flex; justify-content: space-between; font: 400 12px/16px var(--font-mono); color: var(--u-muted); }
+.cm-body p { margin: 0; font: 400 14px/22px var(--font-text); color: color-mix(in oklab, var(--u-ink) 88%, var(--u-bg)); }
+.cm-msg--draft { border-top: 1px solid var(--u-line); }
+.cm-msg--draft .cm-msg__date { color: var(--u-accent); }
+.cm-refline { grid-column: 2 / -1; margin-top: 12px; font: 400 12px/20px var(--font-mono); color: var(--u-muted); }
+
+/* #policy: the config window and the held result, on the effect's frame */
+#policy .frame--split { --ratio: 112%; }
+.cm-toml { font: 400 14px/24px var(--font-mono); padding: 18px 22px 40px; color: var(--cm-str); }
+.cm-toml .c { color: var(--cm-dim); }
+.cm-toml .t { color: var(--u-ink); font-weight: 500; }
+.cm-toml .k { color: var(--cm-key); }
+.cm-toml .n { color: var(--u-ink); }
+.cm-heldcard { padding: 14px 16px 16px; font: 400 13px/20px var(--font-mono); display: grid; gap: 6px; }
+.cm-heldcard .cmd { color: var(--u-ink); }
+.cm-heldcard .cmd .p { color: var(--u-muted); }
+.cm-heldcard .out { color: var(--u-ink); }
+.cm-heldcard .row { display: grid; grid-template-columns: 9ch minmax(0, 1fr); color: var(--u-muted); }
+.cm-heldcard .row b { font-weight: 400; color: var(--u-ink); overflow-wrap: anywhere; }
+.cm-heldcard .exit { display: flex; align-items: center; gap: 10px; margin-top: 6px; padding-top: 10px; border-top: 1px solid var(--u-line); color: var(--u-muted); }
+.cm-heldcard .exit b { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 5px; font-weight: 500;
+                       color: var(--u-accent); background: color-mix(in oklab, var(--u-accent) 14%, var(--u-bg)); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--u-accent) 35%, transparent); }
+
+/* #agents and #security: the diagram frames on the dark ground */
+.cm-dgframe { padding: 0; background: color-mix(in oklab, var(--p-surface) 70%, var(--p-bg)); }
+.cm-dgframe > .dg { width: 100%; height: 100%; }
+#agents .cm-dgframe { margin-top: var(--s-7); }
+#security .cm-dgframe { --ratio: 112%; padding: var(--s-5); }
+#security .frame { background: var(--p-bg); }
+
+/* #features: the four fragments on their sage panels */
+#features .panel { --p-h: 320px; }
+.cm-frag { font: 400 13px/20px var(--font-mono); }
+.cm-frag .cm-cmd { border-bottom: 1px solid var(--u-line); }
+.cm-ev { display: grid; grid-template-columns: 8ch 10ch 7ch minmax(0, 1fr); column-gap: 8px; padding: 6px 18px; color: var(--u-muted); white-space: nowrap; }
+.cm-ev b { font-weight: 400; color: var(--u-ink); overflow: hidden; text-overflow: ellipsis; }
+.cm-ev--note { grid-template-columns: minmax(0, 1fr); color: var(--cm-dim); padding-top: 10px; }
+.cm-ev--hi { background: color-mix(in oklab, var(--u-ink) 5%, var(--u-bg)); }
+.cm-ev--hi .kind { color: var(--u-accent); }
+.cm-items { padding: 14px 18px 24px; display: grid; gap: 10px; font-family: var(--font-text); font-size: 14px; }
+.cm-item { display: grid; grid-template-columns: 11ch minmax(0, 1fr) auto; gap: 10px; align-items: baseline; }
+.cm-item .ty { font: 400 12px/20px var(--font-mono); color: var(--u-muted); }
+.cm-item .ti { font-weight: 500; color: var(--u-ink); }
+.cm-item .st { font: 400 12px/20px var(--font-mono); color: var(--u-muted); padding: 0 7px; border-radius: 5px; box-shadow: inset 0 0 0 1px var(--u-line-2); }
+.cm-item--child { padding-left: 2ch; }
+.cm-crit { display: flex; gap: 10px; align-items: center; padding-left: calc(13ch + 10px); color: var(--u-text-2); }
+.cm-crit i { width: 16px; height: 16px; line-height: 1; overflow: visible; border-radius: 4px; flex: none; box-shadow: inset 0 0 0 1px var(--u-line-2); display: grid; place-items: center; font-style: normal; font-size: 11px; color: var(--u-bg); }
+.cm-crit i.on { background: var(--u-ink); box-shadow: none; }
+.cm-link { margin-left: calc(13ch + 10px); padding: 10px 12px; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--u-line-2); display: grid; gap: 2px; }
+.cm-link .l { font: 400 12px/18px var(--font-mono); color: var(--u-muted); }
+.cm-link .v { color: var(--u-ink); }
+.cm-link .e { font: 400 12px/18px var(--font-mono); color: var(--u-accent); margin-top: 4px; }
+.cm-audit { display: grid; }
+.cm-audit > div { display: grid; grid-template-columns: 6ch 13ch 8ch minmax(0, 1fr); gap: 10px; padding: 7px 18px; border-bottom: 1px solid var(--u-line); white-space: nowrap; color: var(--u-ink); }
+.cm-audit > div.h { color: var(--u-muted); }
+.cm-audit .m { color: var(--u-muted); }
+.cm-audit .held { color: var(--u-accent); }
+.cm-untr { padding: 14px 18px 24px; display: grid; gap: 4px; color: var(--cm-key); }
+.cm-untr .s { color: var(--cm-str); }
+.cm-untr .w { color: var(--u-muted); }
+.cm-untr .x { color: var(--u-ink); font-family: var(--font-text); font-size: 14px; line-height: 22px; padding: 6px 0 6px 12px; box-shadow: inset 1px 0 0 var(--u-line-2); }
+.cm-untr .gap { height: 8px; }
+
+/* #install: the two command boxes */
+.cm-steps { margin-top: var(--s-7); }
+.cm-box { margin-top: var(--s-4); }
+.cm-box .cm-cmd { min-height: 176px; }
+.cm-cl { padding-left: 2ch; text-indent: -2ch; overflow-wrap: anywhere; }
+.cm-cl + .cm-cl { margin-top: 8px; }
+.cm-also { margin-top: var(--s-5); }
+.cm-also code { font: 400 0.92em/1 var(--font-mono); color: var(--ink); }
+.cm-box .cm-cmd { display: block; border-bottom: 0; align-items: start; border-bottom: 0; padding: 18px 20px; font-size: 14px; line-height: 24px; }
+.cm-box .cm-cmd code { font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cm-facts { list-style: none; padding: 0; margin-bottom: 0; }
+.cm-facts li { padding: var(--s-3) 0; border-top: 1px solid var(--line); color: var(--ink); }
+.cm-facts li + li { margin-top: 0; }
+.cm-facts code, .faq code { font: 400 0.92em/1 var(--font-mono); }
+#faq .faq--more > .faq__item:first-child { padding-top: var(--s-5); }
+@media (max-width: 639px) { #faq .faq--more > .faq__item:first-child { padding-top: 0; } }
+.cm-figs { margin-top: auto; padding-top: var(--s-7); }
+#install > .wrap { display: flex; flex-direction: column; }
+
+@media (max-width: 1023px) { .cm-msg__snip { white-space: normal; } .cm-msg--open .cm-body p:nth-of-type(2) { display: none; } }
+@media (max-width: 639px) { .cm-thread__head .meta, .hero__art .cm-tag { display: none; } }
+/* tablets (640 to 1023): every section grows to its content (system.css lets it from 640), so the space
+   between sections is the one --padb + --padt gap; #features drops its second screen and its rows close up */
+@media (min-width: 640px) and (max-width: 1023px) {
+  #features { --h: 1; }
+  #features > .wrap { grid-template-rows: auto auto; row-gap: var(--card-gap); }
+  /* a card per row, so each window shows whole on its panel instead of running out through its right edge;
+     shorter panels keep the four cards inside two screens */
+  #features .grid > .card { grid-column: 1 / -1; }
+  #features .panel { --p-h: 276px; }
+  /* the audit log keeps the rows its panel can show, so none runs on under the next card */
+  #features .cm-audit > div:nth-child(n+9) { display: none; }
+}
+/* phones: the sections keep their screens (layout-v4 section 2) */
+@media (max-width: 639px) {
+  .hero__art .cm-args { display: none; }
+  #policy .cm-facts { display: none; }
+  #policy .frame--split { --ratio: 100%; }
+  #security { --hm: 2; }
+  #security .cm-dgframe { --ratio: 200%; }
+  #features .panel { --p-h: 160px; }
+  #install { --hm: 2; }
+  /* the last block of each phone section runs down to the section's foot, so no section ends on empty ground */
+  #policy > .wrap > .grid, #security > .wrap > .grid { flex: 1 1 auto; grid-template-rows: auto minmax(0, 1fr); }
+  #features > .wrap > .grid:last-child { flex: 1 1 auto; }
+  /* the audit window takes the panel's width (as cards.css sets for a phone) with tighter columns, and keeps
+     the rows its panel can show, so no row runs on under the next card */
+  #features .stage > .at-corner:has(.cm-audit) { width: auto !important; }
+  #features .cm-audit > div { grid-template-columns: 5ch 11ch 8ch minmax(0, 1fr); gap: 8px; padding-inline: 14px; }
+  #features .cm-audit > div:nth-child(n+7) { display: none; }
+  /* the hero window rests on the held result: the answer under it would only show as a sliver at the frame's foot */
+  .hero__art .cm-say, .hero__art .cm-input { display: none; }
+  /* tighter rows, so the open message's first paragraph fits the window */
+  .cm-msg { padding-block: 9px; }
+  .cm-body { margin-top: 10px; padding: 12px 14px; gap: 8px; }
+  /* the second screen of questions spreads down to the section's foot */
+  #faq .faq--more { display: flex; flex-direction: column; justify-content: space-between; }
+}
+.footer--statement .btn--primary { --action: var(--p-action); --action-ink: var(--p-action-ink); }
+/* the close: the mascot's one cameo, beside the button; sized to the old badge's height (122px, 78px on a phone) */
+.section-head--split > .close__cta-end { display: flex; align-items: center; gap: var(--s-6); }
+.closing__cta.close--word { min-width: 0; gap: var(--s-5); }
+.close--word h2 { max-width: none; }
+.close--word .close__word { font-size: calc(min(100vw - 2 * var(--gut), 1280px) / 4.3); line-height: .96; overflow: visible; margin-top: auto; }
+.close__mascot { width: 102px; height: auto; flex: none; }
+@media (max-width: 639px) { .close__mascot { width: 65px; } .section-head--split > .close__cta-end { gap: var(--s-4); width: 100%; } .close__cta-end > .btn { flex: 1; } }
+
+/* the nav mark beside the wordmark */
+.nav__mark { border-radius: 6px; margin-right: 10px; vertical-align: -6px; }
