@@ -329,3 +329,45 @@ func TestNewWordsInvalidEntriesAsParseDoes(t *testing.T) {
 		t.Errorf("Parse: %v; New: %v; want the same wording", perr, nerr)
 	}
 }
+
+func TestIsOwn(t *testing.T) {
+	t.Parallel()
+	const withPolicy = accounts + `
+[policy]
+send_allow = ["*@example.com", "friend@global.test"]
+`
+	p := newPolicy(t, withPolicy)
+	tests := []struct {
+		addr string
+		want bool
+	}{
+		{"james@example.com", true},
+		{"JAMES@EXAMPLE.COM", true},
+		{"James@Example.com", true},
+		{"james@work.test", true},
+		{"James@Work.Test", true},
+		{"ann@example.com", false},    // allowed by *@example.com, but not own
+		{"friend@global.test", false}, // allowed, but not own
+		{"stranger@else.test", false},
+		{"*@example.com", false},
+		{"mailto:james@example.com", false},
+		{" james@example.com", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := p.IsOwn(tt.addr); got != tt.want {
+			t.Errorf("IsOwn(%q) = %t, want %t", tt.addr, got, tt.want)
+		}
+	}
+}
+
+func TestIsOwnWithoutAccounts(t *testing.T) {
+	t.Parallel()
+	p, err := New(&config.Config{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if p.IsOwn("james@example.com") || p.IsOwn("") {
+		t.Error("IsOwn is true with no accounts")
+	}
+}
