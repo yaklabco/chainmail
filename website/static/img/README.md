@@ -1,11 +1,14 @@
 # Images
 
-The chainmail gopher in these files was made for chainmail from the Go gopher.
-It is a gopher in a mail coif and hauberk, holding a navy shield that carries a gold envelope.
+## Logo
 
-- `mascot.png` is the full figure on a transparent background. The repository README uses it.
-- `logo-tile.png` is the gopher's head on a navy rounded square, for the navigation bar.
-- `favicon.ico`, `favicon-192.png` and `apple-touch-icon.png` are the same tile at icon sizes.
-- `social-card.png` is the 1200x630 preview image that link previews show.
+- `wordmark-dark.svg` and `wordmark-light.svg` are the logo for dark and light backgrounds: two linked gold rings, "chainmail" in DM Mono 500 and an underscore cursor. The letters are outlined, so the files need no font. On load the name types itself in, one letter at a time, and then the cursor blinks. Visitors who ask for reduced motion see the finished name and a still cursor.
+- `favicon.svg` is the rings on a navy rounded square. `favicon.ico`, `favicon-192.png` and `apple-touch-icon.png` are the same mark at icon sizes. The Apple icon is square, because iOS rounds the corners itself.
 
-The Go gopher was designed by Renée French and is licensed under CC BY 4.0. The chainmail gopher is a derivative work under the same license.
+The repository README shows the wordmark too, through a `<picture>` element that picks the dark or light file.
+
+## Link preview
+
+- `social-card.png` is the 1200x630 image that link previews show: the wordmark, the headline and the install command, with the rings drawn large on the right.
+
+The landing page keeps its own copies of these files in `site/public/img/`.

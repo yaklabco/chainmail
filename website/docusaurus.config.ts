@@ -4,9 +4,6 @@ import { themes as prismThemes } from 'prism-react-renderer';
 import rehypeTables from './plugins/rehype-tables.mjs';
 import { mermaidOptions } from './plugins/mermaid-theme.mjs';
 
-const gopherCredit =
-  'The Go gopher was designed by Renée French and is licensed under CC BY 4.0. The chainmail gopher is a derivative work under the same license.';
-
 const config: Config = {
   title: 'chainmail',
   tagline: 'Email for AI agents, behind a policy daemon',
@@ -34,6 +31,7 @@ const config: Config = {
   i18n: { defaultLocale: 'en', locales: ['en'] },
 
   headTags: [
+    { tagName: 'link', attributes: { rel: 'icon', type: 'image/svg+xml', href: '/docs/img/favicon.svg' } },
     { tagName: 'link', attributes: { rel: 'icon', type: 'image/png', sizes: '192x192', href: '/docs/img/favicon-192.png' } },
     { tagName: 'link', attributes: { rel: 'apple-touch-icon', href: '/docs/img/apple-touch-icon.png' } },
   ],
@@ -66,14 +64,14 @@ const config: Config = {
     image: 'img/social-card.png',
     colorMode: { defaultMode: 'dark', respectPrefersColorScheme: true },
     navbar: {
-      title: 'chainmail',
       logo: {
         alt: 'chainmail',
-        src: 'img/logo-tile.png',
+        src: 'img/wordmark-light.svg',
+        srcDark: 'img/wordmark-dark.svg',
         href: 'https://chainmail.sh/',
         target: '_self',
-        width: 28,
-        height: 28,
+        width: 166,
+        height: 22,
       },
       items: [
         { type: 'docSidebar', sidebarId: 'docs', position: 'left', label: 'Docs' },
@@ -110,7 +108,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © 2026 James Ainslie. MIT license. ${gopherCredit}`,
+      copyright: `Copyright © 2026 James Ainslie. MIT license.`,
     },
     prism: {
       theme: prismThemes.github,

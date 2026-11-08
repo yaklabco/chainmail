@@ -343,3 +343,14 @@ html[data-theme='dark'] .diagram-dialog {
 .diagram-dialog__body > svg {
   display: block;
 }
+
+/* The wordmark carries the name, so the navbar shows no title beside it. */
+.navbar__logo {
+  height: 22px;
+  margin-right: 1.25rem;
+}
+
+.navbar__logo img {
+  height: 100%;
+  width: auto;
+}
