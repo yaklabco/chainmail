@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/yaklabco/chainmail/internal/cache"
@@ -15,6 +16,16 @@ import (
 	"github.com/yaklabco/chainmail/internal/watch"
 )
 
+const (
+	// inviteRetryInterval is how often the retry loop announces the
+	// invites whose event could not be published.
+	inviteRetryInterval = 5 * time.Minute
+	// inviteRetryWindow bounds how long after it was first found an
+	// invite's event is still tried, so invites that never get one (James
+	// organizes them, or they ended) are not read again for ever.
+	inviteRetryWindow = 7 * 24 * time.Hour
+)
+
 // inviteHookOptions are what the invite hook works with. Only Cache is
 // required; every other nil field does nothing.
 type inviteHookOptions struct {
@@ -22,6 +33,9 @@ type inviteHookOptions struct {
 	Cache *calcache.Store
 	// Log receives the invite events of store none accounts.
 	Log *watch.Log
+	// Publish appends one event to the log. Nil means Log.Publish. Tests
+	// set it to fail a publish.
+	Publish func(ctx context.Context, e watch.Event) error
 	// Poke asks the account's calendar syncer for a cycle soon, without
 	// blocking.
 	Poke func(account string)
@@ -41,8 +55,14 @@ type inviteHookOptions struct {
 // (cache.AccountOptions.OnInvites): it parses each, stores it as a mail
 // invite row in calendar.db, pokes the account's calendar syncer, and on a
 // store none account publishes an invite event for each new REQUEST UID.
+// An event that cannot be published stays pending in calendar.db (the row
+// is not announced) and is tried again on the account's next hook call and
+// by the retry loop.
 type inviteHook struct {
 	o inviteHookOptions
+	// mu serializes announcing, so the hook calls of several cache workers
+	// and the retry loop never publish one invite twice.
+	mu sync.Mutex
 }
 
 // newInviteHook returns the invite hook over o, or nil when o has no
@@ -57,31 +77,70 @@ func newInviteHook(o inviteHookOptions) *inviteHook {
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
 	}
+	if o.Publish == nil && o.Log != nil {
+		log := o.Log
+		o.Publish = func(ctx context.Context, e watch.Event) error { return log.Publish(ctx, e) }
+	}
 	return &inviteHook{o: o}
+}
+
+// hookFunc is h's OnInvites, nil when h is.
+func (h *inviteHook) hookFunc() func(context.Context, []cache.FoundInvite) {
+	if h == nil {
+		return nil
+	}
+	return h.onInvites
 }
 
 // calendarInviteHook returns the OnInvites hook of the cache workers over
 // the calendar cache cal and the syncer poke poke, or nil when cal is nil,
 // which leaves invite detection off. Store none comes from the account's
 // resolved calendar table, own addresses from the policy, and events go to
-// the daemon's log.
+// the daemon's log. Every call over the same cache shares one hook with the
+// retry loop.
 func (s *Server) calendarInviteHook(cal *calcache.Store, poke func(account string)) func(context.Context, []cache.FoundInvite) {
+	return s.serverInviteHook(cal, poke).hookFunc()
+}
+
+// serverInviteHook returns the server's invite hook over cal, built on
+// first use, or nil when cal is nil.
+func (s *Server) serverInviteHook(cal *calcache.Store, poke func(account string)) *inviteHook {
 	if cal == nil {
 		return nil
 	}
-	h := newInviteHook(inviteHookOptions{
-		Cache:     cal,
-		Log:       s.watchLog,
-		Poke:      poke,
-		StoreNone: s.calendarStoreNone,
-		Self:      s.policy.IsOwn,
-		Now:       s.opts.Now,
-		Logger:    s.opts.Logger,
-	})
-	if h == nil {
-		return nil
+	s.invitesMu.Lock()
+	defer s.invitesMu.Unlock()
+	if s.invites == nil || s.invites.o.Cache != cal {
+		s.invites = newInviteHook(inviteHookOptions{
+			Cache:     cal,
+			Log:       s.watchLog,
+			Poke:      poke,
+			StoreNone: s.calendarStoreNone,
+			Self:      s.policy.IsOwn,
+			Now:       s.opts.Now,
+			Logger:    s.opts.Logger,
+		})
 	}
-	return h.onInvites
+	return s.invites
+}
+
+// startInviteRetries runs the invite retry loop on wg until ctx ends, when
+// calendar.db is open and some account's store is none.
+func (s *Server) startInviteRetries(ctx context.Context, wg *sync.WaitGroup) {
+	h := s.serverInviteHook(s.calcache, s.pokeCalendar)
+	if h == nil {
+		return
+	}
+	var accounts []string
+	for _, name := range s.opts.Config.AccountNames() {
+		if s.calendarStoreNone(name) {
+			accounts = append(accounts, name)
+		}
+	}
+	if len(accounts) == 0 {
+		return
+	}
+	wg.Go(func() { h.retryLoop(ctx, s.calClock, accounts) })
 }
 
 // calendarStoreNone reports whether account's calendar store is none. An
@@ -93,20 +152,26 @@ func (s *Server) calendarStoreNone(account string) bool {
 
 // onInvites handles one batch of found invites, in order. An invite that
 // does not parse, or whose row cannot be read or written, is logged by
-// reason code and skipped; the rest of the batch goes on. Each account
-// with an invite stored is poked once, after the batch.
+// reason code and skipped; the rest of the batch goes on. Then each
+// account of the batch announces its pending invites, and each account
+// with an invite stored is poked once.
 //
-// A store none account's REQUEST whose UID has no stored row yet, that
-// James does not organize and that has not ended, is published as an
-// invite event before its row is written, so a crash between the two
-// repeats the event when the builder applies the message again (at least
-// once, as the syncer's events are).
+// The row is written before its event is published, and marked announced
+// only once the publish succeeds, so a failed publish or a crash between
+// the two leaves the event pending, to go out on a later hook call or
+// retry pass (at least once, as the syncer's events are).
 func (h *inviteHook) onInvites(ctx context.Context, invites []cache.FoundInvite) {
-	var poke []string
+	var accounts, poke []string
 	for _, f := range invites {
+		if !slices.Contains(accounts, f.Account) {
+			accounts = append(accounts, f.Account)
+		}
 		if h.handle(ctx, f) && !slices.Contains(poke, f.Account) {
 			poke = append(poke, f.Account)
 		}
+	}
+	for _, account := range accounts {
+		h.announce(ctx, account)
 	}
 	if h.o.Poke == nil {
 		return
@@ -116,8 +181,32 @@ func (h *inviteHook) onInvites(ctx context.Context, invites []cache.FoundInvite)
 	}
 }
 
-// handle parses and stores one found invite, publishing its event when it
-// is due one. It reports whether the row was stored.
+// retryLoop announces the pending invites of accounts at once, then every
+// inviteRetryInterval on clock, until ctx ends.
+func (h *inviteHook) retryLoop(ctx context.Context, clock watch.Clock, accounts []string) {
+	for {
+		for _, account := range accounts {
+			if ctx.Err() != nil {
+				return
+			}
+			h.announce(ctx, account)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-clock.After(inviteRetryInterval):
+		}
+	}
+}
+
+// handle parses and stores one found invite. It reports whether the row
+// was stored.
+//
+// The row holds the invite's UTF-8 text with no charset when that fits in
+// calendar.MaxICSBytes, and otherwise the part's own bytes with its
+// charset: a single-byte part can grow past the limit in UTF-8, and
+// calendar.ParseInvite refuses data over it. Either way the row reads back
+// with calendar.ParseInvite(Raw, Charset).
 func (h *inviteHook) handle(ctx context.Context, f cache.FoundInvite) bool {
 	log := h.o.Logger.With("account", f.Account)
 	inv, err := calendar.ParseInvite(f.Data, f.Part.Charset)
@@ -126,24 +215,13 @@ func (h *inviteHook) handle(ctx context.Context, f cache.FoundInvite) bool {
 		return false
 	}
 	ref := calendar.MailInviteRef(f.Account, inv.UID)
-	_, err = h.o.Cache.MailInvite(ctx, ref)
-	isNew := errors.Is(err, calcache.ErrNotFound)
-	if err != nil && !isNew {
-		log.WarnContext(ctx, "could not read the calendar cache for a mail invite", "ref", ref)
-		return false
-	}
-	if isNew && h.announces(f.Account, inv) {
-		h.publish(ctx, log, f, ref, inv)
-	}
-	raw := f.Data
-	if len(inv.Events) > 0 && inv.Events[0].Raw != nil {
-		// The parsed text, in UTF-8 whatever the part's charset, so a
-		// reader parses the row with no charset.
-		raw = inv.Events[0].Raw
+	raw, charset := f.Data, f.Part.Charset
+	if len(inv.Events) > 0 && inv.Events[0].Raw != nil && len(inv.Events[0].Raw) <= calendar.MaxICSBytes {
+		raw, charset = inv.Events[0].Raw, ""
 	}
 	row := calcache.MailInviteRow{
 		Ref: ref, Account: f.Account, MessageRef: f.MessageRef, UID: inv.UID, Method: inv.Method,
-		Sequence: inv.Sequence, DTStamp: inv.DTStamp, Raw: raw, FoundAt: h.o.Now(),
+		Sequence: inv.Sequence, DTStamp: inv.DTStamp, Raw: raw, Charset: charset, FoundAt: h.o.Now(),
 	}
 	if err := h.o.Cache.PutMailInvite(ctx, row); err != nil {
 		log.WarnContext(ctx, "could not store a mail invite", "ref", ref)
@@ -152,12 +230,53 @@ func (h *inviteHook) handle(ctx context.Context, f cache.FoundInvite) bool {
 	return true
 }
 
-// announces reports whether a new invite on account gets an invite event:
-// the account's store is none, the method is REQUEST, the event is not
-// cancelled, James does not organize it, and it has not ended (a
-// recurring one never has).
-func (h *inviteHook) announces(account string, inv calendar.MailInvite) bool {
-	if h.o.Log == nil || h.o.StoreNone == nil || !h.o.StoreNone(account) || inv.Method != calendar.MethodRequest {
+// announce publishes the invite event of each of account's pending
+// invites that is due one, and marks it announced once published. It does
+// nothing unless the account's store is none and the hook has a log. A
+// publish that fails leaves the invite pending for the next call.
+func (h *inviteHook) announce(ctx context.Context, account string) {
+	if h.o.Publish == nil || h.o.StoreNone == nil || !h.o.StoreNone(account) {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	log := h.o.Logger.With("account", account)
+	now := h.o.Now()
+	rows, err := h.o.Cache.PendingInvites(ctx, account, now.Add(-inviteRetryWindow))
+	if err != nil {
+		if ctx.Err() == nil {
+			log.WarnContext(ctx, "could not read the pending mail invites")
+		}
+		return
+	}
+	failed := 0
+	for _, row := range rows {
+		inv, err := calendar.ParseInvite(row.Raw, row.Charset)
+		if err != nil {
+			log.WarnContext(ctx, "a stored mail invite does not parse", "ref", row.Ref, "reason", inviteReason(err))
+			continue
+		}
+		if !h.due(inv, now) {
+			continue
+		}
+		if err := h.publish(ctx, row, inv, now); err != nil {
+			failed++
+			continue
+		}
+		if err := h.o.Cache.MarkInviteAnnounced(ctx, row.Ref); err != nil {
+			log.WarnContext(ctx, "could not mark a mail invite announced", "ref", row.Ref)
+		}
+	}
+	if failed > 0 {
+		log.WarnContext(ctx, "could not publish invite events; they stay pending", "count", failed)
+	}
+}
+
+// due reports whether an invite gets an invite event: the method is
+// REQUEST, the event is not cancelled, James does not organize it, and it
+// has not ended at now (a recurring one never has).
+func (h *inviteHook) due(inv calendar.MailInvite, now time.Time) bool {
+	if inv.Method != calendar.MethodRequest {
 		return false
 	}
 	ev := inviteEvent(inv)
@@ -170,26 +289,23 @@ func (h *inviteHook) announces(account string, inv calendar.MailInvite) bool {
 	if ev.RRule != "" || len(ev.RDates) > 0 {
 		return true
 	}
-	return inviteEnd(ev).After(h.o.Now())
+	return inviteEnd(ev).After(now)
 }
 
-// publish appends the invite event of a new mail invite. A failure is
-// logged: the row is still written, so the invite lists.
-func (h *inviteHook) publish(ctx context.Context, log *slog.Logger, f cache.FoundInvite, ref string, inv calendar.MailInvite) {
+// publish appends the invite event of a pending mail invite.
+func (h *inviteHook) publish(ctx context.Context, row calcache.MailInviteRow, inv calendar.MailInvite, now time.Time) error {
 	ev := inviteEvent(inv)
 	change := &watch.CalendarChange{
-		Ref:        ref,
-		MessageRef: f.MessageRef,
+		Ref:        row.Ref,
+		MessageRef: row.MessageRef,
 		Start:      calendarTime(ev.Start),
 		End:        calendarTime(inviteEnd(ev)),
 	}
 	if ev.Organizer != nil && mailaddr.Safe(ev.Organizer.Email) {
 		change.Organizer = ev.Organizer.Email
 	}
-	e := watch.Event{At: h.o.Now(), Kind: watch.KindInvite, Account: f.Account, Ref: ref, Calendar: change}
-	if err := h.o.Log.Publish(ctx, e); err != nil {
-		log.WarnContext(ctx, "could not publish an invite event", "ref", ref)
-	}
+	e := watch.Event{At: now, Kind: watch.KindInvite, Account: row.Account, Ref: row.Ref, Calendar: change}
+	return h.o.Publish(ctx, e)
 }
 
 // inviteEvent is the VEVENT an invite is about: its series master or

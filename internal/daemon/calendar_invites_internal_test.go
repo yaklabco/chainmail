@@ -3,10 +3,12 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -52,6 +54,11 @@ type inviteRig struct {
 	mu    sync.Mutex
 	pokes []string
 	hook  func(ctx context.Context, invites []cache.FoundInvite)
+	// h is the hook behind hook. failing counts the publishes still to
+	// fail, and publishes every publish tried.
+	h         *inviteHook
+	failing   atomic.Int32
+	publishes atomic.Int32
 }
 
 func newInviteRig(t *testing.T) *inviteRig {
@@ -68,15 +75,31 @@ func newInviteRig(t *testing.T) *inviteRig {
 	}
 	t.Cleanup(func() { _ = cal.Close() }) // a close error at test end changes nothing
 	r := &inviteRig{t: t, cal: cal, log: watch.NewLog(stateDB, func() time.Time { return inviteNow }, nil)}
-	r.hook = newInviteHook(inviteHookOptions{
+	r.h = newInviteHook(inviteHookOptions{
 		Cache:     cal,
 		Log:       r.log,
+		Publish:   r.publish,
 		Poke:      r.poke,
 		StoreNone: func(account string) bool { return account == "none" },
 		Self:      func(addr string) bool { return strings.EqualFold(addr, "me@example.com") },
 		Now:       func() time.Time { return inviteNow },
-	}).onInvites
+	})
+	r.hook = r.h.onInvites
 	return r
+}
+
+// errPublish is the failure of a publish the rig fails.
+var errPublish = errors.New("publish failed")
+
+// publish is the hook's Publish: it fails while failing is above zero,
+// counting it down, and otherwise publishes to the rig's log.
+func (r *inviteRig) publish(ctx context.Context, e watch.Event) error {
+	r.publishes.Add(1)
+	if r.failing.Add(-1) >= 0 {
+		return errPublish
+	}
+	r.failing.Store(0)
+	return r.log.Publish(ctx, e)
 }
 
 func (r *inviteRig) poke(account string) {
@@ -344,5 +367,174 @@ url = "https://dav.example.com/"
 	}
 	if !s.calendarStoreNone("host") || s.calendarStoreNone("dav") || s.calendarStoreNone("nobody") {
 		t.Error("calendarStoreNone: want host true, dav false, an unknown account false")
+	}
+}
+
+// latin1Invite is a REQUEST for uid in iso-8859-1 whose DESCRIPTION holds
+// n bytes of \xe9, folded at 74 octets, so it grows by n bytes in UTF-8.
+func latin1Invite(uid string, n int) []byte {
+	var b bytes.Buffer
+	b.WriteString(strings.TrimSuffix(string(request(uid)), "END:VEVENT\r\nEND:VCALENDAR\r\n"))
+	line := []byte("DESCRIPTION:")
+	for range n {
+		if len(line) == 74 {
+			b.Write(line)
+			b.WriteString("\r\n")
+			line = []byte(" ")
+		}
+		line = append(line, 0xe9)
+	}
+	b.Write(line)
+	b.WriteString("\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	return b.Bytes()
+}
+
+// A single-byte part whose UTF-8 form would outgrow calendar.MaxICSBytes
+// is stored as the part's own bytes with their charset, so the row reads
+// back with calendar.ParseInvite(raw, charset), and the event still goes
+// out for a store none account.
+func TestInviteHookStoresThePartWhenUTF8WouldOutgrowTheLimit(t *testing.T) {
+	t.Parallel()
+	const n = 600_000
+	data := latin1Invite("u1", n)
+	if len(data) > calendar.MaxICSBytes || len(data)+n <= calendar.MaxICSBytes {
+		t.Fatalf("test data: %d bytes, %d in UTF-8; want at most %d, then over it", len(data), len(data)+n, calendar.MaxICSBytes)
+	}
+	r := newInviteRig(t)
+	f := found("none", "msg-1", "REQUEST", data)
+	f.Part.Charset = "iso-8859-1"
+	r.hook(t.Context(), []cache.FoundInvite{f})
+
+	rows := r.invites("none")
+	if len(rows) != 1 {
+		t.Fatalf("stored %d invites, want 1", len(rows))
+	}
+	if rows[0].Charset != "iso-8859-1" || !bytes.Equal(rows[0].Raw, data) {
+		t.Errorf("row charset %q, %d raw bytes; want iso-8859-1 and the part's %d bytes", rows[0].Charset, len(rows[0].Raw), len(data))
+	}
+	inv, err := calendar.ParseInvite(rows[0].Raw, rows[0].Charset)
+	if err != nil {
+		t.Fatalf("ParseInvite of the stored row: %v", err)
+	}
+	if d := inv.Events[0].Description; d != strings.Repeat("é", n) {
+		t.Errorf("description has %d bytes, want %d é", len(d), n)
+	}
+	if evs := r.events(); len(evs) != 1 {
+		t.Errorf("published %d invite events, want 1", len(evs))
+	}
+}
+
+// A publish that fails leaves the invite pending: the row is stored
+// unannounced, and the next hook call publishes it and marks it announced,
+// so later deliveries of the UID publish nothing more.
+func TestInviteHookRetriesAFailedPublish(t *testing.T) {
+	t.Parallel()
+	r := newInviteRig(t)
+	r.failing.Store(1)
+	r.hook(t.Context(), []cache.FoundInvite{found("none", "msg-1", "REQUEST", request("u1"))})
+	if n := len(r.events()); n != 0 {
+		t.Fatalf("published %d invite events with a failing log, want none", n)
+	}
+	rows := r.invites("none")
+	if len(rows) != 1 || rows[0].Announced {
+		t.Fatalf("rows = %+v, want one unannounced row", rows)
+	}
+
+	r.hook(t.Context(), []cache.FoundInvite{found("none", "msg-2", "UPDATE", inviteICS("UPDATE", "u2", 1, "ann@example.com", "20261110T170000Z", "20261110T173000Z"))})
+	evs := r.events()
+	if len(evs) != 1 || evs[0].Ref != calendar.MailInviteRef("none", "u1") || evs[0].Calendar == nil || evs[0].Calendar.MessageRef != "msg-1" {
+		t.Fatalf("events = %+v, want u1's invite from msg-1", evs)
+	}
+	for _, row := range r.invites("none") {
+		if row.UID == "u1" && !row.Announced {
+			t.Error("u1 is not marked announced after its publish")
+		}
+	}
+
+	r.hook(t.Context(), []cache.FoundInvite{found("none", "msg-3", "REQUEST", request("u1"))})
+	if n := len(r.events()); n != 1 {
+		t.Errorf("published %d invite events after another delivery of u1, want 1", n)
+	}
+}
+
+// tickClock is a watch.Clock whose After reports each wait on asked and
+// fires when the test sends on fire.
+type tickClock struct {
+	asked chan time.Duration
+	fire  chan time.Time
+}
+
+func (c *tickClock) Now() time.Time { return inviteNow }
+
+func (c *tickClock) After(d time.Duration) <-chan time.Time {
+	c.asked <- d
+	return c.fire
+}
+
+// The retry loop announces pending invites when it starts and then every
+// inviteRetryInterval, for the store none accounts it is given, until its
+// context ends.
+func TestInviteRetryLoopRecovers(t *testing.T) {
+	t.Parallel()
+	r := newInviteRig(t)
+	r.failing.Store(2) // the hook call and the loop's first pass
+	r.hook(t.Context(), []cache.FoundInvite{found("none", "msg-1", "REQUEST", request("u1"))})
+
+	clk := &tickClock{asked: make(chan time.Duration), fire: make(chan time.Time)}
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	wg.Go(func() { r.h.retryLoop(ctx, clk, []string{"none", "cal"}) })
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
+
+	if d := <-clk.asked; d != inviteRetryInterval {
+		t.Errorf("the loop waits %v, want %v", d, inviteRetryInterval)
+	}
+	if n := r.publishes.Load(); n != 2 {
+		t.Errorf("tried %d publishes after the first pass, want 2", n)
+	}
+	if n := len(r.events()); n != 0 {
+		t.Fatalf("published %d events while the log fails, want none", n)
+	}
+	clk.fire <- inviteNow
+	<-clk.asked
+	if n := len(r.events()); n != 1 {
+		t.Errorf("published %d invite events after the next pass, want 1", n)
+	}
+	clk.fire <- inviteNow
+	<-clk.asked
+	if n := len(r.events()); n != 1 {
+		t.Errorf("published %d invite events after a third pass, want still 1", n)
+	}
+}
+
+// startBackground runs the retry loop over the server's calendar cache,
+// so an invite left unannounced before a restart goes out, and its stop
+// joins the loop.
+func TestStartBackgroundAnnouncesPendingInvites(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServer(t)
+	r := newInviteRig(t)
+	s.calcache = r.cal
+	s.watchLog = r.log
+	s.opts.Now = func() time.Time { return inviteNow }
+	row := calcache.MailInviteRow{
+		Account: "host", MessageRef: "msg-1", UID: "u1", Method: calendar.MethodRequest,
+		DTStamp: inviteNow, Raw: request("u1"), FoundAt: inviteNow,
+	}
+	if err := r.cal.PutMailInvite(t.Context(), row); err != nil {
+		t.Fatal(err)
+	}
+	stop := s.startBackground(t.Context())
+	deadline := time.Now().Add(5 * time.Second)
+	for len(r.events()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	stop()
+	evs := r.events()
+	if len(evs) != 1 || evs[0].Account != "host" || evs[0].Ref != calendar.MailInviteRef("host", "u1") {
+		t.Errorf("events = %+v, want host's u1 invite", evs)
 	}
 }
