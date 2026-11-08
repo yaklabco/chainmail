@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The opt-in `rule` event kind, which reports every change to a rule. `chainmail watch` and `read_events` accept it and the three due kinds.
 - `chainmail audit --client`, which keeps the rows of one client kind, such as `rule` for the actions rules take.
 - A landing page at https://chainmail.sh, with the manual under https://chainmail.sh/docs/.
+- Calendars on Google accounts, through the Google Calendar API, and on CalDAV servers such as Mailwright. The daemon syncs them into `calendar.db`, next to `cache.db`, and expands recurring events when they are read. The new `[calendar]` table sets `timezone`, `poll`, `window_past` and `window_future`, and an `[accounts.<name>.calendar]` table sets an account's `store`, `url`, `include`, `exclude` and `default`.
+- `chainmail calendars`, `agenda`, `event`, `invites`, `invite`, `rsvp` and `freebusy` read calendars, show free/busy time and answer invites. `chainmail event create`, `event edit` and `event cancel` change events. Ten MCP tools do the same for agents: `list_calendars`, `agenda`, `get_event`, `list_invites`, `get_invite`, `free_busy`, `rsvp`, `create_event`, `update_event` and `cancel_event`.
+- Invites from calendars and from mail. The cache finds `text/calendar` invites in the new mail of watched accounts, and an account with store `none` answers them with an iCalendar REPLY email to the organizer.
+- The send policy covers calendars. It checks the organizer of every answer and the attendees of every change that notifies them. A held answer by email is saved to Drafts, a held new event is created as a draft that invites no one, and a held change or cancel is not applied.
+- The opt-in event kinds `invite`, `event_changed`, `event_cancelled` and `invite_reply`. `chainmail watch --kind` and `read_events` accept them.
+- `chainmail cache status` shows each account's calendar sync: its state (`ready`, `syncing`, `auth_required` or `error`), its last sync, and how many calendars and events it holds.
+- OAuth clients with an `issuer`, such as a Keycloak realm, take their endpoints from OIDC discovery and need no secret. Their `scopes` add to what their accounts ask for. A `custom` account can log in with `auth = "oauth2"` through such a client, which is how chainmail reaches Mailwright.
+- `tls_server_name` on an account's `imap` and `smtp` tables, for a server reached through a host name its certificate does not hold, such as an internal load balancer.
+- The error reasons `NOT_ORGANIZER` and `CALENDAR_READ_ONLY` (exit 3), `NO_CALENDAR_STORE` (exit 2) and `EVENT_CONFLICT` (exit 7).
+- `stave test:caldav`, which runs the CalDAV store tests against the Mailwright image `CHAINMAIL_MAILWRIGHT_IMAGE` names. CI does not run it.
 
 ### Changed
 
@@ -28,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The landing page leads with what an agent does with your mail: a morning brief, threads filed under tasks, follow-ups before a due date, rules that file receipts, held replies and search across accounts. The two stories that need unreleased features say so.
 - https://chainmail.sh/search is a new page on search speed, with the benchmark figures for the local index against the mail servers. It replaces the redirect from `/search` to the manual's search page.
 - The logo is now a wordmark: two linked gold rings, the name in DM Mono, typed in on load, and a blinking underscore cursor. The favicons and the link preview image use it too, and the gopher mascot is retired.
+- A Google account that logs in with OAuth2 now asks for three calendar scopes, unless its calendar table sets `store = "none"`. A refresh token from before lacks them, so mail keeps working and the account's calendar state is `auth_required` until you run `chainmail auth login <account>`.
+- A `gmail` account with `auth = "password"` has calendar store `none`, and `store = "google"` on it is a config error, since the Calendar API takes no password.
+- `CACHE_NOT_READY` also answers a calendar read before the account's first calendar sync, and `HELD` a calendar answer or change the policy held.
+- The upgrade applies `state.db` migration 7, and an older binary refuses the database afterwards. Take a snapshot before you upgrade.
+- The README, the quick start and the runbook describe calendars.
 
 ### Fixed
 
