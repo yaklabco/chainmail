@@ -153,25 +153,12 @@ type rulesService struct {
 
 var _ chainmailv1connect.RulesServiceHandler = (*rulesService)(nil)
 
-// ruleCall runs one rule call the way every handler of the service does:
-// it identifies the caller, gives the call timeout unless the client set a
-// deadline, and runs run, which sets the audit entry's targets as it
-// validates. It then records the entry, so refusals are audited too.
+// ruleCall runs one rule call through auditedCall with timeout, as every
+// handler of the service does.
 func ruleCall[Req, Resp any](ctx context.Context, s *Server, req *connect.Request[Req], action string, timeout time.Duration,
 	run func(ctx context.Context, c caller, entry *audit.Entry) (*Resp, error),
 ) (*connect.Response[Resp], error) {
-	c, err := callerOf(ctx, req.Header())
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := withDeadline(ctx, timeout)
-	defer cancel()
-	entry := audit.Entry{Action: action}
-	resp, runErr := run(ctx, c, &entry)
-	if err := s.record(ctx, c, entry, runErr); err != nil {
-		return nil, err
-	}
-	return connect.NewResponse(resp), nil
+	return auditedCall(ctx, s, req, action, timeout, run)
 }
 
 // pokeRuleScheduler wakes the rule scheduler so it plans again. It never
