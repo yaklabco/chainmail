@@ -105,3 +105,12 @@ func TestUntrustedPreambleCoversRuleText(t *testing.T) {
 		t.Errorf("preamble %q lacks %q", untrustedPreamble, "rule text")
 	}
 }
+
+// TestUntrustedPreambleCoversEventText: the calendar tools put event text
+// and calendar names between the same markers, so the preamble names them.
+func TestUntrustedPreambleCoversEventText(t *testing.T) {
+	t.Parallel()
+	if !strings.Contains(untrustedPreamble, "calendar event text") {
+		t.Errorf("preamble %q lacks %q", untrustedPreamble, "calendar event text")
+	}
+}
