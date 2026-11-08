@@ -1,4 +1,5 @@
-// Package oauthtest runs a fake OAuth2 token endpoint for tests.
+// Package oauthtest runs a fake OAuth2 token endpoint, with an OIDC
+// discovery document, for tests.
 package oauthtest
 
 import (
@@ -20,22 +21,46 @@ const (
 	ClientSecret = "test-client-secret"
 )
 
+// IssuerPath is the path of the issuer a Server serves discovery for.
+const IssuerPath = "/realms/test"
+
 // Server is a fake token endpoint. It accepts Code with any PKCE verifier and
-// RefreshToken until Revoke is called.
+// RefreshToken until Revoke is called. It serves an OIDC discovery document
+// for Issuer.
 type Server struct {
 	URL string
 
-	mu        sync.Mutex
-	revoked   bool
-	exchanges int
-	refreshes int
+	public bool
+
+	mu          sync.Mutex
+	revoked     bool
+	exchanges   int
+	refreshes   int
+	discoveries int
 }
 
-// Start runs a Server until the test ends.
+// Options configure a Server.
+type Options struct {
+	// Public makes the server treat the client as public: token requests
+	// must carry a client_id and no client_secret, and the code exchange a
+	// PKCE verifier, as Keycloak requires of a public client.
+	Public bool
+}
+
+// Start runs a Server for a confidential client until the test ends.
 func Start(t testing.TB) *Server {
 	t.Helper()
-	s := &Server{}
-	srv := httptest.NewServer(http.HandlerFunc(s.token))
+	return StartWith(t, Options{})
+}
+
+// StartWith runs a Server with opts until the test ends.
+func StartWith(t testing.TB, opts Options) *Server {
+	t.Helper()
+	s := &Server{public: opts.Public}
+	mux := http.NewServeMux()
+	mux.HandleFunc(IssuerPath+"/.well-known/openid-configuration", s.discovery)
+	mux.HandleFunc("/", s.token)
+	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	s.URL = srv.URL
 	return s
@@ -44,6 +69,36 @@ func Start(t testing.TB) *Server {
 // Endpoint points an oauth2.Config at s.
 func (s *Server) Endpoint() oauth2.Endpoint {
 	return oauth2.Endpoint{AuthURL: s.URL + "/auth", TokenURL: s.URL + "/token", AuthStyle: oauth2.AuthStyleInParams}
+}
+
+// Issuer is the OIDC issuer URL whose discovery document s serves. Its
+// endpoints are the same fake ones Endpoint names, under the issuer path.
+func (s *Server) Issuer() string { return s.URL + IssuerPath }
+
+// Discoveries counts discovery document requests.
+func (s *Server) Discoveries() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.discoveries
+}
+
+func (s *Server) discovery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	s.discoveries++
+	s.mu.Unlock()
+	issuer := s.Issuer()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{ // a failed write shows up as a client-side parse error
+		"issuer":                           issuer,
+		"authorization_endpoint":           issuer + "/auth",
+		"token_endpoint":                   issuer + "/token",
+		"jwks_uri":                         issuer + "/certs",
+		"code_challenge_methods_supported": []string{"S256"},
+	})
 }
 
 // Revoke makes the refresh token invalid.
@@ -74,7 +129,7 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if r.PostForm.Get("client_secret") != ClientSecret {
+	if !s.clientOK(r.PostForm) {
 		writeError(w, "invalid_client")
 		return
 	}
@@ -96,6 +151,17 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, "unsupported_grant_type")
 	}
+}
+
+// clientOK checks the client authentication of a token request: the
+// secret for a confidential client, a client_id and no secret for a public
+// one.
+func (s *Server) clientOK(form url.Values) bool {
+	if s.public {
+		_, hasSecret := form["client_secret"]
+		return form.Get("client_id") != "" && !hasSecret
+	}
+	return form.Get("client_secret") == ClientSecret
 }
 
 func writeToken(w http.ResponseWriter, withRefresh bool) {
