@@ -398,81 +398,120 @@ func (r *ruleRunner) waitForCache(ctx context.Context, last int64) error {
 }
 
 // runBatch runs every enabled on_new rule covering the account over b, in
-// priority order. The caller holds the runner's turn. A message a stop
-// rule matched, or a relocating rule moved, is left alone by the rules
-// after it. The first transient failure ends the batch.
+// priority order. The caller holds the runner's turn. Every rule matches
+// the batch, text rules after their wait for bodies, before any rule acts,
+// so a rule sees the cache as it was when the batch was matched and never
+// what an earlier rule's actions changed there (spec amendment 24). The
+// rules then act in priority order: a message a stop rule matched, or a
+// relocating rule moved, is left alone by the rules after it. The first
+// transient failure ends the batch.
 func (r *ruleRunner) runBatch(ctx context.Context, b *newBatch) error {
 	list, err := r.s.rules.EnabledOnNew(ctx, r.acct.Name)
 	if err != nil {
 		return err
 	}
-	stopped := map[string]bool{}
+	matches := make([]batchMatch, 0, len(list))
 	for _, rule := range list {
-		if err := r.newRun(ctx, rule, b, stopped); err != nil {
+		m, ok, err := r.newMatch(ctx, rule, b)
+		if err != nil {
+			return err
+		}
+		if ok {
+			matches = append(matches, m)
+		}
+	}
+	stopped := map[string]bool{}
+	for _, m := range matches {
+		if err := r.newAct(ctx, m, stopped); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// newRun runs one on_new rule over the batch. A text rule first drops the
-// messages its query rules out on their headers and labels alone, then
-// waits for the bodies the rest need, and a message whose body does not
-// come counts as a failed match (amendment 10) that no action was
-// attempted on, so it never counts toward all_failed. A rule that matched
-// nothing writes no run (spec 3.3). It acts on at most rule.MaxPerRun
-// messages after the act-once filter, oldest first, and records outcome
-// capped when an eligible match remains. The new trigger never comes back
-// for those: the batch is acknowledged, and a scheduled or manual run
-// covers them. It returns a transient failure, after recording the run as
-// interrupted. While the account's cache is off it returns a
-// cache_disabled failure and writes no run, so the batch stays unread.
-func (r *ruleRunner) newRun(ctx context.Context, rule rules.Rule, b *newBatch, stopped map[string]bool) error {
-	start := r.s.opts.Now()
+// batchMatch is what one on_new rule matched in a batch, found before any
+// rule of the batch acts.
+type batchMatch struct {
+	rule rules.Rule
+	// start is when the rule's run began, before it matched.
+	start time.Time
+	// scopeErr is a scope failure that waiting does not fix, such as an
+	// item: term naming a deleted item. newAct records it as the run's.
+	scopeErr error
+	// rows are the batch messages the rule matched, oldest first, and
+	// bodyFailed those of a text rule whose bodies did not come.
+	rows       []cache.Row
+	bodyFailed []ref.Ref
+}
+
+// newMatch matches one on_new rule against the batch. A text rule first
+// drops the messages its query rules out on their headers and labels
+// alone, then waits for the bodies the rest need, and a message whose body
+// does not come counts as a failed match (amendment 10). ok is false when
+// the rule matched nothing and had no scope failure, so it writes no run
+// (spec 3.3), or does not cover the account. It returns a transient
+// failure, and while the account's cache is off a cache_disabled failure,
+// so the batch stays unread.
+func (r *ruleRunner) newMatch(ctx context.Context, rule rules.Rule, b *newBatch) (batchMatch, bool, error) {
+	m := batchMatch{rule: rule, start: r.s.opts.Now()}
 	sc, covered, reason, err := r.scope(ctx, rule, false)
 	switch {
 	case err != nil && classifyReason(errDetail(err).GetReason()) == actTransient:
-		return err
+		return m, false, err
 	case err != nil:
-		_, err = r.scopeFailed(ctx, rule, rules.TriggerNew, start, err)
-		return err
+		m.scopeErr = err
+		return m, true, nil
 	case !covered:
-		return nil
+		return m, false, nil
 	case reason == reasonCacheDisabled:
 		// The cache is down, as a full disk turns it off: the batch
 		// would match nothing, so it stays unread until the cache is back
 		// (spec 5.2).
-		return &actionUnavailable{reason: reasonCacheDisabled, hint: ruleCacheDisabledHint}
+		return m, false, &actionUnavailable{reason: reasonCacheDisabled, hint: ruleCacheDisabledHint}
 	}
 	uids := b.scoped(sc.sources)
-	var bodyFailed []ref.Ref
 	if sc.needsBodies {
 		if uids, err = r.s.headerCandidates(ctx, sc, uids); err != nil {
-			return err
+			return m, false, err
 		}
-		if uids, bodyFailed, err = r.bodyGate(ctx, sc, b, uids); err != nil {
-			return err
+		if uids, m.bodyFailed, err = r.bodyGate(ctx, sc, b, uids); err != nil {
+			return m, false, err
 		}
 	}
-	rows, err := r.s.matchBatch(ctx, sc, uids)
-	if err != nil {
+	if m.rows, err = r.s.matchBatch(ctx, sc, uids); err != nil {
+		return m, false, err
+	}
+	return m, len(m.rows)+len(m.bodyFailed) > 0, nil
+}
+
+// newAct runs one on_new rule's actions on what it matched in the batch,
+// or records its scope failure as a permanent failure of the run. A
+// message whose body did not come is a failed match that no action was
+// attempted on, so it never counts toward all_failed. It acts on at most
+// rule.MaxPerRun messages after the act-once filter, oldest first, and
+// records outcome capped when an eligible match remains. The new trigger
+// never comes back for those: the batch is acknowledged, and a scheduled
+// or manual run covers them. It returns a transient failure, after
+// recording the run as interrupted.
+func (r *ruleRunner) newAct(ctx context.Context, m batchMatch, stopped map[string]bool) error {
+	rule := m.rule
+	if m.scopeErr != nil {
+		_, err := r.scopeFailed(ctx, rule, rules.TriggerNew, m.start, m.scopeErr)
 		return err
 	}
-	keys := make([]string, 0, len(rows)+len(bodyFailed))
+	rows := m.rows
+	keys := make([]string, 0, len(rows)+len(m.bodyFailed))
 	for _, row := range rows {
 		keys = append(keys, messageKeyOf(r.acct, row.Ref()))
 	}
-	for _, m := range bodyFailed {
-		keys = append(keys, messageKeyOf(r.acct, m))
-	}
-	if len(keys) == 0 {
-		return nil
+	for _, f := range m.bodyFailed {
+		keys = append(keys, messageKeyOf(r.acct, f))
 	}
 	applied, err := r.applied(ctx, rule.ID, keys)
 	if err != nil {
 		return err
 	}
-	run, err := r.begin(ctx, rule, rules.TriggerNew, start)
+	run, err := r.begin(ctx, rule, rules.TriggerNew, m.start)
 	if err != nil {
 		return err
 	}

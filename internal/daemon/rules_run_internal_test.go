@@ -12,6 +12,7 @@ import (
 
 	"github.com/yaklabco/chainmail/internal/api"
 	"github.com/yaklabco/chainmail/internal/cache"
+	"github.com/yaklabco/chainmail/internal/config"
 	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/mailstore/fake"
 	"github.com/yaklabco/chainmail/internal/ref"
@@ -363,6 +364,66 @@ func TestRuleBatchKeepsPriorityAndStop(t *testing.T) {
 	}
 	if run := g.lastRun(t, third.ID); run.Matched != 1 || run.Skipped != 1 || run.Applied != 0 {
 		t.Errorf("stopped rule's run = %+v, want 1 matched, 1 skipped", run)
+	}
+}
+
+// flagEchoStore is a fake mail store whose flag writes reach the cache at
+// once, as a cache builder that applies their flags events between two
+// rules of a batch would leave it.
+type flagEchoStore struct {
+	*fake.Store
+	t     *testing.T
+	cache *cache.Store
+}
+
+func (w *flagEchoStore) StoreFlags(ctx context.Context, refs []ref.Ref, add, remove []string) []mailstore.RefResult {
+	res := w.Store.StoreFlags(ctx, refs, add, remove)
+	for i, m := range refs {
+		if res[i].Err != nil {
+			continue
+		}
+		if ok, err := w.cache.SetFlags(ctx, m, w.Flags(m), nil); err != nil || !ok {
+			w.t.Errorf("echoing %s's flags to the cache: %t, %v", m, ok, err)
+		}
+	}
+	return res
+}
+
+// TestRuleBatchMatchesEveryRuleFirst checks spec amendment 24: every rule
+// of a batch matches the cache as it was when the batch was matched. The
+// first rule marks the message read, and its flag reaches the cache before
+// the second rule acts, but the second rule, which wants read mail, saw
+// the message unread and leaves it alone.
+func TestRuleBatchMatchesEveryRuleFirst(t *testing.T) {
+	t.Parallel()
+	g := newRunnerRig(t, "host", nil)
+	echo := &flagEchoStore{Store: g.fk, t: t, cache: g.f.store}
+	g.f.s.stores = &storeSet{build: func(a config.ResolvedAccount) mailstore.Store {
+		if a.Name == "host" {
+			return echo
+		}
+		return g.f.fakes[a.Name]
+	}}
+	g.newRule(t, "host", "read-lunch", func(d *rules.Definition) {
+		d.Priority, d.Query, d.Actions = 10, "subject:lunch", []rules.Action{{Kind: rules.ActRead}}
+	})
+	later := g.newRule(t, "host", "flag-read-lunch", func(d *rules.Definition) {
+		d.Priority, d.Query = 20, "is:read subject:lunch"
+	})
+	lunch := g.refs["host lunch"]
+	g.publish(t, lunch)
+	if err := g.step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	row, ok, err := g.f.store.Row(t.Context(), lunch)
+	if err != nil || !ok || !slices.Contains(row.Flags, flagSeen) {
+		t.Fatalf("cached lunch = %+v, %t, %v, want it read in the cache after the batch", row.Flags, ok, err)
+	}
+	if g.flagged([]ref.Ref{lunch})[0] {
+		t.Error("the read-mail rule flagged lunch, which was unread when the batch was matched")
+	}
+	if runs := g.runsOf(t, later.ID); len(runs) != 0 {
+		t.Errorf("read-mail rule's runs = %+v, want none: it matched nothing", runs)
 	}
 }
 
