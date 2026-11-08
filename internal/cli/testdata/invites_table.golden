@@ -1,0 +1,3 @@
+WHEN                            ACCOUNT  SOURCE    METHOD   ORGANIZER          REF                                             SUMMARY
+Tue 2026-11-10 09:00-09:30 EST  work     calendar  REQUEST  alice@example.com  ce_01jcb7m2k9r8q3v4w5x6y7z8a9@20261110T140000Z  Stand[2Jup
+Fri 2026-11-20 18:30-20:30 EST  host     mail      REQUEST  carol@example.org  ce_01jcb7m2k9r8q3v4w5x6y7z8c1                   Dinner

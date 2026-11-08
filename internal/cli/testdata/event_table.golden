@@ -1,0 +1,26 @@
+ref          ce_01jcb7m2k9r8q3v4w5x6y7z8a9@20261110T140000Z
+account      work
+calendar     primary
+summary      Stand[2Jup
+when         Tue 2026-11-10 09:00-09:30 EST
+event zone   Tue 2026-11-10 15:00-15:30 CET (Europe/Paris)
+status       confirmed
+location     Room 4
+organizer    Alice <alice@example.com>
+me           accepted
+recurrence   FREQ=WEEKLY;BYDAY=TU
+instance of  2026-11-10T14:00:00Z
+busy         yes
+sequence     2
+uid          standup@example.com
+etag         "e1"
+
+attendees:
+  ACCEPTED      Alice <alice@example.com>  chair
+  ACCEPTED      me@example.com             me
+  NEEDS-ACTION  Bob <bob@example.com>
+
+description:
+  Daily sync.
+
+  Bring notes.

@@ -32,6 +32,30 @@ var examples = map[string]string{
   chainmail cache rebuild --account work --folder INBOX`,
 	"chainmail cache status": `  chainmail cache status
   chainmail cache status --account work --account gmail --output json`,
+	"chainmail calendars": `  chainmail calendars
+  chainmail calendars --account work --output json`,
+	"chainmail agenda": `  chainmail agenda
+  chainmail agenda --days 1
+  chainmail agenda --account work --from 2026-11-10 --to 2026-11-17 --output json
+  # a working day in another zone
+  chainmail agenda --from "2026-11-10 09:00" --to "2026-11-10 17:00" --tz Europe/London`,
+	"chainmail event": `  chainmail event ce_01jcb7m2k9r8q3v4w5x6y7z8a9
+  # one instance of a recurring series
+  chainmail event ce_01jcb7m2k9r8q3v4w5x6y7z8a9@20261110T140000Z --output json`,
+	"chainmail event create": `  chainmail event create --account work --title "Planning" --start "2026-11-10 09:00" --duration 30m --attendee alice@example.com
+  chainmail event create --title "Offsite" --all-day --start 2026-11-11 --end 2026-11-13
+  chainmail event create --title "Gym" --start "2026-11-10 07:00" --end "2026-11-10 08:00" --rrule "FREQ=WEEKLY;BYDAY=TU" --tz Europe/London`,
+	"chainmail event edit": `  chainmail event edit ce_01jcb7m2k9r8q3v4w5x6y7z8a9 --start "2026-11-10 10:00"
+  # refuse the change if the event changed since it was read
+  chainmail event edit ce_01jcb7m2k9r8q3v4w5x6y7z8a9 --location "Room 5" --etag '"e1"'`,
+	"chainmail event cancel": `  chainmail event cancel ce_01jcb7m2k9r8q3v4w5x6y7z8a9`,
+	"chainmail invites": `  chainmail invites
+  chainmail invites --account work --output json`,
+	"chainmail invite": `  chainmail invite ce_01jcb7m2k9r8q3v4w5x6y7z8a9`,
+	"chainmail rsvp": `  chainmail rsvp ce_01jcb7m2k9r8q3v4w5x6y7z8a9 accept
+  chainmail rsvp ce_01jcb7m2k9r8q3v4w5x6y7z8a9@20261110T140000Z decline --comment "Away that week"`,
+	"chainmail freebusy": `  chainmail freebusy --days 3
+  chainmail freebusy --account work --from 2026-11-10 --to 2026-11-10 alice@example.com bob@example.com`,
 	"chainmail copy": `  chainmail copy cm1:work:INBOX:7:42 --to Receipts`,
 	"chainmail daemon": `  # production runs under systemd; a development daemon runs as you
   chainmail daemon --dev --config ./config.toml --state-dir ./state --vault-key-file ./vault-key`,
@@ -157,7 +181,9 @@ var examples = map[string]string{
   # changes to an item and the items below it, and new mail on their threads
   chainmail watch --kind item,item_mail --item it_01jcb7m2k9r8q3v4w5x6y7z8a9
   # rule changes, and work items coming due
-  chainmail watch --kind rule,item_due_soon,item_due,item_overdue`,
+  chainmail watch --kind rule,item_due_soon,item_due,item_overdue
+  # new invites, changes to events and replies to events James organizes
+  chainmail watch --group calendar --kind invite,event_changed,event_cancelled,invite_reply`,
 	"chainmail watch groups":        `  chainmail watch groups`,
 	"chainmail watch groups delete": `  chainmail watch groups delete triage`,
 	"chainmail watch status":        `  chainmail watch status`,
