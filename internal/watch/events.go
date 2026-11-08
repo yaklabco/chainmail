@@ -48,6 +48,16 @@ const (
 	KindItemDueSoon Kind = "item_due_soon"
 	KindItemDue     Kind = "item_due"
 	KindItemOverdue Kind = "item_overdue"
+	// KindInvite, KindEventChanged, KindEventCancelled and KindInviteReply are
+	// calendar changes: an invitation to the account, a change to an event
+	// on one of its calendars, an event cancelled, and an attendee's reply to
+	// an event it organizes. Each carries its account and the event's ce_
+	// ref in Ref, has no folder, and its payload never holds event text.
+	// Readers opt in: a Filter matches them only when Kinds names them.
+	KindInvite         Kind = "invite"
+	KindEventChanged   Kind = "event_changed"
+	KindEventCancelled Kind = "event_cancelled"
+	KindInviteReply    Kind = "invite_reply"
 )
 
 // Status is a folder's sync state, as status events and sync_folders rows
@@ -139,26 +149,55 @@ type ItemDue struct {
 	ParentID string `json:"parent_id,omitempty"`
 }
 
+// CalendarChange is the payload of the four calendar kinds: invite,
+// event_changed, event_cancelled and invite_reply. Times are RFC 3339 UTC
+// strings ("" when unset). It holds refs, IDs, times, addresses, field
+// names and a PARTSTAT, never event text: no summary, description,
+// location, display names, comments or calendar names.
+type CalendarChange struct {
+	// Ref is the event's ce_ ref, with an @<instant> suffix for one
+	// instance of a recurring event.
+	Ref string `json:"ref"`
+	// MessageRef is the ref of the mail an invite arrived in, for invites
+	// found in mail.
+	MessageRef string `json:"message_ref,omitempty"`
+	// CalendarID is the calendar the event is on, empty for an invite only
+	// in mail.
+	CalendarID string `json:"calendar_id,omitempty"`
+	// Start and End are the event's (or instance's) start and end.
+	Start string `json:"start,omitempty"`
+	End   string `json:"end,omitempty"`
+	// Organizer is the organizer's address.
+	Organizer string `json:"organizer,omitempty"`
+	// Fields names the changed fields, for event_changed.
+	Fields []string `json:"fields,omitempty"`
+	// Attendee is the replying attendee's address, for invite_reply.
+	Attendee string `json:"attendee,omitempty"`
+	// PartStat is the attendee's answer, for invite_reply.
+	PartStat string `json:"partstat,omitempty"`
+}
+
 // Event is one entry in the log. Which optional fields are set depends on Kind.
 type Event struct {
 	ID       int64 // assigned by Append; 0 before
 	At       time.Time
 	Kind     Kind
-	Account  string // "" for item, rule and due events and the trimmed gap
+	Account  string // "" for item, rule and due events and the trimmed gap; set for calendar events
 	Folder   string
 	Ref      string
-	Message  *Message    // new, item_mail
-	Flags    []string    // flags
-	Labels   []string    // flags
-	State    Status      // status
-	Detail   string      // status
-	Reason   string      // gap
-	NextID   int64       // gap
-	Item     *ItemChange // item
-	ItemID   string      // item_mail
-	FromSelf bool        // item_mail: the message is from the account's own address
-	Rule     *RuleChange // rule
-	Due      *ItemDue    // item_due_soon, item_due, item_overdue
+	Message  *Message        // new, item_mail
+	Flags    []string        // flags
+	Labels   []string        // flags
+	State    Status          // status
+	Detail   string          // status
+	Reason   string          // gap
+	NextID   int64           // gap
+	Item     *ItemChange     // item
+	ItemID   string          // item_mail
+	FromSelf bool            // item_mail: the message is from the account's own address
+	Rule     *RuleChange     // rule
+	Due      *ItemDue        // item_due_soon, item_due, item_overdue
+	Calendar *CalendarChange // invite, event_changed, event_cancelled, invite_reply
 }
 
 // The payload column holds one of these per kind, as JSON. expunged and
@@ -192,6 +231,9 @@ type (
 	}
 	duePayload struct {
 		Due *ItemDue `json:"due"`
+	}
+	calendarPayload struct {
+		Calendar *CalendarChange `json:"calendar"`
 	}
 )
 
@@ -233,6 +275,11 @@ func encodePayload(e Event) (string, error) {
 			return "", fmt.Errorf("%s event has no due item", e.Kind)
 		}
 		v = duePayload{Due: e.Due}
+	case KindInvite, KindEventChanged, KindEventCancelled, KindInviteReply:
+		if e.Calendar == nil {
+			return "", fmt.Errorf("%s event for %s has no calendar change", e.Kind, e.Ref)
+		}
+		v = calendarPayload{Calendar: e.Calendar}
 	case KindExpunged, KindUnreadable:
 		return "{}", nil
 	default:
@@ -290,6 +337,11 @@ func decodePayload(e *Event, payload string) error {
 		var p duePayload
 		if err = json.Unmarshal(data, &p); err == nil {
 			e.Due = p.Due
+		}
+	case KindInvite, KindEventChanged, KindEventCancelled, KindInviteReply:
+		var p calendarPayload
+		if err = json.Unmarshal(data, &p); err == nil {
+			e.Calendar = p.Calendar
 		}
 	case KindExpunged, KindUnreadable:
 	default:

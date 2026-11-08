@@ -232,3 +232,78 @@ func TestFilterMatchOptInKinds(t *testing.T) {
 		})
 	}
 }
+
+// The four calendar kinds are opt-in and folderless. They carry an
+// account, so a filter that names no kinds, the cache builder's reader
+// included, must drop them or every mail reader would get them. Named, they
+// pass In always and Accounts only for their own account. An item filter
+// drops them, as it drops rule events.
+func TestFilterMatchCalendarKinds(t *testing.T) {
+	t.Parallel()
+	ref := "ce_0123456789abcdefghjkmnpqrs"
+	invite := Event{Kind: KindInvite, Account: "a", Ref: ref, Calendar: &CalendarChange{Ref: ref, CalendarID: "primary", Organizer: "ann@example.com"}}
+	changed := Event{Kind: KindEventChanged, Account: "a", Ref: ref, Calendar: &CalendarChange{Ref: ref, Fields: []string{"start"}}}
+	cancelled := Event{Kind: KindEventCancelled, Account: "a", Ref: ref, Calendar: &CalendarChange{Ref: ref}}
+	reply := Event{Kind: KindInviteReply, Account: "a", Ref: ref, Calendar: &CalendarChange{Ref: ref, Attendee: "bob@example.com", PartStat: "ACCEPTED"}}
+	status := Event{Kind: KindStatus, Account: "a", Folder: "INBOX", State: StateWatching}
+	inbox := Event{Kind: KindNew, Account: "a", Folder: "INBOX", Message: &Message{}}
+	calKinds := []Kind{KindInvite, KindEventChanged, KindEventCancelled, KindInviteReply}
+	cache := Filter{Accounts: []string{"a"}, Internal: true}
+	onlyA := map[string]bool{"it_a": true}
+
+	tests := []struct {
+		name string
+		f    Filter
+		e    Event
+		want bool
+	}{
+		// A default filter and the cache builder's filter drop all four.
+		{"invite hidden by empty kinds", Filter{}, invite, false},
+		{"event_changed hidden by empty kinds", Filter{}, changed, false},
+		{"event_cancelled hidden by empty kinds", Filter{}, cancelled, false},
+		{"invite_reply hidden by empty kinds", Filter{}, reply, false},
+		{"invite hidden with only its account", Filter{Accounts: []string{"a"}}, invite, false},
+		{"event_changed hidden with only in", Filter{In: "INBOX"}, changed, false},
+		{"invite hidden from the cache reader", cache, invite, false},
+		{"event_changed hidden from the cache reader", cache, changed, false},
+		{"event_cancelled hidden from the cache reader", cache, cancelled, false},
+		{"invite_reply hidden from the cache reader", cache, reply, false},
+		{"invite hidden from an internal reader", Filter{Internal: true}, invite, false},
+		{"new still passes the cache reader", cache, inbox, true},
+
+		// Delivered when listed.
+		{"invite named", Filter{Kinds: []Kind{KindInvite}}, invite, true},
+		{"event_changed named", Filter{Kinds: []Kind{KindEventChanged}}, changed, true},
+		{"event_cancelled named", Filter{Kinds: []Kind{KindEventCancelled}}, cancelled, true},
+		{"invite_reply named", Filter{Kinds: []Kind{KindInviteReply}}, reply, true},
+		{"every calendar kind named", Filter{Kinds: calKinds}, reply, true},
+		{"event_changed not named beside invite", Filter{Kinds: []Kind{KindInvite}}, changed, false},
+		{"invite not named beside the due kinds", Filter{Kinds: []Kind{KindItemDueSoon, KindItemDue, KindItemOverdue}}, invite, false},
+		{"new not named beside the calendar kinds", Filter{Kinds: calKinds}, inbox, false},
+		{"status passes the calendar kinds", Filter{Kinds: calKinds}, status, true},
+		{"invite named for an internal reader", Filter{Internal: true, Kinds: []Kind{KindInvite}}, invite, true},
+
+		// In never drops them; Accounts drops another account's.
+		{"invite passes in", Filter{Kinds: []Kind{KindInvite}, In: "INBOX"}, invite, true},
+		{"event_changed passes in", Filter{Kinds: []Kind{KindEventChanged}, In: "Archive"}, changed, true},
+		{"event_cancelled passes in", Filter{Kinds: []Kind{KindEventCancelled}, In: "sent"}, cancelled, true},
+		{"invite_reply passes in", Filter{Kinds: []Kind{KindInviteReply}, In: "inbox"}, reply, true},
+		{"invite passes its account", Filter{Kinds: []Kind{KindInvite}, Accounts: []string{"a"}}, invite, true},
+		{"invite dropped for another account", Filter{Kinds: []Kind{KindInvite}, Accounts: []string{"b"}}, invite, false},
+		{"invite_reply dropped for another account", Filter{Kinds: calKinds, Accounts: []string{"b"}}, reply, false},
+
+		// An item filter drops them, named or not.
+		{"item filter drops invite", Filter{Items: onlyA}, invite, false},
+		{"item filter drops event_changed even when named", Filter{Kinds: []Kind{KindEventChanged}, Items: onlyA}, changed, false},
+		{"item filter drops event_cancelled", Filter{Items: onlyA}, cancelled, false},
+		{"item filter drops invite_reply even when named", Filter{Kinds: calKinds, Items: onlyA}, reply, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.f.Match(tt.e); got != tt.want {
+				t.Errorf("%+v.Match(%+v) = %v, want %v", tt.f, tt.e, got, tt.want)
+			}
+		})
+	}
+}
