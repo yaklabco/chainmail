@@ -43,6 +43,8 @@ A body that fails to fetch is tried at most 3 times, 8 hours apart, then counted
 
 Each account is decided on its own, for each page, so one search can mix the cache and the servers. With `--source auto`, the default, the cache answers an account when every folder the search covers is synced, fresh and backfilled, and the cache can answer the whole query. Otherwise the account's mail server answers.
 
+Rules match only against the cache, never against the mail servers. A scheduled or manual run on an account whose cache cannot answer the rule completely acts on nothing (see [Rules](../guide/rules.md#the-query)).
+
 ### Fresh folders
 
 A folder is fresh when all of these hold:

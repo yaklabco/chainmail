@@ -24,8 +24,9 @@ Fields held as 64-bit integers arrive in the CLI's JSON as strings, as protobuf'
 - In the cache commands, and the `cache` entries of `admin status`: `size_bytes`, `max_size_bytes`, `budget_used_bytes`, `budget_bytes`, and a folder's `headers`, `bodies`, `body_bytes`, `window_messages`, `window_bodies`, `body_failures`, `unreadable` and `attachments_unknown`.
 - `bodies_evicted` and `freed_bytes` from `cache evict`.
 - Every `revision` in the output of the `item` commands and in `item` events.
+- In the `rule` commands: every `revision`, a run's `id`, `matched`, `applied`, `held`, `skipped` and `failed`, the `counts` of `rule show`, `matched` and `skipped` in `rule dry-run`, `next_before_id` from `rule runs`, and `acked_id` and `lag` from `rule status`. A `rule` event's `revision` is a string too.
 
-The MCP tool `cache_status` returns its sizes and counts as JSON numbers, and so do the item tools and `read_events` for `revision`. 32-bit fields, such as a folder's `messages` and `unseen` and a row's `thread_count`, are JSON numbers everywhere, and so is `bytes` in the output of `attachment`.
+The MCP tool `cache_status` returns its sizes and counts as JSON numbers, and so do the item and rule tools for revisions, run IDs and counts, and `read_events` for `revision`. 32-bit fields, such as a folder's `messages` and `unseen` and a row's `thread_count`, are JSON numbers everywhere, and so is `bytes` in the output of `attachment`.
 
 ## What is untrusted
 
@@ -40,6 +41,8 @@ Everything that comes from a message or a mail server is untrusted:
 - the blocked addresses of a held send, which can come from the original message
 
 Work item text is untrusted too, whoever wrote it. Titles, descriptions, criterion text, evidence and link notes come back wrapped the same way, as they were stored, since agents often copy them from mail.
+
+Rule descriptions and queries are untrusted too, for the same reason, and over MCP so is a forward action's note. Rule names are plain, since a name holds only lowercase letters, digits and hyphens.
 
 Refs are the exception. They pass unchanged as plain strings, with the folder name percent-encoded inside (see [Refs and cursors](./refs-and-cursors.md)).
 

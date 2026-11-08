@@ -29,7 +29,7 @@ flowchart LR
 
 - [Install](./getting-started/install.md) chainmail with Homebrew, a release archive, Nix or from source.
 - [Quick start](./getting-started/quick-start.mdx): run a dev daemon, add an account and search your mail.
-- [User guide](./guide/reading-and-searching.md): reading, searching, sending, organizing, items and watching.
+- [User guide](./guide/reading-and-searching.md): reading, searching, sending, organizing, items, rules and watching.
 - [Agents (MCP)](./agents/setup.md): connect an AI agent and learn how it should treat what it reads.
 - [Operations](./operations/deploy.mdx): deploy the daemon, keep it healthy, back it up and upgrade it.
 - [Reference](./reference/configuration.md): the configuration file, [every command](./reference/commands/chainmail.md), the [MCP tools](./reference/mcp-tools.md) and the [exit codes](./reference/exit-codes.md).

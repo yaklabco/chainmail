@@ -566,6 +566,21 @@ func (s *Server) FileSent(raw []byte) {
 	s.refreshLocked()
 }
 
+// Deliver adds raw as Gmail files mail it receives: unread, with the
+// \Inbox label, so in INBOX and All Mail, with date as its INTERNALDATE. It
+// joins the thread its In-Reply-To or References name. It returns the
+// message's index, as MsgID, ThreadID, Flags and Labels count. A session
+// learns of it as of any other arrival: at its next command, or within
+// 10ms while it idles.
+func (s *Server) Deliver(raw string, date time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.newMessageLocked(raw, date, nil)
+	addLabel(m, `\Inbox`)
+	s.refreshLocked()
+	return len(s.msgs) - 1
+}
+
 // MsgID returns the X-GM-MSGID of the i-th message, counting from 0. Messages
 // added by APPEND and FileSent count on from those given to Start.
 func (s *Server) MsgID(i int) uint64 {
@@ -586,6 +601,14 @@ func (s *Server) Flags(i int) []imap.Flag {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.msgs[i].Flags)
+}
+
+// Labels returns the i-th message's labels, sorted, as writes have left
+// them.
+func (s *Server) Labels(i int) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Sorted(slices.Values(s.msgs[i].Labels))
 }
 
 // LastRaw returns every X-GM-RAW string received, in order.
