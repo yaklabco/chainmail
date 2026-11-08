@@ -59,9 +59,8 @@ func waitInTake(t *testing.T, id string) {
 func TestRuleStepReadsOwedWritesOnItsTurn(t *testing.T) {
 	t.Parallel()
 	g := newRunnerRig(t, "host", nil)
-	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(t.Context())
-	joinAtCleanup(t, cancel, &wg)
+	work := newTurnWorkers(t, cancel)
 	rule := g.newRule(t, "host", "copy-then-flag", func(d *rules.Definition) {
 		d.Query, d.Actions = "subject:lunch", []rules.Action{{Kind: rules.ActCopy, Folder: "Archive"}, {Kind: rules.ActFlag}}
 	})
@@ -83,11 +82,11 @@ func TestRuleStepReadsOwedWritesOnItsTurn(t *testing.T) {
 	var manualErr, stepErr error
 	// The manual run takes the turn, meets the owed drop, and waits on the
 	// clock between its tries.
-	wg.Go(func() { manual, manualErr = g.r.runRule(ctx, rule, rules.TriggerManual, 0) })
+	work.Go(func() { manual, manualErr = g.r.runRule(ctx, rule, rules.TriggerManual, 0) })
 	retry := g.clk.next(t)
 	// The step starts and waits for the turn the manual run holds.
 	stepID := make(chan string, 1)
-	wg.Go(func() {
+	work.Go(func() {
 		stepID <- goroutineID()
 		stepErr = g.step(ctx)
 	})
@@ -99,7 +98,7 @@ func TestRuleStepReadsOwedWritesOnItsTurn(t *testing.T) {
 	}
 	g.fk.FailWrite("StoreFlags", mailstore.ErrUnavailable)
 	retry.fire <- g.clk.Now()
-	waitWorkers(t, &wg)
+	work.wait(t)
 
 	if manualErr != nil || manual.Outcome != rules.OutcomeInterrupted || manual.Reason != api.ReasonServerUnavailable {
 		t.Fatalf("manual run = %+v, %v, want interrupted with SERVER_UNAVAILABLE", manual, manualErr)
@@ -129,9 +128,8 @@ func TestRuleStepReadsOwedWritesOnItsTurn(t *testing.T) {
 func TestRuleStepAcksOnTheTurnThatDrained(t *testing.T) {
 	t.Parallel()
 	g := newRunnerRig(t, "host", nil)
-	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(t.Context())
-	joinAtCleanup(t, cancel, &wg)
+	work := newTurnWorkers(t, cancel)
 	// The batch's first rule leaves a drop owed: its copy is refused for
 	// good, and state.db will not drop the pending row yet.
 	g.newRule(t, "host", "copy-nowhere", func(d *rules.Definition) {
@@ -165,13 +163,13 @@ func TestRuleStepAcksOnTheTurnThatDrained(t *testing.T) {
 
 	var manual rules.Run
 	var manualErr, stepErr error
-	wg.Go(func() { stepErr = g.step(ctx) })
+	work.Go(func() { stepErr = g.step(ctx) })
 	body := g.clk.next(t)
 	if body.d != bodyPoll {
 		t.Fatalf("first wait %v, want the body poll %v", body.d, bodyPoll)
 	}
 	manualID := make(chan string, 1)
-	wg.Go(func() {
+	work.Go(func() {
 		manualID <- goroutineID()
 		manual, manualErr = g.r.runRule(ctx, manualRule, rules.TriggerManual, 0)
 	})
@@ -182,7 +180,7 @@ func TestRuleStepAcksOnTheTurnThatDrained(t *testing.T) {
 	}
 	g.clk.advance(bodyWait)
 	body.fire <- g.clk.Now()
-	waitWorkers(t, &wg)
+	work.wait(t)
 
 	if stepErr != nil {
 		t.Fatal(stepErr)
@@ -216,7 +214,7 @@ func TestRuleStepAcksOnTheTurnThatDrained(t *testing.T) {
 	start := g.pos
 	g.publish(t, g.refs["host lunch"])
 	var heldErr error
-	wg.Go(func() { heldErr = g.step(ctx) })
+	work.Go(func() { heldErr = g.step(ctx) })
 	for i := range owedWriteTries - 1 {
 		w := g.clk.next(t)
 		if want := watch.Backoff(i, 0.5); w.d != want {
@@ -224,7 +222,7 @@ func TestRuleStepAcksOnTheTurnThatDrained(t *testing.T) {
 		}
 		w.fire <- g.clk.Now()
 	}
-	waitWorkers(t, &wg)
+	work.wait(t)
 	if reason, _ := failureOf(heldErr); reason != api.ReasonInternal {
 		t.Fatalf("held step = %v, want an INTERNAL failure", heldErr)
 	}
@@ -249,38 +247,52 @@ func TestRuleStepAcksOnTheTurnThatDrained(t *testing.T) {
 // workerBound bounds how long a turn test waits for its workers to finish.
 const workerBound = 10 * time.Second
 
-// waitGroupWithin reports whether wg finishes within d. On a timeout the
-// goroutine waiting on wg outlives the call, which only a failing test
-// sees.
-func waitGroupWithin(wg *sync.WaitGroup, d time.Duration) bool {
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-		return true
-	case <-time.After(d):
-		return false
-	}
+// turnWorkers runs a turn test's worker goroutines. Each worker signals its
+// own completion, so wait bounds the test's wait without a waiting
+// goroutine of its own. At cleanup the workers' context is cancelled and
+// every worker is joined before the rig's own cleanups close the rig:
+// everything a worker blocks on (the turn, the runner clock, the store)
+// gives up when the context ends.
+type turnWorkers struct {
+	wg      sync.WaitGroup
+	done    chan struct{}
+	pending int
 }
 
-// joinAtCleanup cancels the workers' context and joins them, within
-// workerBound, when the test ends on any path, so a failed assertion never
-// leaves a worker running while the rig closes.
-func joinAtCleanup(t *testing.T, cancel context.CancelFunc, wg *sync.WaitGroup) {
+// maxTurnWorkers is the most workers one turn test starts.
+const maxTurnWorkers = 8
+
+// newTurnWorkers returns the workers of t, whose context cancel ends.
+func newTurnWorkers(t *testing.T, cancel context.CancelFunc) *turnWorkers {
 	t.Helper()
+	w := &turnWorkers{done: make(chan struct{}, maxTurnWorkers)}
 	t.Cleanup(func() {
 		cancel()
-		if !waitGroupWithin(wg, workerBound) {
-			t.Errorf("workers did not stop within %v of cleanup", workerBound)
-		}
+		w.wg.Wait()
+	})
+	return w
+}
+
+// Go starts f as a worker.
+func (w *turnWorkers) Go(f func()) {
+	w.pending++
+	w.wg.Go(func() {
+		defer func() { w.done <- struct{}{} }()
+		f()
 	})
 }
 
-// waitWorkers waits for the workers to finish, failing the test after
+// wait waits for every worker started so far, failing the test after
 // workerBound so a locking regression fails fast instead of hanging.
-func waitWorkers(t *testing.T, wg *sync.WaitGroup) {
+func (w *turnWorkers) wait(t *testing.T) {
 	t.Helper()
-	if !waitGroupWithin(wg, workerBound) {
-		t.Fatalf("workers did not finish within %v", workerBound)
+	timer := time.NewTimer(workerBound)
+	defer timer.Stop()
+	for ; w.pending > 0; w.pending-- {
+		select {
+		case <-w.done:
+		case <-timer.C:
+			t.Fatalf("%d workers did not finish within %v", w.pending, workerBound)
+		}
 	}
 }
