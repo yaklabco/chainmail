@@ -101,8 +101,8 @@ func TestGoogleLabelRule(t *testing.T) {
 
 	// 4. Run it with max 1.
 	run := runLiveRule(t, c, rule.GetId(), name, 1)
-	if run.GetMatched() != 1 || run.GetApplied() != 1 || run.GetFailed() != 0 || (run.GetOutcome() != "ok" && run.GetOutcome() != "capped") {
-		t.Errorf("run %d: outcome %s, matched %d, applied %d, failed %d; want the one message applied", run.GetId(), run.GetOutcome(), run.GetMatched(), run.GetApplied(), run.GetFailed())
+	if run.GetMatched() != 1 || run.GetApplied() != 1 || run.GetFailed() != 0 || run.GetOutcome() != "ok" {
+		t.Errorf("run %d: outcome %s, matched %d, applied %d, failed %d; want ok with the one message applied", run.GetId(), run.GetOutcome(), run.GetMatched(), run.GetApplied(), run.GetFailed())
 	}
 	if !slices.Contains(getOne(t, c, m, false).GetLabels(), label) {
 		t.Errorf("%s lacks the label %s after the run", m, label)
