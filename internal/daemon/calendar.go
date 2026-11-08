@@ -3,12 +3,16 @@ package daemon
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/yaklabco/chainmail/gen/chainmail/v1/chainmailv1connect"
 	"github.com/yaklabco/chainmail/internal/api"
@@ -16,6 +20,7 @@ import (
 	"github.com/yaklabco/chainmail/internal/calcache"
 	"github.com/yaklabco/chainmail/internal/calendar"
 	"github.com/yaklabco/chainmail/internal/calstore"
+	"github.com/yaklabco/chainmail/internal/idempotency"
 )
 
 const (
@@ -23,6 +28,9 @@ const (
 	// client set none. Reads come from calendar.db, except free/busy of
 	// other people, which asks the provider.
 	calendarReadTimeout = callTimeout
+	// calendarWriteTimeout is the deadline of a CalendarService write: a
+	// store call, a sync and, for an RSVP by email, a whole send.
+	calendarWriteTimeout = composeTimeout
 	// maxCalendarSpan is the longest range Agenda and FreeBusy read.
 	maxCalendarSpan = 400 * 24 * time.Hour
 	// defaultCalendarSpan is the range Agenda and FreeBusy read from now
@@ -52,7 +60,35 @@ var (
 		hint: "set store in the account's [calendar] table, or name another account; " + calendarsHint,
 	}
 
+	errNotAttendee = &calendarRefusal{
+		code: connect.CodeFailedPrecondition, reason: api.ReasonInvalidArgument,
+		msg:  "none of the account's addresses is an attendee of the event",
+		hint: "only an invite to one of the account's addresses can be answered",
+	}
+	errNoOrganizer = &calendarRefusal{
+		code: connect.CodeFailedPrecondition, reason: api.ReasonInvalidArgument,
+		msg:  "the event has no organizer to answer",
+		hint: "answer it in the calendar app",
+	}
+	errOwnEvent = &calendarRefusal{
+		code: connect.CodeFailedPrecondition, reason: api.ReasonInvalidArgument,
+		msg:  "James organizes this event, so there is no invite to answer",
+		hint: "change it with: chainmail event edit <ref>",
+	}
+	errCalendarKeyBusy = &calendarRefusal{
+		code: connect.CodeUnavailable, reason: api.ReasonServerUnavailable,
+		msg:  "a call with this idempotency key is still in progress",
+		hint: "try again later with the same key",
+	}
+	errCalendarKeyFailed = &calendarRefusal{
+		code: connect.CodeUnavailable, reason: api.ReasonServerUnavailable,
+		msg:  "an earlier call with this idempotency key failed",
+		hint: "try again with the same key",
+	}
+
 	errCalendarRange = &argError{msg: "from must be before to, and at most 400 days before it", hint: "leave from and to unset for the next 7 days"}
+	errCalendarKey   = &argError{msg: "the idempotency key is malformed", hint: "pass idempotency_key: 1 to 128 of A-Z, a-z, 0-9 and . _ : -"}
+	errCalendarReuse = &argError{msg: "key already used for a different request", hint: "use a new idempotency key for a different request"}
 )
 
 // calendarService implements chainmailv1connect.CalendarServiceHandler.
@@ -303,4 +339,109 @@ func (s *Server) resolveEvent(ctx context.Context, ref string) (resolvedEvent, e
 // set the policy always allows.
 func (s *Server) ownAddress(addr string) bool {
 	return addr != "" && s.policy.IsOwn(strings.TrimSpace(addr))
+}
+
+// syncAfterWrite runs a sync cycle of ca so calendar.db holds what a write
+// changed. A failure is logged by its reason: the write itself is done, so
+// the result is built from what the store returned.
+func (s *Server) syncAfterWrite(ctx context.Context, ca *calAccount) {
+	if ca.syncer == nil {
+		return
+	}
+	if err := ca.syncer.SyncNow(ctx); err != nil && ctx.Err() == nil {
+		s.opts.Logger.Warn("syncing the calendar after a write failed", "account", ca.name, "reason", apiReason(calendarError(ca.name, err)))
+	}
+}
+
+// calendarKey is the idempotency key a calendar call claims for a
+// caller's key: ns, a colon and 40 hex digits of the key's SHA-256. It fits
+// the 128 bytes a key may have whatever the caller's key, and never meets
+// a send's key or another kind of calendar call's.
+func calendarKey(ns, key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return ns + ":" + hex.EncodeToString(sum[:20])
+}
+
+// calendarHash is the hash of a calendar request with its idempotency key
+// cleared, so a repeat with the same key is recognized.
+func calendarHash(m proto.Message) ([32]byte, error) {
+	m = proto.Clone(m)
+	r := m.ProtoReflect()
+	if fd := r.Descriptor().Fields().ByName("idempotency_key"); fd != nil {
+		r.Clear(fd)
+	}
+	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(m)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("encoding the request: %w", err)
+	}
+	return sha256.Sum256(b), nil
+}
+
+// calendarClaim is the outcome of claiming a calendar call's key.
+type calendarClaim struct {
+	// proceed means the caller holds the key: it does the work and then
+	// calls settleCalendar.
+	proceed bool
+	// result is the stored response of a call that finished, to replay.
+	result []byte
+	// unknown means an earlier daemon stopped during the call. The caller
+	// does the work again without settling: the stores make a repeated
+	// create or answer harmless (Amendment 14).
+	unknown bool
+}
+
+// claimCalendar claims (account, key) for hash. A key used with another
+// request is INVALID_ARGUMENT; one another process holds, or whose attempt
+// this caller waited on failed, is refused with fixed text.
+func (s *Server) claimCalendar(ctx context.Context, account, key string, hash [32]byte) (calendarClaim, error) {
+	claim, err := s.idem.Begin(ctx, account, key, hash)
+	switch {
+	case errors.Is(err, idempotency.ErrKeyMismatch):
+		return calendarClaim{}, errCalendarReuse
+	case err != nil:
+		return calendarClaim{}, err
+	case claim.Proceed:
+		return calendarClaim{proceed: true}, nil
+	case claim.State == idempotency.Done:
+		return calendarClaim{result: claim.Result}, nil
+	case claim.State == idempotency.Unknown:
+		return calendarClaim{unknown: true}, nil
+	case claim.State == idempotency.InProgress:
+		return calendarClaim{}, errCalendarKeyBusy
+	default:
+		return calendarClaim{}, errCalendarKeyFailed
+	}
+}
+
+// settleCalendar settles a claimed key: done with the response to replay,
+// or retryable after a failure, so a repeat tries again. A client hang-up
+// must not leave the key in progress, so it ignores ctx's cancellation.
+func (s *Server) settleCalendar(ctx context.Context, account, key string, resp proto.Message, failed error) {
+	state, b := idempotency.Done, []byte(nil)
+	if failed != nil {
+		state = idempotency.Retryable
+	} else {
+		var err error
+		if b, err = proto.Marshal(resp); err != nil {
+			s.opts.Logger.Error("encoding a calendar result", "account", account, "err", err)
+			state = idempotency.Retryable
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
+	defer cancel()
+	if err := s.idem.Finish(ctx, account, key, state, b); err != nil {
+		s.opts.Logger.Error("settling an idempotency key", "account", account, "state", string(state), "err", err)
+	}
+}
+
+// heldTargets adds a policy decision's counts to an audit entry and marks
+// it held: blocked:<n> and too_many, never an address.
+func heldTargets(entry *audit.Entry, blocked int, tooMany bool) {
+	entry.Decision, entry.Reason = decisionHeld, api.ReasonHeld
+	if blocked > 0 {
+		entry.Targets = append(entry.Targets, fmt.Sprintf("blocked:%d", blocked))
+	}
+	if tooMany {
+		entry.Targets = append(entry.Targets, "too_many")
+	}
 }
