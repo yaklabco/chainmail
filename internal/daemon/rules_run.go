@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"sync"
@@ -657,7 +658,15 @@ func (r *ruleRunner) apply(ctx context.Context, rule rules.Rule, run *rules.Run,
 			run.Applied++
 		}
 		if err := r.markApplied(ctx, rule.ID, run.ID, key, outcome, res); err != nil {
-			r.oweCopyGuard(rule.ID, run.ID, res)
+			// The actions ran, so the whole write is owed: the acting row
+			// and every alias, the copy's guard among them. Until it is
+			// made, applied reads those keys as it will leave them.
+			r.s.opts.Logger.WarnContext(ctx, "a rule acted but could not save its act-once state; the runner owes the write",
+				"rule", rule.ID, "account", r.acct.Name, "run", run.ID, "err", err)
+			r.owe(owedWrite{
+				kind: owedMark, ruleID: rule.ID, key: key, runID: run.ID,
+				outcome: outcome, note: res.note, aliases: aliasesOf(r.acct, key, res),
+			})
 			return false, err
 		}
 		return relocates(rule), nil
@@ -700,16 +709,26 @@ const (
 	// owedAlias saves a rule's applied row at the key of a copy it made,
 	// so the copy's own new event is not copied again.
 	owedAlias
+	// owedMark is a whole act-once write that failed after the rule's
+	// actions ran: the acting row with its outcome and note, and every
+	// alias, such as the key a move gave the message, with the other
+	// rules' rows copied there (markApplied). Without it a message that
+	// moved would be acted on again where it landed.
+	owedMark
 )
 
 // owedWrite is one act-once write the runner owes: its kind, the rule,
-// the message key it writes (the pending row's, or the copy's) and the
-// run that left it.
+// the message key it writes (the pending row's, the copy's, or the acting
+// row's) and the run that left it. An owedMark also holds the outcome,
+// the note and the aliases.
 type owedWrite struct {
-	kind   owedKind
-	ruleID string
-	key    string
-	runID  int64
+	kind    owedKind
+	ruleID  string
+	key     string
+	runID   int64
+	outcome rules.AppliedOutcome
+	note    string
+	aliases []string
 }
 
 // owe adds w to the writes the runner owes, once.
@@ -745,19 +764,73 @@ func (r *ruleRunner) owedOf(kind owedKind, ruleID, key string) (owedWrite, bool)
 	return owedWrite{}, false
 }
 
-// applied is the act-once table's rows of ruleID for keys, with the copies
-// whose rows the runner owes read as applied, so no run acts on them
-// before their rows are saved.
+// applied is the act-once table's rows of ruleID for keys, read as the
+// writes the runner owes will leave them, so no run acts on a message
+// before its rows are saved: a copy whose guard is owed reads as applied,
+// and an owed act-once write of ruleID reads its key and every alias with
+// its outcome. An owed write of another rule copies ruleID's row of its
+// key to its aliases when made, without replacing a row there, so its
+// aliases read as ruleID's row of that key.
 func (r *ruleRunner) applied(ctx context.Context, ruleID string, keys []string) (map[string]rules.AppliedRow, error) {
 	applied, err := r.s.rules.Applied(ctx, ruleID, r.acct.Name, keys)
 	if err != nil {
 		return nil, err
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, w := range r.owed {
-		if w.kind == owedAlias && w.ruleID == ruleID && slices.Contains(keys, w.key) {
-			applied[w.key] = rules.AppliedRow{Outcome: rules.AppliedDone, RunID: w.runID}
+	owed := slices.Clone(r.owed)
+	r.mu.Unlock()
+	if len(owed) == 0 {
+		return applied, nil
+	}
+	want := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		want[k] = true
+	}
+	// own is what ruleID's owed writes will leave at any key; borrow maps
+	// another rule's owed key to its aliases among keys.
+	own := map[string]rules.AppliedRow{}
+	borrow := map[string][]string{}
+	for _, w := range owed {
+		switch {
+		case w.kind == owedAlias && w.ruleID == ruleID:
+			own[w.key] = rules.AppliedRow{Outcome: rules.AppliedDone, RunID: w.runID}
+		case w.kind == owedMark && w.ruleID == ruleID:
+			row := rules.AppliedRow{Outcome: w.outcome, Note: w.note, RunID: w.runID}
+			for _, k := range append([]string{w.key}, w.aliases...) {
+				own[k] = row
+			}
+		case w.kind == owedMark:
+			for _, a := range w.aliases {
+				if want[a] {
+					borrow[w.key] = append(borrow[w.key], a)
+				}
+			}
+		}
+	}
+	for k, row := range own {
+		if want[k] {
+			applied[k] = row
+		}
+	}
+	if len(borrow) == 0 {
+		return applied, nil
+	}
+	src, err := r.s.rules.Applied(ctx, ruleID, r.acct.Name, slices.Collect(maps.Keys(borrow)))
+	if err != nil {
+		return nil, err
+	}
+	for k, aliases := range borrow {
+		row, ok := own[k]
+		if !ok {
+			row, ok = src[k]
+		}
+		if !ok {
+			continue
+		}
+		for _, a := range aliases {
+			if _, has := applied[a]; !has {
+				applied[a] = row
+			}
 		}
 	}
 	return applied, nil
@@ -835,10 +908,14 @@ func (r *ruleRunner) pay(ctx context.Context, w owedWrite) error {
 
 // writeOwed makes the owed write w once.
 func (r *ruleRunner) writeOwed(ctx context.Context, w owedWrite) error {
-	if w.kind == owedClear {
+	switch w.kind {
+	case owedClear:
 		return rules.ClearPending(ctx, r.s.opts.StateDB, w.ruleID, r.acct.Name, w.key)
+	case owedMark:
+		return r.s.rules.MarkApplied(ctx, w.ruleID, r.acct.Name, w.key, w.runID, w.outcome, w.note, w.aliases...)
+	default:
+		return r.s.rules.MarkApplied(ctx, w.ruleID, r.acct.Name, w.key, w.runID, rules.AppliedDone, "")
 	}
-	return r.s.rules.MarkApplied(ctx, w.ruleID, r.acct.Name, w.key, w.runID, rules.AppliedDone, "")
 }
 
 // markApplied records a message the rule acted on, with every rule's row
@@ -846,8 +923,19 @@ func (r *ruleRunner) writeOwed(ctx context.Context, w owedWrite) error {
 // one transaction, so no rule acts on it again where it landed (amendment
 // 6).
 func (r *ruleRunner) markApplied(ctx context.Context, ruleID string, runID int64, key string, o rules.AppliedOutcome, res actResult) error {
-	return r.s.rules.MarkApplied(ctx, ruleID, r.acct.Name, key, runID, o, res.note,
-		aliasOf(r.acct, res.newRef, key), aliasOf(r.acct, res.copyRef, key))
+	return r.s.rules.MarkApplied(ctx, ruleID, r.acct.Name, key, runID, o, res.note, aliasesOf(r.acct, key, res)...)
+}
+
+// aliasesOf is the act-once keys res moved or copied the message at key
+// to, other than key: its new ref's and its copy's.
+func aliasesOf(acct config.ResolvedAccount, key string, res actResult) []string {
+	var out []string
+	for _, m := range []string{res.newRef, res.copyRef} {
+		if a := aliasOf(acct, m, key); a != "" {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // aliasOf is the act-once key of newRef when it names another message

@@ -1094,6 +1094,126 @@ func TestRunRuleSkipsAnOwedCopy(t *testing.T) {
 	}
 }
 
+// refuseDone makes state.db refuse every applied or held act-once row that
+// when allows, a SQL condition on NEW, until the func it returns drops the
+// refusal. Pending rows still go in.
+func refuseDone(t *testing.T, g *runnerRig, when string) func() {
+	t.Helper()
+	for _, op := range []string{"INSERT", "UPDATE"} {
+		if _, err := g.f.stateDB.ExecContext(t.Context(), `CREATE TRIGGER refuse_done_`+op+` BEFORE `+op+` ON rule_applied
+			WHEN NEW.outcome != 'pending' AND (`+when+`) BEGIN SELECT RAISE(ABORT, 'refused'); END`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return func() {
+		for _, op := range []string{"INSERT", "UPDATE"} {
+			if _, err := g.f.stateDB.ExecContext(t.Context(), `DROP TRIGGER refuse_done_`+op); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// moveAfterFailedMark runs a batch of host's invoice through rules whose
+// act-once write state.db refuses where refuse allows, after the rules
+// forwarded the invoice, which the policy holds as a draft, and moved it
+// to Archive. The store then recovers, and the cache builder drops the
+// original's row and caches the moved message, as the move's events make
+// it. It returns the moved message.
+func moveAfterFailedMark(t *testing.T, g *runnerRig, refuse string) ref.Ref {
+	t.Helper()
+	allow := refuseDone(t, g, refuse)
+	invoice := g.refs["host invoice"]
+	g.publish(t, invoice)
+	if err := g.step(t.Context()); err == nil {
+		t.Fatal("step = nil, want the refused act-once write's failure")
+	}
+	moved := g.foundIn(t, "host", "Archive", "inv42@x")
+	if n := len(g.fk.Appended()); n != 1 {
+		t.Fatalf("drafts after the first batch = %d, want the one held forward", n)
+	}
+	allow()
+	if err := g.f.store.DeleteRow(t.Context(), invoice); err != nil {
+		t.Fatal(err)
+	}
+	g.cacheHeader(t, moved)
+	return moved
+}
+
+// TestRuleOwesAFailedActOnceWrite checks that an act-once write that fails
+// after a forward and a move is owed whole, the moved message's key with
+// it, and made before the next batch is matched: once the original's row
+// is gone from the cache, the moved message's own new event is skipped
+// and the invoice is not forwarded again.
+func TestRuleOwesAFailedActOnceWrite(t *testing.T) {
+	t.Parallel()
+	g := newRunnerRig(t, "host", nil)
+	g.password(t)
+	g.failDial(t, false)
+	rule := g.newRule(t, "host", "fwd-and-file", func(d *rules.Definition) {
+		d.Query = "subject:invoice"
+		d.Actions = []rules.Action{{Kind: rules.ActForward, To: []string{"you@blocked.invalid"}}, {Kind: rules.ActMove, Folder: "Archive"}}
+	})
+	moved := moveAfterFailedMark(t, g, "1")
+	last := g.publish(t, moved)
+	if err := g.step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(g.fk.Appended()); n != 1 {
+		t.Errorf("drafts = %d, want 1: the moved invoice was forwarded again", n)
+	}
+	for name, key := range map[string]string{"original": keyOf(false, g.refs["host invoice"]), "moved": keyOf(false, moved)} {
+		if row, ok := g.appliedRow(t, rule.ID, "host", key); !ok || row.Outcome != rules.AppliedHeld {
+			t.Errorf("%s's row = %+v, %t, want held", name, row, ok)
+		}
+	}
+	if got := g.acked(t); got != last {
+		t.Errorf("acked %d, want %d", got, last)
+	}
+}
+
+// TestRunRuleSkipsWhatAnOwedWriteCovers checks that while the runner owes
+// a rule's act-once write, a manual run reads its message's keys as the
+// write will leave them: the moving rule's own row at both keys, and
+// every other rule's row of the original copied to the moved key. A rule
+// that forwarded the invoice before another moved it does not forward
+// the moved invoice again.
+func TestRunRuleSkipsWhatAnOwedWriteCovers(t *testing.T) {
+	t.Parallel()
+	g := newRunnerRig(t, "host", nil)
+	g.password(t)
+	g.failDial(t, false)
+	fwd := g.newRule(t, "host", "fwd-invoices", func(d *rules.Definition) {
+		d.Priority, d.Query = 10, "subject:invoice"
+		d.Actions = []rules.Action{{Kind: rules.ActForward, To: []string{"you@blocked.invalid"}}}
+	})
+	file := g.newRule(t, "host", "file-invoices", func(d *rules.Definition) {
+		d.Priority, d.Query = 20, "subject:invoice"
+		d.Actions = []rules.Action{{Kind: rules.ActMove, Folder: "Archive"}}
+	})
+	moved := moveAfterFailedMark(t, g, "NEW.rule_id = '"+file.ID+"'")
+	for _, rule := range []rules.Rule{fwd, file} {
+		run, err := g.r.runRule(t.Context(), rule, rules.TriggerManual, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.Outcome != rules.OutcomeOK || run.Matched != 1 || run.Skipped != 1 || run.Applied+run.Held != 0 {
+			t.Errorf("rule %s's manual run = %+v, want the moved invoice skipped", rule.Name, run)
+		}
+	}
+	if n := len(g.fk.Appended()); n != 1 {
+		t.Errorf("drafts = %d, want 1: the moved invoice was forwarded again", n)
+	}
+	if err := g.r.payOwed(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{fwd.ID, file.ID} {
+		if _, ok := g.appliedRow(t, id, "host", keyOf(false, moved)); !ok {
+			t.Errorf("rule %s has no row at the moved key once the write is made", id)
+		}
+	}
+}
+
 // TestRuleCopyAndMoveAliasBothKeys checks amendment 6 for a rule that
 // copies and then moves: the acting row, the copy's key and the moved
 // message's key all hold the rule's row.
