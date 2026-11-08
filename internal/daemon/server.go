@@ -241,6 +241,11 @@ type Server struct {
 	// handler, cache worker or syncer runs, and closes it after all of
 	// them have stopped.
 	calcache *calcache.Store
+	// invites is the invite hook over calcache that the cache workers and
+	// the invite retry loop share, built on first use (serverInviteHook).
+	// Guarded by invitesMu.
+	invitesMu sync.Mutex
+	invites   *inviteHook
 	// calendars holds every configured account's calendar runtime, by
 	// account. New fills it with the stores and Serve adds the syncers
 	// before any handler or cache worker runs; it never changes after.

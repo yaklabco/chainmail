@@ -547,6 +547,26 @@ func (s *Store) StreamPart(_ context.Context, r ref.Ref, part string) (mailstore
 	if err := s.begin("StreamPart"); err != nil {
 		return mailstore.PartInfo{}, nil, err
 	}
+	return s.streamPartLocked(r, part)
+}
+
+// StreamPartBackground implements mailstore.BackgroundPartStreamer. It is
+// StreamPart made with a background context whatever ctx says: it counts
+// in Calls and BackgroundCalls of "StreamPart", Fail("StreamPart") and
+// FailStreamAfter apply to it, and while SetBusy is on it fails with
+// mailstore.ErrBusy, as imapstore's does when no connection is free for
+// background work.
+func (s *Store) StreamPartBackground(ctx context.Context, r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.beginRead(mailstore.WithBackground(ctx), "StreamPart"); err != nil {
+		return mailstore.PartInfo{}, nil, err
+	}
+	return s.streamPartLocked(r, part)
+}
+
+// streamPartLocked opens part of r. s.mu must be held.
+func (s *Store) streamPartLocked(r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error) {
 	m, err := s.resolveLocked(r)
 	if err != nil {
 		return mailstore.PartInfo{}, nil, err

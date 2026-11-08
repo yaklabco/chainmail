@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/yaklabco/chainmail/internal/calendar"
 	"github.com/yaklabco/chainmail/internal/mailstore"
@@ -69,19 +70,35 @@ var errInviteTooLarge = errors.New("invite part over the size limit")
 // fetch found over the limit. A part that cannot be read is logged by
 // reason code and skipped: invite detection never fails a build step. It
 // does nothing without OnInvites.
+//
+// Invite work is optional, so it is bounded: the reads of one segment
+// share a deadline of inviteTimeout, and at most inviteCap parts are read.
+// A part the cap or the deadline leaves unread is skipped and counted in a
+// log line; it is never read again, since the segment is acknowledged once
+// apply returns.
 func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooLarge int) {
 	if a.o.OnInvites == nil {
 		return
 	}
+	if over := len(cands) - a.inviteCap; over > 0 {
+		cands = cands[:a.inviteCap]
+		a.logger.InfoContext(ctx, "cache skipped invite parts over the per-segment cap", "count", over, "cap", a.inviteCap)
+	}
+	readCtx, cancel := context.WithTimeout(ctx, a.inviteTimeout)
+	defer cancel()
 	var (
-		found  []FoundInvite
-		failed int
+		found    []FoundInvite
+		failed   int
+		timedOut int
 	)
-	for _, c := range cands {
-		part, data, err := a.readInvite(ctx, c)
+	for i, c := range cands {
+		part, data, err := a.readInvite(readCtx, c)
 		switch {
 		case ctx.Err() != nil:
 			return
+		case readCtx.Err() != nil && err != nil:
+			// The step's deadline passed: this part and the rest go unread.
+			timedOut = len(cands) - i
 		case errors.Is(err, errInviteTooLarge):
 			tooLarge++
 		case err != nil:
@@ -90,6 +107,9 @@ func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooL
 		default:
 			found = append(found, FoundInvite{Account: a.name, MessageRef: c.ref.String(), Part: part, Data: data})
 		}
+		if timedOut > 0 {
+			break
+		}
 	}
 	if tooLarge > 0 {
 		a.logger.InfoContext(ctx, "cache skipped invite parts over the size limit", "count", tooLarge)
@@ -97,21 +117,32 @@ func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooL
 	if failed > 0 {
 		a.logger.WarnContext(ctx, "cache skipped invite parts it could not read", "count", failed)
 	}
+	if timedOut > 0 {
+		a.logger.WarnContext(ctx, "cache ran out of time for invite parts and skipped them", "count", timedOut, "timeout", a.inviteTimeout)
+	}
 	if len(found) > 0 {
 		a.o.OnInvites(ctx, found)
 	}
 }
 
 // readInvite streams one candidate's part on a background context,
-// retrying while the pool is busy, reading at most calendar.MaxICSBytes + 1
-// bytes, and counts the bytes read against the day's budget. A part whose
-// decoded bytes pass the limit returns errInviteTooLarge. The charset of
-// the part's info fills in one the header lacked, in the part returned.
+// retrying while the pool is busy until ctx ends, reading at most
+// calendar.MaxICSBytes + 1 bytes, and counts the bytes read against the
+// day's budget. A store that can (mailstore.BackgroundPartStreamer) opens
+// the part as background work, which never queues beside foreground
+// requests for a connection; another store's StreamPart is used as it is.
+// A part whose decoded bytes pass the limit returns errInviteTooLarge. The
+// charset of the part's info fills in one the header lacked, in the part
+// returned.
 func (a *Account) readInvite(ctx context.Context, c inviteCandidate) (mailstore.CalendarPart, []byte, error) {
 	var data []byte
 	err := a.retryBusy(ctx, func() error {
 		return a.withMail(ctx, func(bg context.Context, st MailStore) error {
-			info, rc, err := st.StreamPart(bg, c.ref, c.part.Part)
+			open := st.StreamPart
+			if bs, ok := st.(mailstore.BackgroundPartStreamer); ok {
+				open = bs.StreamPartBackground
+			}
+			info, rc, err := open(bg, c.ref, c.part.Part)
 			if err != nil {
 				return err
 			}
@@ -124,7 +155,9 @@ func (a *Account) readInvite(ctx context.Context, c inviteCandidate) (mailstore.
 		})
 	})
 	if len(data) > 0 {
-		if _, berr := a.o.Store.AddBudget(ctx, a.name, a.day(), int64(len(data))); berr != nil {
+		// The budget is charged on the builder's own context: the bytes
+		// were read even when the step's deadline cut the read short.
+		if _, berr := a.o.Store.AddBudget(context.WithoutCancel(ctx), a.name, a.day(), int64(len(data))); berr != nil {
 			a.noteErr(berr)
 			a.logger.WarnContext(ctx, "cache could not count an invite part against the budget", "reason", reasonCode(berr))
 		}
@@ -137,3 +170,11 @@ func (a *Account) readInvite(ctx context.Context, c inviteCandidate) (mailstore.
 	}
 	return c.part, data, nil
 }
+
+// Bounds of the builder's invite step for one segment.
+const (
+	// inviteStepTimeout is how long the step may spend reading parts.
+	inviteStepTimeout = 30 * time.Second
+	// maxInvitesPerSegment is how many parts the step reads at most.
+	maxInvitesPerSegment = 20
+)

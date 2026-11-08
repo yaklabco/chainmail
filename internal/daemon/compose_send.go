@@ -117,6 +117,7 @@ func (s *Server) startBackground(ctx context.Context) (stop func()) {
 		wg.Go(func() { s.runCacheHousekeeping(ctx) })
 	}
 	s.startCalendarSyncers(ctx, &wg)
+	s.startInviteRetries(ctx, &wg)
 	return func() {
 		s.ruleScheduler.stop()
 		cancel()

@@ -277,3 +277,26 @@ func TestCorruptPageMarksAndRecreates(t *testing.T) {
 		t.Errorf("Stats after recreate: %v", err)
 	}
 }
+
+// A calendar.db of schema version 1, whose mail_invites has no charset or
+// announced column, is recreated, and the new columns work.
+func TestOpenRecreatesSchemaVersion1(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), calcache.FileName)
+	rawExec(t, path, `CREATE TABLE mail_invites (account TEXT NOT NULL, message_ref TEXT NOT NULL, uid TEXT NOT NULL,
+		ref TEXT NOT NULL, method TEXT NOT NULL, sequence INTEGER NOT NULL, dtstamp TEXT NOT NULL, raw BLOB NOT NULL,
+		found_at TEXT NOT NULL, PRIMARY KEY (account, message_ref, uid))`)
+	rawExec(t, path, "PRAGMA user_version = 1")
+	s, err := calcache.Open(t.Context(), path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() }) // a close error at test end changes nothing
+	if why := s.Recreated(); why != "version" {
+		t.Errorf("Recreated = %q, want version", why)
+	}
+	r := calcache.MailInviteRow{Account: "acme", MessageRef: "m1", UID: "u1", Method: "REQUEST", Charset: "iso-8859-1", Raw: []byte("x")}
+	if err := s.PutMailInvite(t.Context(), r); err != nil {
+		t.Fatalf("PutMailInvite: %v", err)
+	}
+}

@@ -24,7 +24,8 @@ import (
 
 // SchemaVersion is calendar.db's PRAGMA user_version. A file with any other
 // version is deleted and created again: the cache has no migrations.
-const SchemaVersion = 1
+// Version 2 added mail_invites.charset and mail_invites.announced.
+const SchemaVersion = 2
 
 // FileName is the cache's file name inside the cache directory.
 const FileName = "calendar.db"
