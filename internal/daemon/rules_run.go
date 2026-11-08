@@ -40,14 +40,13 @@ const (
 	// matchPageSize is how many matches a scheduled or manual run reads
 	// at once.
 	matchPageSize = 200
-	// clearPendingTries is how many times a runner tries to drop the pending
-	// row of a guarded action refused for good, waiting watch.Backoff
-	// between tries, before it fails the batch.
-	clearPendingTries = 3
-	// clearPendingHint is the fixed hint of a batch held for a pending row
-	// the runner could not drop.
-	clearPendingHint = "the daemon could not drop the act-once row of a rule action refused for good; " +
-		"it tries again with the batch, and the daemon log says why"
+	// owedWriteTries is how many times a runner tries an act-once write it
+	// owes, waiting watch.Backoff between tries, before it fails the step.
+	owedWriteTries = 3
+	// owedWriteHint is the fixed hint of a step held for an act-once write
+	// the runner owes and could not make.
+	owedWriteHint = "the daemon could not save the act-once state of a rule action; " +
+		"it holds new mail and tries again before the next batch, and the daemon log says why"
 	// ruleCacheNotReadyHint is the fixed hint of a cache_not_ready run.
 	// search_items.go's cacheNotReadyHint answers a refused search.
 	ruleCacheNotReadyHint = "the cache cannot answer this rule completely yet; " +
@@ -106,18 +105,19 @@ type ruleRunner struct {
 	// backoff.
 	clock  watch.Clock
 	jitter func() float64
-	// mu guards st, jobs and uncleared.
+	// mu guards st, jobs and owed.
 	mu sync.Mutex
 	// st is the runner's state, as RulesStatus reports it.
 	st runnerStatus
 	// jobs counts the scheduled and manual runs holding the turn, which
 	// show the runner as running whatever its loop last said.
 	jobs int
-	// uncleared are the pending act-once rows of guarded actions refused
-	// for good that the runner could not drop, which apply drops before it
-	// acts on their messages again, so no replay takes a refused action as
-	// done.
-	uncleared map[pendingKey]bool
+	// owed are the act-once writes that failed and that the runner still
+	// owes, whatever rule they belong to and whether that rule still runs.
+	// step makes them before it reads a batch and never acknowledges one
+	// while any is owed. They live in memory: a daemon that stops forgets
+	// them, the at-most-once window of spec amendment 5.
+	owed []owedWrite
 }
 
 // runnerStatus is a runner's state for RulesStatus: one of the runner
@@ -256,11 +256,16 @@ func (r *ruleRunner) open(ctx context.Context) (int64, error) {
 	return acked, nil
 }
 
-// step reads the next batch after pos, runs the on_new rules over its new
-// messages once the cache holds them, and acknowledges it. Caught up, it
-// waits for the log to grow and returns pos. A failure returns pos and
-// acknowledges nothing, so the batch is read again.
+// step makes the act-once writes the runner owes, then reads the next
+// batch after pos, runs the on_new rules over its new messages once the
+// cache holds them, makes any write the batch left owed, and acknowledges
+// it. Caught up, it waits for the log to grow and returns pos. A failure,
+// including an owed write that keeps failing, returns pos and acknowledges
+// nothing, so the batch is read again.
 func (r *ruleRunner) step(ctx context.Context, pos int64) (int64, error) {
+	if err := r.payOwed(ctx); err != nil {
+		return pos, err
+	}
 	page, err := r.s.watchLog.Read(ctx, watch.Query{
 		After:  pos,
 		Filter: watch.Filter{Accounts: []string{r.acct.Name}, Kinds: []watch.Kind{watch.KindNew}},
@@ -280,6 +285,9 @@ func (r *ruleRunner) step(ctx context.Context, pos int64) (int64, error) {
 		if err := r.runBatch(ctx, b); err != nil {
 			return pos, err
 		}
+	}
+	if err := r.payOwed(ctx); err != nil {
+		return pos, err
 	}
 	if err := r.s.watchLog.Ack(ctx, r.group, page.Next); err != nil {
 		return pos, err
@@ -438,7 +446,7 @@ func (r *ruleRunner) newRun(ctx context.Context, rule rules.Rule, b *newBatch, s
 	if len(keys) == 0 {
 		return nil
 	}
-	applied, err := r.s.rules.Applied(ctx, rule.ID, r.acct.Name, keys)
+	applied, err := r.applied(ctx, rule.ID, keys)
 	if err != nil {
 		return err
 	}
@@ -596,10 +604,12 @@ func (r *ruleRunner) scopeFailed(ctx context.Context, rule rules.Rule, t rules.T
 
 // apply runs rule on one matched row and counts it in run. A row the
 // act-once table holds as applied or held is skipped; a pending one is
-// replayed, unless it is the row of an action refused for good that the
-// runner could not drop, which it drops first and then acts afresh. It
-// returns whether later rules must leave the message alone because this
-// rule moves messages, and a transient failure, which ends the run.
+// replayed, unless the runner owes the drop of that row, left by an action
+// refused for good, which it drops first and then acts afresh. An act-once
+// write that fails here is owed, so the step holds its batch until it is
+// made. It returns whether later rules must leave the message alone
+// because this rule moves messages, and a transient failure, which ends
+// the run.
 func (r *ruleRunner) apply(ctx context.Context, rule rules.Rule, run *rules.Run, row cache.Row, key string, applied map[string]rules.AppliedRow) (bool, error) {
 	var replay *rules.AppliedRow
 	if prev, ok := applied[key]; ok {
@@ -609,8 +619,8 @@ func (r *ruleRunner) apply(ctx context.Context, rule rules.Rule, run *rules.Run,
 		}
 		replay = &prev
 	}
-	if r.isUncleared(rule.ID, key) {
-		if err := r.dropPending(ctx, rule.ID, run.ID, key); err != nil {
+	if w, ok := r.owedOf(owedClear, rule.ID, key); ok {
+		if err := r.pay(ctx, w); err != nil {
 			return false, err
 		}
 		replay = nil
@@ -625,79 +635,165 @@ func (r *ruleRunner) apply(ctx context.Context, rule rules.Rule, run *rules.Run,
 		} else {
 			run.Applied++
 		}
-		return relocates(rule), r.markApplied(ctx, rule.ID, run.ID, key, outcome, res)
+		if err := r.markApplied(ctx, rule.ID, run.ID, key, outcome, res); err != nil {
+			r.oweCopyGuard(rule.ID, run.ID, res)
+			return false, err
+		}
+		return relocates(rule), nil
 	case actPermanent:
+		r.oweCopyGuard(rule.ID, run.ID, res)
 		run.Failed++
 		if run.Reason == "" {
 			run.Reason, run.Hint = res.reason, res.hint
 		}
 		if res.clearPending {
 			// A pending row left behind would make a replay take the
-			// refused action as done, so the batch is not acknowledged
-			// while the row stays.
-			if err := r.dropPending(ctx, rule.ID, run.ID, key); err != nil {
-				return false, err
+			// refused action as done, so a drop that fails is owed.
+			if err := rules.ClearPending(ctx, r.s.opts.StateDB, rule.ID, r.acct.Name, key); err != nil {
+				r.s.opts.Logger.WarnContext(ctx, "a rule action refused for good left a pending act-once row; the runner owes its drop",
+					"rule", rule.ID, "account", r.acct.Name, "run", run.ID, "err", err)
+				r.owe(owedWrite{kind: owedClear, ruleID: rule.ID, key: key, runID: run.ID})
 			}
 		}
 		return false, nil
 	default:
+		r.oweCopyGuard(rule.ID, run.ID, res)
 		return false, &actionUnavailable{reason: res.reason, hint: res.hint}
 	}
 }
 
-// pendingKey names one rule's act-once row of one message on the
-// runner's account.
-type pendingKey struct {
-	ruleID, key string
+// owedKind is the kind of an act-once write the runner owes.
+type owedKind int
+
+const (
+	// owedClear drops a rule's pending row of a message, left by a
+	// guarded action refused for good, so no replay takes the action as
+	// done.
+	owedClear owedKind = iota
+	// owedAlias saves a rule's applied row at the key of a copy it made,
+	// so the copy's own new event is not copied again.
+	owedAlias
+)
+
+// owedWrite is one act-once write the runner owes: its kind, the rule,
+// the message key it writes (the pending row's, or the copy's) and the
+// run that left it.
+type owedWrite struct {
+	kind   owedKind
+	ruleID string
+	key    string
+	runID  int64
 }
 
-// isUncleared reports whether the runner failed to drop ruleID's pending
-// row of key.
-func (r *ruleRunner) isUncleared(ruleID, key string) bool {
+// owe adds w to the writes the runner owes, once.
+func (r *ruleRunner) owe(w owedWrite) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.uncleared[pendingKey{ruleID, key}]
+	if !slices.ContainsFunc(r.owed, w.same) {
+		r.owed = append(r.owed, w)
+	}
 }
 
-// dropPending drops ruleID's pending row of key, left by a guarded action
-// refused for good, trying clearPendingTries times with watch.Backoff
-// between tries. Until it succeeds the runner remembers the row, and
-// apply drops it before acting on the message again. A failure returns an
-// INTERNAL failure, which fails the batch so it is not acknowledged. A
-// context that ends, as at shutdown, leaves the row: a daemon that stops
-// then forgets it, the at-most-once window of spec amendment 5.
-func (r *ruleRunner) dropPending(ctx context.Context, ruleID string, runID int64, key string) error {
-	pk := pendingKey{ruleID, key}
+// same reports whether o is the same write as w, whatever run left it.
+func (w owedWrite) same(o owedWrite) bool {
+	return o.kind == w.kind && o.ruleID == w.ruleID && o.key == w.key
+}
+
+// oweCopyGuard owes the act-once row of the copy res made, when writing it
+// right after the copy failed.
+func (r *ruleRunner) oweCopyGuard(ruleID string, runID int64, res actResult) {
+	if res.unguardedCopy != "" {
+		r.owe(owedWrite{kind: owedAlias, ruleID: ruleID, key: res.unguardedCopy, runID: runID})
+	}
+}
+
+// owedOf is the owed write of kind for ruleID and key, if any.
+func (r *ruleRunner) owedOf(kind owedKind, ruleID, key string) (owedWrite, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	want := owedWrite{kind: kind, ruleID: ruleID, key: key}
+	if i := slices.IndexFunc(r.owed, want.same); i >= 0 {
+		return r.owed[i], true
+	}
+	return owedWrite{}, false
+}
+
+// applied is the act-once table's rows of ruleID for keys, with the copies
+// whose rows the runner owes read as applied, so no run acts on them
+// before their rows are saved.
+func (r *ruleRunner) applied(ctx context.Context, ruleID string, keys []string) (map[string]rules.AppliedRow, error) {
+	applied, err := r.s.rules.Applied(ctx, ruleID, r.acct.Name, keys)
+	if err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, w := range r.owed {
+		if w.kind == owedAlias && w.ruleID == ruleID && slices.Contains(keys, w.key) {
+			applied[w.key] = rules.AppliedRow{Outcome: rules.AppliedDone, RunID: w.runID}
+		}
+	}
+	return applied, nil
+}
+
+// payOwed makes every act-once write the runner owes, on its turn, so no
+// job acts between a write and the decision that made it owed. It returns
+// nil at once when nothing is owed, and the first write's failure
+// otherwise.
+func (r *ruleRunner) payOwed(ctx context.Context) error {
+	r.mu.Lock()
+	owed := slices.Clone(r.owed)
+	r.mu.Unlock()
+	if len(owed) == 0 {
+		return nil
+	}
+	if err := r.take(ctx); err != nil {
+		return err
+	}
+	defer r.release()
+	for _, w := range owed {
+		if err := r.pay(ctx, w); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pay makes the owed write w, on the runner's turn, trying owedWriteTries
+// times with watch.Backoff between tries. Done, w is no longer owed. A
+// failure keeps it owed and returns an INTERNAL failure, which fails the
+// step so its batch is not acknowledged. A context that ends, as at
+// shutdown, returns its error and keeps w owed.
+func (r *ruleRunner) pay(ctx context.Context, w owedWrite) error {
 	var err error
-	for try := range clearPendingTries {
+	for try := range owedWriteTries {
 		if try > 0 {
 			select {
 			case <-r.clock.After(watch.Backoff(try-1, r.jitter())):
 			case <-ctx.Done():
 			}
 			if err = ctx.Err(); err != nil {
-				break
+				return err
 			}
 		}
-		if err = rules.ClearPending(ctx, r.s.opts.StateDB, ruleID, r.acct.Name, key); err == nil {
+		if err = r.writeOwed(ctx, w); err == nil {
 			r.mu.Lock()
-			delete(r.uncleared, pk)
+			r.owed = slices.DeleteFunc(r.owed, w.same)
 			r.mu.Unlock()
 			return nil
 		}
 	}
-	r.mu.Lock()
-	if r.uncleared == nil {
-		r.uncleared = map[pendingKey]bool{}
+	r.s.opts.Logger.WarnContext(ctx, "a rules runner could not make an act-once write it owes; new mail waits for it",
+		"rule", w.ruleID, "account", r.acct.Name, "run", w.runID, "err", err)
+	return &actionUnavailable{reason: api.ReasonInternal, hint: owedWriteHint}
+}
+
+// writeOwed makes the owed write w once.
+func (r *ruleRunner) writeOwed(ctx context.Context, w owedWrite) error {
+	if w.kind == owedClear {
+		return rules.ClearPending(ctx, r.s.opts.StateDB, w.ruleID, r.acct.Name, w.key)
 	}
-	r.uncleared[pk] = true
-	r.mu.Unlock()
-	r.s.opts.Logger.WarnContext(ctx, "a rule action refused for good left a pending act-once row; the batch waits for it",
-		"rule", ruleID, "account", r.acct.Name, "run", runID, "err", err)
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	return &actionUnavailable{reason: api.ReasonInternal, hint: clearPendingHint}
+	return r.s.rules.MarkApplied(ctx, w.ruleID, r.acct.Name, w.key, w.runID, rules.AppliedDone, "")
 }
 
 // markApplied records a message the rule acted on, with every rule's row
@@ -842,7 +938,7 @@ func (r *ruleRunner) page(ctx context.Context, rule rules.Rule, sc ruleScope, ru
 		for i, row := range rows {
 			keys[i] = messageKeyOf(r.acct, row.Ref())
 		}
-		applied, err := r.s.rules.Applied(ctx, rule.ID, r.acct.Name, keys)
+		applied, err := r.applied(ctx, rule.ID, keys)
 		if err != nil {
 			return false, err
 		}
