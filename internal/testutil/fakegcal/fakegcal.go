@@ -30,6 +30,11 @@
 // including its sendUpdates parameter, so tests can prove what a write asked
 // Google to send.
 //
+// An event with more attendees than a request's maxAttendees, or than
+// SetMaxAttendees allows, is shown with only the participant and
+// attendeesOmitted set. A PATCH with attendeesOmitted true updates only the
+// attendees it names, as Google's participant-only update does.
+//
 // Tests can make it fail: Inject answers matching requests with a fixed
 // status, body and headers, or blocks them until the client gives up.
 package fakegcal
@@ -118,6 +123,7 @@ type Server struct {
 	reqs     []Request
 	faults   []Fault
 	pageSize int
+	maxAtt   int
 	token    string
 	gen      int
 	etags    int
@@ -167,6 +173,16 @@ func (s *Server) SetPageSize(n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pageSize = n
+}
+
+// SetMaxAttendees makes every event the fake shows list only the
+// participant (the attendee with self set) and set attendeesOmitted when it
+// has more than n attendees, as Google does for a request with maxAttendees
+// n. Zero turns it off.
+func (s *Server) SetMaxAttendees(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxAtt = n
 }
 
 // RequireToken makes every request need "Authorization: Bearer tok".
@@ -525,7 +541,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	end := min(cur.offset+s.pageLimit(r), len(ids))
 	items := make([]map[string]any, 0, end-cur.offset)
 	for _, id := range ids[cur.offset:end] {
-		items = append(items, c.events[id].obj)
+		items = append(items, s.view(r, c.events[id].obj))
 	}
 	resp := map[string]any{"kind": "calendar#events", "summary": c.Summary, "items": items}
 	if c.TimeZone != "" {
@@ -553,7 +569,7 @@ func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "notFound", "Not Found")
 		return
 	}
-	writeJSON(w, http.StatusOK, obj)
+	writeJSON(w, http.StatusOK, s.view(r, obj))
 }
 
 func (s *Server) insertEvent(w http.ResponseWriter, r *http.Request) {
@@ -632,13 +648,14 @@ func (s *Server) patchEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delete(patch, "id")
+	patchParticipants(obj, patch)
 	mergePatch(obj, patch)
 	if !validTimes(obj) {
 		writeError(w, http.StatusBadRequest, "invalid", "Invalid start or end time.")
 		return
 	}
 	s.store(c, id, obj)
-	writeJSON(w, http.StatusOK, obj)
+	writeJSON(w, http.StatusOK, s.view(r, obj))
 }
 
 func (s *Server) deleteEvent(w http.ResponseWriter, r *http.Request) {
@@ -937,4 +954,58 @@ func (c *fakeCalendar) uidOf(obj map[string]any) any {
 		}
 	}
 	return nil
+}
+
+// view is the copy of obj a response shows: with more attendees than the
+// request's maxAttendees or SetMaxAttendees allow, only the participant is
+// listed and attendeesOmitted is set. s.mu is held.
+func (s *Server) view(r *http.Request, obj map[string]any) map[string]any {
+	out := deepCopy(obj)
+	limit := s.maxAtt
+	if n, err := strconv.Atoi(r.URL.Query().Get("maxAttendees")); err == nil && n > 0 && (limit == 0 || n < limit) {
+		limit = n
+	}
+	atts, _ := out["attendees"].([]any)
+	if limit <= 0 || len(atts) <= limit {
+		return out
+	}
+	mine := []any{}
+	for _, a := range atts {
+		if m, ok := a.(map[string]any); ok && m["self"] == true {
+			mine = append(mine, m)
+		}
+	}
+	out["attendees"] = mine
+	out["attendeesOmitted"] = true
+	return out
+}
+
+// patchParticipants applies a PATCH that sets attendeesOmitted: each
+// attendee it names merges into the stored attendee with that address, and
+// the rest of the list stays. Attendees not on the event are ignored. It
+// removes both fields from patch. s.mu is held.
+func patchParticipants(obj, patch map[string]any) {
+	omitted, _ := patch["attendeesOmitted"].(bool)
+	delete(patch, "attendeesOmitted")
+	if !omitted {
+		return
+	}
+	given, _ := patch["attendees"].([]any)
+	delete(patch, "attendees")
+	stored, _ := obj["attendees"].([]any)
+	for _, g := range given {
+		gm, ok := g.(map[string]any)
+		if !ok {
+			continue
+		}
+		email, _ := gm["email"].(string)
+		for _, a := range stored {
+			am, ok := a.(map[string]any)
+			if se, _ := am["email"].(string); ok && strings.EqualFold(se, email) {
+				delete(gm, "email")
+				mergePatch(am, gm)
+				break
+			}
+		}
+	}
 }

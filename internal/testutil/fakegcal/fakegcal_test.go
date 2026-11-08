@@ -372,3 +372,68 @@ func TestPatchMergesNestedObjects(t *testing.T) {
 		t.Errorf("all-day start with a timed end: %d, want 400", code)
 	}
 }
+
+func withAttendees(id string) map[string]any {
+	ev := single(id)
+	ev["attendees"] = []any{
+		map[string]any{"email": "boss@example.org", "organizer": true, "responseStatus": "accepted"},
+		map[string]any{"email": "me@example.com", "self": true, "responseStatus": "needsAction", "additionalGuests": 1},
+		map[string]any{"email": "ann@example.org", "responseStatus": "tentative"},
+	}
+	return ev
+}
+
+func TestAttendeesOmitted(t *testing.T) {
+	srv, c := setup(t)
+	srv.AddEvent("me@example.com", withAttendees("omit1"))
+	path := "/calendars/" + url.PathEscape("me@example.com") + "/events/omit1"
+
+	// Over the limit, only the participant is shown and attendeesOmitted is
+	// set, as Google answers with maxAttendees.
+	code, ev := c.do("GET", path, url.Values{"maxAttendees": {"2"}}, nil, nil)
+	if code != 200 || ev["attendeesOmitted"] != true || len(ev["attendees"].([]any)) != 1 {
+		t.Fatalf("maxAttendees=2: %d %v", code, ev)
+	}
+	srv.SetMaxAttendees(2)
+	code, ev = c.do("GET", path, nil, nil, nil)
+	if code != 200 || ev["attendeesOmitted"] != true || len(ev["attendees"].([]any)) != 1 {
+		t.Fatalf("SetMaxAttendees(2): %d %v", code, ev)
+	}
+	code, page := c.do("GET", "/calendars/"+url.PathEscape("me@example.com")+"/events", nil, nil, nil)
+	if it := page["items"].([]any)[0].(map[string]any); code != 200 || it["attendeesOmitted"] != true || len(it["attendees"].([]any)) != 1 {
+		t.Fatalf("list with SetMaxAttendees(2): %d %v", code, page)
+	}
+	srv.SetMaxAttendees(0)
+
+	// attendeesOmitted on a PATCH updates only the attendees it names.
+	code, out := c.do("PATCH", path, nil, nil, map[string]any{
+		"attendeesOmitted": true,
+		"attendees":        []any{map[string]any{"email": "ME@example.com", "responseStatus": "accepted"}},
+	})
+	if code != 200 {
+		t.Fatalf("participant patch: %d %v", code, out)
+	}
+	stored, _ := srv.Event("me@example.com", "omit1")
+	atts := stored["attendees"].([]any)
+	if len(atts) != 3 {
+		t.Fatalf("participant patch replaced the list: %v", atts)
+	}
+	self := atts[1].(map[string]any)
+	if self["responseStatus"] != "accepted" || self["additionalGuests"] != float64(1) || self["email"] != "me@example.com" {
+		t.Errorf("self after participant patch = %v", self)
+	}
+	if _, ok := stored["attendeesOmitted"]; ok {
+		t.Error("attendeesOmitted stored on the event")
+	}
+
+	// Without it the array is replaced.
+	if code, _ := c.do("PATCH", path, nil, nil, map[string]any{
+		"attendees": []any{map[string]any{"email": "me@example.com", "responseStatus": "declined"}},
+	}); code != 200 {
+		t.Fatalf("plain patch: %d", code)
+	}
+	stored, _ = srv.Event("me@example.com", "omit1")
+	if n := len(stored["attendees"].([]any)); n != 1 {
+		t.Errorf("plain attendee patch kept %d attendees, want 1", n)
+	}
+}
