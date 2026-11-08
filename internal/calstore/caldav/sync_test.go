@@ -308,3 +308,107 @@ func TestMultigetSplitsLargeAnswers(t *testing.T) {
 		t.Errorf("got %d objects, %v missing; batches %v", len(objs), missing, batches)
 	}
 }
+
+// failedResponse is a multistatus response whose resource failed with
+// status line code, with no propstat.
+func failedResponse(href, code string) string {
+	return `<d:response><d:href>` + href + `</d:href><d:status>HTTP/1.1 ` + code + `</d:status></d:response>`
+}
+
+// failedPropstat is a multistatus response whose properties failed with
+// status line code.
+func failedPropstat(href, props, code string) string {
+	return `<d:response><d:href>` + href + `</d:href><d:propstat><d:prop>` + props +
+		`</d:prop><d:status>HTTP/1.1 ` + code + `</d:status></d:propstat></d:response>`
+}
+
+// reportServer answers sync-collection with syncResponses (and token t2),
+// calendar-query with queryResponses and calendar-multiget with
+// multigetResponses.
+func reportServer(t *testing.T, syncResponses, queryResponses, multigetResponses []string) *davServer {
+	t.Helper()
+	d := newDAVServer(t)
+	d.multistatus("PROPFIND", "/cal/", ms(resp("/cal/", `<cs:getctag>2</cs:getctag>`)))
+	d.handle("REPORT", "/cal/", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		b := string(body)
+		w.WriteHeader(http.StatusMultiStatus)
+		switch {
+		case strings.Contains(b, "sync-collection"):
+			_, _ = fmt.Fprint(w, strings.Replace(ms(syncResponses...), "</d:multistatus>", "<d:sync-token>t2</d:sync-token></d:multistatus>", 1))
+		case strings.Contains(b, "calendar-query"):
+			_, _ = fmt.Fprint(w, ms(queryResponses...))
+		default:
+			_, _ = fmt.Fprint(w, ms(multigetResponses...))
+		}
+	})
+	return d
+}
+
+// TestSyncResourceFailuresFailTheSync: a member the server could not
+// report, in the change list or in the multiget, is not a deleted one. The
+// whole Sync fails, so the caller keeps its token and tries again; only an
+// explicit 404 or 410 is a delete.
+func TestSyncResourceFailuresFailTheSync(t *testing.T) {
+	okA := resp("/cal/a.ics", `<d:getetag>"a2"</d:getetag>`)
+	dataA := resp("/cal/a.ics", `<d:getetag>"a2"</d:getetag><c:calendar-data>`+xmlText(singleICS)+`</c:calendar-data>`)
+	okB := resp("/cal/b.ics", `<d:getetag>"b2"</d:getetag>`)
+	tests := []struct {
+		name               string
+		sync, query, multi []string
+		want               error
+	}{
+		{"sync member 403", []string{okA, failedResponse("/cal/b.ics", "403 Forbidden")}, nil, []string{dataA}, calstore.ErrAuth},
+		{"sync member 500", []string{okA, failedResponse("/cal/b.ics", "500 Internal Server Error")}, nil, []string{dataA}, calstore.ErrUnavailable},
+		{"sync propstat 500", []string{okA, failedPropstat("/cal/b.ics", `<d:getetag/>`, "500 Internal Server Error")}, nil, []string{dataA}, calstore.ErrUnavailable},
+		{"sync propstat 403", []string{okA, failedPropstat("/cal/b.ics", `<d:getetag/>`, "403 Forbidden")}, nil, []string{dataA}, calstore.ErrAuth},
+		{"sync member without etag", []string{okA, `<d:response><d:href>/cal/b.ics</d:href></d:response>`}, nil, []string{dataA}, calstore.ErrUnavailable},
+		{"multiget 403", []string{okA, okB}, nil, []string{dataA, failedResponse("/cal/b.ics", "403 Forbidden")}, calstore.ErrAuth},
+		{"multiget 500", []string{okA, okB}, nil, []string{dataA, failedResponse("/cal/b.ics", "500 Internal Server Error")}, calstore.ErrUnavailable},
+		{"multiget data propstat 500", []string{okA, okB}, nil, []string{dataA, `<d:response><d:href>/cal/b.ics</d:href>` +
+			`<d:propstat><d:prop><d:getetag>"b2"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>` +
+			`<d:propstat><d:prop><c:calendar-data/></d:prop><d:status>HTTP/1.1 500 Internal Server Error</d:status></d:propstat></d:response>`}, calstore.ErrUnavailable},
+		{"multiget member missing", []string{okA, okB}, nil, []string{dataA}, calstore.ErrUnavailable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := reportServer(t, tc.sync, tc.query, tc.multi)
+			ch, err := d.store(t, "/").Sync(context.Background(), "/cal/", tokenSync+"t1")
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Sync = token %q deletes %v, %v; want %v", ch.Token, ch.Deletes, err, tc.want)
+			}
+			if ch.Token != "" || len(ch.Deletes) != 0 {
+				t.Errorf("a failed sync returned token %q deletes %v", ch.Token, ch.Deletes)
+			}
+		})
+	}
+
+	// The same for an etag sync: a member the calendar-query could not
+	// report stays, and the sync fails.
+	tok, err := encodeETagState(etagState{CTag: "1", ETags: map[string]string{"/cal/a.ics": `"a1"`, "/cal/b.ics": `"b1"`}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, failed := range map[string]string{
+		"query member 500":   failedResponse("/cal/b.ics", "500 Internal Server Error"),
+		"query propstat 403": failedPropstat("/cal/b.ics", `<d:getetag/>`, "403 Forbidden"),
+	} {
+		d := reportServer(t, nil, []string{okA, failed}, []string{dataA})
+		ch, err := d.store(t, "/").Sync(context.Background(), "/cal/", tok)
+		if err == nil || ch.Token != "" || len(ch.Deletes) != 0 {
+			t.Errorf("%s: Sync = token %q deletes %v, %v; want an error", name, ch.Token, ch.Deletes, err)
+		}
+	}
+
+	// An explicit 404 or 410 is still a delete.
+	for _, code := range []string{"404 Not Found", "410 Gone"} {
+		d := reportServer(t, []string{okA, okB}, nil, []string{dataA, failedResponse("/cal/b.ics", code)})
+		ch, err := d.store(t, "/").Sync(context.Background(), "/cal/", tokenSync+"t1")
+		if err != nil {
+			t.Fatalf("multiget %s: %v", code, err)
+		}
+		if strings.Join(ch.Deletes, " ") != "/cal/b.ics" || ch.Token != tokenSync+"t2" {
+			t.Errorf("multiget %s: token %q deletes %v, want b.ics deleted", code, ch.Token, ch.Deletes)
+		}
+	}
+}

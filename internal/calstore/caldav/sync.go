@@ -123,7 +123,9 @@ func (s *Store) GetEvent(ctx context.Context, calID, providerID string) ([]calen
 // when the collection supports it and etag comparison otherwise. Changed
 // objects are read with calendar-multiget. Each object's events replace
 // the stored rows of that object (ObjectReplace). An object that no longer
-// parses, or holds no VEVENT, is reported deleted.
+// parses, or holds no VEVENT, is reported deleted. Only a 404 or 410 for a
+// member is a deletion: a member the server answers with any other failure
+// fails the whole Sync, so the caller keeps its token.
 func (s *Store) Sync(ctx context.Context, calID, token string) (calendar.Changes, error) {
 	coll, ok := collectionPath(calID)
 	if !ok {
@@ -212,15 +214,19 @@ func (s *Store) collectionSync(ctx context.Context, coll, token string, full boo
 			if !childOf(coll, href) {
 				continue
 			}
-			if code == http.StatusNotFound || code == http.StatusGone {
+			if r.gone() {
 				deleted[href] = true
 				delete(changed, href)
 				continue
 			}
-			if e := r.props().ETag; e != nil {
-				changed[href] = normalizeETag(*e)
-				delete(deleted, href)
+			// A member the server could not report is not a deleted one:
+			// the sync fails and the caller keeps its token.
+			e := r.props().ETag
+			if code/100 != 2 || e == nil {
+				return calendar.Changes{}, r.failure("etag")
 			}
+			changed[href] = normalizeETag(*e)
+			delete(deleted, href)
 		}
 		token = strings.TrimSpace(ms.SyncToken)
 		if !truncated {
@@ -285,12 +291,14 @@ func (s *Store) etagSyncFrom(ctx context.Context, coll string, state etagState, 
 	changed := map[string]string{}
 	for _, r := range ms.Responses {
 		href := r.href()
-		if !childOf(coll, href) || statusCode(r.Status)/100 > 2 {
+		if !childOf(coll, href) || r.gone() {
 			continue
 		}
 		e := r.props().ETag
-		if e == nil {
-			continue
+		if statusCode(r.Status)/100 != 2 || e == nil {
+			// Leaving out a member it could not read would report it
+			// deleted.
+			return calendar.Changes{}, r.failure("etag")
 		}
 		etag := normalizeETag(*e)
 		state.ETags[href] = etag
@@ -321,8 +329,8 @@ func (s *Store) etagSyncFrom(ctx context.Context, coll string, state etagState, 
 }
 
 // fetchChanges reads the changed objects with calendar-multiget and builds
-// the Changes. Objects that vanished in between, no longer parse or hold
-// no VEVENT are deletes.
+// the Changes. Objects the multiget answers with 404 or 410, and objects
+// that no longer parse or hold no VEVENT, are deletes.
 func (s *Store) fetchChanges(ctx context.Context, coll string, changed map[string]string, deleted map[string]bool, full bool) (calendar.Changes, []string, error) {
 	ch := calendar.Changes{Full: full, ObjectReplace: true}
 	hrefs := make([]string, 0, len(changed))
@@ -425,9 +433,12 @@ func (s *Store) multigetBatch(ctx context.Context, coll string, batch []string) 
 			continue
 		}
 		seen[href] = true
+		if r.gone() {
+			continue // reported missing below
+		}
 		p := r.props()
-		if code := statusCode(r.Status); code/100 > 2 || p.CalendarData == nil {
-			continue
+		if statusCode(r.Status)/100 != 2 || p.CalendarData == nil {
+			return nil, nil, r.failure("calendar data")
 		}
 		etag := ""
 		if p.ETag != nil {
@@ -435,8 +446,14 @@ func (s *Store) multigetBatch(ctx context.Context, coll string, batch []string) 
 		}
 		objs = append(objs, &storedObject{href: href, etag: etag, raw: []byte(*p.CalendarData)})
 	}
+	// Only an explicit 404 or 410 is a missing object. RFC 4791 section
+	// 7.9 has the server answer for every href, so one left out is a
+	// failure, not a deletion.
 	var missing []string
 	for _, h := range batch {
+		if !seen[h] {
+			return nil, nil, fmt.Errorf("%w: multiget answer incomplete", calstore.ErrUnavailable)
+		}
 		if !containsObject(objs, h) {
 			missing = append(missing, h)
 		}
