@@ -235,6 +235,41 @@ func TestWriteAppendDetails(t *testing.T) {
 	}
 }
 
+// A write to a ref whose folder another client deleted or renamed fails
+// with a FolderGoneError naming that folder, as imapstore's failed SELECT
+// does, while a missing destination stays a FolderNotFoundError.
+func TestWriteRefInAGoneFolder(t *testing.T) {
+	t.Parallel()
+	for _, gone := range []string{"deleted", "renamed"} {
+		t.Run(gone, func(t *testing.T) {
+			t.Parallel()
+			s := newHost()
+			r := s.Add(Message{Folder: "Projects", Subject: "report", MessageID: "report@x"})
+			var err error
+			if gone == "deleted" {
+				err = s.DeleteFolder(t.Context(), "Projects", true)
+			} else {
+				_, err = s.RenameFolder(t.Context(), "Projects", "Old")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, res := range map[string]mailstore.RefResult{
+				"Move":       one(t, s.Move(t.Context(), []ref.Ref{r}, "Trash")),
+				"StoreFlags": one(t, s.StoreFlags(t.Context(), []ref.Ref{r}, []string{`\Flagged`}, nil)),
+			} {
+				if g, ok := errors.AsType[*mailstore.FolderGoneError](res.Err); !ok || g.Folder != "Projects" || !errors.Is(res.Err, mailstore.ErrNotFound) {
+					t.Errorf("%s = %v (%+v, %t), want a FolderGoneError for Projects", name, res.Err, g, ok)
+				}
+			}
+			res := one(t, s.Move(t.Context(), []ref.Ref{r}, "Nope"))
+			if nf, ok := errors.AsType[*mailstore.FolderNotFoundError](res.Err); !ok || nf.Name != "Nope" {
+				t.Errorf("Move to Nope = %v, want a FolderNotFoundError for Nope", res.Err)
+			}
+		})
+	}
+}
+
 func TestWriteMove(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

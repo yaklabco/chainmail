@@ -13,6 +13,7 @@ import (
 	"github.com/yaklabco/chainmail/internal/idempotency"
 	"github.com/yaklabco/chainmail/internal/items"
 	"github.com/yaklabco/chainmail/internal/mailstore"
+	"github.com/yaklabco/chainmail/internal/mailstore/fake"
 	"github.com/yaklabco/chainmail/internal/provider"
 	"github.com/yaklabco/chainmail/internal/ref"
 	"github.com/yaklabco/chainmail/internal/rules"
@@ -211,6 +212,88 @@ func TestActSkipsAGoneMessage(t *testing.T) {
 				t.Errorf("act = %+v, want class %d, %s, clearPending %t", res, tt.class, tt.reason, tt.clear)
 			}
 		})
+	}
+}
+
+// TestActSkipsAMessageWhoseFolderIsGone checks that an action on a message
+// whose own folder another client deleted or renamed after the match ends
+// it as gone: the store's not-found names the message's folder. A missing
+// destination still fails for good, the message's folder gone or not.
+func TestActSkipsAMessageWhoseFolderIsGone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		actions []rules.Action
+		class   actClass
+		clear   bool
+	}{
+		{name: "move", actions: []rules.Action{{Kind: rules.ActMove, Folder: "Archive"}}, class: actGone},
+		{name: "copy", actions: []rules.Action{{Kind: rules.ActCopy, Folder: "Archive"}}, class: actGone, clear: true},
+		{name: "archive", actions: []rules.Action{{Kind: rules.ActArchive}}, class: actGone},
+		{name: "trash", actions: []rules.Action{{Kind: rules.ActTrash}}, class: actGone},
+		{name: "flag", actions: []rules.Action{{Kind: rules.ActFlag}}, class: actGone},
+		{name: "missing destination", actions: []rules.Action{{Kind: rules.ActMove, Folder: "Nowhere"}}, class: actPermanent},
+		{name: "missing destination, copy", actions: []rules.Action{{Kind: rules.ActCopy, Folder: "Nowhere"}}, class: actPermanent, clear: true},
+	}
+	for _, gone := range []string{"deleted", "renamed"} {
+		for _, tt := range tests {
+			t.Run(gone+" "+tt.name, func(t *testing.T) {
+				t.Parallel()
+				var report ref.Ref
+				g := newActRig(t, func(f *routeFixture) {
+					f.fakes["host"].AddFolder("Projects", mailstore.RoleNone)
+					report = f.fakes["host"].Add(fake.Message{
+						Folder: "Projects", Date: routeDaysAgo(2), Subject: "report", MessageID: "report@x", Body: "the report",
+					})
+				})
+				rule := g.newRule(t, "host", "gone-folder", func(d *rules.Definition) { d.Actions = tt.actions })
+				row, ok, err := g.f.store.Row(t.Context(), report)
+				if err != nil || !ok {
+					t.Fatalf("cached row of the report: %v, %t", err, ok)
+				}
+				host := g.f.fakes["host"]
+				if gone == "deleted" {
+					err = host.DeleteFolder(t.Context(), "Projects", true)
+				} else {
+					_, err = host.RenameFolder(t.Context(), "Projects", "Old Projects")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				res := g.f.s.act(t.Context(), rule, 7, g.acct(t, "host"), row)
+				if res.class != tt.class || res.reason != api.ReasonNotFound || res.clearPending != tt.clear {
+					t.Errorf("act = %+v, want class %d, NOT_FOUND, clearPending %t", res, tt.class, tt.clear)
+				}
+			})
+		}
+	}
+}
+
+// TestMessageGoneNeedsTheSourceFolder checks that a not-found naming a
+// folder counts as the message gone only when it names the message's own
+// folder: one naming another folder, such as a destination the store
+// opened after a copy, stays a failure for every action kind.
+func TestMessageGoneNeedsTheSourceFolder(t *testing.T) {
+	t.Parallel()
+	kinds := []rules.ActionKind{
+		rules.ActMove, rules.ActCopy, rules.ActArchive, rules.ActTrash, rules.ActLabel, rules.ActUnlabel,
+		rules.ActFlag, rules.ActForward,
+	}
+	for _, kind := range kinds {
+		for _, tt := range []struct {
+			name string
+			err  error
+			want bool
+		}{
+			{name: "source gone", err: fmt.Errorf("moving: %w", &mailstore.FolderGoneError{Folder: "Projects"}), want: true},
+			{name: "source not found", err: &mailstore.FolderNotFoundError{Name: "Projects"}, want: true},
+			{name: "other folder gone", err: &mailstore.FolderGoneError{Folder: "Archive"}, want: false},
+			{name: "destination not found", err: &mailstore.FolderNotFoundError{Name: "Archive", Requested: "Archive"}, want: false},
+		} {
+			if got := messageGone(kind, tt.err, "Projects"); got != tt.want {
+				t.Errorf("messageGone(%s, %s) = %t, want %t", kind, tt.name, got, tt.want)
+			}
+		}
 	}
 }
 

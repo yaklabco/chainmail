@@ -84,6 +84,24 @@ func (e *FolderNotFoundError) Error() string {
 // Is makes a FolderNotFoundError match ErrNotFound.
 func (e *FolderNotFoundError) Is(target error) bool { return target == ErrNotFound }
 
+// FolderGoneError is ErrNotFound for a folder a store could not open to
+// reach messages in it, because the server says it does not exist: the
+// folder of a ref another client has since deleted or renamed. Folder is
+// the folder as the store opened it, the server's name, so it is only for
+// the daemon. Its text is a plain not-found's, and it is not a
+// FolderNotFoundError, so a caller that does not look for it sees any
+// other NOT_FOUND.
+type FolderGoneError struct {
+	Folder string
+}
+
+func (e *FolderGoneError) Error() string {
+	return fmt.Sprintf("%v: no folder %q", ErrNotFound, e.Folder)
+}
+
+// Is makes a FolderGoneError match ErrNotFound.
+func (e *FolderGoneError) Is(target error) bool { return target == ErrNotFound }
+
 const (
 	// SampleBytes is how much of a text part a store reads to build a
 	// snippet when the server has no PREVIEW.

@@ -89,14 +89,19 @@ type actionStep struct {
 	err error
 }
 
-// messageGone reports whether err, which ended an action of kind, says the
-// matched message itself is gone: STALE_REF always does, as it is about
-// the ref. NOT_FOUND does when nothing else the action names can be
-// missing: a missing destination or role folder is a FolderNotFoundError
-// and a missing item items.ErrNotFound, and a label, folder or role folder
+// messageGone reports whether err, which ended an action of kind on a
+// message in folder source, says the matched message itself is gone:
+// STALE_REF always does, as it is about the ref. A NOT_FOUND that names a
+// folder does when that folder is source: the store could not open the
+// message's own folder (a FolderGoneError), as when another client
+// deleted or renamed it after the match, or a folder the action needs is
+// the message's own and is missing. One that names another folder, such
+// as a missing destination or role folder, stays a failure. A plain
+// NOT_FOUND does when nothing else the action names can be missing: a
+// missing item is items.ErrNotFound, and a label, folder or role folder
 // that an action names can be missing in ways the store does not type, so
 // a plain NOT_FOUND from those actions stays a failure.
-func messageGone(kind rules.ActionKind, err error) bool {
+func messageGone(kind rules.ActionKind, err error, source string) bool {
 	switch {
 	case err == nil:
 		return false
@@ -105,8 +110,11 @@ func messageGone(kind rules.ActionKind, err error) bool {
 	case !errors.Is(err, mailstore.ErrNotFound):
 		return false
 	}
-	if _, ok := errors.AsType[*mailstore.FolderNotFoundError](err); ok {
-		return false
+	if gone, ok := errors.AsType[*mailstore.FolderGoneError](err); ok {
+		return source != "" && gone.Folder == source
+	}
+	if nf, ok := errors.AsType[*mailstore.FolderNotFoundError](err); ok {
+		return source != "" && nf.Name == source
 	}
 	switch kind {
 	case rules.ActFlag, rules.ActUnflag, rules.ActRead, rules.ActUnread, rules.ActForward, rules.ActLinkItem:
@@ -260,14 +268,23 @@ func replaySkip(a rules.Action, prev rules.AppliedRow, now time.Time) (string, b
 
 // runAction runs one action on the message at cur through the daemon's
 // own organize, items or compose path, within ruleActionTimeout. A
-// permanent failure that says the message itself is gone (messageGone)
-// is actGone instead.
+// permanent failure that says the message itself is gone (messageGone),
+// judged against cur's folder, is actGone instead.
 func (s *Server) runAction(ctx context.Context, ruleID string, a rules.Action, acct config.ResolvedAccount, cur, key string, targets []string) actionStep {
 	st := s.doAction(ctx, ruleID, a, acct, cur, key, targets)
-	if st.class == actPermanent && messageGone(a.Kind, st.err) {
+	if st.class == actPermanent && messageGone(a.Kind, st.err, folderOf(cur)) {
 		st.class = actGone
 	}
 	return st
+}
+
+// folderOf is the folder of the ref cur, "" when cur does not parse.
+func folderOf(cur string) string {
+	m, err := ref.Parse(cur)
+	if err != nil {
+		return ""
+	}
+	return m.Folder
 }
 
 // doAction is runAction before a gone message is told apart.

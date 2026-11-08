@@ -736,14 +736,16 @@ func (s *Store) findLocked(folder string, uid uint32) *Message {
 }
 
 // resolveLocked finds the message r points at. On Gmail a changed
-// UIDVALIDITY is recovered by X-GM-MSGID, as imapstore does.
+// UIDVALIDITY is recovered by X-GM-MSGID, as imapstore does. A ref whose
+// folder is gone is a mailstore.FolderGoneError naming it, as imapstore's
+// failed SELECT is.
 func (s *Store) resolveLocked(r ref.Ref) (*Message, error) {
 	if r.Account != s.account {
 		return nil, fmt.Errorf("%w: ref is for account %s", mailstore.ErrNotFound, r.Account)
 	}
 	v, ok := s.uidValidity[r.Folder]
 	if !ok {
-		return nil, fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, r.Folder)
+		return nil, &mailstore.FolderGoneError{Folder: r.Folder}
 	}
 	if v != r.UIDValidity {
 		if s.gmail && r.GmailMsgID != 0 {
