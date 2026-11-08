@@ -160,9 +160,9 @@ func (a *Account) fetchBatch(ctx context.Context, w *walk) ([]uint32, []Row, []u
 			size = min(size, w.limit)
 		}
 		batch := w.uids[:size]
-		rows, unreadable, err := a.fetchHeadersOnce(ctx, src, batch)
+		got, err := a.fetchHeadersOnce(ctx, src, batch)
 		if !errors.Is(err, mailstore.ErrBusy) {
-			return batch, rows, unreadable, err
+			return batch, got.rows, got.unreadable, err
 		}
 		if !a.sleep(ctx, max(a.settings().BackfillPause, busyRetryFloor)) {
 			return nil, nil, nil, ctx.Err()

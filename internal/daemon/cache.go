@@ -275,6 +275,10 @@ func (s *Server) cacheAccountOptions(acct config.ResolvedAccount) cache.AccountO
 		Clock:   s.cacheClock,
 		Logger:  s.opts.Logger,
 		OnError: s.noteCacheErr,
+		// Invite detection needs the calendar cache and the account
+		// syncers' poke; with neither, calendarInviteHook returns nil and
+		// the worker reads no calendar part.
+		OnInvites: s.calendarInviteHook(nil, nil),
 	}
 }
 
