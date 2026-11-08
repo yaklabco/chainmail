@@ -482,6 +482,53 @@ func TestPruneKeepsMasters(t *testing.T) {
 	same(t, "rows after Prune", want, got)
 }
 
+// TestPruneKeepsOccurrencesMovedEarlier covers an override whose own end is
+// before the cutoff while the occurrence it replaces (its RECURRENCE-ID) is
+// after it. Deleting it would let the master put the original occurrence
+// back, so Prune keeps it (Amendment 18).
+func TestPruneKeepsOccurrencesMovedEarlier(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := setup(t)
+	master := weekly("weekly", t0.AddDate(-1, 0, 0))
+	rid := master.Start.AddDate(0, 0, 7*53) // the first occurrence after t0
+	if !rid.After(t0) {
+		t.Fatalf("recurrence ID %v is not after the cutoff %v", rid, t0)
+	}
+	moved := override(master, rid, -(rid.Sub(t0) + 2*time.Hour)) // ends 90 minutes before t0
+	if !moved.End.Before(t0) {
+		t.Fatalf("moved override ends %v, want before the cutoff %v", moved.End, t0)
+	}
+	// Ended and replaced before the cutoff: pruned.
+	gone := override(master, master.Start.AddDate(0, 0, 7*50), -time.Hour)
+	apply(t, s, "work", calendar.Changes{Full: true, Upserts: []calendar.Event{master, moved, gone}})
+
+	n, err := s.Prune(ctx, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("Prune removed %d rows, want 1 (the override replacing a past occurrence)", n)
+	}
+	series, err := s.Series(ctx, "acme", "work", "weekly")
+	if err != nil {
+		t.Fatal(err)
+	}
+	same(t, "series after Prune", []string{"weekly", "weekly@" + rid.Format("20060102T150405Z")}, keys(series))
+
+	events := make([]calendar.Event, 0, len(series))
+	for _, r := range series {
+		events = append(events, r.Event)
+	}
+	insts, _, err := calendar.Expand(events, rid.Add(-time.Hour), rid.Add(time.Hour), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(insts) != 0 {
+		t.Errorf("instances at the moved occurrence's original time = %+v, want none", insts)
+	}
+}
+
 func TestStatsAndReady(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
