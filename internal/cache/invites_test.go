@@ -415,7 +415,7 @@ type holdingMail struct {
 }
 
 func (m *holdingMail) StreamPartBackground(ctx context.Context, r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error) {
-	tx, err := m.st.db.BeginTx(context.Background(), nil)
+	tx, err := m.st.db.BeginTx(context.WithoutCancel(ctx), nil)
 	if err != nil {
 		return mailstore.PartInfo{}, nil, err
 	}
