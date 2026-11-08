@@ -59,7 +59,7 @@ func (s *Store) getObject(ctx context.Context, href string) (*storedObject, erro
 		if resp.status/100 == 2 {
 			return nil, fmt.Errorf("%w: status %d", calstore.ErrUnavailable, resp.status)
 		}
-		return nil, statusError(opRead, resp.status, resp.body)
+		return nil, statusError(opRead, resp)
 	}
 	etag := normalizeETag(resp.header.Get("ETag"))
 	if etag == "" {
@@ -192,7 +192,7 @@ func (s *Store) collectionSync(ctx context.Context, coll, token string, full boo
 			if resp.status/100 == 2 {
 				return calendar.Changes{}, fmt.Errorf("%w: status %d", calstore.ErrUnavailable, resp.status)
 			}
-			return calendar.Changes{}, statusError(opSync, resp.status, resp.body)
+			return calendar.Changes{}, statusError(opSync, resp)
 		}
 		ms, err := parseMultistatus(resp.body)
 		if err != nil {
@@ -282,7 +282,7 @@ func (s *Store) etagSyncFrom(ctx context.Context, coll string, state etagState, 
 		if resp.status/100 == 2 {
 			return calendar.Changes{}, fmt.Errorf("%w: status %d", calstore.ErrUnavailable, resp.status)
 		}
-		return calendar.Changes{}, statusError(opRead, resp.status, resp.body)
+		return calendar.Changes{}, statusError(opRead, resp)
 	}
 	ms, err := parseMultistatus(resp.body)
 	if err != nil {
@@ -415,7 +415,7 @@ func (s *Store) multigetBatch(ctx context.Context, coll string, batch []string) 
 		if resp.status/100 == 2 {
 			return nil, nil, fmt.Errorf("%w: status %d", calstore.ErrUnavailable, resp.status)
 		}
-		return nil, nil, statusError(opRead, resp.status, resp.body)
+		return nil, nil, statusError(opRead, resp)
 	}
 	ms, err := parseMultistatus(resp.body)
 	if err != nil {

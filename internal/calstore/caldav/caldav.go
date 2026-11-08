@@ -287,12 +287,18 @@ const (
 	opWrite
 )
 
-// statusError maps a non-success status. body is the start of the error
-// response, read only for DAV precondition element names.
-func statusError(op opKind, code int, body []byte) error {
+// statusError maps a non-success response. Its body, the start of the
+// error response, is read only for DAV precondition element names, and its
+// WWW-Authenticate header only for an RFC 6750 bearer error code.
+func statusError(op opKind, resp *response) error {
+	code, body := resp.status, resp.body
 	var sentinel error
 	switch {
 	case code == http.StatusUnauthorized:
+		sentinel = calstore.ErrAuth
+	case code == http.StatusForbidden && bearerTokenRefused(resp.header):
+		// RFC 6750 section 3.1: the token lacks the scope or is no longer
+		// valid, which a new token fixes, whatever the calendar allows.
 		sentinel = calstore.ErrAuth
 	case code == http.StatusTooManyRequests || code >= 500:
 		sentinel = calstore.ErrUnavailable
@@ -323,6 +329,63 @@ func statusError(op opKind, code int, body []byte) error {
 		sentinel = ErrRejected
 	}
 	return fmt.Errorf("%w: status %d", sentinel, code)
+}
+
+// bearerTokenRefused reports whether a WWW-Authenticate header holds a
+// Bearer challenge whose error is insufficient_scope or invalid_token (RFC
+// 6750 section 3.1).
+func bearerTokenRefused(h http.Header) bool {
+	switch strings.ToLower(bearerError(h)) {
+	case "insufficient_scope", "invalid_token":
+		return true
+	}
+	return false
+}
+
+// bearerError returns the error parameter of the first Bearer challenge in
+// the WWW-Authenticate headers, or "". A header holds challenges separated
+// by commas, each an auth scheme followed by comma-separated auth-params
+// (RFC 9110 section 11.6.1), so an item that starts with a bare token
+// starts a new challenge.
+func bearerError(h http.Header) string {
+	for _, v := range h.Values("WWW-Authenticate") {
+		scheme := ""
+		for _, item := range splitUnquoted(v, ',') {
+			item = strings.TrimSpace(item)
+			name, rest, _ := strings.Cut(item, " ")
+			if name != "" && !strings.Contains(name, "=") && !strings.HasPrefix(strings.TrimSpace(rest), "=") {
+				scheme, item = strings.ToLower(name), strings.TrimSpace(rest)
+			}
+			if scheme != "bearer" {
+				continue
+			}
+			k, val, ok := strings.Cut(item, "=")
+			if ok && strings.EqualFold(strings.TrimSpace(k), "error") {
+				return strings.Trim(strings.TrimSpace(val), `"`)
+			}
+		}
+	}
+	return ""
+}
+
+// splitUnquoted splits s at sep outside double-quoted strings.
+func splitUnquoted(s string, sep byte) []string {
+	var out []string
+	inQuote, escaped, start := false, false, 0
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case escaped:
+			escaped = false
+		case inQuote && c == '\\':
+			escaped = true
+		case c == '"':
+			inQuote = !inQuote
+		case c == sep && !inQuote:
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	return append(out, s[start:])
 }
 
 // onlyErrorElement reports whether names holds nothing but the DAV error

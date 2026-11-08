@@ -142,7 +142,7 @@ func (s *Store) putObject(ctx context.Context, href string, body []byte, cond ma
 		return "", err
 	}
 	if resp.status/100 != 2 {
-		return "", statusError(op, resp.status, resp.body)
+		return "", statusError(op, resp)
 	}
 	return normalizeETag(resp.header.Get("ETag")), nil
 }
@@ -197,7 +197,7 @@ func (s *Store) Delete(ctx context.Context, calID, providerID, etag string, mode
 		return err
 	}
 	if resp.status/100 != 2 {
-		return statusError(opWrite, resp.status, resp.body)
+		return statusError(opWrite, resp)
 	}
 	return nil
 }

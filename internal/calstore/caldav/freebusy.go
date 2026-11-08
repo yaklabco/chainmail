@@ -62,7 +62,7 @@ func (s *Store) freeBusyBatch(ctx context.Context, d *discovery, people []string
 		return err
 	}
 	if resp.status/100 != 2 {
-		return statusError(opRead, resp.status, resp.body)
+		return statusError(opRead, resp)
 	}
 	var sr scheduleResponse
 	if err := xml.Unmarshal(resp.body, &sr); err != nil {

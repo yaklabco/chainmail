@@ -500,3 +500,33 @@ func TestDeleteWithoutNotificationsGuardsTheParser(t *testing.T) {
 		t.Error("object deleted")
 	}
 }
+
+// TestWriteRefusedForTheToken: a 403 whose WWW-Authenticate says the
+// bearer token lacks the scope or is invalid (RFC 6750 section 3.1) is an
+// authorization problem, not a read-only calendar.
+func TestWriteRefusedForTheToken(t *testing.T) {
+	for _, challenge := range []string{
+		`Bearer realm="mail", error="insufficient_scope", scope="calendar"`,
+		`Bearer error="invalid_token", error_description="expired"`,
+		`Basic realm="mail", Bearer error=insufficient_scope`,
+	} {
+		f := newFakeServer(t)
+		href := testCal + "single.ics"
+		etag := f.backend.put(t, href, singleICS)
+		f.intercept = func(w http.ResponseWriter, r *http.Request, _ []byte) bool {
+			if r.Method != http.MethodPut && r.Method != http.MethodDelete {
+				return false
+			}
+			w.Header().Set("WWW-Authenticate", challenge)
+			w.WriteHeader(http.StatusForbidden)
+			return true
+		}
+		s := f.store(t, WithClock(clock))
+		if _, err := s.Put(context.Background(), testCal, newMeeting("tok@chainmail"), "", calendar.NotifySend); !errors.Is(err, calstore.ErrAuth) {
+			t.Errorf("%s: create err = %v, want ErrAuth", challenge, err)
+		}
+		if err := s.Delete(context.Background(), testCal, href, etag, calendar.NotifySend); !errors.Is(err, calstore.ErrAuth) {
+			t.Errorf("%s: delete err = %v, want ErrAuth", challenge, err)
+		}
+	}
+}
