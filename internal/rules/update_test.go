@@ -269,6 +269,10 @@ func TestUpdateRefusesWhatTheTableCannotHold(t *testing.T) {
 		{Patch{Name: storePtr("Bad Name")}, errStoreName},
 		{Patch{Actions: storePtr([]Action{})}, errStoreActions},
 		{Patch{MaxPerRun: storePtr(MaxMaxPerRun + 1)}, errStoreMaxPerRun},
+		{Patch{Schedule: storePtr(Schedule{Kind: "weekly", Every: time.Hour})}, errStoreSchedule},
+		{Patch{Schedule: storePtr(Schedule{Kind: ScheduleAt, At: ClockTime{Hour: 7}, Every: time.Hour})}, errStoreSchedule},
+		{Patch{Actions: storePtr([]Action{{Kind: ActArchive, Label: "Receipts"}})}, errStoreAction},
+		{Patch{Actions: storePtr([]Action{{Kind: ActMove, Folder: "Archive", Note: "lost"}})}, errStoreAction},
 	} {
 		_, err := r.store.Update(t.Context(), otherActor, created.ID, tc.patch, nil)
 		wantRefused(t, err, tc.want)

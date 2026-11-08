@@ -42,7 +42,8 @@ type StoreOptions struct {
 	Now func() time.Time
 	// Location is the wall clock at schedules run on. Nil means time.Local.
 	Location *time.Location
-	// Rand feeds rule IDs. Nil means crypto/rand.
+	// Rand feeds rule IDs. Nil means crypto/rand. Creates may run at once,
+	// so it must be safe for concurrent use.
 	Rand io.Reader
 }
 
@@ -424,14 +425,19 @@ func checkStored(d Definition) error {
 			return errStoreAction
 		}
 	}
+	// The stored forms must read back as d itself: an encoding that drops
+	// a field, such as a label action's folder or an unknown schedule kind
+	// rendered as none, would store a rule other than the one asked for.
 	enc, err := EncodeActions(d.Actions)
 	if err != nil {
 		return errStoreAction
 	}
-	if _, err := DecodeActions(enc); err != nil {
+	back, err := DecodeActions(enc)
+	if err != nil || !slices.EqualFunc(back, d.Actions, sameAction) {
 		return errStoreAction
 	}
-	if _, err := ParseSchedule(d.Schedule.String()); err != nil {
+	sched, err := ParseSchedule(d.Schedule.String())
+	if err != nil || sched != d.Schedule {
 		return errStoreSchedule
 	}
 	return nil

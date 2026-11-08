@@ -201,6 +201,24 @@ func TestCreateRefusesWhatTheTablesCannotHold(t *testing.T) {
 		{"schedule under 15 minutes", func(d *Definition) {
 			d.Schedule = Schedule{Kind: ScheduleEvery, Every: 10 * time.Minute}
 		}, errStoreSchedule},
+		{"unknown schedule kind", func(d *Definition) {
+			d.Schedule = Schedule{Kind: "weekly", Every: time.Hour}
+		}, errStoreSchedule},
+		{"no schedule with a gap", func(d *Definition) {
+			d.Schedule = Schedule{Every: time.Hour}
+		}, errStoreSchedule},
+		{"every schedule with a clock time", func(d *Definition) {
+			d.Schedule = Schedule{Kind: ScheduleEvery, Every: time.Hour, At: ClockTime{Hour: 7}}
+		}, errStoreSchedule},
+		{"label action with a folder", func(d *Definition) {
+			d.Actions = []Action{{Kind: ActLabel, Label: "Receipts", Folder: "Archive"}}
+		}, errStoreAction},
+		{"flag action with a recipient", func(d *Definition) {
+			d.Actions = []Action{{Kind: ActFlag, To: []string{markAddress}}}
+		}, errStoreAction},
+		{"forward action with an item", func(d *Definition) {
+			d.Actions = []Action{{Kind: ActForward, To: []string{markAddress}, ItemID: "it_x"}}
+		}, errStoreAction},
 		{"priority too low", func(d *Definition) { d.Priority = MinPriority - 1 }, errStorePriority},
 		{"priority too high", func(d *Definition) { d.Priority = MaxPriority + 1 }, errStorePriority},
 		{"max_per_run negative", func(d *Definition) { d.MaxPerRun = -1 }, errStoreMaxPerRun},
