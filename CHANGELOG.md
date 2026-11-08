@@ -10,10 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - A documentation site at https://chainmail.sh, with a user guide, an operations guide, a configuration and command reference, and a developer guide.
+- A landing page at https://chainmail.sh, with the manual under https://chainmail.sh/docs/.
 
 ### Changed
 
 - The README is a short introduction, and the quick start and runbook moved to chainmail.sh.
+- The manual has the landing page's look, and the chainmail gopher is redrawn.
 
 ### Fixed
 

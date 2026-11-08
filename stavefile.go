@@ -63,20 +63,38 @@ func (Docs) Commands() error {
 	return sh.RunV("go", "run", "./cmd/chainmail", "docs", commandDocsDir)
 }
 
-// Build builds the docs site into website/build.
+// Build builds the landing page and the docs into pages-dist, as CI deploys them.
 func (Docs) Build() error {
-	if err := sh.RunWithV(nil, "website", "bun", "install", "--frozen-lockfile"); err != nil {
-		return err
-	}
-	return sh.RunWithV(nil, "website", "bun", "run", "build")
+	return sh.RunV("scripts/build-pages.sh")
 }
 
 // Serve runs the docs site locally with live reload.
+// It serves the manual at http://localhost:3000/docs/.
 func (Docs) Serve() error {
 	if err := sh.RunWithV(nil, "website", "bun", "install", "--frozen-lockfile"); err != nil {
 		return err
 	}
 	return sh.RunWithV(nil, "website", "bun", "run", "start")
+}
+
+// Site groups the landing page's targets.
+type Site st.Namespace
+
+// Build builds the landing page into site/dist.
+func (Site) Build() error {
+	if err := sh.RunWithV(nil, "site", "bun", "install", "--frozen-lockfile"); err != nil {
+		return err
+	}
+	return sh.RunWithV(nil, "site", "bun", "run", "build")
+}
+
+// Serve runs the landing page locally with live reload at
+// http://localhost:4321/.
+func (Site) Serve() error {
+	if err := sh.RunWithV(nil, "site", "bun", "install", "--frozen-lockfile"); err != nil {
+		return err
+	}
+	return sh.RunWithV(nil, "site", "bun", "run", "dev")
 }
 
 // Lint runs buf lint and golangci-lint.
