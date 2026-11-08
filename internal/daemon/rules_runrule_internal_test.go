@@ -216,3 +216,117 @@ func TestRunRuleInterruptedMidPage(t *testing.T) {
 		t.Errorf("flagged %v, want the 2 oldest", got)
 	}
 }
+
+// lateBatch adds a sixth batch message to host's server after the cache
+// was warmed and publishes its new event, as a sync pass that has just
+// found it does. The builder is left one event short of it, inside
+// fresh_lag, so the cache still counts as complete. It returns the
+// message and the event's ID.
+func lateBatch(t *testing.T, g *runnerRig) (ref.Ref, int64) {
+	t.Helper()
+	late := g.uncached("host", fake.Message{
+		Folder: "INBOX", Date: routeDaysAgo(4), Subject: "batch 6",
+		MessageID: "batch6@x", Body: "part of a batch",
+	})
+	tail := g.publish(t, late)
+	g.sig.set(tail - 1)
+	return late, tail
+}
+
+// startRunRule runs rule once for trigger in the background and returns
+// the channel its run and error arrive on.
+func startRunRule(t *testing.T, g *runnerRig, rule rules.Rule, trigger rules.Trigger) <-chan runRuleResult {
+	t.Helper()
+	done := make(chan runRuleResult, 1)
+	go func() {
+		run, err := g.r.runRule(t.Context(), rule, trigger, 10)
+		done <- runRuleResult{run, err}
+	}()
+	return done
+}
+
+// runRuleResult is what one runRule call returned.
+type runRuleResult struct {
+	run rules.Run
+	err error
+}
+
+// awaitCacheWait waits until the runner asks its clock for the wait on the
+// builder, failing the test if runRule returns first.
+func awaitCacheWait(t *testing.T, g *runnerRig, done <-chan runRuleResult, tail int64) ruleWait {
+	t.Helper()
+	select {
+	case res := <-done:
+		t.Fatalf("runRule = %+v, %v before the builder applied event %d", res.run, res.err, tail)
+	case w := <-g.clk.waits:
+		if w.d != ruleCacheWait {
+			t.Fatalf("runner waited %v, want %v for the builder", w.d, ruleCacheWait)
+		}
+		return w
+	case <-time.After(10 * time.Second):
+		t.Fatal("runRule neither returned nor waited for the builder")
+	}
+	return ruleWait{}
+}
+
+// TestRunRuleWaitsForTheBuilder checks spec 5.3 and section 6 for a
+// scheduled or manual run. The cache counts as complete while its builder
+// lags the log by less than fresh_lag, so a run waits until the builder
+// has applied the log's tail before it matches: mail the sync has just
+// found, such as the mail a downtime catch-up is for, is acted on in this
+// run and not an interval later.
+func TestRunRuleWaitsForTheBuilder(t *testing.T) {
+	t.Parallel()
+	for _, trigger := range []rules.Trigger{rules.TriggerSchedule, rules.TriggerManual} {
+		t.Run(string(trigger), func(t *testing.T) {
+			t.Parallel()
+			g, batch, rule := newBatchRig(t)
+			late, tail := lateBatch(t, g)
+			done := startRunRule(t, g, rule, trigger)
+			awaitCacheWait(t, g, done, tail)
+			if n := g.fk.Calls("StoreFlags"); n != 0 {
+				t.Errorf("flagged %d times before the builder applied the tail", n)
+			}
+			// The builder applies the new event: the row reaches cache.db,
+			// then its position moves.
+			g.cacheHeader(t, late)
+			g.sig.set(tail)
+			res := <-done
+			if res.err != nil {
+				t.Fatal(res.err)
+			}
+			if run := res.run; run.Outcome != rules.OutcomeOK || run.Matched != 6 || run.Applied != 6 || run.Skipped != 0 || run.Failed != 0 {
+				t.Errorf("run = %+v, want ok, 6 matched, 6 applied", run)
+			}
+			if got := g.flagged(append(slices.Clone(batch), late)); slices.Contains(got, false) {
+				t.Errorf("flagged %v, want all six, the late one too", got)
+			}
+		})
+	}
+}
+
+// TestRunRuleGivesUpOnAStuckBuilder checks that a run whose builder does
+// not reach the log's tail within ruleCacheWait is recorded cache_not_ready
+// with reason stale and acts on nothing, so a scheduled rule retries soon
+// (amendment 7).
+func TestRunRuleGivesUpOnAStuckBuilder(t *testing.T) {
+	t.Parallel()
+	g, _, rule := newBatchRig(t)
+	_, tail := lateBatch(t, g)
+	done := startRunRule(t, g, rule, rules.TriggerSchedule)
+	w := awaitCacheWait(t, g, done, tail)
+	w.fire <- routeNow
+	res := <-done
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if run := res.run; run.Outcome != rules.OutcomeCacheNotReady || run.Reason != "stale" || run.Hint != ruleCacheNotReadyHint || run.Matched != 0 {
+		t.Errorf("run = %+v, want cache_not_ready, stale", run)
+	}
+	if n := g.fk.Calls("StoreFlags"); n != 0 {
+		t.Errorf("flagged %d times", n)
+	}
+	if last := g.lastRun(t, rule.ID); last.ID != res.run.ID || last.Outcome != rules.OutcomeCacheNotReady {
+		t.Errorf("stored run = %+v, want the cache_not_ready run", last)
+	}
+}

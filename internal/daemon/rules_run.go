@@ -47,6 +47,11 @@ const (
 	// the runner owes and could not make.
 	owedWriteHint = "the daemon could not save the act-once state of a rule action; " +
 		"it holds new mail and tries again before the next batch, and the daemon log says why"
+	// ruleCacheWait bounds a scheduled or manual run's wait for the cache
+	// builder to apply the log's tail. The cache counts as complete while
+	// the builder lags by less than fresh_lag, so a healthy builder gets
+	// there well inside it; one that does not reads as stale.
+	ruleCacheWait = time.Minute
 	// ruleCacheNotReadyHint is the fixed hint of a cache_not_ready run.
 	// search_items.go's cacheNotReadyHint answers a refused search.
 	ruleCacheNotReadyHint = "the cache cannot answer this rule completely yet; " +
@@ -912,9 +917,13 @@ func relocates(rule rules.Rule) bool {
 // TriggerManual, taking the runner's lock. limit 0 means the rule's
 // MaxPerRun. It matches the whole cache oldest first, needs the cache to
 // answer the rule completely (spec 5.3), and returns the run it recorded
-// with a nil error whatever its outcome. An error means the turn was not
-// taken before ctx ended, the rule does not cover the account
-// (errRuleAccount), or the run could not be written.
+// with a nil error whatever its outcome. A complete cache can still lag
+// the log by less than fresh_lag, so the run first waits for the builder
+// to apply the log's tail (builderAtTail): mail the sync has just found,
+// such as what a downtime catch-up is for, is matched in this run. An
+// error means the turn was not taken, or the builder not waited for,
+// before ctx ended, the rule does not cover the account (errRuleAccount),
+// or the log's tail could not be read or the run written.
 func (r *ruleRunner) runRule(ctx context.Context, rule rules.Rule, t rules.Trigger, limit int) (rules.Run, error) {
 	if err := r.take(ctx); err != nil {
 		return rules.Run{}, err
@@ -933,6 +942,15 @@ func (r *ruleRunner) runRule(ctx context.Context, rule rules.Rule, t rules.Trigg
 	case err == nil && !covered:
 		return rules.Run{}, errRuleAccount
 	}
+	if err == nil && reason == "" {
+		at, werr := r.builderAtTail(ctx)
+		if werr != nil {
+			return rules.Run{}, werr
+		}
+		if !at {
+			reason = cache.ReasonStale
+		}
+	}
 	run, berr := r.begin(ctx, rule, t, start)
 	if berr != nil {
 		return rules.Run{}, berr
@@ -948,6 +966,38 @@ func (r *ruleRunner) runRule(ctx context.Context, rule rules.Rule, t rules.Trigg
 		err = r.settle(ctx, &run, capped, cause)
 	}
 	return run, err
+}
+
+// builderAtTail waits until the account's cache builder has applied the
+// event log up to its tail as read now, and reports whether it got there
+// within ruleCacheWait. The caller has already found the cache's folders
+// fresh, and a sync pass stamps a folder in the same write as the events
+// it logs, so the tail read after that covers every pass the freshness
+// counted. Applied passes every ID in the log, other accounts' too, so it
+// compares with the tail directly. The runner's state is left alone: a
+// job holding the turn shows as running.
+func (r *ruleRunner) builderAtTail(ctx context.Context) (bool, error) {
+	tail, err := r.s.watchLog.Tail(ctx)
+	if err != nil {
+		return false, err
+	}
+	var timeout <-chan time.Time
+	for {
+		changed := r.ca.AppliedChanged()
+		if r.ca.Applied() >= tail {
+			return true, nil
+		}
+		if timeout == nil {
+			timeout = r.clock.After(ruleCacheWait)
+		}
+		select {
+		case <-changed:
+		case <-timeout:
+			return false, nil
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
 }
 
 // page runs rule over the scope oldest first, a page at a time, acting on

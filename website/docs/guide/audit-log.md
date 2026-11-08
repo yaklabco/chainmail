@@ -1,7 +1,7 @@
 ---
 title: The audit log
 description: Read the daemon's record of every call, filter it by account and action, and page through it.
-sidebar_position: 6
+sidebar_position: 7
 ---
 
 # The audit log
@@ -14,6 +14,7 @@ Rows hold no message content, recipients or secrets, so any user allowed on the 
 chainmail audit
 chainmail audit --since 1h --output table
 chainmail audit --account work --action send --limit 20
+chainmail audit --client rule --since 1h --output table
 ```
 
 ## Flags
@@ -23,6 +24,7 @@ chainmail audit --account work --action send --limit 20
 | `--since` | `24h` | How far back to look, as a Go duration such as `90m` or `168h`. |
 | `--account` | all accounts | Only rows of this account. An unknown account fails with `INVALID_ARGUMENT`. |
 | `--action` | all actions | Only rows of this action, such as `send`, `expunge` or `folders.delete`. See [actions](#actions). |
+| `--client` | all clients | Only rows of this client kind, such as `cli`, `mcp` or `rule`. A value that is not a well-formed client kind fails with `INVALID_ARGUMENT`. |
 | `--limit` | `100` | Rows per page, up to 1000. |
 | `--before-id` | none | Only rows older than this id. Pass the previous page's `next_before_id`. |
 
@@ -39,7 +41,7 @@ Each entry has these fields:
 | `id` | The row's number. |
 | `at` | When the call was made. |
 | `caller_uid` | The caller's user ID, read from the socket. This is the authoritative identity. |
-| `client` | The client kind: `cli`, `mcp`, `live-test`, or `daemon` for work the daemon starts itself, such as a background probe. The client reports it itself, so any local caller can claim any kind. |
+| `client` | The client kind: `cli`, `mcp`, `live-test`, `daemon` for work the daemon starts itself, such as a background probe, or `rule` for an action a rule took. The client reports it itself, so any local caller can claim any kind except `daemon` and `rule`, which are recorded as `(invalid)` from a socket client. |
 | `account` | The account the call was for. |
 | `action` | What was done. See [actions](#actions). |
 | `targets` | Refs, Message-IDs and counts the call touched, such as `source=cache` on a search. |
@@ -57,11 +59,13 @@ chainmail audit --since 168h --before-id 4182
 
 ## Actions
 
-The audited reads are `accounts.list`, `account.test`, `secret.set`, `auth.login.begin`, `auth.login.finish`, `folders.list`, `search`, `get`, `get.raw`, `thread`, `attachment`, `watch.subscribe`, `watch.read`, `watch.groups.list`, `item.get` and `item.list`.
+The audited reads are `accounts.list`, `account.test`, `secret.set`, `auth.login.begin`, `auth.login.finish`, `folders.list`, `search`, `get`, `get.raw`, `thread`, `attachment`, `watch.subscribe`, `watch.read`, `watch.groups.list`, `item.get`, `item.list`, `rule.get`, `rule.list`, `rule.dry_run`, `rule.runs` and `rule.status`.
 
-The audited writes are `send`, `send_raw`, `reply`, `forward`, `upload`, `draft.create`, `draft.update`, `draft.send`, `draft.delete`, `move`, `copy`, `archive`, `trash`, `expunge`, `flags`, `labels`, `folders.create`, `folders.rename`, `folders.delete`, `limits.probe`, `watch.groups.delete`, `cache.rebuild`, `cache.evict`, `item.create`, `item.update`, `item.delete`, `item.restore`, `item.criteria`, `item.tick`, `item.block`, `item.link` and `item.unlink`.
+The audited writes are `send`, `send_raw`, `reply`, `forward`, `upload`, `draft.create`, `draft.update`, `draft.send`, `draft.delete`, `move`, `copy`, `archive`, `trash`, `expunge`, `flags`, `labels`, `folders.create`, `folders.rename`, `folders.delete`, `limits.probe`, `watch.groups.delete`, `cache.rebuild`, `cache.evict`, `item.create`, `item.update`, `item.delete`, `item.restore`, `item.criteria`, `item.tick`, `item.block`, `item.link`, `item.unlink`, `rule.create`, `rule.update`, `rule.delete`, `rule.restore` and `rule.run`.
 
 Every call is recorded except `admin status`, `audit`, `watch status`, `cache status` and a watch's acknowledgements. A batch that spans accounts records one row per account. Over MCP, each check of which policy-gated tools to list is one `accounts.list` row (see [which tools are listed](../agents/setup.md#which-tools-are-listed)).
+
+An action a rule takes is recorded under its own action, such as `labels`, `move`, `forward` or `item.link`, with client kind `rule` and the daemon's user. Its targets add `rule=<id>` and `run=<id>`, so `chainmail audit --client rule` shows what each rule did and in which run (see [Rules](./rules.md#the-audit-log)).
 
 ## Decisions
 
