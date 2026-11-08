@@ -88,7 +88,8 @@ The [quick start](https://chainmail.sh/docs/getting-started/quick-start) goes on
 - [MCP](https://chainmail.sh/docs/agents/setup): `chainmail mcp` serves the tools to an AI agent over stdio.
 - [Watching and events](https://chainmail.sh/docs/guide/watching): IMAP IDLE and polling feed a durable event log, and a named group resumes where it stopped.
 - [The local cache](https://chainmail.sh/docs/concepts/cache): `cache.db`, indexed with SQLite FTS5, answers searches and reads when it is complete and fresh.
-- [Work items](https://chainmail.sh/docs/guide/items): a tree of items from objectives down to tasks, with mail threads linked to them.
+- [Work items](https://chainmail.sh/docs/guide/items): a tree of items from objectives down to tasks, with mail threads linked to them and events when they come due.
+- [Rules](https://chainmail.sh/docs/guide/rules): rules in `state.db` label, file, forward and archive mail as it arrives, on a schedule or on demand. They match with the search language against the cache, and each action is audited.
 - [NixOS module](https://chainmail.sh/docs/operations/deploy): runs the daemon as its own system user, with the vault key passed as an encrypted systemd credential.
 
 ## Documentation
@@ -96,7 +97,7 @@ The [quick start](https://chainmail.sh/docs/getting-started/quick-start) goes on
 The manual is at [chainmail.sh](https://chainmail.sh).
 
 - [Getting started](https://chainmail.sh/docs/getting-started/install): install, a first daemon, accounts and connecting an agent.
-- [User guide](https://chainmail.sh/docs/guide/reading-and-searching): reading, sending, organizing, items, watching, the audit log and CLI settings.
+- [User guide](https://chainmail.sh/docs/guide/reading-and-searching): reading, sending, organizing, items, rules, watching, the audit log and CLI settings.
 - [Agents](https://chainmail.sh/docs/agents/setup): setting up an MCP client and working with mail as an agent.
 - [Operations](https://chainmail.sh/docs/operations/deploy): deploying, health checks, auth, upgrades, backups and troubleshooting.
 - [Reference](https://chainmail.sh/docs/reference/configuration): configuration, commands, MCP tools and exit codes.
