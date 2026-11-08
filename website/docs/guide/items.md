@@ -200,7 +200,7 @@ The event's `due` field holds `item_id`, `type`, `due_date`, `state` and `parent
 - Each stage fires once for each item and due date. A new due date gives new stages, which fire again.
 - When an item first reaches a stage, only the most advanced stage it has reached fires, and the earlier ones never will. An item created already overdue gets one `item_overdue`. An item made due tomorrow, with `due_soon_days = 2`, gets `item_due_soon` at once.
 - No stage repeats, so an overdue item gets one `item_overdue` for each due date.
-- The daemon checks every open item at `due_time` each day and when it starts. It also checks an item in the same transaction as its creation, its restore, or an update that changes its due date or state.
+- The daemon checks every open item at `due_time` each day and when it starts. A machine that was asleep at `due_time` gets the check within about 5 minutes of waking. It also checks an item in the same transaction as its creation, its restore, or an update that changes its due date or state.
 
 The `[rules]` keys are in the [configuration reference](../reference/configuration.md#rules).
 

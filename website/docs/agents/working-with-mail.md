@@ -336,6 +336,6 @@ The item tools keep the same tree as `chainmail item`. Link each mail thread to 
 
 ## Rules
 
-The rule tools keep the same rules as `chainmail rule`. Dry-run a rule with `dry_run_rule` before you create it with `create_rule`, and again before you run it by hand with `run_rule`. A dry run acts on nothing and shows the first 50 matches with the actions each would get.
+The rule tools keep the same rules as `chainmail rule`. Dry-run a rule with `dry_run_rule` before you create it with `create_rule`, and again before you run it by hand with `run_rule`. A dry run acts on nothing and shows the first 50 matches with the actions each would get. When `run_rule` returns an error, the rule may still have acted on other accounts. Read it with `get_rule` and check its last runs before you call `run_rule` again.
 
 A rule acts as the daemon, under client kind `rule`, behind the same policy as your own calls. A forward off the allowlist is held as a draft, never sent. A rule that keeps failing turns itself off, and a `rule` event says so. [Rules](../guide/rules.md) covers every rule the tools follow.

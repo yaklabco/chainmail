@@ -757,7 +757,7 @@ Returns `rule`. Idempotent. Audit action `rule.restore`.
 
 ### `dry_run_rule`
 
-Matches a saved rule, or an unsaved definition, without acting and without writing anything. For each account it returns the match count, the count already acted on, the first 50 matches as untrusted search rows, and the actions each would get. An account the cache cannot answer completely gets a `reason` and no matches. It waits up to 10 minutes.
+Matches a saved rule, or an unsaved definition, without acting and without writing anything. For each account it returns the match count, the count already acted on, the first 50 matches as untrusted search rows, and the actions each would get. An account the cache cannot answer completely gets a `reason` and no matches. With trigger schedule or manual, an account whose covered folders hold messages the cache could not read gets the reason `unreadable_messages`, as a real run would. It waits up to 10 minutes.
 
 | Argument | Type | Required | Meaning |
 |---|---|---|---|
@@ -773,6 +773,8 @@ Returns `accounts`. Read-only, idempotent. Audit action `rule.dry_run`.
 ### `run_rule`
 
 Runs a rule now on each account it covers, or on one, and returns one run per account. It acts on mail, so dry-run the rule first. `max` caps the messages it acts on per account. It waits up to 10 minutes.
+
+A run whose cache was not ready comes back as a run with outcome `cache_not_ready`, not as an error. When the call fails on an account, such as when it runs out of time, it returns only the error. The runs on the other accounts are still recorded and may have acted on mail. Read the rule with `get_rule`, whose last 10 runs show what each account did, before you call `run_rule` again. An operator can list every run with `chainmail rule runs`.
 
 | Argument | Type | Required | Meaning |
 |---|---|---|---|
