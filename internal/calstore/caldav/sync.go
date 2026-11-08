@@ -28,6 +28,9 @@ const (
 	maxSyncRounds = 100
 	// maxTokenBytes bounds a decoded etag token.
 	maxTokenBytes = 16 << 20
+	// maxPageToken bounds the sync token a sync-collection answer hands
+	// out. Servers use short URIs; a longer one is refused, not kept.
+	maxPageToken = 4 << 10
 )
 
 // etagState is the content of an etag token.
@@ -125,27 +128,38 @@ func (s *Store) GetEvent(ctx context.Context, calID, providerID string) ([]calen
 // the stored rows of that object (ObjectReplace). An object that no longer
 // parses, or holds no VEVENT, is reported deleted; one with more than
 // calendar.MaxObjectEvents VEVENTs is reported skipped. A calendar with more
-// than calstore.MaxSyncEvents objects listed, or objects kept past
-// calstore.MaxSyncBytes or calstore.MaxSyncEvents events, gives
-// calstore.ErrSyncTooLarge. Only a 404 or 410 for a member is a deletion: a
-// member the server answers with any other failure fails the whole Sync,
-// so the caller keeps its token.
+// than calstore.MaxSyncEvents objects listed, or more than
+// calstore.MaxSyncEvents events kept, or more than calstore.MaxSyncBytes
+// kept of listed hrefs and etags, tokens and objects together (syncBudget),
+// gives calstore.ErrSyncTooLarge. A sync token over maxPageToken is
+// refused. Only a 404 or 410 for a member is a deletion: a member the
+// server answers with any other failure fails the whole Sync, so the
+// caller keeps its token.
 func (s *Store) Sync(ctx context.Context, calID, token string) (calendar.Changes, error) {
 	coll, ok := collectionPath(calID)
 	if !ok {
 		return calendar.Changes{}, errBadID
 	}
+	b := s.newBudget()
 	switch {
 	case token == "":
-		return s.fullSync(ctx, coll)
+		return s.fullSync(ctx, coll, b)
 	case strings.HasPrefix(token, tokenSync):
-		return s.collectionSync(ctx, coll, strings.TrimPrefix(token, tokenSync), false)
+		return s.collectionSync(ctx, coll, strings.TrimPrefix(token, tokenSync), false, b)
 	case strings.HasPrefix(token, tokenETag):
 		state, err := decodeETagState(strings.TrimPrefix(token, tokenETag))
 		if err != nil {
 			return calendar.Changes{}, err
 		}
-		return s.etagSync(ctx, coll, state)
+		// The stored etags are kept for the whole Sync.
+		kept := len(state.CTag)
+		for href, etag := range state.ETags {
+			kept += len(href) + len(etag) + entryOverhead
+		}
+		if err := b.charge(kept); err != nil {
+			return calendar.Changes{}, err
+		}
+		return s.etagSync(ctx, coll, state, b)
 	default:
 		return calendar.Changes{}, fmt.Errorf("%w: unknown token form", calstore.ErrSyncTokenInvalid)
 	}
@@ -153,7 +167,7 @@ func (s *Store) Sync(ctx context.Context, calID, token string) (calendar.Changes
 
 // fullSync lists the whole collection, by sync-collection when the
 // collection reports a sync token or the report, else by calendar-query.
-func (s *Store) fullSync(ctx context.Context, coll string) (calendar.Changes, error) {
+func (s *Store) fullSync(ctx context.Context, coll string, b *syncBudget) (calendar.Changes, error) {
 	ms, err := s.propfind(ctx, coll, "0", "d:supported-report-set", "d:sync-token", "cs:getctag")
 	if err != nil {
 		return calendar.Changes{}, err
@@ -166,18 +180,18 @@ func (s *Store) fullSync(ctx context.Context, coll string) (calendar.Changes, er
 		}
 	}
 	if p.SyncToken != nil || p.ReportSet.has(nsDAV, "sync-collection") {
-		return s.collectionSync(ctx, coll, "", true)
+		return s.collectionSync(ctx, coll, "", true, b)
 	}
 	state := etagState{ETags: map[string]string{}}
 	if p.CTag != nil {
 		state.CTag = *p.CTag
 	}
-	return s.etagSyncFrom(ctx, coll, state, nil)
+	return s.etagSyncFrom(ctx, coll, state, nil, b)
 }
 
 // collectionSync runs sync-collection from token ("" for the initial sync)
 // until the server stops truncating.
-func (s *Store) collectionSync(ctx context.Context, coll, token string, full bool) (calendar.Changes, error) {
+func (s *Store) collectionSync(ctx context.Context, coll, token string, full bool, b *syncBudget) (calendar.Changes, error) {
 	changed := map[string]string{} // href to etag
 	deleted := map[string]bool{}
 	for range maxSyncRounds {
@@ -205,6 +219,12 @@ func (s *Store) collectionSync(ctx context.Context, coll, token string, full boo
 		if ms.SyncToken == "" {
 			return calendar.Changes{}, fmt.Errorf("%w: no sync token", calstore.ErrUnavailable)
 		}
+		if len(ms.SyncToken) > maxPageToken {
+			return calendar.Changes{}, errLongSyncToken
+		}
+		if err := b.charge(len(ms.SyncToken)); err != nil {
+			return calendar.Changes{}, err
+		}
 		truncated := false
 		for _, r := range ms.Responses {
 			href := r.href()
@@ -219,6 +239,11 @@ func (s *Store) collectionSync(ctx context.Context, coll, token string, full boo
 				continue
 			}
 			if r.gone() {
+				if !deleted[href] {
+					if err := b.charge(len(href) + entryOverhead); err != nil {
+						return calendar.Changes{}, err
+					}
+				}
 				deleted[href] = true
 				delete(changed, href)
 				continue
@@ -229,7 +254,11 @@ func (s *Store) collectionSync(ctx context.Context, coll, token string, full boo
 			if code/100 != 2 || e == nil {
 				return calendar.Changes{}, r.failure("etag")
 			}
-			changed[href] = normalizeETag(*e)
+			etag := normalizeETag(*e)
+			if err := b.charge(len(href) + len(etag) + entryOverhead); err != nil {
+				return calendar.Changes{}, err
+			}
+			changed[href] = etag
 			delete(deleted, href)
 		}
 		if _, maxObjects := s.syncLimits(); len(changed)+len(deleted) > maxObjects {
@@ -237,7 +266,7 @@ func (s *Store) collectionSync(ctx context.Context, coll, token string, full boo
 		}
 		token = strings.TrimSpace(ms.SyncToken)
 		if !truncated {
-			ch, _, err := s.fetchChanges(ctx, coll, changed, deleted, full)
+			ch, _, err := s.fetchChanges(ctx, coll, changed, deleted, full, b)
 			if err != nil {
 				return calendar.Changes{}, err
 			}
@@ -250,7 +279,7 @@ func (s *Store) collectionSync(ctx context.Context, coll, token string, full boo
 
 // etagSync compares the collection's ctag with the stored one and, when it
 // changed or is unknown, its etags with the stored ones.
-func (s *Store) etagSync(ctx context.Context, coll string, old etagState) (calendar.Changes, error) {
+func (s *Store) etagSync(ctx context.Context, coll string, old etagState, b *syncBudget) (calendar.Changes, error) {
 	ms, err := s.propfind(ctx, coll, "0", "cs:getctag")
 	if err != nil {
 		return calendar.Changes{}, err
@@ -268,12 +297,12 @@ func (s *Store) etagSync(ctx context.Context, coll string, old etagState) (calen
 		}
 		return calendar.Changes{Token: tok, ObjectReplace: true}, nil
 	}
-	return s.etagSyncFrom(ctx, coll, etagState{CTag: ctag, ETags: map[string]string{}}, old.ETags)
+	return s.etagSyncFrom(ctx, coll, etagState{CTag: ctag, ETags: map[string]string{}}, old.ETags, b)
 }
 
 // etagSyncFrom lists etags with calendar-query and fetches what differs
 // from prev. A nil prev is a full sync.
-func (s *Store) etagSyncFrom(ctx context.Context, coll string, state etagState, prev map[string]string) (calendar.Changes, error) {
+func (s *Store) etagSyncFrom(ctx context.Context, coll string, state etagState, prev map[string]string, b *syncBudget) (calendar.Changes, error) {
 	resp, err := s.do(ctx, request{
 		method:      "REPORT",
 		path:        coll,
@@ -308,6 +337,11 @@ func (s *Store) etagSyncFrom(ctx context.Context, coll string, state etagState, 
 			return calendar.Changes{}, r.failure("etag")
 		}
 		etag := normalizeETag(*e)
+		// The href and etag are kept in the token, and in changed when
+		// they differ from prev.
+		if err := b.charge(len(href) + len(etag) + 2*entryOverhead); err != nil {
+			return calendar.Changes{}, err
+		}
 		state.ETags[href] = etag
 		if prev == nil || prev[href] != etag {
 			changed[href] = etag
@@ -323,7 +357,7 @@ func (s *Store) etagSyncFrom(ctx context.Context, coll string, state etagState, 
 			deleted[href] = true
 		}
 	}
-	ch, vanished, err := s.fetchChanges(ctx, coll, changed, deleted, prev == nil)
+	ch, vanished, err := s.fetchChanges(ctx, coll, changed, deleted, prev == nil, b)
 	if err != nil {
 		return calendar.Changes{}, err
 	}
@@ -344,17 +378,17 @@ func (s *Store) etagSyncFrom(ctx context.Context, coll string, state etagState, 
 // kept past it. Objects the multiget answers with 404 or 410, and objects
 // that no longer parse or hold no VEVENT, are deletes. Objects with more
 // than calendar.MaxObjectEvents VEVENTs are skipped (Changes.Skipped).
-// Objects kept past calstore.MaxSyncBytes of calendar data or
-// calstore.MaxSyncEvents events give calstore.ErrSyncTooLarge.
-func (s *Store) fetchChanges(ctx context.Context, coll string, changed map[string]string, deleted map[string]bool, full bool) (calendar.Changes, []string, error) {
+// Objects past the Sync's byte budget b, or past calstore.MaxSyncEvents
+// events, give calstore.ErrSyncTooLarge.
+func (s *Store) fetchChanges(ctx context.Context, coll string, changed map[string]string, deleted map[string]bool, full bool, b *syncBudget) (calendar.Changes, []string, error) {
 	ch := calendar.Changes{Full: full, ObjectReplace: true}
 	hrefs := make([]string, 0, len(changed))
 	for h := range changed {
 		hrefs = append(hrefs, h)
 	}
 	sort.Strings(hrefs)
-	maxBytes, maxEvents := s.syncLimits()
-	var kept, events int
+	_, maxEvents := s.syncLimits()
+	var events int
 	missing, err := s.multiget(ctx, coll, hrefs, func(o *storedObject) error {
 		evs, err := o.events()
 		if errors.Is(err, calendar.ErrTooLarge) {
@@ -370,9 +404,10 @@ func (s *Store) fetchChanges(ctx context.Context, coll string, changed map[strin
 			deleted[o.href] = true
 			return nil
 		}
-		kept += len(o.raw)
-		events += len(evs)
-		if kept > maxBytes || events > maxEvents {
+		if err := b.charge(len(o.raw)); err != nil {
+			return err
+		}
+		if events += len(evs); events > maxEvents {
 			return calstore.ErrSyncTooLarge
 		}
 		ch.Upserts = append(ch.Upserts, evs...)
@@ -554,4 +589,32 @@ func decodeETagState(s string) (etagState, error) {
 		st.ETags = map[string]string{}
 	}
 	return st, nil
+}
+
+// errLongSyncToken is a sync-collection answer whose sync token is longer
+// than maxPageToken.
+var errLongSyncToken = fmt.Errorf("%w: sync token too long", calstore.ErrUnavailable)
+
+// entryOverhead is what Sync counts for each href it keeps, besides the
+// bytes of the href and its etag.
+const entryOverhead = 64
+
+// syncBudget is the bytes of server data one Sync may still keep: listed
+// hrefs and etags, the stored etag token, sync tokens, and the bodies of
+// the objects it reads. It starts at the Sync's byte limit (syncLimits).
+type syncBudget struct{ left int }
+
+// newBudget returns a full budget for one Sync.
+func (s *Store) newBudget() *syncBudget {
+	bytes, _ := s.syncLimits()
+	return &syncBudget{left: bytes}
+}
+
+// charge takes n bytes from the budget, before they are kept. A Sync over
+// its budget gives calstore.ErrSyncTooLarge.
+func (b *syncBudget) charge(n int) error {
+	if b.left -= n; b.left < 0 {
+		return calstore.ErrSyncTooLarge
+	}
+	return nil
 }
