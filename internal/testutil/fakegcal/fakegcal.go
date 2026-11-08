@@ -23,8 +23,10 @@
 //     notFound error, as Google answers for a calendar it cannot see.
 //
 // Writes to a calendar whose access role is reader or freeBusyReader answer
-// 403 requiredAccessLevel. PATCH merges top-level fields and a JSON null
-// removes one, as Google's patch semantics do. Every request is recorded,
+// 403 requiredAccessLevel. PATCH follows Google's patch semantics: nested
+// objects merge, arrays are replaced whole and a JSON null removes a field.
+// A start or end left with both date and dateTime, or neither, or a start
+// and end of different kinds, answer 400. Every request is recorded,
 // including its sendUpdates parameter, so tests can prove what a write asked
 // Google to send.
 //
@@ -583,6 +585,10 @@ func (s *Server) insertEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "required", "Missing start time.")
 		return
 	}
+	if !validTimes(obj) {
+		writeError(w, http.StatusBadRequest, "invalid", "Invalid start or end time.")
+		return
+	}
 	if _, ok := obj["iCalUID"]; !ok {
 		obj["iCalUID"] = id + "@google.com"
 	}
@@ -627,6 +633,10 @@ func (s *Server) patchEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	delete(patch, "id")
 	mergePatch(obj, patch)
+	if !validTimes(obj) {
+		writeError(w, http.StatusBadRequest, "invalid", "Invalid start or end time.")
+		return
+	}
 	s.store(c, id, obj)
 	writeJSON(w, http.StatusOK, obj)
 }
@@ -828,15 +838,50 @@ func parsePageToken(tok string) (listPage, bool) {
 	return p, p.offset >= 0
 }
 
-// mergePatch applies a patch's top-level fields to obj; null removes one.
+// mergePatch applies patch to obj as Google's patch semantics do (JSON merge
+// patch, RFC 7396): a nested object merges into the object it names, an
+// array replaces the stored one whole, and a JSON null removes the field.
 func mergePatch(obj, patch map[string]any) {
 	for k, v := range patch {
-		if v == nil {
+		switch pv := v.(type) {
+		case nil:
 			delete(obj, k)
-			continue
+		case map[string]any:
+			cur, ok := obj[k].(map[string]any)
+			if !ok {
+				cur = map[string]any{}
+			}
+			mergePatch(cur, pv)
+			obj[k] = cur
+		default:
+			obj[k] = v
 		}
-		obj[k] = v
 	}
+}
+
+// validTimes reports whether obj's start and end are each a date or a
+// dateTime, not both and not neither, and of the same kind. An event with no
+// start (a cancelled instance) passes.
+func validTimes(obj map[string]any) bool {
+	kind := func(field string) (allDay, present, ok bool) {
+		v, found := obj[field]
+		if !found {
+			return false, false, true
+		}
+		m, isMap := v.(map[string]any)
+		if !isMap {
+			return false, true, false
+		}
+		_, date := m["date"]
+		_, dateTime := m["dateTime"]
+		return date, true, date != dateTime
+	}
+	sAll, sOK, sValid := kind("start")
+	eAll, eOK, eValid := kind("end")
+	if !sValid || !eValid {
+		return false
+	}
+	return !sOK || !eOK || sAll == eAll
 }
 
 func deepCopy(m map[string]any) map[string]any {

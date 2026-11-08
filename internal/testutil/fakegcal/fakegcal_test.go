@@ -302,3 +302,73 @@ func mustJSON(t *testing.T, v any) string {
 	}
 	return string(b)
 }
+
+func TestPatchMergesNestedObjects(t *testing.T) {
+	srv, c := setup(t)
+	srv.AddEvent("me@example.com", single("merge1"))
+	path := "/calendars/" + url.PathEscape("me@example.com") + "/events/merge1"
+
+	// A nested object merges: a date without nulling dateTime leaves both,
+	// which Google refuses.
+	code, _ := c.do("PATCH", path, nil, nil, map[string]any{
+		"start": map[string]any{"date": "2026-11-10"}, "end": map[string]any{"date": "2026-11-11"},
+	})
+	if code != http.StatusBadRequest {
+		t.Errorf("date over a dateTime without null: %d, want 400", code)
+	}
+	ev, _ := srv.Event("me@example.com", "merge1")
+	if start := ev["start"].(map[string]any); start["dateTime"] != "2026-11-10T09:00:00-08:00" || start["date"] != nil {
+		t.Errorf("refused patch changed the event: %v", start)
+	}
+
+	// Nulling the other fields converts the event to all-day.
+	code, out := c.do("PATCH", path, nil, nil, map[string]any{
+		"start": map[string]any{"date": "2026-11-10", "dateTime": nil, "timeZone": nil},
+		"end":   map[string]any{"date": "2026-11-11", "dateTime": nil, "timeZone": nil},
+	})
+	if code != 200 {
+		t.Fatalf("to all-day: %d %v", code, out)
+	}
+	if start := out["start"].(map[string]any); len(start) != 1 || start["date"] != "2026-11-10" {
+		t.Errorf("all-day start = %v", start)
+	}
+
+	// Back to timed: the date is nulled, the other fields of the object
+	// merge in.
+	code, out = c.do("PATCH", path, nil, nil, map[string]any{
+		"start": map[string]any{"date": nil, "dateTime": "2026-11-10T10:00:00-08:00", "timeZone": "America/Los_Angeles"},
+		"end":   map[string]any{"date": nil, "dateTime": "2026-11-10T11:00:00-08:00", "timeZone": "America/Los_Angeles"},
+	})
+	if code != 200 {
+		t.Fatalf("to timed: %d %v", code, out)
+	}
+	if start := out["start"].(map[string]any); len(start) != 2 || start["dateTime"] != "2026-11-10T10:00:00-08:00" {
+		t.Errorf("timed start = %v", start)
+	}
+
+	// A nested field merges without touching its siblings, and arrays are
+	// replaced whole.
+	srv.ChangeEvent("me@example.com", "merge1", map[string]any{"attendees": []any{
+		map[string]any{"email": "a@example.org"}, map[string]any{"email": "b@example.org"},
+	}})
+	code, out = c.do("PATCH", path, nil, nil, map[string]any{
+		"start":     map[string]any{"timeZone": "America/New_York"},
+		"attendees": []any{map[string]any{"email": "b@example.org"}},
+	})
+	if code != 200 {
+		t.Fatalf("nested merge: %d %v", code, out)
+	}
+	if start := out["start"].(map[string]any); start["dateTime"] != "2026-11-10T10:00:00-08:00" || start["timeZone"] != "America/New_York" {
+		t.Errorf("merged start = %v", start)
+	}
+	if got := out["attendees"].([]any); len(got) != 1 {
+		t.Errorf("array not replaced: %v", got)
+	}
+
+	// Start and end must be of one kind.
+	if code, _ := c.do("PATCH", path, nil, nil, map[string]any{
+		"start": map[string]any{"date": "2026-11-10", "dateTime": nil, "timeZone": nil},
+	}); code != http.StatusBadRequest {
+		t.Errorf("all-day start with a timed end: %d, want 400", code)
+	}
+}
