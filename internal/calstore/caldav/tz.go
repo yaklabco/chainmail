@@ -128,9 +128,14 @@ func vtimezone(id string, loc *time.Location, first, last int, open bool) *ical.
 	tz := ical.NewComponent(ical.CompTimezone)
 	setRaw(tz.Props, ical.PropTimezoneID, id)
 	if len(all) == 0 {
-		start := time.Date(min(first, 1970), 1, 1, 0, 0, 0, 0, loc)
-		name, off := start.Zone()
-		tz.Children = append(tz.Children, observance(start.IsDST(), localStamp(start), off, off, name, ""))
+		// The offset is sampled inside the span, since a zone with no
+		// change there may have had another offset in 1970 (Kathmandu,
+		// Singapore). DTSTART is backdated to 1970 or the span's start,
+		// whichever is earlier, so earlier times still resolve.
+		sample := time.Date(first, 1, 1, 0, 0, 0, 0, loc)
+		name, off := sample.Zone()
+		start := time.Date(min(first, 1970), 1, 1, 0, 0, 0, 0, time.UTC)
+		tz.Children = append(tz.Children, observance(sample.IsDST(), localStamp(start), off, off, name, ""))
 		return tz
 	}
 

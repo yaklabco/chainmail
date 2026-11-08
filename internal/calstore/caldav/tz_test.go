@@ -60,6 +60,10 @@ func TestVTimezoneMatchesGoZoneData(t *testing.T) {
 		{"America/Sao_Paulo", 2018, 2018, true, false},
 		{"America/Chicago", 2005, 2005, true, true},
 		{"Pacific/Auckland", 2026, 2026, true, true},
+		// Zones whose offset changed after 1970 and never since: the fixed
+		// observance must carry today's offset, not the 1970 one.
+		{"Asia/Kathmandu", 2026, 2026, true, false},
+		{"Asia/Singapore", 2026, 2027, false, false},
 	}
 	for _, tc := range tests {
 		t.Run(fmt.Sprintf("%s %d-%d open=%v", tc.zone, tc.first, tc.last, tc.open), func(t *testing.T) {
