@@ -523,7 +523,7 @@ func (h *calendarService) UpdateEvent(ctx context.Context, req *connect.Request[
 		if err != nil {
 			return nil, err
 		}
-		notified := s.notified(slices.Concat(audience, ev.Attendees))
+		notified := s.notified(slices.Concat(audience, ev.Attendees, s.removalNotice(res)))
 		if d := s.policy.CheckSend(ca.name, notified); len(notified) > 0 && !d.Allowed {
 			heldTargets(entry, len(d.Blocked), d.TooMany)
 			return &chainmailv1.UpdateEventResponse{Held: &chainmailv1.CalendarHeld{
@@ -710,7 +710,7 @@ func (s *Server) freshSeries(ctx context.Context, ca *calAccount, res resolvedEv
 	return nil, errSeriesUnread
 }
 
-// removalNotice is who a cancel of res tells besides its attendees: the
+// removalNotice is who a cancel or an update of res tells besides its attendees: the
 // organizer, when someone other than James organizes it. Removing such an
 // event from James's calendar is an attendee's removal, which tells the
 // organizer (a CalDAV scheduling server sends a REPLY, RFC 6638 section

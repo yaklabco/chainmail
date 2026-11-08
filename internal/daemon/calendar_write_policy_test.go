@@ -162,3 +162,23 @@ func TestSeriesChangeChecksPrunedOverrides(t *testing.T) {
 		t.Errorf("cancel of the plain series = %v, %v", got, err)
 	}
 }
+
+// An update of an event someone else organizes, with James its only
+// attendee, is checked against the policy for the organizer too: a server
+// may tell the organizer about an attendee's change, so an organizer the
+// policy does not allow means the update is never sent.
+func TestAttendeeSideUpdateChecksTheOrganizer(t *testing.T) {
+	t.Parallel()
+	var blocked string
+	e := startCal(t, func(e *calEnv) {
+		blocked = e.mw.Add(mwCal, organizedBy("blocked-upd@x", blockedAddr, "james@mw.example", e.start))
+	})
+	ref := calendar.EventRef("mw", mwCal, blocked)
+	got, err := e.update(t, &chainmailv1.UpdateEventRequest{Ref: ref, Etag: e.etagOf(t, ref), UpdateMask: mask("title"), Title: "Moved"})
+	if err == nil && got.GetHeld() == nil {
+		t.Errorf("update of an event a blocked organizer runs = %v, want held or refused", got)
+	}
+	if n := e.mw.Count(calfake.MethodPut); n != 0 {
+		t.Errorf("store Puts = %d, want none", n)
+	}
+}
