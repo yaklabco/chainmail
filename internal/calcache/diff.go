@@ -61,31 +61,42 @@ type querier interface {
 // Diff compares ch with the stored rows of the calendar, without writing.
 // Changes come sorted by ProviderID and then recurrence ID. A row whose
 // stored form, including the etag, raw object, MyPartStat and IsOrganizer,
-// is unchanged is not a change.
+// is unchanged is not a change. The changes are admitted first (Admit):
+// a skipped object's stored rows are not changes.
 func (s *Store) Diff(ctx context.Context, account, calID string, ch calendar.Changes, self func(string) bool) ([]Change, error) {
-	changes, err := planChanges(ctx, s.db, account, calID, ch, self)
+	p, err := planChanges(ctx, s.db, account, calID, ch, self)
 	if err != nil {
 		if errors.Is(err, errNoProviderID) {
 			return nil, err
 		}
 		return nil, s.fail("diffing calendar changes", err)
 	}
-	out := make([]Change, 0, len(changes))
-	for _, c := range changes {
-		change := Change{Kind: c.kind}
+	var recs []storedRecord
+	for _, c := range p.changes {
 		if c.before != nil {
-			row, err := c.before.decode(account, calID)
-			if err != nil {
-				return nil, err
-			}
-			change.Before = &row
+			recs = append(recs, storedRecord{account: account, calID: calID, r: *c.before})
 		}
 		if c.after != nil {
-			row, err := c.after.decode(account, calID)
-			if err != nil {
-				return nil, err
-			}
-			change.After = &row
+			recs = append(recs, storedRecord{account: account, calID: calID, r: *c.after})
+		}
+	}
+	rows, err := decodeRecords(ctx, s.db, recs, p.raws.bySum)
+	if err != nil {
+		if errors.Is(err, errStoredRow) {
+			return nil, err
+		}
+		return nil, s.fail("diffing calendar changes", err)
+	}
+	out := make([]Change, 0, len(p.changes))
+	for _, c := range p.changes {
+		change := Change{Kind: c.kind}
+		if c.before != nil {
+			change.Before = &rows[0]
+			rows = rows[1:]
+		}
+		if c.after != nil {
+			change.After = &rows[0]
+			rows = rows[1:]
 		}
 		out = append(out, change)
 	}
@@ -94,7 +105,8 @@ func (s *Store) Diff(ctx context.Context, account, calID string, ch calendar.Cha
 
 // Apply writes ch in one transaction with the new token and LastSync,
 // clearing LastError. The calendar must be stored (SetCalendars), else
-// ErrNotFound. Only the rows Diff would report are written.
+// ErrNotFound. Only the rows Diff would report are written, and each raw
+// object once.
 func (s *Store) Apply(ctx context.Context, account, calID string, ch calendar.Changes, self func(string) bool, syncedAt time.Time) error {
 	return s.inTx(ctx, "applying calendar changes", func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
@@ -108,11 +120,12 @@ func (s *Store) Apply(ctx context.Context, account, calID string, ch calendar.Ch
 		} else if n == 0 {
 			return ErrNotFound
 		}
-		changes, err := planChanges(ctx, tx, account, calID, ch, self)
+		p, err := planChanges(ctx, tx, account, calID, ch, self)
 		if err != nil {
 			return err
 		}
-		for _, c := range changes {
+		written := map[rawKey]bool{}
+		for _, c := range p.changes {
 			if c.kind == ChangeDeleted {
 				if _, err := tx.ExecContext(ctx,
 					"DELETE FROM cal_events WHERE account = ? AND calendar_id = ? AND provider_id = ? AND recurrence_id = ?",
@@ -121,9 +134,23 @@ func (s *Store) Apply(ctx context.Context, account, calID string, ch calendar.Ch
 				}
 				continue
 			}
+			if k := (rawKey{provider: c.after.providerID, sum: c.after.rawSum}); k.sum != "" && !written[k] {
+				written[k] = true
+				if _, err := tx.ExecContext(ctx,
+					"INSERT OR IGNORE INTO cal_raws (account, calendar_id, provider_id, sum, raw) VALUES (?, ?, ?, ?, ?)",
+					account, calID, k.provider, k.sum, p.raws.bySum[k.sum]); err != nil {
+					return err
+				}
+			}
 			if _, err := tx.ExecContext(ctx,
 				"INSERT OR REPLACE INTO cal_events (account, calendar_id, "+eventColumns+") VALUES (?, ?, "+placeholders(eventColumnCount)+")",
 				append([]any{account, calID}, c.after.args()...)...); err != nil {
+				return err
+			}
+		}
+		if len(p.changes) > 0 {
+			if _, err := tx.ExecContext(ctx,
+				"DELETE FROM cal_raws WHERE account = ? AND calendar_id = ? AND "+unreferencedRaw, account, calID); err != nil {
 				return err
 			}
 		}
@@ -131,27 +158,47 @@ func (s *Store) Apply(ctx context.Context, account, calID string, ch calendar.Ch
 	})
 }
 
+// plan is what planChanges works out: the row changes, and the raw objects
+// of the upserts by sum.
+type plan struct {
+	changes []rowChange
+	raws    *rawSet
+}
+
 // planChanges works out the rows ch creates, updates and deletes in the
-// calendar. The new state is the stored rows, less every row of a deleted
-// ProviderID, every row of an upserted ProviderID when ch.ObjectReplace,
-// and every row when ch.Full, with each upsert then put in its row's place.
-func planChanges(ctx context.Context, q querier, account, calID string, ch calendar.Changes, self func(string) bool) ([]rowChange, error) {
+// calendar. ch is admitted first (Admit). The new state is the stored rows,
+// less every row of a deleted ProviderID, every row of an upserted
+// ProviderID when ch.ObjectReplace, and every row when ch.Full, with each
+// upsert then put in its row's place. The rows of a skipped ProviderID are
+// kept as they are.
+func planChanges(ctx context.Context, q querier, account, calID string, ch calendar.Changes, self func(string) bool) (plan, error) {
+	ch = Admit(ch)
+	skipped := map[string]bool{}
+	for _, p := range ch.Skipped {
+		skipped[p] = true
+	}
+	raws := newRawSet()
 	upserts := make([]record, 0, len(ch.Upserts))
 	upserted := map[string]bool{}
 	for _, ev := range ch.Upserts {
 		if ev.ProviderID == "" {
-			return nil, errNoProviderID
+			return plan{}, errNoProviderID
 		}
-		r, err := encode(account, calID, ev, self)
+		if skipped[ev.ProviderID] {
+			continue
+		}
+		r, err := encode(account, calID, ev, self, raws)
 		if err != nil {
-			return nil, err
+			return plan{}, err
 		}
 		upserts = append(upserts, r)
 		upserted[ev.ProviderID] = true
 	}
 	deleted := map[string]bool{}
 	for _, p := range ch.Deletes {
-		deleted[p] = true
+		if !skipped[p] {
+			deleted[p] = true
+		}
 	}
 
 	var old map[rowKey]record
@@ -168,17 +215,17 @@ func planChanges(ctx context.Context, q querier, account, calID string, ch calen
 		if len(providers) == 0 {
 			// An incremental sync that touches nothing, such as a poll that
 			// only moves the token, changes no row.
-			return nil, nil
+			return plan{raws: raws}, nil
 		}
 		old, err = loadRecords(ctx, q, account, calID, false, providers)
 	}
 	if err != nil {
-		return nil, err
+		return plan{}, err
 	}
 
 	next := make(map[rowKey]record, len(old)+len(upserts))
 	for k, r := range old {
-		if ch.Full || deleted[k.provider] || (ch.ObjectReplace && upserted[k.provider]) {
+		if !skipped[k.provider] && (ch.Full || deleted[k.provider] || (ch.ObjectReplace && upserted[k.provider])) {
 			continue
 		}
 		next[k] = r
@@ -207,7 +254,7 @@ func planChanges(ctx context.Context, q querier, account, calID string, ch calen
 			changes = append(changes, rowChange{kind: ChangeUpdated, before: &before, after: &after})
 		}
 	}
-	return changes, nil
+	return plan{changes: changes, raws: raws}, nil
 }
 
 // providerChunk bounds the ProviderIDs in one IN list, well under SQLite's

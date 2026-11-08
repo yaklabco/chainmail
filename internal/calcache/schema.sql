@@ -30,7 +30,7 @@ CREATE TABLE cal_events (
   rrule TEXT NOT NULL, rdates_json TEXT NOT NULL, exdates_json TEXT NOT NULL,
   summary TEXT NOT NULL, location TEXT NOT NULL, description TEXT NOT NULL,
   updated TEXT NOT NULL,
-  raw BLOB,
+  raw_sum TEXT NOT NULL,
   my_partstat TEXT NOT NULL, is_organizer INTEGER NOT NULL,
   PRIMARY KEY (account, calendar_id, provider_id, recurrence_id),
   FOREIGN KEY (account, calendar_id) REFERENCES calendars (account, calendar_id) ON DELETE CASCADE
@@ -39,6 +39,15 @@ CREATE INDEX cal_events_by_ref ON cal_events (ref);
 CREATE INDEX cal_events_by_uid ON cal_events (account, uid);
 CREATE INDEX cal_events_by_end ON cal_events (is_master, end_utc);
 CREATE INDEX cal_events_by_start ON cal_events (account, calendar_id, start_utc);
+CREATE TABLE cal_raws (
+  account TEXT NOT NULL,
+  calendar_id TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  sum TEXT NOT NULL,
+  raw BLOB NOT NULL,
+  PRIMARY KEY (account, calendar_id, provider_id, sum),
+  FOREIGN KEY (account, calendar_id) REFERENCES calendars (account, calendar_id) ON DELETE CASCADE
+);
 CREATE TABLE mail_invites (
   account TEXT NOT NULL,
   message_ref TEXT NOT NULL,

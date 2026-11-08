@@ -29,9 +29,9 @@ func TestPlanChangesReadsNothingForAnEmptyIncrementalSync(t *testing.T) {
 		{Token: "t2", ObjectReplace: true},
 		{Token: "t2", Upserts: []calendar.Event{}, Deletes: []string{}},
 	} {
-		changes, err := planChanges(t.Context(), refusingQuerier{t}, "acme", "work", ch, nil)
-		if err != nil || len(changes) != 0 {
-			t.Errorf("planChanges(%+v) = %v, %v; want an empty plan", ch, changes, err)
+		p, err := planChanges(t.Context(), refusingQuerier{t}, "acme", "work", ch, nil)
+		if err != nil || len(p.changes) != 0 {
+			t.Errorf("planChanges(%+v) = %v, %v; want an empty plan", ch, p.changes, err)
 		}
 	}
 }

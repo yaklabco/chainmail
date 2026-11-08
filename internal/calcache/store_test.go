@@ -81,7 +81,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if journal != "wal" {
 		t.Errorf("journal_mode = %q, want wal", journal)
 	}
-	for _, table := range []string{"accounts", "calendars", "cal_events", "mail_invites"} {
+	for _, table := range []string{"accounts", "calendars", "cal_events", "cal_raws", "mail_invites"} {
 		var n int
 		rawQuery(t, path, "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '"+table+"'", &n)
 		if n != 1 {
@@ -321,5 +321,22 @@ func TestOpenRecreatesSchemaVersion2(t *testing.T) {
 	}
 	if err := s.PutInviteFetches(t.Context(), []calcache.InviteFetchRow{{Account: "acme", MessageRef: "m1", Part: "2"}}); err != nil {
 		t.Fatalf("PutInviteFetches: %v", err)
+	}
+}
+
+// A version 3 file, which kept a copy of each object's raw on every row,
+// is created again.
+func TestOpenRecreatesSchemaVersion3(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), calcache.FileName)
+	rawExec(t, path, "CREATE TABLE accounts (account TEXT PRIMARY KEY, ready_at TEXT NOT NULL)")
+	rawExec(t, path, "PRAGMA user_version = 3")
+	s, err := calcache.Open(t.Context(), path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() }) // a close error at test end changes nothing
+	if why := s.Recreated(); why != "version" {
+		t.Errorf("Recreated = %q, want version", why)
 	}
 }

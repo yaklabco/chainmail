@@ -298,41 +298,99 @@ func (s *Store) Range(ctx context.Context, accounts, calIDs []string, from, to t
 func (s *Store) Prune(ctx context.Context, before time.Time) (int64, error) {
 	cutoff := formatTime(before)
 	// recurrence_id is "" for a single, which sorts before every stored time.
-	res, err := s.db.ExecContext(ctx,
-		"DELETE FROM cal_events WHERE is_master = 0 AND end_utc < ? AND recurrence_id < ?", cutoff, cutoff)
+	var n int64
+	err := s.inTx(ctx, "pruning old events", func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			"DELETE FROM cal_events WHERE is_master = 0 AND end_utc < ? AND recurrence_id < ?", cutoff, cutoff)
+		if err != nil {
+			return err
+		}
+		if n, err = res.RowsAffected(); err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+		_, err = tx.ExecContext(ctx, "DELETE FROM cal_raws WHERE "+unreferencedRaw)
+		return err
+	})
 	if err != nil {
-		return 0, s.fail("pruning old events", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, s.fail("pruning old events", err)
+		return 0, err
 	}
 	return n, nil
 }
 
-// queryEvents reads event rows; clause follows "FROM cal_events e".
+// queryEvents reads event rows; clause follows "FROM cal_events e". The
+// rows are read first and their raw objects after, once per object and
+// content, since the one connection serves one query at a time.
 func (s *Store) queryEvents(ctx context.Context, op, clause string, args ...any) ([]EventRow, error) {
-	rows, err := s.db.QueryContext(ctx,
-		"SELECT e.account, e.calendar_id, "+prefixed("e.", eventColumns)+" FROM cal_events e "+clause, args...)
+	recs, err := func() ([]storedRecord, error) {
+		rows, err := s.db.QueryContext(ctx,
+			"SELECT e.account, e.calendar_id, "+prefixed("e.", eventColumns)+" FROM cal_events e "+clause, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = rows.Close() }() // rows.Err below reports read errors
+		var out []storedRecord
+		for rows.Next() {
+			var sr storedRecord
+			if sr.r, err = scanRecord(rows, &sr.account, &sr.calID); err != nil {
+				return nil, err
+			}
+			out = append(out, sr)
+		}
+		return out, rows.Err()
+	}()
 	if err != nil {
 		return nil, s.fail(op, err)
 	}
-	defer func() { _ = rows.Close() }() // rows.Err below reports read errors
-	var out []EventRow
-	for rows.Next() {
-		var account, calID string
-		r, err := scanRecord(rows, &account, &calID)
-		if err != nil {
-			return nil, s.fail(op, err)
+	out, err := decodeRecords(ctx, s.db, recs, nil)
+	if err != nil && !errors.Is(err, errStoredRow) {
+		return nil, s.fail(op, err)
+	}
+	return out, err
+}
+
+// storedRecord is a record with the account and calendar it belongs to.
+type storedRecord struct {
+	account, calID string
+	r              record
+}
+
+// decodeRecords decodes recs, reading each raw object they name from
+// cal_raws once, unless have, by sum, already holds it. Rows with the same
+// object and content share one Raw slice.
+func decodeRecords(ctx context.Context, q querier, recs []storedRecord, have map[string][]byte) ([]EventRow, error) {
+	var need []rawKey
+	wanted := map[rawKey]bool{}
+	for _, sr := range recs {
+		if sr.r.rawSum == "" {
+			continue
 		}
-		row, err := r.decode(account, calID)
+		if _, ok := have[sr.r.rawSum]; ok {
+			continue
+		}
+		k := rawKey{account: sr.account, calID: sr.calID, provider: sr.r.providerID, sum: sr.r.rawSum}
+		if !wanted[k] {
+			wanted[k] = true
+			need = append(need, k)
+		}
+	}
+	loaded, err := loadRaws(ctx, q, need)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]EventRow, 0, len(recs))
+	for _, sr := range recs {
+		raw, ok := have[sr.r.rawSum]
+		if !ok && sr.r.rawSum != "" {
+			raw = loaded[rawKey{account: sr.account, calID: sr.calID, provider: sr.r.providerID, sum: sr.r.rawSum}]
+		}
+		row, err := sr.r.decode(sr.account, sr.calID, raw)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, s.fail(op, err)
 	}
 	return out, nil
 }
@@ -350,7 +408,7 @@ func prefixed(prefix, columns string) string {
 // in record.args and scanRecord order.
 const eventColumns = "provider_id, recurrence_id, ref, is_master, etag, uid, start_utc, end_utc, tzid, all_day, " +
 	"status, sequence, transparent, organizer_json, attendees_json, attendees_truncated, " +
-	"rrule, rdates_json, exdates_json, summary, location, description, updated, raw, my_partstat, is_organizer"
+	"rrule, rdates_json, exdates_json, summary, location, description, updated, raw_sum, my_partstat, is_organizer"
 
 const eventColumnCount = 26
 
@@ -369,7 +427,7 @@ type record struct {
 	rrule, rdates, exdates        string
 	summary, location, desc       string
 	updated                       string
-	raw                           string
+	rawSum                        string // the cal_raws sum of the raw object, "" for none
 	myPartStat                    string
 	isOrganizer                   bool
 }
@@ -378,30 +436,22 @@ func (r record) key() rowKey { return rowKey{provider: r.providerID, rid: r.recu
 
 // args are r's values in eventColumns order.
 func (r record) args() []any {
-	var raw any
-	if r.raw != "" {
-		raw = []byte(r.raw)
-	}
 	return []any{
 		r.providerID, r.recurrenceID, r.ref, boolInt(r.isMaster), r.etag, r.uid, r.start, r.end, r.tzid, boolInt(r.allDay),
 		r.status, r.sequence, boolInt(r.transparent), r.organizer, r.attendees, boolInt(r.attendeesTruncated),
-		r.rrule, r.rdates, r.exdates, r.summary, r.location, r.desc, r.updated, raw, r.myPartStat, boolInt(r.isOrganizer),
+		r.rrule, r.rdates, r.exdates, r.summary, r.location, r.desc, r.updated, r.rawSum, r.myPartStat, boolInt(r.isOrganizer),
 	}
 }
 
 // scanRecord reads account, calendar_id and then eventColumns.
 func scanRecord(sc scanner, account, calID *string) (record, error) {
-	var (
-		r   record
-		raw []byte
-	)
+	var r record
 	if err := sc.Scan(account, calID,
 		&r.providerID, &r.recurrenceID, &r.ref, &r.isMaster, &r.etag, &r.uid, &r.start, &r.end, &r.tzid, &r.allDay,
 		&r.status, &r.sequence, &r.transparent, &r.organizer, &r.attendees, &r.attendeesTruncated,
-		&r.rrule, &r.rdates, &r.exdates, &r.summary, &r.location, &r.desc, &r.updated, &raw, &r.myPartStat, &r.isOrganizer); err != nil {
+		&r.rrule, &r.rdates, &r.exdates, &r.summary, &r.location, &r.desc, &r.updated, &r.rawSum, &r.myPartStat, &r.isOrganizer); err != nil {
 		return record{}, err
 	}
-	r.raw = string(raw)
 	return r, nil
 }
 
@@ -422,8 +472,10 @@ type storedAttendee struct {
 
 // encode turns ev into its stored row in the account's calendar calID,
 // computing MyPartStat and IsOrganizer with self (nil knows no address).
-// Times are stored in UTC; an event without an end ends at its start.
-func encode(account, calID string, ev calendar.Event, self func(string) bool) (record, error) {
+// Times are stored in UTC; an event without an end ends at its start. The
+// raw object goes into raws, once per backing array, and the row keeps its
+// sum.
+func encode(account, calID string, ev calendar.Event, self func(string) bool, raws *rawSet) (record, error) {
 	if self == nil {
 		self = func(string) bool { return false }
 	}
@@ -450,7 +502,7 @@ func encode(account, calID string, ev calendar.Event, self func(string) bool) (r
 		location:           ev.Location,
 		desc:               ev.Description,
 		updated:            formatTime(ev.Updated),
-		raw:                string(ev.Raw),
+		rawSum:             raws.add(ev.Raw),
 	}
 	base := calendar.EventRef(account, calID, ev.ProviderID)
 	r.ref = base
@@ -526,8 +578,9 @@ func decodeTimes(s string) ([]time.Time, error) {
 	return out, nil
 }
 
-// decode turns a stored row back into an EventRow. Errors are fixed text.
-func (r record) decode(account, calID string) (EventRow, error) {
+// decode turns a stored row back into an EventRow with raw, the object its
+// raw_sum names, as Event.Raw. Errors are fixed text.
+func (r record) decode(account, calID string, raw []byte) (EventRow, error) {
 	ev := calendar.Event{
 		ProviderID:         r.providerID,
 		ETag:               r.etag,
@@ -542,9 +595,7 @@ func (r record) decode(account, calID string) (EventRow, error) {
 		Transparent:        r.transparent,
 		AttendeesTruncated: r.attendeesTruncated,
 		RRule:              r.rrule,
-	}
-	if r.raw != "" {
-		ev.Raw = []byte(r.raw)
+		Raw:                raw,
 	}
 	var err error
 	for _, f := range []struct {
