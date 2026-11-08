@@ -273,7 +273,7 @@ func boundMiss(ca *cache.Account, plan cache.Plan, transient cacheMiss) cacheMis
 // same folders.
 func (m *messageService) cacheCovers(ctx context.Context, ca *cache.Account, acct config.ResolvedAccount, plan cache.Plan, folders []string) cacheVerdict {
 	log := m.s.opts.Logger
-	needsBound := needsBound(ca, plan)
+	bound := needsBound(ca, plan)
 	miss := func(transient cacheMiss) cacheMiss { return boundMiss(ca, plan, transient) }
 	fresh, reason, syncedAt, err := ca.Freshness(ctx, folders)
 	switch {
@@ -285,7 +285,7 @@ func (m *messageService) cacheCovers(ctx context.Context, ca *cache.Account, acc
 		return cacheVerdict{reason: cmp.Or(reason, cache.ReasonStale), syncedAt: syncedAt, miss: miss(missWait)}
 	case plan.ServerOnly:
 		return cacheVerdict{reason: plan.Reason, syncedAt: syncedAt, miss: miss(missWait)}
-	case needsBound:
+	case bound:
 		return cacheVerdict{reason: cache.ReasonTextOutsideWindow, syncedAt: syncedAt, miss: missBound}
 	case plan.NeedsBodies:
 		covers, err := ca.WindowCovers(ctx, folders, plan.Since)
