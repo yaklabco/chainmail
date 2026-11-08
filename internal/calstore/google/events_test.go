@@ -500,3 +500,42 @@ func TestEventPathEscapesIDs(t *testing.T) {
 		t.Fatalf("sync of a calendar id with #: %v", err)
 	}
 }
+
+func TestPutUpdateSwitchesAllDay(t *testing.T) {
+	st, srv := newStore(t)
+	srv.AddEvent(me, timedEvent("single1"))
+	ev := getOne(t, st, "single1")
+
+	// Timed to all-day: date replaces dateTime and timeZone.
+	ev.AllDay, ev.TZID = true, ""
+	ev.Start, ev.End = utc(2026, 11, 10, 0, 0), utc(2026, 11, 11, 0, 0)
+	got, err := st.Put(ctx(t), me, ev, ev.ETag, calendar.NotifyNone)
+	if err != nil {
+		t.Fatalf("to all-day: %v", err)
+	}
+	stored, _ := srv.Event(me, "single1")
+	if s := stored["start"].(map[string]any); len(s) != 1 || s["date"] != "2026-11-10" {
+		t.Errorf("stored all-day start = %v", s)
+	}
+	if e := stored["end"].(map[string]any); len(e) != 1 || e["date"] != "2026-11-11" {
+		t.Errorf("stored all-day end = %v", e)
+	}
+	if !got.AllDay || !got.Start.Equal(ev.Start) || !got.End.Equal(ev.End) || got.TZID != "" {
+		t.Errorf("all-day event = %+v", got)
+	}
+
+	// All-day to timed: dateTime and timeZone replace date.
+	got.AllDay, got.TZID = false, la
+	got.Start, got.End = utc(2026, 11, 10, 18, 0), utc(2026, 11, 10, 19, 0)
+	back, err := st.Put(ctx(t), me, got, got.ETag, calendar.NotifyNone)
+	if err != nil {
+		t.Fatalf("to timed: %v", err)
+	}
+	stored, _ = srv.Event(me, "single1")
+	if s := stored["start"].(map[string]any); len(s) != 2 || s["dateTime"] != "2026-11-10T10:00:00-08:00" || s["timeZone"] != la {
+		t.Errorf("stored timed start = %v", s)
+	}
+	if back.AllDay || !back.Start.Equal(got.Start) || !back.End.Equal(got.End) || back.TZID != la {
+		t.Errorf("timed event = %+v", back)
+	}
+}

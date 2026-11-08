@@ -400,3 +400,17 @@ func attendeesJSON(atts []calendar.Attendee, known map[string]map[string]any) []
 	}
 	return out
 }
+
+// patchTime is eventTime for a PATCH. Google merges a nested object into the
+// stored one, so the fields of the other kind are sent as JSON null: an
+// event that switches between timed and all-day would otherwise keep its
+// old date or dateTime next to the new one.
+func patchTime(t time.Time, tzid string, allDay bool) map[string]any {
+	m := eventTime(t, tzid, allDay)
+	if allDay {
+		m["dateTime"], m["timeZone"] = nil, nil
+	} else {
+		m["date"] = nil
+	}
+	return m
+}

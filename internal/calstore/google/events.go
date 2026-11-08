@@ -129,10 +129,10 @@ func patchBody(ev calendar.Event, old *calendar.Event, known map[string]map[stri
 	}
 	sameZone := old != nil && ev.AllDay == old.AllDay && ev.TZID == old.TZID
 	if differs(sameZone && ev.Start.Equal(old.Start)) {
-		b["start"] = eventTime(ev.Start, ev.TZID, ev.AllDay)
+		b["start"] = patchTime(ev.Start, ev.TZID, ev.AllDay)
 	}
 	if differs(sameZone && ev.End.Equal(old.End)) {
-		b["end"] = eventTime(ev.End, ev.TZID, ev.AllDay)
+		b["end"] = patchTime(ev.End, ev.TZID, ev.AllDay)
 	}
 	if differs(old != nil && ev.Transparent == old.Transparent) {
 		b["transparency"] = "opaque"
