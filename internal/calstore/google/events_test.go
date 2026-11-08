@@ -360,18 +360,27 @@ func TestRespondSeries(t *testing.T) {
 		t.Errorf("respond request %s If-Match %q query %v", req.Path, req.IfMatch, req.Query)
 	}
 	b := body(t, req)
-	if k := keys(b); !slices.Equal(k, []string{"attendees"}) {
+	if k := keys(b); !slices.Equal(k, []string{"attendees", "attendeesOmitted"}) {
 		t.Errorf("respond patched %v", k)
 	}
 	self := attendee(t, b, me)
 	if self["responseStatus"] != "accepted" || self["comment"] != "see you" || self["additionalGuests"] != float64(1) {
 		t.Errorf("self attendee = %v", self)
 	}
-	if boss := attendee(t, b, "boss@example.org"); boss["responseStatus"] != "accepted" {
+	// A participant-only update: only self is sent, and the other attendees
+	// stay as they were.
+	if b["attendeesOmitted"] != true || len(b["attendees"].([]any)) != 1 {
+		t.Errorf("respond body is not a participant-only update: %v", b)
+	}
+	stored, _ := srv.Event(me, "single1")
+	if boss := attendee(t, stored, "boss@example.org"); boss["responseStatus"] != "accepted" {
 		t.Errorf("organizer attendee changed: %v", boss)
 	}
-	if opt := attendee(t, b, "opt@example.org"); opt["responseStatus"] != "tentative" {
+	if opt := attendee(t, stored, "opt@example.org"); opt["responseStatus"] != "tentative" {
 		t.Errorf("other attendee changed: %v", opt)
+	}
+	if n := len(stored["attendees"].([]any)); n != 3 {
+		t.Errorf("stored event has %d attendees, want 3", n)
 	}
 	var mine calendar.PartStat
 	for _, a := range got.Attendees {
@@ -537,5 +546,48 @@ func TestPutUpdateSwitchesAllDay(t *testing.T) {
 	}
 	if back.AllDay || !back.Start.Equal(got.Start) || !back.End.Equal(got.End) || back.TZID != la {
 		t.Errorf("timed event = %+v", back)
+	}
+}
+
+func TestRespondOmittedAttendees(t *testing.T) {
+	st, srv := newStore(t)
+	srv.AddEvent(me, timedEvent("single1"))
+	// Google shows only the participant of a large event.
+	srv.SetMaxAttendees(2)
+	if _, err := st.Respond(ctx(t), me, "single1", calendar.Response{Self: me, PartStat: calendar.PartStatAccepted}); err != nil {
+		t.Fatalf("Respond with omitted attendees: %v", err)
+	}
+	stored, _ := srv.Event(me, "single1")
+	if n := len(stored["attendees"].([]any)); n != 3 {
+		t.Fatalf("respond dropped attendees: %d left, want 3", n)
+	}
+	self := attendee(t, stored, me)
+	if self["responseStatus"] != "accepted" || self["comment"] != "earlier note" || self["additionalGuests"] != float64(1) {
+		t.Errorf("self attendee = %v", self)
+	}
+	if boss := attendee(t, stored, "boss@example.org"); boss["responseStatus"] != "accepted" {
+		t.Errorf("organizer attendee changed: %v", boss)
+	}
+
+	// Google may leave the participant out too when it omits attendees;
+	// the answer still goes as a participant-only update by address.
+	noFlag := timedEvent("single2")
+	for _, a := range noFlag["attendees"].([]any) {
+		delete(a.(map[string]any), "self")
+	}
+	srv.AddEvent(me, noFlag)
+	if _, err := st.Respond(ctx(t), me, "single2", calendar.Response{Self: me, PartStat: calendar.PartStatDeclined, Comment: "away"}); err != nil {
+		t.Fatalf("Respond when the participant is not shown: %v", err)
+	}
+	req, _ := srv.LastRequest("PATCH")
+	if b := body(t, req); b["attendeesOmitted"] != true || len(b["attendees"].([]any)) != 1 {
+		t.Errorf("respond body = %v", b)
+	}
+	stored, _ = srv.Event(me, "single2")
+	if n := len(stored["attendees"].([]any)); n != 3 {
+		t.Fatalf("respond dropped attendees: %d left, want 3", n)
+	}
+	if self := attendee(t, stored, me); self["responseStatus"] != "declined" || self["comment"] != "away" {
+		t.Errorf("self attendee = %v", self)
 	}
 }

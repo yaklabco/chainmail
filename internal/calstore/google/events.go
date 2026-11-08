@@ -177,7 +177,9 @@ func sameRecurrence(a, b calendar.Event) bool {
 
 // Respond sets r.Self's responseStatus, and comment when r.Comment is set,
 // on the event or on the instance r.RecurrenceID names, with
-// sendUpdates=all so Google tells the organizer. It reads the event first
+// sendUpdates=all so Google tells the organizer. It sends a participant-only
+// update (attendeesOmitted true with only the self attendee), so attendees
+// Google left out of the event it read are kept. It reads the event first
 // and patches with If-Match on the etag it read, so a change in between
 // gives calstore.ErrConflict.
 func (s *Store) Respond(ctx context.Context, calID, providerID string, r calendar.Response) (calendar.Event, error) {
@@ -205,25 +207,37 @@ func (s *Store) Respond(ctx context.Context, calID, providerID string, r calenda
 		return calendar.Event{}, err
 	}
 	var cur struct {
-		ETag      string           `json:"etag"`
-		Attendees []map[string]any `json:"attendees"`
+		ETag             string           `json:"etag"`
+		Attendees        []map[string]any `json:"attendees"`
+		AttendeesOmitted bool             `json:"attendeesOmitted"`
 	}
 	if err := json.Unmarshal(data, &cur); err != nil {
 		return calendar.Event{}, errBadResponse
 	}
-	self := slices.IndexFunc(cur.Attendees, func(a map[string]any) bool {
+	idx := slices.IndexFunc(cur.Attendees, func(a map[string]any) bool {
 		email, _ := a["email"].(string)
 		return strings.EqualFold(email, r.Self)
 	})
-	if self < 0 {
+	var self map[string]any
+	switch {
+	case idx >= 0:
+		self = cur.Attendees[idx] // keeps the fields chainmail does not model
+	case cur.AttendeesOmitted:
+		// Google may not show the participant of a large event; it matches
+		// the update to the attendee by address.
+		self = map[string]any{"email": r.Self}
+	default:
 		return calendar.Event{}, fmt.Errorf("%w: the account is not an attendee", ErrRequest)
 	}
-	cur.Attendees[self]["responseStatus"] = status
+	self["responseStatus"] = status
 	if r.Comment != "" {
-		cur.Attendees[self]["comment"] = r.Comment
+		self["comment"] = r.Comment
 	}
+	// A participant-only update: PATCH replaces arrays, so sending the list
+	// as read would drop every attendee Google left out of it.
+	body := map[string]any{"attendees": []map[string]any{self}, "attendeesOmitted": true}
 	return s.write(ctx, call{
-		method: "PATCH", path: eventPath(calID, target), body: map[string]any{"attendees": cur.Attendees},
+		method: "PATCH", path: eventPath(calID, target), body: body,
 		ifMatch: cur.ETag, query: sendQuery(calendar.NotifySend), write: true,
 	})
 }
