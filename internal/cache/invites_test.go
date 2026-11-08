@@ -2,6 +2,7 @@ package cache
 
 import (
 	"bytes"
+	"database/sql"
 	"context"
 	"encoding/base64"
 	"io"
@@ -400,4 +401,63 @@ func (m *lyingSizeMail) StreamPartBackground(ctx context.Context, r ref.Ref, par
 	}
 	_ = rc.Close() // the fake's reader holds nothing
 	return info, &countingReader{r: strings.NewReader(strings.Repeat("x", m.size)), n: &m.read}, nil
+}
+
+// holdingMail is a fake whose background part stream takes cache.db's
+// only connection, in a transaction, before it returns, so the budget
+// charge after the read finds the database blocked.
+type holdingMail struct {
+	*fake.Store
+	st *Store
+	tx chan *sql.Tx
+}
+
+func (m *holdingMail) StreamPartBackground(ctx context.Context, r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error) {
+	tx, err := m.st.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return mailstore.PartInfo{}, nil, err
+	}
+	m.tx <- tx
+	return m.Store.StreamPartBackground(ctx, r, part)
+}
+
+// The budget charge of an invite part runs detached from the step's
+// cancellation but bounded by its own short timeout, as the read path's
+// bookkeeping is: a cache.db write that cannot get the connection gives up
+// within the timeout, and the part read is still returned.
+func TestReadInviteBoundsABlockedBudgetCharge(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r, _ := inviteRig(t, fs)
+	hold := &holdingMail{Store: fs, st: r.store, tx: make(chan *sql.Tx, 1)}
+	r.mail = hold
+	r.a.keepTimeout = 20 * time.Millisecond
+	logs := inviteLogs(r)
+	rf := fs.Add(calMsg("invite", "text/calendar; method=REQUEST", []byte(testInviteICS)))
+	c := inviteCandidate{ref: rf, part: mailstore.CalendarPart{Part: "2", Method: "REQUEST", Size: int64(len(testInviteICS))}}
+
+	type result struct {
+		data []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		_, data, err := r.a.readInvite(t.Context(), c)
+		done <- result{data, err}
+	}()
+	tx := <-hold.tx
+	defer func() { _ = tx.Rollback() }() // releases the connection; nothing was written
+	select {
+	case got := <-done:
+		if got.err != nil || string(got.data) != testInviteICS {
+			t.Errorf("readInvite = %q, %v; want the part", got.data, got.err)
+		}
+	case <-time.After(lockGuard):
+		_ = tx.Rollback()
+		<-done
+		t.Fatal("the budget charge of an invite part waited for a blocked cache.db past its timeout")
+	}
+	if out := logs.String(); !strings.Contains(out, "cache could not count an invite part against the budget") {
+		t.Errorf("logs = %q, want the failed charge logged", out)
+	}
 }

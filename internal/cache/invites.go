@@ -155,12 +155,7 @@ func (a *Account) readInvite(ctx context.Context, c inviteCandidate) (mailstore.
 		})
 	})
 	if len(data) > 0 {
-		// The budget is charged on the builder's own context: the bytes
-		// were read even when the step's deadline cut the read short.
-		if _, berr := a.o.Store.AddBudget(context.WithoutCancel(ctx), a.name, a.day(), int64(len(data))); berr != nil {
-			a.noteErr(berr)
-			a.logger.WarnContext(ctx, "cache could not count an invite part against the budget", "reason", reasonCode(berr))
-		}
+		a.chargeInvite(ctx, int64(len(data)))
 	}
 	if err != nil {
 		return c.part, nil, err
@@ -178,3 +173,18 @@ const (
 	// maxInvitesPerSegment is how many parts the step reads at most.
 	maxInvitesPerSegment = 20
 )
+
+// chargeInvite counts n bytes of an invite part read against the day's
+// budget. The charge runs without ctx's cancellation, since the bytes were
+// read even when a deadline cut the read short, but bounded by
+// keepTimeout, as the read path's bookkeeping is: cache.db has one
+// connection, and a charge must not wait for it without end. A charge that
+// fails is logged and passed to OnError; it never fails the read.
+func (a *Account) chargeInvite(ctx context.Context, n int64) {
+	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), a.keepTimeout)
+	defer cancel()
+	if _, err := a.o.Store.AddBudget(bctx, a.name, a.day(), n); err != nil {
+		a.noteErr(err)
+		a.logger.WarnContext(ctx, "cache could not count an invite part against the budget", "reason", reasonCode(err))
+	}
+}

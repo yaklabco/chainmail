@@ -89,8 +89,9 @@ type Account struct {
 	// discarded instead of written over a drop.
 	wmu   chan struct{}
 	epoch atomic.Uint64
-	// keepTimeout bounds the read path's bookkeeping after a download,
-	// keepReadTimeout unless a test shortens it.
+	// keepTimeout bounds the read path's bookkeeping after a download and
+	// the budget charge of an invite part, keepReadTimeout unless a test
+	// shortens it.
 	keepTimeout time.Duration
 	// inviteTimeout bounds the builder's invite step for one segment and
 	// inviteCap the invite parts it reads, inviteStepTimeout and
