@@ -8,11 +8,15 @@ on:
     branches: [main]
     paths:
       - website/**
+      - site/**
+      - scripts/build-pages.sh
       - CHANGELOG.md
       - .github/workflows/docs.yml
   pull_request:
     paths:
       - website/**
+      - site/**
+      - scripts/build-pages.sh
       - CHANGELOG.md
       - .github/workflows/docs.yml
 concurrency:
@@ -38,10 +42,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
-      - run: bun install --frozen-lockfile
-        working-directory: website
-      - run: bun run build
-        working-directory: website
+      - run: scripts/build-pages.sh
       # Pages names a preview after its branch. The branch name comes from
       # the pull request, so only letters, digits and hyphens reach the
       # deploy command.
@@ -62,7 +63,7 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: 4.152.0
           gitHubToken: ${{ github.token }}
-          command: pages deploy website/build --project-name chainmail --branch ${{ steps.branch.outputs.name }}
+          command: pages deploy pages-dist --project-name chainmail --branch ${{ steps.branch.outputs.name }}
       - name: Comment the preview URL
         if: env.DEPLOY == 'true' && github.event_name == 'pull_request'
         env:
