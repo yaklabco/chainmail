@@ -137,6 +137,7 @@ func TestScheduleNextEvery(t *testing.T) {
 func TestScheduleNextAt(t *testing.T) {
 	t.Parallel()
 	la := zone(t, "America/Los_Angeles")
+	apia := zone(t, "Pacific/Apia")
 	london := zone(t, "Europe/London")
 	at := func(h, m int) Schedule { return Schedule{Kind: ScheduleAt, At: ClockTime{Hour: h, Minute: m}} }
 	tests := []struct {
@@ -164,6 +165,9 @@ func TestScheduleNextAt(t *testing.T) {
 		{"london 01:30 does not exist on spring forward", at(1, 30), utc(2026, 3, 29, 0, 0), london, utc(2026, 3, 29, 1, 0)},
 		{"london 01:30 twice on fall back runs at the first", at(1, 30), utc(2026, 10, 24, 12, 0), london, utc(2026, 10, 25, 0, 30)},
 		{"london the local date decides today", at(0, 30), utc(2026, 6, 15, 23, 15), london, utc(2026, 6, 15, 23, 30)},
+		// Samoa skipped all of 2011-12-30: the clocks went from 12-29 24:00
+		// (UTC-10) to 12-31 00:00 (UTC+14) at 2011-12-30 10:00 UTC.
+		{"apia 08:00 on the skipped 2011-12-30 runs when the clocks land", at(8, 0), utc(2011, 12, 29, 19, 0), apia, utc(2011, 12, 30, 10, 0)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

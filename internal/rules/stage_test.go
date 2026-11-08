@@ -12,6 +12,7 @@ func TestDueStage(t *testing.T) {
 	utcTwo := DueSettings{Location: time.UTC, At: eight, SoonDays: 2}
 	utcOff := DueSettings{Location: time.UTC, At: eight}
 	laTwo := DueSettings{Location: la, At: eight, SoonDays: 2}
+	apiaEight := DueSettings{Location: zone(t, "Pacific/Apia"), At: eight}
 	tests := []struct {
 		name   string
 		due    string
@@ -42,6 +43,11 @@ func TestDueStage(t *testing.T) {
 		{"la not overdue an hour earlier", "2026-10-31", utc(2026, 11, 1, 15, 0), laTwo, "item_due", true},
 		{"la due at a time in the spring gap", "2026-03-08", utc(2026, 3, 8, 10, 0), DueSettings{Location: la, At: ClockTime{Hour: 2, Minute: 30}}, "item_due", true},
 		{"la before the spring gap", "2026-03-08", utc(2026, 3, 8, 10, 0).Add(-time.Nanosecond), DueSettings{Location: la, At: ClockTime{Hour: 2, Minute: 30}}, "", false},
+		// Samoa skipped all of 2011-12-30; its due instant is when the clocks
+		// land at 12-31 00:00 local, 2011-12-30 10:00 UTC.
+		{"apia skipped due date not due at noon the day before", "2011-12-30", utc(2011, 12, 29, 22, 0), apiaEight, "", false},
+		{"apia skipped due date just before the jump", "2011-12-30", utc(2011, 12, 30, 10, 0).Add(-time.Nanosecond), apiaEight, "", false},
+		{"apia skipped due date due when the clocks land", "2011-12-30", utc(2011, 12, 30, 10, 0), apiaEight, "item_due", true},
 		{"bad date", "2026-02-30", utc(2026, 11, 7, 9, 0), utcTwo, "", false},
 		{"not a date", "soon", utc(2026, 11, 7, 9, 0), utcTwo, "", false},
 		{"empty date", "", utc(2026, 11, 7, 9, 0), utcTwo, "", false},
@@ -92,6 +98,7 @@ func TestNextDueWake(t *testing.T) {
 		{"la across spring forward", utc(2026, 3, 7, 16, 0), DueSettings{Location: la, At: ClockTime{Hour: 8}}, utc(2026, 3, 8, 15, 0)},
 		{"la across fall back", utc(2026, 10, 31, 15, 0), DueSettings{Location: la, At: ClockTime{Hour: 8}}, utc(2026, 11, 1, 16, 0)},
 		{"la gap time", utc(2026, 3, 8, 9, 0), DueSettings{Location: la, At: ClockTime{Hour: 2, Minute: 30}}, utc(2026, 3, 8, 10, 0)},
+		{"apia skipped day", utc(2011, 12, 29, 19, 0), DueSettings{Location: zone(t, "Pacific/Apia"), At: ClockTime{Hour: 8}}, utc(2011, 12, 30, 10, 0)},
 	}
 	for _, tt := range tests {
 		if got := NextDueWake(tt.now, tt.s); !got.Equal(tt.want) {

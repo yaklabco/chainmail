@@ -204,10 +204,41 @@ func wallInstant(y int, m time.Month, d int, c ClockTime, loc *time.Location) ti
 	if !best.IsZero() {
 		return best
 	}
-	// No zone around the date reads c: the clocks jumped over it. The zone
-	// in effect after the jump starts at the first instant after the gap.
-	if start, _ := guess.Add(12 * time.Hour).ZoneBounds(); !start.IsZero() {
-		return start.In(loc)
+	// No zone around the date reads c: the clocks jumped over it. The
+	// answer is the transition whose jump spans that wall time.
+	if t, ok := gapEnd(wall, guess, loc); ok {
+		return t
 	}
 	return guess
+}
+
+// gapWindow is how far either side of a skipped wall time gapEnd looks
+// for the transition that skipped it. A zone has jumped a whole day
+// (Pacific/Apia, 2011-12-30), so the window is wider than that.
+const gapWindow = 48 * time.Hour
+
+// gapEnd returns the transition of loc near guess whose jump skips the
+// wall time wall (a wall clock reading expressed in UTC): the wall clock
+// reads before wall an instant before it and after wall at it. It walks
+// the zone periods from gapWindow before guess to gapWindow after.
+func gapEnd(wall, guess time.Time, loc *time.Location) (time.Time, bool) {
+	limit := guess.Add(gapWindow)
+	for t := guess.Add(-gapWindow); t.Before(limit); {
+		_, end := t.In(loc).ZoneBounds()
+		if end.IsZero() || !end.Before(limit) {
+			return time.Time{}, false
+		}
+		if wallClock(end.Add(-time.Nanosecond), loc).Before(wall) && wallClock(end, loc).After(wall) {
+			return end.In(loc), true
+		}
+		t = end
+	}
+	return time.Time{}, false
+}
+
+// wallClock is the wall clock reading of t in loc, expressed in UTC so
+// readings from different offsets compare directly.
+func wallClock(t time.Time, loc *time.Location) time.Time {
+	t = t.In(loc)
+	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
 }
