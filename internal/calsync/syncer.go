@@ -97,6 +97,9 @@ type Syncer struct {
 	o     Options
 	clock watch.Clock
 	wake  chan struct{}
+	// series reads the stored rows of one object; nil means Cache.Series.
+	// Tests replace it to make the read fail.
+	series func(ctx context.Context, account, calID, providerID string) ([]calcache.EventRow, error)
 
 	// cycleMu serializes cycles, Run's and SyncNow's.
 	cycleMu sync.Mutex
@@ -307,11 +310,18 @@ func (s *Syncer) syncCalendar(ctx context.Context, calID string) error {
 		if err != nil {
 			return err
 		}
-		evs := calendarEvents(eventInput{
+		evs, err := calendarEvents(eventInput{
 			account: acct, calID: calID, changes: changes, self: s.o.Self,
 			now: wallNow(s.clock), windowPast: s.o.WindowPast,
-			master: func(providerID string) *calcache.EventRow { return s.storedMaster(ctx, calID, providerID) },
+			master: func(providerID string) (*calcache.EventRow, error) {
+				return s.storedMaster(ctx, calID, providerID)
+			},
 		})
+		if err != nil {
+			// Nothing is published or applied, so the next cycle diffs the
+			// same changes again.
+			return err
+		}
 		if len(evs) > 0 {
 			if err := s.o.Log.Publish(ctx, evs...); err != nil {
 				return err
@@ -322,18 +332,23 @@ func (s *Syncer) syncCalendar(ctx context.Context, calID string) error {
 }
 
 // storedMaster returns the stored row of providerID with no recurrence ID
-// (the master or the single event), or nil.
-func (s *Syncer) storedMaster(ctx context.Context, calID, providerID string) *calcache.EventRow {
-	rows, err := s.o.Cache.Series(ctx, s.o.Account, calID, providerID)
+// (the master or the single event), or nil when there is none. A failed
+// read is an error, never taken for a missing master.
+func (s *Syncer) storedMaster(ctx context.Context, calID, providerID string) (*calcache.EventRow, error) {
+	read := s.series
+	if read == nil {
+		read = s.o.Cache.Series
+	}
+	rows, err := read(ctx, s.o.Account, calID, providerID)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	for i := range rows {
 		if rows[i].Event.RecurrenceID.IsZero() {
-			return &rows[i]
+			return &rows[i], nil
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // filter applies Include and Exclude.

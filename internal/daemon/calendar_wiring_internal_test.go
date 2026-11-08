@@ -345,3 +345,72 @@ func TestCacheWorkersFindInvitesOnceCalendarOpens(t *testing.T) {
 	s.pokeCalendar("host")    // no store, no syncer: nothing to do
 	s.pokeCalendar("missing") // not configured: nothing to do
 }
+
+// storeNoneConfig has only accounts whose calendar store is none, with the
+// mail cache on.
+const storeNoneConfig = `
+[cache]
+enabled = true
+
+[accounts.host]
+provider = "hostinger"
+address = "me@example.com"
+
+[accounts.other]
+provider = "hostinger"
+address = "other@example.com"
+
+[accounts.other.calendar]
+store = "none"
+`
+
+// TestOpenCalendarStoreNoneOnly checks that calendar.db opens when every
+// account's store is none, so the invite hook can keep the invites found in
+// mail (Amendment 6), and that no account gets a store or a syncer.
+func TestOpenCalendarStoreNoneOnly(t *testing.T) {
+	t.Parallel()
+	newStore, _, asked := calendarStores()
+	dir := filepath.Join(t.TempDir(), "cache")
+	s, _ := newTestServerOptions(t, storeNoneConfig, Options{NewCalendarStore: newStore, CacheDir: dir})
+	s.openCache(t.Context())
+	defer s.closeCache()
+	s.openCalendar(t.Context())
+	defer s.closeCalendar()
+	if s.cache == nil {
+		t.Fatal("cache.db did not open")
+	}
+	if s.calcache == nil {
+		t.Fatal("calendar.db did not open with only store none accounts")
+	}
+	if _, err := os.Stat(filepath.Join(dir, calcache.FileName)); err != nil {
+		t.Errorf("calendar.db: %v", err)
+	}
+	if got := asked(); len(got) != 0 {
+		t.Errorf("stores built for %v, want none", got)
+	}
+	for _, name := range []string{"host", "other"} {
+		ca := s.calendars[name]
+		if ca == nil || ca.store != nil || ca.syncer != nil {
+			t.Errorf("%s = %+v, want no store and no syncer", name, ca)
+		}
+		acct, err := s.opts.Config.Account(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.cacheAccountOptions(acct).OnInvites == nil {
+			t.Errorf("%s: OnInvites is nil, so invites in mail are lost", name)
+		}
+	}
+	if st := s.calendarStatuses(t.Context(), mustResolve(t, s)); len(st) != 0 {
+		t.Errorf("calendar statuses = %v, want none for store none accounts", st)
+	}
+}
+
+func mustResolve(t *testing.T, s *Server) []config.ResolvedAccount {
+	t.Helper()
+	accts, err := s.resolveAccounts(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return accts
+}

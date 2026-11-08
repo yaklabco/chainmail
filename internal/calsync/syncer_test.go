@@ -1,11 +1,13 @@
 package calsync_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -601,4 +603,149 @@ func TestObjectReplaceQuietForPrunedRows(t *testing.T) {
 	if evs := r.events(t); len(evs) != 0 {
 		t.Errorf("events = %+v, want none", evs)
 	}
+}
+
+// TestRecurringInviteMovedIntoFuture checks that a new series whose own
+// occurrences are all past, but whose override moves one into the future,
+// gives one invite for the series.
+func TestRecurringInviteMovedIntoFuture(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.sync(t)
+	master := invited("s@x", t0.AddDate(0, 0, -21), calendar.PartStatNeedsAction)
+	master.RRule = "FREQ=WEEKLY;COUNT=2"
+	moved := master
+	moved.RRule = ""
+	moved.RecurrenceID = master.Start.AddDate(0, 0, 7)
+	moved.Start = t0.AddDate(0, 0, 3)
+	moved.End = moved.Start.Add(time.Hour)
+	p := r.store.Add("work", master, moved)
+	r.sync(t)
+	evs := r.events(t)
+	if len(evs) != 1 || evs[0].Kind != "invite" || evs[0].Ref != calendar.EventRef(account, "work", p) {
+		t.Errorf("events = %+v, want one invite for the series", evs)
+	}
+}
+
+// TestRecurringNoInviteWhenFutureCancelled checks that a new series whose
+// only future occurrence is cancelled by an override gives no invite.
+func TestRecurringNoInviteWhenFutureCancelled(t *testing.T) {
+	t.Parallel()
+	master := invited("s@x", t0.AddDate(0, 0, -8), calendar.PartStatNeedsAction)
+	master.RRule = "FREQ=WEEKLY;COUNT=3"
+	rid := master.Start.AddDate(0, 0, 14) // t0 + 6 days, the only future one
+	full := master
+	full.RRule = ""
+	full.RecurrenceID = rid
+	full.Start, full.End = rid, rid.Add(time.Hour)
+	full.Status = calendar.StatusCancelled
+	sparse := calendar.Event{UID: master.UID, RecurrenceID: rid, Status: calendar.StatusCancelled}
+	for name, cancelled := range map[string]calendar.Event{"full": full, "sparse": sparse} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t)
+			r.sync(t)
+			r.store.Add("work", master, cancelled)
+			r.sync(t)
+			if evs := r.events(t); len(evs) != 0 {
+				t.Errorf("events = %+v, want none", evs)
+			}
+		})
+	}
+}
+
+// TestRecurringInviteOnOverride checks that a new series James has already
+// accepted, with one instance that asks him again, gives one invite for
+// that instance.
+func TestRecurringInviteOnOverride(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.sync(t)
+	master := invited("s@x", t0.Add(24*time.Hour), calendar.PartStatAccepted)
+	master.RRule = "FREQ=WEEKLY;COUNT=3"
+	asks := invited("s@x", master.Start.AddDate(0, 0, 7), calendar.PartStatNeedsAction)
+	asks.RecurrenceID = asks.Start
+	p := r.store.Add("work", master, asks)
+	r.sync(t)
+	want := calendar.InstanceRef(calendar.EventRef(account, "work", p), asks.RecurrenceID)
+	evs := r.events(t)
+	if len(evs) != 1 || evs[0].Kind != "invite" || evs[0].Ref != want {
+		t.Errorf("events = %+v, want one invite for %s", evs, want)
+	}
+}
+
+// TestStoredMasterReadFails checks that when the stored master of a new
+// sparse cancelled override cannot be read, the cycle fails before it
+// publishes or applies anything, and the next cycle reports the cancelled
+// instance.
+func TestStoredMasterReadFails(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	// Like Google, the store sends only the instance that changed, so the
+	// override's series role comes from the stored master.
+	instancesOnly := &changedInstances{Store: r.store}
+	r.syncer = calsync.New(calsync.Options{Account: account, Store: instancesOnly, Cache: r.cache, Log: r.log, Self: self, Poll: poll, WindowPast: windowPast, Clock: r.clock})
+	var failing atomic.Bool
+	calsync.SetSeriesRead(r.syncer, func(ctx context.Context, account, calID, providerID string) ([]calcache.EventRow, error) {
+		if failing.Load() {
+			return nil, errors.New("disk I/O error")
+		}
+		return r.cache.Series(ctx, account, calID, providerID)
+	})
+	master := invited("s@x", t0.Add(24*time.Hour), calendar.PartStatAccepted)
+	master.RRule = "FREQ=WEEKLY"
+	p := r.store.Add("work", master)
+	r.sync(t)
+	before, err := r.cache.Calendar(t.Context(), account, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instancesOnly.overridesOnly.Store(true)
+	rid := master.Start.AddDate(0, 0, 7)
+	r.store.Change("work", p, func(rows []calendar.Event) []calendar.Event {
+		return append(rows, calendar.Event{UID: master.UID, RecurrenceID: rid, Status: calendar.StatusCancelled})
+	})
+
+	failing.Store(true)
+	if err := r.syncer.SyncNow(t.Context()); err == nil {
+		t.Fatal("SyncNow succeeded with the stored master unreadable")
+	}
+	if evs := r.events(t); len(evs) != 0 {
+		t.Errorf("events = %+v, want none from a failed cycle", evs)
+	}
+	after, err := r.cache.Calendar(t.Context(), account, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.SyncToken != before.SyncToken || !after.LastSync.Equal(before.LastSync) {
+		t.Errorf("token %q synced %v after the failed cycle, want %q synced %v", after.SyncToken, after.LastSync, before.SyncToken, before.LastSync)
+	}
+	if st := r.syncer.Status(); st.State != calsync.StateError || strings.Contains(st.LastError, "disk") {
+		t.Errorf("Status = %+v, want error with fixed text", st)
+	}
+
+	failing.Store(false)
+	r.sync(t)
+	evs := r.events(t)
+	want := calendar.InstanceRef(calendar.EventRef(account, "work", p), rid)
+	if len(evs) != 1 || evs[0].Kind != "event_cancelled" || evs[0].Ref != want {
+		t.Errorf("events = %+v, want one event_cancelled for %s", evs, want)
+	}
+}
+
+// changedInstances is a calendar store whose incremental syncs, once
+// overridesOnly is set, send only the overrides of each changed object, as
+// Google sends only the instance that changed.
+type changedInstances struct {
+	calstore.Store
+	overridesOnly atomic.Bool
+}
+
+func (s *changedInstances) Sync(ctx context.Context, calID, token string) (calendar.Changes, error) {
+	ch, err := s.Store.Sync(ctx, calID, token)
+	if err != nil || ch.Full || !s.overridesOnly.Load() {
+		return ch, err
+	}
+	ch.Upserts = slices.DeleteFunc(ch.Upserts, func(ev calendar.Event) bool { return ev.RecurrenceID.IsZero() })
+	return ch, nil
 }
