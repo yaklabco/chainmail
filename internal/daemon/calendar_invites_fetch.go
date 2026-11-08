@@ -9,6 +9,7 @@ import (
 
 	"github.com/yaklabco/chainmail/internal/cache"
 	"github.com/yaklabco/chainmail/internal/calcache"
+	"github.com/yaklabco/chainmail/internal/calendar"
 	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
@@ -43,10 +44,24 @@ func inviteFetchBackoff(attempts int) time.Duration {
 }
 
 // inviteFetchDone reports whether a read error means the part will never
-// be read: its message or folder is gone, or it is over the size limit.
+// be read, so its row leaves the queue: its message or folder is gone, it
+// is over the size limit, its content fails the same way on every read (a
+// transfer encoding that does not decode, a form the server sends that
+// chainmail cannot read), or it is no usable invite (calendar's
+// ErrInvalidICS, ErrNotInvite, ErrTooLarge). Every other error, the
+// server unavailable, a busy pool, a login needed or refused, the cache
+// not running, may pass, and keeps the row.
 func inviteFetchDone(err error) bool {
-	return errors.Is(err, mailstore.ErrNotFound) || errors.Is(err, mailstore.ErrStaleRef) ||
-		errors.Is(err, cache.ErrInviteTooLarge)
+	for _, done := range []error{
+		mailstore.ErrNotFound, mailstore.ErrStaleRef, mailstore.ErrMalformed,
+		cache.ErrInviteTooLarge, cache.ErrInviteUndecodable,
+		calendar.ErrInvalidICS, calendar.ErrNotInvite, calendar.ErrTooLarge,
+	} {
+		if errors.Is(err, done) {
+			return true
+		}
+	}
+	return false
 }
 
 // deferredFunc is h's OnDeferredInvites, nil when h is.
@@ -96,12 +111,12 @@ func (h *inviteHook) pass(ctx context.Context, accounts []string) {
 // due, the ones queued longest ago first, through ReadPart, and runs each
 // invite read through the hook as the builder's are: stored, announced
 // and its account poked. A part read and handled, or that will never be
-// read (its message is gone, it is over the limit, or it is no usable
-// invite), leaves the queue. Any other failure puts its next read off by
-// inviteFetchBackoff; a part is never dropped for its attempts, since its
-// message may still be there. It stops between parts once ctx ends, and a
-// read cut short by that counts no attempt. It does nothing without
-// ReadPart.
+// read (inviteFetchDone: its message is gone, it is over the limit, it
+// does not decode, or it is no usable invite), leaves the queue. Any
+// other failure puts its next read off by inviteFetchBackoff; a part is
+// never dropped for its attempts, since its message may still be there.
+// It stops between parts once ctx ends, and a read cut short by that
+// counts no attempt. It does nothing without ReadPart.
 func (h *inviteHook) drainFetches(ctx context.Context) {
 	if h.o.ReadPart == nil {
 		return
@@ -165,7 +180,7 @@ func (h *inviteHook) drainFetches(ctx context.Context) {
 		}
 	}
 	if dropped > 0 {
-		h.o.Logger.InfoContext(ctx, "dropped queued invite parts whose messages are gone or too large", "count", dropped)
+		h.o.Logger.InfoContext(ctx, "dropped queued invite parts that will never be read", "count", dropped)
 	}
 	if delayed > 0 {
 		h.o.Logger.InfoContext(ctx, "put off queued invite parts that could not be read", "count", delayed)

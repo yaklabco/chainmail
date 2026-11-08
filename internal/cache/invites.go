@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"strings"
 	"time"
 
+	"github.com/yaklabco/chainmail/internal/auth"
 	"github.com/yaklabco/chainmail/internal/calendar"
 	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/ref"
@@ -65,6 +67,12 @@ func inviteOf(h mailstore.Header) (c inviteCandidate, ok, tooLarge bool) {
 // calendar.MaxICSBytes.
 var ErrInviteTooLarge = errors.New("invite part over the size limit")
 
+// ErrInviteUndecodable is a part that fails the same way on every read:
+// its transfer encoding (base64 or quoted-printable) does not decode, or
+// the server sends it in a form chainmail cannot read
+// (mailstore.ErrMalformed). It carries no part text.
+var ErrInviteUndecodable = errors.New("invite part does not decode")
+
 // errInviteNotOurs is a deferred part ReadInvite was handed for a message
 // that is not one of its account's. It is not found, for this account.
 var errInviteNotOurs = fmt.Errorf("%w: the invite part is not this account's", mailstore.ErrNotFound)
@@ -96,9 +104,9 @@ func inviteGone(err error) bool {
 // are read. No part is lost to those bounds: every part the cap or the
 // deadline leaves unread, and every part whose read failed with an error
 // that may pass, goes to OnDeferredInvites, which queues it for a later
-// read with ReadInvite. A part over the limit, or whose message is gone,
-// is dropped and counted. Without OnDeferredInvites, the parts it would
-// get are skipped and counted in a log line.
+// read with ReadInvite. A part over the limit, whose message is gone, or
+// that does not decode is dropped and counted. Without OnDeferredInvites,
+// the parts it would get are skipped and counted in a log line.
 //
 // A read never fails the step. It fails, so the segment is not
 // acknowledged and is applied again, only when OnDeferredInvites could not
@@ -118,8 +126,8 @@ func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooL
 	readCtx, cancel := context.WithTimeout(ctx, a.inviteTimeout)
 	defer cancel()
 	var (
-		found                  []FoundInvite
-		failed, gone, timedOut int
+		found                          []FoundInvite
+		failed, gone, broken, timedOut int
 	)
 	for i, c := range cands {
 		part, data, err := a.readInvite(readCtx, c)
@@ -134,6 +142,8 @@ func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooL
 			tooLarge++
 		case inviteGone(err):
 			gone++
+		case errors.Is(err, ErrInviteUndecodable):
+			broken++
 		case err != nil:
 			failed++
 			deferred = append(deferred, c)
@@ -150,6 +160,9 @@ func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooL
 	}
 	if gone > 0 {
 		a.logger.InfoContext(ctx, "cache skipped invite parts whose messages are gone", "count", gone)
+	}
+	if broken > 0 {
+		a.logger.InfoContext(ctx, "cache skipped invite parts that do not decode", "count", broken)
 	}
 	if failed > 0 {
 		a.logger.WarnContext(ctx, a.deferText("cache skipped invite parts it could not read",
@@ -190,7 +203,8 @@ func (a *Account) deferText(skipped, deferred string) string {
 // them against the day's budget, as the builder's invite step does. A
 // part over the limit is ErrInviteTooLarge, and a message or folder that
 // is gone is mailstore.ErrNotFound or mailstore.ErrStaleRef; so is a part
-// of a message that is not this account's. Other errors may pass.
+// of a message that is not this account's. A part that does not decode
+// is ErrInviteUndecodable. Those never pass; other errors may.
 func (a *Account) ReadInvite(ctx context.Context, c InviteCandidate) (FoundInvite, error) {
 	r, err := ref.Parse(c.MessageRef)
 	if err != nil || c.Account != a.name || r.Account != a.name {
@@ -208,6 +222,41 @@ func (a *Account) readInvite(ctx context.Context, c inviteCandidate) (mailstore.
 	return a.readPart(ctx, c, true)
 }
 
+// streamErr classifies an error reading an open part's stream. A failure
+// that may pass keeps its error: the server unavailable (a dropped
+// connection included), a busy pool, a login needed or refused, or ctx
+// ended or the stream closed. So does a message that is gone, which
+// callers already know. ErrMalformed is ErrInviteUndecodable too
+// (malformedErr). Anything else comes from decoding the part's transfer
+// encoding, as mailstore stores report it (imapstore's decoding error
+// matches no mailstore sentinel), and is ErrInviteUndecodable, without the
+// decoder's text, which can quote the part.
+func streamErr(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, mailstore.ErrUnavailable), errors.Is(err, mailstore.ErrBusy),
+		errors.Is(err, auth.ErrAuthRequired), errors.Is(err, auth.ErrRejected),
+		errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded),
+		errors.Is(err, fs.ErrClosed), inviteGone(err):
+		return err
+	case errors.Is(err, mailstore.ErrMalformed):
+		return malformedErr(err)
+	default:
+		return ErrInviteUndecodable
+	}
+}
+
+// malformedErr makes a mailstore.ErrMalformed error ErrInviteUndecodable
+// as well: the server sends the part in a form chainmail cannot read, and
+// asking again gets the same. Any other error is returned as it is.
+func malformedErr(err error) error {
+	if errors.Is(err, mailstore.ErrMalformed) && !errors.Is(err, ErrInviteUndecodable) {
+		return fmt.Errorf("%w: %w", ErrInviteUndecodable, err)
+	}
+	return err
+}
+
 // readPart streams one candidate's part on a background context, reading
 // at most calendar.MaxICSBytes + 1 bytes, and counts the bytes read
 // against the day's budget. With retry it tries again while the pool is
@@ -215,8 +264,9 @@ func (a *Account) readInvite(ctx context.Context, c inviteCandidate) (mailstore.
 // that can (mailstore.BackgroundPartStreamer) opens the part as background
 // work, which never queues beside foreground requests for a connection;
 // another store's StreamPart is used as it is. A part whose decoded bytes
-// pass the limit returns ErrInviteTooLarge. The charset of the part's info
-// fills in one the header lacked, in the part returned.
+// pass the limit returns ErrInviteTooLarge, and one that does not decode
+// ErrInviteUndecodable (streamErr). The charset of the part's info fills
+// in one the header lacked, in the part returned.
 func (a *Account) readPart(ctx context.Context, c inviteCandidate, retry bool) (mailstore.CalendarPart, []byte, error) {
 	var data []byte
 	read := func() error {
@@ -227,14 +277,14 @@ func (a *Account) readPart(ctx context.Context, c inviteCandidate, retry bool) (
 			}
 			info, rc, err := open(bg, c.ref, c.part.Part)
 			if err != nil {
-				return err
+				return malformedErr(err)
 			}
 			defer func() { _ = rc.Close() }() // a read-only stream: the read's error is the one to report
 			if c.part.Charset == "" {
 				c.part.Charset = strings.ToLower(info.Params["charset"])
 			}
 			data, err = io.ReadAll(io.LimitReader(rc, calendar.MaxICSBytes+1))
-			return err
+			return streamErr(err)
 		})
 	}
 	var err error

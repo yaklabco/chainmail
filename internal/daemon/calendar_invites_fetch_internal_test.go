@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yaklabco/chainmail/internal/auth"
 	"github.com/yaklabco/chainmail/internal/cache"
 	"github.com/yaklabco/chainmail/internal/calcache"
+	"github.com/yaklabco/chainmail/internal/calendar"
 	"github.com/yaklabco/chainmail/internal/config"
 	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/mailstore/fake"
@@ -125,8 +127,11 @@ func TestInviteFetchQueueBacksOffABusyPool(t *testing.T) {
 	}
 }
 
-// A part whose message or folder is gone, that is over the size limit, or
-// that is no usable invite is dropped from the queue, with nothing stored.
+// A part whose message or folder is gone, that is over the size limit, that
+// does not decode (a bad transfer encoding, or a form the server sends
+// that chainmail cannot read), or that is no usable invite (not iCalendar,
+// no invite, too large to parse) is dropped from the queue, with nothing
+// stored: no later read changes any of those.
 func TestInviteFetchQueueDropsWhatCannotBeRead(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -144,6 +149,21 @@ func TestInviteFetchQueueDropsWhatCannotBeRead(t *testing.T) {
 		}},
 		{"not an invite", func(_ context.Context, c cache.InviteCandidate) (cache.FoundInvite, error) {
 			return found(c.Account, c.MessageRef, "REQUEST", []byte("not a calendar")), nil
+		}},
+		{"bad transfer encoding", func(context.Context, cache.InviteCandidate) (cache.FoundInvite, error) {
+			return cache.FoundInvite{}, cache.ErrInviteUndecodable
+		}},
+		{"malformed", func(context.Context, cache.InviteCandidate) (cache.FoundInvite, error) {
+			return cache.FoundInvite{}, fmt.Errorf("%w: body", mailstore.ErrMalformed)
+		}},
+		{"invalid ics", func(context.Context, cache.InviteCandidate) (cache.FoundInvite, error) {
+			return cache.FoundInvite{}, fmt.Errorf("reading: %w", calendar.ErrInvalidICS)
+		}},
+		{"not an invite error", func(context.Context, cache.InviteCandidate) (cache.FoundInvite, error) {
+			return cache.FoundInvite{}, calendar.ErrNotInvite
+		}},
+		{"ics too large", func(context.Context, cache.InviteCandidate) (cache.FoundInvite, error) {
+			return cache.FoundInvite{}, calendar.ErrTooLarge
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -291,6 +311,34 @@ func TestInviteFetchesThroughTheServer(t *testing.T) {
 	}
 	if n := fk.BackgroundCalls("StreamPart"); n != 1 {
 		t.Errorf("background part reads = %d, want 1", n)
+	}
+}
+
+// A failure that may pass keeps the part queued with its next read put
+// off: the server unavailable, a busy pool, a login needed or refused, the
+// account's cache not running, or an error nothing classifies.
+func TestInviteFetchQueueKeepsWhatMayPass(t *testing.T) {
+	t.Parallel()
+	for name, err := range map[string]error{
+		"unavailable": fmt.Errorf("%w: connection reset", mailstore.ErrUnavailable),
+		"busy":        mailstore.ErrBusy,
+		"login":       auth.ErrAuthRequired,
+		"rejected":    auth.ErrRejected,
+		"no cache":    errInviteNoCache,
+		"unknown":     errors.New("something else"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := newInviteRig(t)
+			r.queue([]cache.InviteCandidate{candidate("none", "msg-1")})
+			r.readFn = func(context.Context, cache.InviteCandidate) (cache.FoundInvite, error) {
+				return cache.FoundInvite{}, err
+			}
+			r.h.pass(t.Context(), []string{"none"})
+			if rows := r.fetches(); len(rows) != 1 || rows[0].Attempts != 1 {
+				t.Errorf("queued = %+v, want the part kept with 1 attempt", rows)
+			}
+		})
 	}
 }
 

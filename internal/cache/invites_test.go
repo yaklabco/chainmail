@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yaklabco/chainmail/internal/auth"
 	"github.com/yaklabco/chainmail/internal/calendar"
 	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/mailstore/fake"
@@ -762,5 +763,61 @@ func TestBuilderReplaysASegmentWhoseDeferredPartsWereNotQueued(t *testing.T) {
 		if f.MessageRef != first.String() {
 			t.Errorf("invite %d = %s, want %s", i, f.MessageRef, first)
 		}
+	}
+}
+
+// A part whose transfer encoding does not decode, or that the server sends
+// in a form chainmail cannot read, fails the same way on every read: the
+// step drops it, counted in a log line, and does not defer it, and
+// ReadInvite reports it as ErrInviteUndecodable. A failure that may pass
+// (the server unavailable, a login needed) is still deferred.
+func TestBuilderDropsInvitePartsThatDoNotDecode(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		err     error
+		deferIt bool
+	}{
+		{"bad base64", fmt.Errorf("decoding the part: %w", base64.CorruptInputError(12)), false},
+		{"bad quoted-printable", fmt.Errorf("decoding the part: %w", errors.New("quotedprintable: invalid hex byte 0x7a")), false},
+		{"cut quoted-printable", fmt.Errorf("decoding the part: %w", io.ErrUnexpectedEOF), false},
+		{"malformed", fmt.Errorf("%w: a body chainmail cannot read", mailstore.ErrMalformed), false},
+		{"unavailable", fmt.Errorf("%w: connection reset", mailstore.ErrUnavailable), true},
+		{"auth", auth.ErrAuthRequired, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fs := fake.New("acme", false)
+			r, sink, deferred := deferRig(t, fs)
+			logs := inviteLogs(r)
+			r.pass("INBOX")
+			r.start()
+			r.waitApplied()
+
+			fs.FailStreamAfter(10, tt.err)
+			rf := fs.Add(calMsg("invite", "text/calendar; method=REQUEST", []byte(testInviteICS)))
+			r.pass("INBOX")
+			r.waitApplied()
+			if got := sink.invites(); len(got) != 0 {
+				t.Errorf("found %d invites, want none", len(got))
+			}
+			if n := len(deferred.candidates()); (n == 1) != tt.deferIt || n > 1 {
+				t.Errorf("deferred %d parts, want deferred = %t", n, tt.deferIt)
+			}
+			if got, tail := r.acked(), r.tail(); got != tail {
+				t.Errorf("acked %d, want the tail %d", got, tail)
+			}
+			if e := r.a.lastError(); e != "" {
+				t.Errorf("last error = %q, want none", e)
+			}
+			c := InviteCandidate{Account: "acme", MessageRef: rf.String(), Part: mailstore.CalendarPart{Part: "2", Method: "REQUEST"}}
+			_, err := r.a.ReadInvite(t.Context(), c)
+			if broken := errors.Is(err, ErrInviteUndecodable); broken == tt.deferIt {
+				t.Errorf("ReadInvite = %v, want ErrInviteUndecodable = %t", err, !tt.deferIt)
+			}
+			if !tt.deferIt && !strings.Contains(logs.String(), "cache skipped invite parts that do not decode") {
+				t.Errorf("logs = %q, want the dropped part counted", logs.String())
+			}
+		})
 	}
 }
