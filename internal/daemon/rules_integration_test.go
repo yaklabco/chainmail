@@ -21,6 +21,7 @@ import (
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 	"github.com/yaklabco/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/rules"
 	"github.com/yaklabco/chainmail/internal/testutil/daemontest"
 	"github.com/yaklabco/chainmail/internal/testutil/dovecot"
 	"github.com/yaklabco/chainmail/internal/testutil/fakegmail"
@@ -766,14 +767,54 @@ func (h *itSMTPHold) onMessage(smtptest.Envelope) {
 // free lets a held reply go. Later calls do nothing.
 func (h *itSMTPHold) free() { h.once.Do(func() { close(h.release) }) }
 
-// checkItRestart is done when item 5. Two pages arrive while the daemon is
-// down, so the first pass after a restart reports both and the runner
-// takes them in one batch. The first forward reaches SMTP, and the daemon
-// is stopped while SMTP holds its reply: the message has gone, but the
-// daemon has not heard so. After another restart every page has been
-// forwarded exactly once, and both act-once rows say applied. The send is
-// detached from the request, so the stop waits for it (see the plan's
-// contract notes): the test lets the reply go once the stop is under way.
+// itForwardKeys reads the idempotency store's keys of ruleID's forwards on
+// account straight from state.db, since no RPC returns them: each key's
+// state.
+func itForwardKeys(t *testing.T, h *daemontest.Harness, account, ruleID string) map[string]string {
+	t.Helper()
+	rows, err := h.DB.QueryContext(t.Context(), "SELECT key, state FROM idempotency WHERE account = ? AND key LIKE ?",
+		account, "rule."+ruleID+".%")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }() // rows.Err below reports any iteration error
+	out := map[string]string{}
+	for rows.Next() {
+		var key, state string
+		if err := rows.Scan(&key, &state); err != nil {
+			t.Fatal(err)
+		}
+		out[key] = state
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// itForwardOf is the subject line of the page a captured forward carries:
+// one of subjects, or "" when it carries none of them.
+func itForwardOf(e smtptest.Envelope, subjects []string) string {
+	for _, s := range subjects {
+		if bytes.Contains(e.Data, []byte("Subject: Fwd: "+s+"\r\n")) {
+			return s
+		}
+	}
+	return ""
+}
+
+// checkItRestart is done when item 5 and spec amendment 8's forward crash
+// safety. Two pages arrive while the daemon is down, so the first pass
+// after a restart reports both and the runner takes them in one batch. The
+// first forward reaches SMTP and the daemon is stopped while SMTP holds its
+// reply: the message has gone, but the runner has not heard so. Its
+// act-once row stays pending, which the stop leaves as it is, and the
+// other page is never tried. After another restart the pending row is
+// replayed under the same idempotency key: the store answers it as a
+// duplicate, nothing is sent again, and the row is recorded applied with
+// note replayed. The other page is forwarded afresh. The send is detached
+// from the request, so the stop waits for it (see the plan's contract
+// notes): the test lets the reply go once the stop is under way.
 func checkItRestart(t *testing.T, dove *dovecot.Server) {
 	const (
 		user = "rules-restart@example.test"
@@ -818,6 +859,24 @@ func checkItRestart(t *testing.T, dove *dovecot.Server) {
 	case <-time.After(itPollWithin):
 		t.Fatalf("no forward reached SMTP within %v of the restart", itPollWithin)
 	}
+	// While SMTP holds the reply, the held page's act-once row is pending:
+	// it was written before the send.
+	pending := itApplied(t, h2, rule.GetId())
+	if len(pending) != 1 {
+		t.Fatalf("act-once rows while SMTP holds the first forward = %v, want one pending row", pending)
+	}
+	heldKey := slices.Collect(maps.Keys(pending))[0]
+	if pending[heldKey] != "pending/" {
+		t.Fatalf("act-once row of the held page = %q, want pending", pending[heldKey])
+	}
+	captured := sink.Messages()
+	if len(captured) != 1 {
+		t.Fatalf("SMTP captured %d forwards while holding the first, want 1", len(captured))
+	}
+	held := itForwardOf(captured[0], subjects)
+	if held == "" {
+		t.Fatalf("the held forward carries none of %q", subjects)
+	}
 	// A graceful stop waits for the send in flight, whose context is
 	// detached from the request: it must not return while SMTP holds the
 	// reply.
@@ -833,27 +892,56 @@ func checkItRestart(t *testing.T, dove *dovecot.Server) {
 	if stopErr := <-stopped; stopErr != nil {
 		t.Fatalf("stopping the daemon mid batch: %v", stopErr)
 	}
-	sent := len(sink.Messages())
-	t.Logf("after the stop mid batch: %d forwards on SMTP, act-once rows %v", sent, itApplied(t, h2, rule.GetId()))
-	if sent < 1 || sent > len(subjects) {
-		t.Fatalf("%d forwards on SMTP after the stop, want 1 to %d", sent, len(subjects))
+	// The send finished and settled its idempotency key, but the stopped
+	// runner did not record it: the held page's row is still pending, and
+	// the other page was never tried.
+	if n := len(sink.Messages()); n != 1 {
+		t.Fatalf("%d forwards on SMTP after the stop mid batch, want exactly the held one", n)
+	}
+	if got := itApplied(t, h2, rule.GetId()); !maps.Equal(got, map[string]string{heldKey: "pending/"}) {
+		t.Fatalf("act-once rows after the stop mid batch = %v, want only %s pending", got, heldKey)
+	}
+	heldFwdKey := rules.ForwardKey(rule.GetId(), "dove", heldKey)
+	if got := itForwardKeys(t, h2, "dove", rule.GetId()); !maps.Equal(got, map[string]string{heldFwdKey: "done"}) {
+		t.Fatalf("forward idempotency keys after the stop mid batch = %v, want only %s done", got, heldFwdKey)
 	}
 
-	// 2. Restart again: the batch is replayed, and nothing is sent twice.
+	// 2. Restart again: the pending row is replayed under the same key,
+	// and nothing is sent twice.
 	third := opts
 	third.Reuse = h2
 	h3 := daemontest.Start(t, cfg, third)
 	applied := itWaitApplied(t, h3, rule.GetId(), len(subjects), itPollWithin)
 	itWaitRunners(t, h3, "dove")
 	t.Logf("act-once rows after the replay: %v", applied)
+	if got := applied[heldKey]; got != string(rules.AppliedDone)+"/"+rules.NoteReplayed {
+		t.Errorf("act-once row of the held page after the replay = %q, want applied/%s", got, rules.NoteReplayed)
+	}
+	for key, got := range applied {
+		if key != heldKey && got != "applied/" {
+			t.Errorf("act-once row of the other page = %q, want applied with no note", got)
+		}
+	}
+	keys := itForwardKeys(t, h3, "dove", rule.GetId())
+	if len(keys) != len(subjects) || keys[heldFwdKey] != "done" {
+		t.Errorf("forward idempotency keys after the replay = %v, want %s and one more, each done", keys, heldFwdKey)
+	}
+	for k, state := range keys {
+		if state != "done" {
+			t.Errorf("forward idempotency key %s = %s, want done", k, state)
+		}
+	}
 	msgs := sink.Messages()
 	if len(msgs) != len(subjects) {
 		t.Errorf("SMTP got %d forwards in all, want %d, one per page", len(msgs), len(subjects))
 	}
+	if len(msgs) > 0 && itForwardOf(msgs[0], subjects) != held {
+		t.Errorf("first forward on SMTP is of %q, want the held %q", itForwardOf(msgs[0], subjects), held)
+	}
 	for _, s := range subjects {
 		n := 0
 		for _, m := range msgs {
-			if bytes.Contains(m.Data, []byte("Subject: Fwd: "+s+"\r\n")) {
+			if itForwardOf(m, subjects) == s {
 				n++
 			}
 		}
@@ -866,16 +954,20 @@ func checkItRestart(t *testing.T, dove *dovecot.Server) {
 			t.Errorf("forward went to %q, want only %s", m.To, to)
 		}
 	}
-	// A replayed forward answers from the idempotency store and is audited
-	// as a duplicate, so exactly one row per page is an allowed send.
-	allowed := 0
+	// The replayed forward answers from the idempotency store and is
+	// audited as a duplicate, so exactly one row per page is an allowed
+	// send, and the held page has the one duplicate.
+	allowed, duplicate := 0, 0
 	for _, e := range itOfRule(itRuleAudit(t, h3, "forward"), rule.GetId()) {
-		if e.GetDecision() == "allowed" {
+		switch e.GetDecision() {
+		case "allowed":
 			allowed++
+		case "duplicate":
+			duplicate++
 		}
 	}
-	if allowed != len(subjects) {
-		t.Errorf("%d forward rows with decision allowed under client rule, want %d", allowed, len(subjects))
+	if allowed != len(subjects) || duplicate != 1 {
+		t.Errorf("forward rows under client rule: %d allowed and %d duplicate, want %d and 1", allowed, duplicate, len(subjects))
 	}
 	itNoRuleText(t, h3, to, note, "pager@vendor.example")
 }
