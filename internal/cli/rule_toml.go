@@ -2,9 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"slices"
 
 	"github.com/pelletier/go-toml/v2"
@@ -95,27 +95,34 @@ func (f *ruleFile) definition() *chainmailv1.RuleDefinition {
 // definition the file gives and the RuleDefinition fields it sets, in
 // ruleMaskOrder. A file that does not parse, or holds a key a rule file
 // does not have, is a usage error pointing at chainmail rule's help, which
-// describes the file.
+// describes the file. The error quotes nothing from the file, since keys
+// and decoder messages can carry rule text: it gives a fixed reason and,
+// when the decoder knows it, the line and column.
 func readRuleFile(cmd *cobra.Command, path string) (*chainmailv1.RuleDefinition, []string, error) {
 	b, err := readFile(path, "--file")
 	if err != nil {
 		return nil, nil, err
 	}
-	notRule := func(cause error) error {
-		return usageError{err: fmt.Errorf("%s is not a rule file: %w", path, cause), hint: helpHint(cmd.Parent())}
+	notRule := func(reason string, cause error) error {
+		var de *toml.DecodeError
+		if errors.As(cause, &de) {
+			row, col := de.Position()
+			reason = fmt.Sprintf("%s (line %d, column %d)", reason, row, col)
+		}
+		return usageError{err: fmt.Errorf("%s is not a rule file: %s", path, reason), hint: helpHint(cmd.Parent())}
 	}
 	var keys map[string]any
 	if err := toml.Unmarshal(b, &keys); err != nil {
-		return nil, nil, notRule(err)
+		return nil, nil, notRule("it is not valid TOML", err)
 	}
-	for _, k := range slices.Sorted(maps.Keys(keys)) {
+	for k := range keys {
 		if !slices.Contains(ruleMaskOrder, k) {
-			return nil, nil, notRule(fmt.Errorf("unknown key %q", k))
+			return nil, nil, notRule("it holds a key a rule file does not have", nil)
 		}
 	}
 	var f ruleFile
 	if err := toml.NewDecoder(bytes.NewReader(b)).DisallowUnknownFields().Decode(&f); err != nil {
-		return nil, nil, notRule(err)
+		return nil, nil, notRule("a value has the wrong type, or an action holds a key an action does not have", err)
 	}
 	var paths []string
 	for _, p := range ruleMaskOrder {

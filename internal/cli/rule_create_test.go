@@ -263,7 +263,7 @@ func TestRuleCreateRequestsAndUsage(t *testing.T) {
 		{name: "create from a file, disabled", args: []string{"create", "-f", full, "--disabled"}, usage: "--file and --disabled cannot be used together"},
 		{name: "create from a missing file", args: []string{"create", "-f", "/nonexistent/rule.toml"}, usage: "no such file"},
 		{name: "create from a file that is not TOML", args: []string{"create", "-f", notTOML}, usage: "is not a rule file"},
-		{name: "create from a file with an unknown key", args: []string{"create", "-f", unknownKey}, usage: `is not a rule file: unknown key \"color\"`},
+		{name: "create from a file with an unknown key", args: []string{"create", "-f", unknownKey}, usage: "is not a rule file: it holds a key a rule file does not have"},
 		{name: "create from a file with an unknown action key", args: []string{"create", "-f", unknownActionKey}, usage: "is not a rule file"},
 		{name: "create from a file with a bad type", args: []string{"create", "-f", badType}, usage: "is not a rule file"},
 	})
@@ -358,6 +358,39 @@ func TestRuleCreateUnknownActionKeepsItsValueOffStderr(t *testing.T) {
 				if strings.Contains(got.stderr, secret) {
 					t.Errorf("stderr = %s, want no %q from the --action value", got.stderr, secret)
 				}
+			}
+		})
+	}
+}
+
+// TestRuleFileErrorsKeepItsTextOffStderr checks that a rule file that
+// does not parse, or holds a key a rule file does not have, is a usage
+// error that quotes nothing from the file: keys and decoder messages can
+// carry rule text, such as a forward address.
+func TestRuleFileErrorsKeepItsTextOffStderr(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, body, want string
+	}{
+		{name: "quoted unknown key", body: "\"private@example.com\" = \"x\"\n", want: "holds a key a rule file does not have"},
+		{name: "repeated table", body: "[\"private@example.com\"]\n[\"private@example.com\"]\n", want: "is not valid TOML"},
+		{name: "bad value type", body: "name = \"x\"\n[[actions]]\nkind = \"forward\"\nto = \"private@example.com\"\nnote = 3\n", want: "has the wrong type"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "rule.toml")
+			if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got := runCLI(t, Env{}, "--socket", "/nonexistent.sock", "rule", "create", "-f", path)
+			if got.code != api.ExitUsage || errorReason(t, got.stderr) != api.ReasonUsage {
+				t.Fatalf("rule create -f: %+v, want a usage error", got)
+			}
+			if !strings.Contains(got.stderr, "is not a rule file") || !strings.Contains(got.stderr, tt.want) {
+				t.Errorf("stderr = %s, want a fixed rule file error saying %q", got.stderr, tt.want)
+			}
+			if strings.Contains(got.stderr, "private@example.com") {
+				t.Errorf("stderr = %s, want nothing quoted from the file", got.stderr)
 			}
 		})
 	}
