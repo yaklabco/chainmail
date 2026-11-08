@@ -11,10 +11,12 @@ Show the daemon's audit log, newest first. Rows hold no message content, recipie
 
 A page ends with next\_before\_id; pass it as --before-id for the older rows. It is 0 on the last page.
 
+\--client keeps one client kind's rows: cli, mcp, rule for what rules did, or daemon for the daemon's own work.
+
 ## Usage
 
 ```text
-chainmail audit [--since 24h] [--account NAME] [--action NAME] [--limit N] [--before-id N] [flags]
+chainmail audit [--since 24h] [--account NAME] [--action NAME] [--client KIND] [--limit N] [--before-id N] [flags]
 ```
 
 ## Examples
@@ -23,6 +25,8 @@ chainmail audit [--since 24h] [--account NAME] [--action NAME] [--limit N] [--be
 chainmail audit
 chainmail audit --since 2h --action send
 chainmail audit --account work --limit 20
+# what rules did today
+chainmail audit --client rule
 ```
 
 ## Flags
@@ -31,6 +35,7 @@ chainmail audit --account work --limit 20
       --account string   only this account (default: all)
       --action string    only this action, such as send or expunge (default: all)
       --before-id int    only rows older than this id, from next_before_id
+      --client string    only this client kind, such as cli, mcp or rule (default: all)
       --limit int32      rows per page, up to 1000 (default: the daemon's 100)
       --since duration   how far back to look, as a Go duration such as 2h or 30m (default 24h0m0s)
 ```

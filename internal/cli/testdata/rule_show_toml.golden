@@ -1,0 +1,27 @@
+name = 'receipts'
+description = "Stripe receipts.\n\nFile them under \u001B[31mAdmin.\n"
+accounts = ['gmail', 'gwork']
+query = 'from:stripe.com subject:receipt'
+on_new = true
+schedule = 'every:6h'
+priority = 50
+stop = false
+max_per_run = 500
+enabled = true
+
+[[actions]]
+kind = 'label'
+label = 'Receipts'
+
+[[actions]]
+kind = 'link_item'
+item_id = 'it_admin_work'
+anchor = true
+
+[[actions]]
+kind = 'forward'
+to = ['books@example.com']
+note = 'for the books'
+
+[[actions]]
+kind = 'archive'

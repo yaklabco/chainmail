@@ -18,17 +18,19 @@ import (
 // newAuditCmd builds chainmail audit, which reads the daemon's audit log.
 func newAuditCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	var (
-		since    time.Duration
-		account  string
-		action   string
-		limit    int32
-		beforeID int64
+		since      time.Duration
+		account    string
+		action     string
+		clientKind string
+		limit      int32
+		beforeID   int64
 	)
 	cmd := &cobra.Command{
-		Use:   "audit [--since 24h] [--account NAME] [--action NAME] [--limit N] [--before-id N]",
+		Use:   "audit [--since 24h] [--account NAME] [--action NAME] [--client KIND] [--limit N] [--before-id N]",
 		Short: "Show the daemon's audit log, newest first",
 		Long: "Show the daemon's audit log, newest first. Rows hold no message content, recipients or secrets.\n\n" +
-			"A page ends with next_before_id; pass it as --before-id for the older rows. It is 0 on the last page.",
+			"A page ends with next_before_id; pass it as --before-id for the older rows. It is 0 on the last page." +
+			"\n\n--client keeps one client kind's rows: cli, mcp, rule for what rules did, or daemon for the daemon's own work.",
 		Args: exactArgs(0),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if since < 0 {
@@ -38,6 +40,7 @@ func newAuditCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 				Since:    timestamppb.New(env.now().Add(-since)),
 				Account:  account,
 				Action:   action,
+				Client:   clientKind,
 				Limit:    limit,
 				BeforeId: beforeID,
 			}
@@ -56,6 +59,7 @@ func newAuditCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	cmd.Flags().DurationVar(&since, "since", 24*time.Hour, "how far back to look, as a Go duration such as 2h or 30m")
 	cmd.Flags().StringVar(&account, "account", "", "only this account (default: all)")
 	cmd.Flags().StringVar(&action, "action", "", "only this action, such as send or expunge (default: all)")
+	cmd.Flags().StringVar(&clientKind, "client", "", "only this client kind, such as cli, mcp or rule (default: all)")
 	cmd.Flags().Int32Var(&limit, "limit", 0, "rows per page, up to 1000 (default: the daemon's 100)")
 	cmd.Flags().Int64Var(&beforeID, "before-id", 0, "only rows older than this id, from next_before_id")
 	return cmd

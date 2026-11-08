@@ -1,7 +1,7 @@
 ---
 title: "chainmail watch"
 sidebar_label: "watch"
-sidebar_position: 67
+sidebar_position: 80
 description: "Stream mail events as they happen, one per line"
 ---
 
@@ -25,10 +25,13 @@ Filters apply in the daemon. status and gap events pass a --kind filter
 unless --kind names them. --in matches a folder or a Gmail label, and
 inbox also matches \\Inbox.
 
-Work item events are sent only when asked for: item, a change to a work
-item, and item\_mail, new mail on a thread linked to one, come when --kind
-names them or --item is given. --item ID limits both to that item and every
-item below it, and leaves out new, flags and expunged events.
+Work item and rule events are sent only when asked for. The item kinds
+are item, a change to a work item; item\_mail, new mail on a thread linked
+to one; and item\_due\_soon, item\_due and item\_overdue, an open item
+reaching a stage of its due date. They come when --kind names them or
+\--item is given. rule, a change to a rule, comes only when --kind names it.
+\--item ID limits the item kinds to that item and every item below it, and
+leaves out new, flags, expunged and rule events.
 
 The watch reconnects by itself when the daemon goes away, or sends nothing
 for 75 seconds, resuming from its group or from the last event or
@@ -57,6 +60,8 @@ chainmail watch --group triage --kind new
 chainmail watch --since 0 --account work --in inbox --once
 # changes to an item and the items below it, and new mail on their threads
 chainmail watch --kind item,item_mail --item it_01jcb7m2k9r8q3v4w5x6y7z8a9
+# rule changes, and work items coming due
+chainmail watch --kind rule,item_due_soon,item_due,item_overdue
 ```
 
 ## Flags
@@ -66,8 +71,8 @@ chainmail watch --kind item,item_mail --item it_01jcb7m2k9r8q3v4w5x6y7z8a9
       --group string          resume after this group's acknowledged event, and acknowledge each line once written
       --heartbeat             print heartbeats too
       --in string             only this folder or Gmail label, such as inbox (default: all)
-      --item string           only item and item_mail events of this item and every item below it
-      --kind strings          only these kinds, comma separated: new, flags, expunged, status, gap, item, item_mail (default: all but item and item_mail; with --item: item, item_mail, status and gap)
+      --item string           only item, item_mail and item_due events of this item and every item below it
+      --kind strings          only these kinds, comma separated: new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due, item_overdue (default: all but the opt-in kinds item, item_mail, rule and the item_due kinds; with --item: the item kinds, status and gap)
       --once                  exit at the first heartbeat, once every event already in the log is printed
       --since int             resume after this event ID
 ```

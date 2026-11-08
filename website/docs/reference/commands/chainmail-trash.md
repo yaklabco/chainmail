@@ -1,7 +1,7 @@
 ---
 title: "chainmail trash"
 sidebar_label: "trash"
-sidebar_position: 63
+sidebar_position: 76
 description: "Move messages to Trash"
 ---
 

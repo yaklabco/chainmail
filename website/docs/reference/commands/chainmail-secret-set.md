@@ -1,7 +1,7 @@
 ---
 title: "chainmail secret set"
 sidebar_label: "secret set"
-sidebar_position: 59
+sidebar_position: 72
 description: "Store a secret such as accounts/<account> or oauth_clients/<client>"
 ---
 
