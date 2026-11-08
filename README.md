@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="website/static/img/wordmark-dark.svg" />
-    <img src="website/static/img/wordmark-light.svg" alt="chainmail" width="360" />
+    <source media="(prefers-color-scheme: dark)" srcset="docs/img/wordmark-dark.svg" />
+    <img src="docs/img/wordmark-light.svg" alt="chainmail" width="360" />
   </picture>
 </p>
 

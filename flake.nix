@@ -34,7 +34,7 @@
 
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [ go buf golangci-lint gotestsum age goreleaser bun nodejs_22 ];
+          packages = with pkgs; [ go buf golangci-lint gotestsum age goreleaser ];
         };
       });
 

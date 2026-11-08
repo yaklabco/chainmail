@@ -1,5 +1,0 @@
-User-agent: *
-Allow: /
-
-Sitemap: https://chainmail.sh/sitemap-index.xml
-Sitemap: https://chainmail.sh/docs/sitemap.xml
