@@ -165,6 +165,46 @@ func TestSyncTokens(t *testing.T) {
 	}
 }
 
+// TestSyncTokensDoNotSurviveCalendarRecreation removes a calendar and adds
+// one with the same ID. The new calendar's change log starts again, so a
+// token of the removed one would skip the new calendar's first changes: it
+// must be invalid, which makes the cache resync from scratch.
+func TestSyncTokensDoNotSurviveCalendarRecreation(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := newStore(t, false)
+	s.Add("work", meeting("a@x"))
+	s.Add("work", meeting("b@x"))
+	old, err := s.Sync(ctx, "work", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info := calendar.Calendar{ID: "work", Name: "Work", Access: calendar.AccessWrite}
+	s.RemoveCalendar("work")
+	s.AddCalendar(info)
+	s.Add("work", meeting("c@x"))
+	s.Add("work", meeting("d@x"))
+	s.Add("work", meeting("e@x"))
+	if _, err := s.Sync(ctx, "work", old.Token); !errors.Is(err, calstore.ErrSyncTokenInvalid) {
+		t.Errorf("sync of the recreated calendar with the removed one's token = %v, want ErrSyncTokenInvalid", err)
+	}
+
+	// The new calendar's own tokens work, and AddCalendar on a calendar
+	// that still exists keeps them.
+	fresh, err := s.Sync(ctx, "work", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh.Upserts) != 3 {
+		t.Errorf("full sync of the recreated calendar = %d upserts, want 3", len(fresh.Upserts))
+	}
+	s.AddCalendar(info)
+	if _, err := s.Sync(ctx, "work", fresh.Token); err != nil {
+		t.Errorf("sync after AddCalendar of an existing calendar = %v, want the token kept", err)
+	}
+}
+
 func sortedProviders(evs []calendar.Event) []string {
 	seen := map[string]bool{}
 	var out []string

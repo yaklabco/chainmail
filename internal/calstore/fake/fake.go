@@ -73,10 +73,13 @@ type change struct {
 }
 
 type cal struct {
-	info    calendar.Calendar
-	objects []*object // in the order they were added
-	log     []change
-	version int
+	info calendar.Calendar
+	// incarnation tells this calendar from an earlier one with the same ID,
+	// whose change log is gone, so its tokens are not valid here.
+	incarnation int
+	objects     []*object // in the order they were added
+	log         []change
+	version     int
 }
 
 func (c *cal) find(providerID string) (int, *object) {
@@ -95,6 +98,7 @@ type Store struct {
 	now           func() time.Time
 	cals          []*cal
 	epoch         int // bumped by InvalidateTokens
+	incarnations  int // the last incarnation given to a new calendar
 	nextETag      int
 	nextObject    int
 	freeBusy      map[string]calendar.FreeBusy
@@ -200,7 +204,8 @@ func (s *Store) AddCalendar(c calendar.Calendar) {
 		existing.info = c
 		return
 	}
-	s.cals = append(s.cals, &cal{info: c})
+	s.incarnations++
+	s.cals = append(s.cals, &cal{info: c, incarnation: s.incarnations})
 }
 
 // RemoveCalendar removes a calendar and its events. An unknown ID is a
@@ -353,8 +358,9 @@ func (s *Store) ListCalendars(ctx context.Context) ([]calendar.Calendar, error) 
 // Sync implements calstore.Store. An empty token gives every object; a
 // token from an earlier Sync of the same calendar gives the objects
 // changed since, with every row of each, and the ProviderIDs removed. A
-// token from another calendar, from before InvalidateTokens, or not made
-// by the fake gives calstore.ErrSyncTokenInvalid.
+// token from another calendar, from a removed calendar with the same ID,
+// from before InvalidateTokens, or not made by the fake gives
+// calstore.ErrSyncTokenInvalid.
 func (s *Store) Sync(ctx context.Context, calID, token string) (calendar.Changes, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -614,22 +620,27 @@ func (s *Store) logLocked(c *cal, providerID string) {
 	c.log = append(c.log, change{version: c.version, providerID: providerID})
 }
 
-// tokenLocked is c's current token: the calendar ID, the epoch and the
-// version, so a token is valid only for its calendar.
+// tokenLocked is c's current token: the epoch, c's incarnation, the version
+// and the calendar ID, so a token is valid only for the calendar that
+// made it, and not for a calendar later added again with the same ID.
 func (s *Store) tokenLocked(c *cal) string {
-	return fmt.Sprintf("fake:%d:%d:%s", s.epoch, c.version, c.info.ID)
+	return fmt.Sprintf("fake:%d:%d:%d:%s", s.epoch, c.incarnation, c.version, c.info.ID)
 }
 
 func (s *Store) parseTokenLocked(c *cal, token string) (int, bool) {
-	parts := strings.SplitN(token, ":", 4)
-	if len(parts) != 4 || parts[0] != "fake" || parts[3] != c.info.ID {
+	parts := strings.SplitN(token, ":", 5)
+	if len(parts) != 5 || parts[0] != "fake" || parts[4] != c.info.ID {
 		return 0, false
 	}
 	epoch, err := strconv.Atoi(parts[1])
 	if err != nil || epoch != s.epoch {
 		return 0, false
 	}
-	version, err := strconv.Atoi(parts[2])
+	incarnation, err := strconv.Atoi(parts[2])
+	if err != nil || incarnation != c.incarnation {
+		return 0, false
+	}
+	version, err := strconv.Atoi(parts[3])
 	if err != nil || version < 0 || version > c.version {
 		return 0, false
 	}

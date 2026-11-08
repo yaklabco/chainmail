@@ -289,10 +289,17 @@ func (s *Store) Range(ctx context.Context, accounts, calIDs []string, from, to t
 		"WHERE "+strings.Join(where, " AND ")+" ORDER BY e.account, e.calendar_id, e.provider_id, e.recurrence_id", args...)
 }
 
-// Prune deletes singles and overrides that ended before before and returns
-// how many it deleted. Series masters are kept whatever their dates.
+// Prune deletes singles that ended before before, and overrides whose own
+// end and RECURRENCE-ID are both before it, and returns how many it
+// deleted. An override that moved an occurrence from after before to a
+// time before it is kept: deleting it would let its master put the
+// original occurrence back (Amendment 18). Series masters are kept
+// whatever their dates.
 func (s *Store) Prune(ctx context.Context, before time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx, "DELETE FROM cal_events WHERE is_master = 0 AND end_utc < ?", formatTime(before))
+	cutoff := formatTime(before)
+	// recurrence_id is "" for a single, which sorts before every stored time.
+	res, err := s.db.ExecContext(ctx,
+		"DELETE FROM cal_events WHERE is_master = 0 AND end_utc < ? AND recurrence_id < ?", cutoff, cutoff)
 	if err != nil {
 		return 0, s.fail("pruning old events", err)
 	}

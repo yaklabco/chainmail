@@ -157,7 +157,7 @@ func planChanges(ctx context.Context, q querier, account, calID string, ch calen
 	var old map[rowKey]record
 	var err error
 	if ch.Full {
-		old, err = loadRecords(ctx, q, account, calID, nil)
+		old, err = loadRecords(ctx, q, account, calID, true, nil)
 	} else {
 		providers := slices.Sorted(maps.Keys(upserted))
 		for p := range deleted {
@@ -165,7 +165,12 @@ func planChanges(ctx context.Context, q querier, account, calID string, ch calen
 				providers = append(providers, p)
 			}
 		}
-		old, err = loadRecords(ctx, q, account, calID, providers)
+		if len(providers) == 0 {
+			// An incremental sync that touches nothing, such as a poll that
+			// only moves the token, changes no row.
+			return nil, nil
+		}
+		old, err = loadRecords(ctx, q, account, calID, false, providers)
 	}
 	if err != nil {
 		return nil, err
@@ -209,9 +214,10 @@ func planChanges(ctx context.Context, q querier, account, calID string, ch calen
 // variable limit.
 const providerChunk = 500
 
-// loadRecords reads the stored rows of the calendar, all of them when
-// providers is nil, else those of the given ProviderIDs.
-func loadRecords(ctx context.Context, q querier, account, calID string, providers []string) (map[rowKey]record, error) {
+// loadRecords reads the stored rows of the calendar: all of them when all
+// is set, else those of the given ProviderIDs, which reads nothing when
+// providers is empty.
+func loadRecords(ctx context.Context, q querier, account, calID string, all bool, providers []string) (map[rowKey]record, error) {
 	out := map[rowKey]record{}
 	read := func(query string, args ...any) error {
 		rows, err := q.QueryContext(ctx, query, args...)
@@ -230,7 +236,7 @@ func loadRecords(ctx context.Context, q querier, account, calID string, provider
 		return rows.Err()
 	}
 	base := "SELECT account, calendar_id, " + eventColumns + " FROM cal_events WHERE account = ? AND calendar_id = ?"
-	if providers == nil {
+	if all {
 		if err := read(base, account, calID); err != nil {
 			return nil, err
 		}

@@ -190,6 +190,56 @@ func TestApplyClearsLastError(t *testing.T) {
 	}
 }
 
+// TestApplyRollsBackAnInvalidSync covers an Apply that fails part way: the
+// token, LastSync, LastError and stored events stay as they were, so the
+// next sync repeats the same changes from the old token.
+func TestApplyRollsBackAnInvalidSync(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := setup(t)
+	apply(t, s, "work", calendar.Changes{Full: true, Token: "t1", Upserts: []calendar.Event{
+		single("a", t0, t0.Add(time.Hour)),
+		single("b", t0, t0.Add(time.Hour)),
+	}})
+	if err := s.SetError(ctx, "acme", "work", "calendar server unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.Calendar(ctx, "acme", "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRows, err := s.Range(ctx, nil, nil, t0.AddDate(-1, 0, 0), t0.AddDate(1, 0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changed := single("b", t0.Add(time.Hour), t0.Add(2*time.Hour))
+	changed.ETag = "e-b2"
+	err = s.Apply(ctx, "acme", "work", calendar.Changes{
+		Token:   "t2",
+		Upserts: []calendar.Event{single("c", t0, t0.Add(time.Hour)), changed, {UID: "no-provider@example.com", Start: t0, End: t0}},
+		Deletes: []string{"a"},
+	}, self, t0.Add(time.Hour))
+	if err == nil {
+		t.Fatal("Apply with an upsert without a ProviderID succeeded, want an error")
+	}
+
+	after, err := s.Calendar(ctx, "acme", "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	same(t, "calendar after a failed Apply", before, after)
+	if after.SyncToken != "t1" || !after.LastSync.Equal(t0) || after.LastError != "calendar server unavailable" {
+		t.Errorf("calendar after a failed Apply = token %q, last sync %v, error %q; want t1, %v and the old error",
+			after.SyncToken, after.LastSync, after.LastError, t0)
+	}
+	afterRows, err := s.Range(ctx, nil, nil, t0.AddDate(-1, 0, 0), t0.AddDate(1, 0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	same(t, "events after a failed Apply", beforeRows, afterRows)
+}
+
 func TestMyPartStatAndIsOrganizer(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -480,6 +530,53 @@ func TestPruneKeepsMasters(t *testing.T) {
 	slices.Sort(got)
 	want := []string{"edge", "new", "rdates", "weekly", "weekly@" + newOverride.RecurrenceID.Format("20060102T150405Z")}
 	same(t, "rows after Prune", want, got)
+}
+
+// TestPruneKeepsOccurrencesMovedEarlier covers an override whose own end is
+// before the cutoff while the occurrence it replaces (its RECURRENCE-ID) is
+// after it. Deleting it would let the master put the original occurrence
+// back, so Prune keeps it (Amendment 18).
+func TestPruneKeepsOccurrencesMovedEarlier(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := setup(t)
+	master := weekly("weekly", t0.AddDate(-1, 0, 0))
+	rid := master.Start.AddDate(0, 0, 7*53) // the first occurrence after t0
+	if !rid.After(t0) {
+		t.Fatalf("recurrence ID %v is not after the cutoff %v", rid, t0)
+	}
+	moved := override(master, rid, -(rid.Sub(t0) + 2*time.Hour)) // ends 90 minutes before t0
+	if !moved.End.Before(t0) {
+		t.Fatalf("moved override ends %v, want before the cutoff %v", moved.End, t0)
+	}
+	// Ended and replaced before the cutoff: pruned.
+	gone := override(master, master.Start.AddDate(0, 0, 7*50), -time.Hour)
+	apply(t, s, "work", calendar.Changes{Full: true, Upserts: []calendar.Event{master, moved, gone}})
+
+	n, err := s.Prune(ctx, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("Prune removed %d rows, want 1 (the override replacing a past occurrence)", n)
+	}
+	series, err := s.Series(ctx, "acme", "work", "weekly")
+	if err != nil {
+		t.Fatal(err)
+	}
+	same(t, "series after Prune", []string{"weekly", "weekly@" + rid.Format("20060102T150405Z")}, keys(series))
+
+	events := make([]calendar.Event, 0, len(series))
+	for _, r := range series {
+		events = append(events, r.Event)
+	}
+	insts, _, err := calendar.Expand(events, rid.Add(-time.Hour), rid.Add(time.Hour), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(insts) != 0 {
+		t.Errorf("instances at the moved occurrence's original time = %+v, want none", insts)
+	}
 }
 
 func TestStatsAndReady(t *testing.T) {

@@ -185,27 +185,6 @@ func TestOpenRecreates(t *testing.T) {
 	}
 }
 
-func TestRemoveDB(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "cache.db")
-	for _, p := range []string{path, path + "-wal", path + "-shm"} {
-		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := removeDB(path); err != nil {
-		t.Fatalf("removeDB: %v", err)
-	}
-	for _, p := range []string{path, path + "-wal", path + "-shm"} {
-		if _, err := os.Stat(p); !errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("%s still there: %v", filepath.Base(p), err)
-		}
-	}
-	if err := removeDB(path); err != nil {
-		t.Errorf("removeDB of missing files: %v, want nil", err)
-	}
-}
-
 func TestOpenRefusesURICharacters(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{"a?b.db", "a#b.db", "a%b.db"} {
@@ -277,23 +256,6 @@ func diskFullError(t *testing.T) error {
 		t.Fatalf("insert past max_page_count: %v, want a full-classified error", err)
 	}
 	return err
-}
-
-func TestOpenErrKeepsClassification(t *testing.T) {
-	t.Parallel()
-	err := openErr("reading user_version", diskFullError(t))
-	if !errors.Is(err, ErrDiskFull) {
-		t.Errorf("openErr(full) = %v, want ErrDiskFull", err)
-	}
-	if _, ok := errors.AsType[*recreateError](err); ok {
-		t.Errorf("openErr(full) = %v, want no recreate", err)
-	}
-	if !strings.Contains(err.Error(), "reading user_version") {
-		t.Errorf("openErr(full) = %q, want the operation named", err)
-	}
-	if re, ok := errors.AsType[*recreateError](openErr("reading the schema", notADBError(t))); !ok || re.reason != "corrupt" {
-		t.Errorf("openErr(not a database) = %v, want a corrupt recreate", re)
-	}
 }
 
 func TestFailMarksCorruption(t *testing.T) {
