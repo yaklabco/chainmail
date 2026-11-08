@@ -9,7 +9,7 @@ sidebar_position: 1
 chainmail keeps mail credentials away from AI agents. A daemon holds every password and token and makes every connection to the mail servers. Agents and people reach it only through the `chainmail` CLI or `chainmail mcp`, which are thin clients on a Unix socket and hold no secrets. The daemon checks each caller at the socket, checks each send against a policy, and records nearly every call in an audit log.
 
 ```mermaid
-flowchart LR
+flowchart TD
   subgraph clients["client users: your user, or members of chainmail-clients"]
     A[AI agent] -- "MCP over stdio" --> M[chainmail mcp]
     H[person or agent] --> C[chainmail CLI]

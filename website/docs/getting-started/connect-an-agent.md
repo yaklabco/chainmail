@@ -9,7 +9,7 @@ sidebar_position: 4
 `chainmail mcp` serves chainmail to an AI agent as MCP tools over stdin and stdout. The agent's MCP client starts it as a subprocess. It holds no secrets and no mail logic. Every call goes to the daemon, through the same policy and audit log as the CLI, and the audit log records it with client kind `mcp`.
 
 ```mermaid
-flowchart LR
+flowchart TD
   A[AI agent] -- "MCP over stdio" --> M[chainmail mcp]
   M -- "ConnectRPC over the Unix socket" --> D[chainmail daemon]
   D -- "IMAP and SMTP" --> S[mail servers]

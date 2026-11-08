@@ -6,7 +6,8 @@
     "start": "node scripts/sync-changelog.mjs && docusaurus start",
     "build": "node scripts/sync-changelog.mjs && docusaurus build",
     "serve": "docusaurus serve",
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "test": "bun test plugins"
   },
   "dependencies": {
     "@docusaurus/core": "3.10.2",
@@ -16,6 +17,7 @@
     "@fontsource-variable/instrument-sans": "5.3.0",
     "@fontsource/dm-mono": "5.3.0",
     "@mdx-js/react": "3.1.1",
+    "@mermaid-js/layout-elk": "1.0.1",
     "clsx": "2.1.1",
     "prism-react-renderer": "2.4.1",
     "react": "19.3.1",

@@ -62,7 +62,7 @@ A failure that stops the daemon is printed as one line of JSON in the CLI's erro
 Start from the exit code of the call that failed. The [exit codes reference](../reference/exit-codes.md) lists every code and reason.
 
 ```mermaid
-flowchart TD
+flowchart LR
   A[A client call fails] --> B{Exit code}
   B -- "7 DAEMON_UNREACHABLE" --> C[systemctl status chainmail]
   C -- "not active" --> D[Read the journal: daemon refuses to start]

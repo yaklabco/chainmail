@@ -11,7 +11,7 @@ A release is a tag, a GitHub release with the binaries, and a Cask in the [yakla
 In the commands below, `'<version>'` is the new version without the `v`, such as `0.2.0`, and its tag is `'v<version>'`. Replace the text between the quotes and keep the quotes. Every block runs unchanged in bash and in fish.
 
 ```mermaid
-flowchart LR
+flowchart TD
   A[Edit CHANGELOG.md] --> B[Open and merge the PR]
   B --> C[Run the release workflow]
   C --> D[Watch the run]

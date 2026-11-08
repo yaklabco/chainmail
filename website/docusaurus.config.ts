@@ -1,6 +1,8 @@
 import type { Config } from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 import { themes as prismThemes } from 'prism-react-renderer';
+import rehypeTables from './plugins/rehype-tables.mjs';
+import { mermaidOptions } from './plugins/mermaid-theme.mjs';
 
 const gopherCredit =
   'The Go gopher was designed by Renée French and is licensed under CC BY 4.0. The chainmail gopher is a derivative work under the same license.';
@@ -27,6 +29,8 @@ const config: Config = {
     hooks: { onBrokenMarkdownLinks: 'throw', onBrokenMarkdownImages: 'throw' },
   },
 
+  clientModules: ['./plugins/diagram-expand.mjs'],
+
   i18n: { defaultLocale: 'en', locales: ['en'] },
 
   headTags: [
@@ -50,6 +54,7 @@ const config: Config = {
           routeBasePath: '/',
           sidebarPath: './sidebars.ts',
           editUrl: 'https://github.com/yaklabco/chainmail/edit/main/website/',
+          rehypePlugins: [rehypeTables],
         },
         blog: false,
         theme: { customCss: './src/css/custom.css' },
@@ -112,7 +117,9 @@ const config: Config = {
       darkTheme: prismThemes.oneDark,
       additionalLanguages: ['bash', 'toml', 'nix', 'go', 'protobuf', 'json'],
     },
-    mermaid: { theme: { light: 'neutral', dark: 'dark' } },
+    // The stock themes cover anything plugins/mermaid-theme.mjs does not
+    // restyle, in the right mode.
+    mermaid: { theme: { light: 'neutral', dark: 'dark' }, options: mermaidOptions },
   } satisfies Preset.ThemeConfig,
 };
 

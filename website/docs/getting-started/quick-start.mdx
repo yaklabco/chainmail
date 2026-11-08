@@ -14,7 +14,7 @@ This guide runs a development daemon as your own user, adds an account to it and
 Blocks fenced as `sh` run unchanged in bash and in fish. Where a step keeps shell state, such as a variable for later commands, the guide gives a bash tab and a fish tab. Text in angle brackets, such as `<account>`, is a value you fill in, and each one is explained next to its block.
 
 ```mermaid
-flowchart LR
+flowchart TD
   A[Make the vault key] --> B[Write the config]
   B --> C[Start the dev daemon]
   C --> D[Point the CLI at it]
