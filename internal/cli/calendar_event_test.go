@@ -130,6 +130,11 @@ func TestEventCreateAllDayDatesAreUTCMidnights(t *testing.T) {
 		{name: "eleven hours behind", zone: "Pacific/Pago_Pago", args: []string{"--start", "2026-11-11", "--duration", "2d"}, start: day(11), end: day(13)},
 		{name: "one day by default", zone: "Asia/Tokyo", args: []string{"--start", "2026-11-30"}, start: day(30), end: time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)},
 		{
+			name: "a date whose local midnight the clocks skip", zone: "America/Santiago",
+			args:  []string{"--start", "2026-09-06", "--end", "2026-09-06"},
+			start: time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC), end: time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC),
+		},
+		{
 			name: "--tz names the zone the dates are read in", zone: "Pacific/Kiritimati",
 			args: []string{"--start", "2026-11-11", "--tz", "America/Los_Angeles"}, start: day(11), end: day(12), tz: "America/Los_Angeles",
 		},

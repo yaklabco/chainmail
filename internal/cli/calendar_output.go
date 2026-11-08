@@ -93,10 +93,13 @@ func ownZone(e *chainmailv1.CalendarEvent, loc *time.Location) *time.Location {
 	if err != nil {
 		return nil
 	}
-	start := e.GetStart().AsTime()
-	_, ownOffset := start.In(own).Zone()
-	_, locOffset := start.In(loc).Zone()
-	if ownOffset == locOffset {
+	start, end := e.GetStart().AsTime(), e.GetEnd().AsTime()
+	_, ownStart := start.In(own).Zone()
+	_, locStart := start.In(loc).Zone()
+	_, ownEnd := end.In(own).Zone()
+	_, locEnd := end.In(loc).Zone()
+	// Both ends: a zone change inside the event can split them.
+	if ownStart == locStart && ownEnd == locEnd {
 		return nil
 	}
 	return own

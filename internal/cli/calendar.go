@@ -43,11 +43,14 @@ const (
 // offer them.
 var rsvpAnswers = []string{"accept", "decline", "tentative"}
 
-// calTime is a time flag as read: the instant, and whether it was a date
-// alone.
+// calTime is a time flag as read: the instant, whether it was a date alone,
+// and for a date the calendar date itself, as 00:00 UTC. All-day values
+// take date, never t: local midnight does not exist on every date (the
+// clocks skip it in some zones), so t can fall on the day before.
 type calTime struct {
 	t        time.Time
 	dateOnly bool
+	date     time.Time
 }
 
 // localMinuteLayout is a time without a zone, to the minute.
@@ -69,8 +72,9 @@ func parseCalTime(cmd *cobra.Command, flag, s string, loc *time.Location) (calTi
 		}
 		return calTime{t: t}, nil
 	}
-	if t, err := time.ParseInLocation(time.DateOnly, s, loc); err == nil {
-		return calTime{t: t, dateOnly: true}, nil
+	if d, err := time.Parse(time.DateOnly, s); err == nil {
+		t, _ := time.ParseInLocation(time.DateOnly, s, loc) // parses: s did
+		return calTime{t: t, dateOnly: true, date: d}, nil
 	}
 	return calTime{}, usageError{
 		err:  fmt.Errorf("--%s %q: want RFC 3339 such as 2026-11-10T09:00:00Z, a time such as 2026-11-10 09:00, or a date such as 2026-11-10", flag, s),
@@ -353,13 +357,6 @@ func newFreeBusyCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	addRangeFlags(cmd, &rf)
 	cmd.Flags().StringVar(&account, "account", "", "the account whose provider is asked about the addresses")
 	return cmd
-}
-
-// utcDate is 00:00 UTC of t's date in t's own zone. All-day dates go on the
-// wire this way (Amendment 17), so the date the user typed is the date the
-// event takes, whatever zone the CLI runs in.
-func utcDate(t time.Time) time.Time {
-	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 // wallTime is the first instant at which the clocks in loc show the wall

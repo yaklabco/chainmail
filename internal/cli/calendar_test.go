@@ -561,4 +561,13 @@ func TestCalendarRowsShowTheEventZone(t *testing.T) {
 	if got, want := ownZoneRow(late, mustZone(t, "America/New_York")), " (Fri 2026-11-13 12:00-15:00 JST Asia/Tokyo)"; got != want {
 		t.Errorf("ownZoneRow = %q, want %q", got, want)
 	}
+	// A London event across the start of BST, shown in UTC: the offsets match
+	// at the start but not at the end, so the event zone is shown.
+	spring := lateFixture()
+	spring.TimeZone = "Europe/London"
+	spring.Start = timestamppb.New(time.Date(2026, 3, 29, 0, 30, 0, 0, time.UTC))
+	spring.End = timestamppb.New(time.Date(2026, 3, 29, 2, 30, 0, 0, time.UTC))
+	if got := ownZoneRow(spring, time.UTC); !strings.Contains(got, "Europe/London") {
+		t.Errorf("ownZoneRow across BST = %q, want the event zone shown", got)
+	}
 }

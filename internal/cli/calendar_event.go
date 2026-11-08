@@ -123,7 +123,7 @@ func (ef *eventFlags) parseStart(cmd *cobra.Command, loc *time.Location, rule da
 		return time.Time{}, usageError{err: errors.New(string(rule) + ": give --start as a date, such as 2026-11-10"), hint: helpHint(cmd)}
 	}
 	if allDay {
-		return utcDate(ct.t), nil
+		return ct.date, nil
 	}
 	return ct.t, nil
 }
@@ -148,7 +148,7 @@ func (ef *eventFlags) parseEnd(cmd *cobra.Command, start time.Time, loc *time.Lo
 			end = nextDay(ct.t)
 		}
 		if allDay {
-			end = nextDay(utcDate(ct.t))
+			end = nextDay(ct.date)
 		}
 		if !end.After(start) {
 			return time.Time{}, false, usage("--end must be after --start")
