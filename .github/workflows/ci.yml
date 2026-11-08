@@ -86,34 +86,13 @@ jobs:
       - run: goreleaser check
       - run: go tool stave snapshot
   docs:
-    # Builds the docs site with broken links set to fail, and checks every
-    # shell block in the README and the docs parses in the shells it is
-    # written for.
+    # Checks every shell block in the README parses in the shells it is
+    # written for. The manual lives in yaklabco/chainmail.sh, which runs
+    # the same check on its pages.
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      # The same Node major and Bun version the Nix dev shell gives local runs.
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.4.2
       - run: sudo apt-get update && sudo apt-get install -y fish
       - run: scripts/check-doc-shell_test.sh
-      - run: git ls-files -z 'website/docs/*.md' 'website/docs/*.mdx' | xargs -0 scripts/check-doc-shell.sh README.md
-      - run: scripts/check-pages-links_test.sh
-      - run: scripts/build-pages_test.sh
-      - run: bun install --frozen-lockfile
-        working-directory: site
-      - run: bun run check
-        working-directory: site
-      - run: bun install --frozen-lockfile
-        working-directory: website
-      - run: bun run typecheck
-        working-directory: website
-      - run: bun run test
-        working-directory: website
-      - run: scripts/build-pages.sh
-      - run: scripts/check-pages-links.sh pages-dist
+      - run: scripts/check-doc-shell.sh README.md
