@@ -174,10 +174,10 @@ func seriesGroups(rows []calcache.EventRow) [][]calcache.EventRow {
 func expandGroup(group []calcache.EventRow, from, to time.Time, limit int) ([]eventView, bool, error) {
 	evs := make([]calendar.Event, len(group))
 	var master *calcache.EventRow
-	byRID := make(map[time.Time]calcache.EventRow, len(group))
+	byRID := make(map[string]calcache.EventRow, len(group))
 	for i, r := range group {
 		evs[i] = r.Event
-		byRID[r.Event.RecurrenceID] = r
+		byRID[ridKey(r.Event.RecurrenceID)] = r
 		if r.Event.RecurrenceID.IsZero() {
 			master = &group[i]
 		}
@@ -190,7 +190,7 @@ func expandGroup(group []calcache.EventRow, from, to time.Time, limit int) ([]ev
 	base := calendar.EventRef(first.Account, first.CalendarID, first.Event.ProviderID)
 	out := make([]eventView, 0, len(insts))
 	for _, in := range insts {
-		row, ok := byRID[in.Event.RecurrenceID]
+		row, ok := byRID[ridKey(in.Event.RecurrenceID)]
 		if !ok {
 			continue
 		}
@@ -602,4 +602,13 @@ func checkPeople(people []string) error {
 		}
 	}
 	return nil
+}
+
+// ridKey is a recurrence ID as a map key: time.Time values of one instant
+// can differ in location and monotonic reading.
+func ridKey(rid time.Time) string {
+	if rid.IsZero() {
+		return ""
+	}
+	return rid.UTC().Format(time.RFC3339Nano)
 }

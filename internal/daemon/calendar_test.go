@@ -300,6 +300,13 @@ func TestAgenda(t *testing.T) {
 		master := own("weekly@x", "james@mw.example", s.Add(-14*24*time.Hour))
 		master.RRule = "FREQ=WEEKLY"
 		weekly = e.mw.Add(mwCal, master)
+		// This week's instance moved half an hour later.
+		e.mw.Change(mwCal, weekly, func(evs []calendar.Event) []calendar.Event {
+			moved := evs[0]
+			moved.RRule, moved.RecurrenceID = "", s
+			moved.Start, moved.End = s.Add(30*time.Minute), s.Add(90*time.Minute)
+			return append(evs, moved)
+		})
 		single = e.mw.Add(mwCal, invitation("single@x", "james@mw.example", s.Add(2*time.Hour)))
 		dec := invitation("declined@x", "james@mw.example", s.Add(3*time.Hour))
 		dec.Attendees[1].PartStat = calendar.PartStatDeclined
@@ -321,7 +328,7 @@ func TestAgenda(t *testing.T) {
 	}
 	base := calendar.EventRef
 	want := []string{
-		"mw " + calendar.InstanceRef(base("mw", mwCal, weekly), e.start) + " " + e.start.Format(time.RFC3339),
+		"mw " + calendar.InstanceRef(base("mw", mwCal, weekly), e.start) + " " + e.start.Add(30*time.Minute).Format(time.RFC3339),
 		"work " + base("work", workCal, calfake.ObjectName("work@x")) + " " + e.start.Add(time.Hour).Format(time.RFC3339),
 		"mw " + base("mw", mwCal, single) + " " + e.start.Add(2*time.Hour).Format(time.RFC3339),
 	}
