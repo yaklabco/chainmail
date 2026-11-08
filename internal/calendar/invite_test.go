@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func inviteICS(method, extra string) string {
@@ -111,4 +112,25 @@ func TestParseInviteCharsets(t *testing.T) {
 	if _, err := ParseInvite(bom, "utf-8"); err != nil {
 		t.Fatalf("UTF-8 BOM: %v", err)
 	}
+}
+
+// An invite that charset conversion takes past MaxICSBytes still recurs on
+// its own VTIMEZONE.
+func TestParseInviteLargeConvertedKeepsZone(t *testing.T) {
+	head := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:x\r\nMETHOD:REQUEST\r\nBEGIN:VTIMEZONE\r\nTZID:Office Time\r\n" +
+		strings.ReplaceAll(pacificRules, "\n", "\r\n") + "END:VTIMEZONE\r\n" +
+		"BEGIN:VEVENT\r\nUID:big@example.com\r\nDTSTAMP:20261101T120000Z\r\nDTSTART;TZID=Office Time:20261019T090000\r\n" +
+		"RRULE:FREQ=WEEKLY;COUNT=3\r\nORGANIZER:mailto:org@example.com\r\nDESCRIPTION:"
+	tail := "\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	// Each 0xE9 becomes two octets of UTF-8.
+	body := strings.Repeat("\xe9", MaxICSBytes-len(head)-len(tail)-1024)
+	inv, err := ParseInvite([]byte(head+body+tail), "ISO-8859-1")
+	if err != nil {
+		t.Fatalf("ParseInvite: %v", err)
+	}
+	if len(inv.Events[0].Raw) <= MaxICSBytes {
+		t.Fatalf("converted invite is %d octets, want more than MaxICSBytes", len(inv.Events[0].Raw))
+	}
+	insts, _ := mustExpand(t, inv.Events, utc(2026, 10, 1, 0, 0, 0), utc(2026, 12, 1, 0, 0, 0), MaxInstances)
+	sameTimes(t, starts(insts), []time.Time{utc(2026, 10, 19, 16, 0, 0), utc(2026, 10, 26, 16, 0, 0), utc(2026, 11, 2, 17, 0, 0)})
 }

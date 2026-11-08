@@ -34,10 +34,12 @@ type parsedEvent struct {
 // MaxAttendees attendees: the rest are dropped and AttendeesTruncated set.
 // Each Event.Raw is the whole input.
 //
-// TZIDs resolve to IANA zones directly, through the Windows zone names
-// Outlook writes, or through a prefixed IANA name. A zone that is none of
-// these is read from its VTIMEZONE rules and the event gets TZID "".
-// Floating times and zones with no definition read as UTC.
+// A TZID the calendar defines in a VTIMEZONE is read with those rules,
+// which RFC 5545 makes authoritative. Event.TZID is still the IANA zone
+// the TZID names (directly, through the Windows zone names Outlook writes,
+// or through a prefixed IANA name), or "" when it names none. A TZID with
+// no usable VTIMEZONE is read from that IANA zone. Floating times and
+// zones with no definition read as UTC.
 func ParseICS(data []byte) (method string, events []Event, err error) {
 	method, parsed, err := parseICS(data, MaxICSBytes)
 	if err != nil {

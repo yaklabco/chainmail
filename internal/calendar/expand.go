@@ -11,8 +11,13 @@ import (
 // Expand returns the instances of one series (a master plus its overrides,
 // or one single event) that overlap [from, to), sorted by Start, at most limit.
 // It applies RDATE, EXDATE and overrides, drops CANCELLED overrides, keeps
-// local wall time across DST using TZID, and reports truncated when there
-// were more than limit instances.
+// local wall time across DST, and reports truncated when there were more
+// than limit instances.
+//
+// The zone a series recurs in is the VTIMEZONE its DTSTART names in the
+// master's Raw, when Raw is an iCalendar object holding one (so a zone
+// known only from its VTIMEZONE, which gives TZID "", still recurs on its
+// own rules), else the IANA zone TZID names, else UTC.
 //
 // SECONDLY and MINUTELY rules return ErrUnsafeRecurrence, as do an INTERVAL
 // over 10000, HOURLY with BYSETPOS, and a rule whose estimated work (the
@@ -136,6 +141,11 @@ func seriesRule(value string, fr frame, start, to time.Time) (*rrule.RRule, erro
 	if err != nil {
 		return nil, err
 	}
+	// A UTC UNTIL is an instant, which the wall-clock frame of a VTIMEZONE
+	// reads as the wall time it is then.
+	if fr.vtz != nil && !opt.Until.IsZero() && untilIsUTC(value) {
+		opt.Until = fr.wall(opt.Until)
+	}
 	opt.Dtstart = start
 	// No instance at or after to is wanted, so the rule stops there.
 	if end := fr.wall(to); opt.Until.IsZero() || opt.Until.After(end) {
@@ -161,14 +171,23 @@ func seriesRule(value string, fr frame, start, to time.Time) (*rrule.RRule, erro
 	return r, nil
 }
 
-// frame is the clock a series recurs on: rrule-go runs in its zone.
+// frame is the clock a series recurs on. With an IANA zone, rrule-go runs
+// in it. With a VTIMEZONE, rrule-go runs on wall times held as UTC values,
+// converted with the zone's rules as ParseICS converts them.
 type frame struct {
 	loc *time.Location
+	vtz *vtimezone
 }
 
-// frameOf returns the frame of a master: its TZID's IANA zone, else UTC.
+// frameOf returns the frame of a master: the VTIMEZONE its DTSTART names
+// in Raw, when Raw is an iCalendar object holding one, else its TZID's
+// IANA zone, else UTC. Raw survives the calendar cache, so a series read
+// back from it recurs on its own zone's rules too.
 func frameOf(ev Event) frame {
 	if !ev.AllDay {
+		if v := embeddedZone(ev); v != nil {
+			return frame{loc: time.UTC, vtz: v}
+		}
 		if l, _, ok := loadZone(ev.TZID); ok {
 			return frame{loc: l}
 		}
@@ -178,11 +197,17 @@ func frameOf(ev Event) frame {
 
 // wall returns the instant u in the frame.
 func (f frame) wall(u time.Time) time.Time {
+	if f.vtz != nil {
+		return f.vtz.wallOf(u.UTC())
+	}
 	return u.In(f.loc)
 }
 
 // instant returns the UTC instant of a time in the frame.
 func (f frame) instant(w time.Time) time.Time {
+	if f.vtz != nil {
+		return w.Add(-f.vtz.offset(w)).UTC()
+	}
 	return w.UTC()
 }
 

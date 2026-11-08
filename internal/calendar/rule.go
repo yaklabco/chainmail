@@ -125,6 +125,13 @@ func ruleValue(rule, key string) (value string, found bool) {
 	return value, found
 }
 
+// untilIsUTC reports whether an RRULE value's UNTIL is a UTC time, which
+// rrule-go reads as an instant rather than a wall time.
+func untilIsUTC(rule string) bool {
+	v, _ := ruleValue(rule, "UNTIL")
+	return strings.HasSuffix(strings.ToUpper(v), "Z")
+}
+
 // ruleCost is the work of one period of a checked rule, in maxRuleWork's
 // units.
 type ruleCost struct {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -585,5 +586,179 @@ func TestEncodeICSDeterministicStamp(t *testing.T) {
 	d, err := EncodeICSAt("", []Event{ev}, now)
 	if err != nil || !bytes.Contains(d, []byte("DTSTAMP:20260101T000000Z\r\n")) {
 		t.Fatalf("Updated wins over now: %v\n%s", err, d)
+	}
+}
+
+// zoneCalendar wraps VTIMEZONE observances and one VEVENT body in a
+// VCALENDAR. tzid names the zone; the VEVENT uses it as "TZ".
+func zoneCalendar(tzid, observances, event string) []byte {
+	s := "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:x\nBEGIN:VTIMEZONE\nTZID:" + tzid + "\n" + observances +
+		"END:VTIMEZONE\n" + event + "END:VCALENDAR\n"
+	return []byte(strings.ReplaceAll(s, "TZ:", tzid+":"))
+}
+
+// An observance recurs at most monthly: faster rules are ignored, and the
+// observance counts only at its DTSTART.
+func TestParseICSObservanceFrequencies(t *testing.T) {
+	event := "BEGIN:VEVENT\nUID:u\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20260715T090000\nEND:VEVENT\n"
+	for _, freq := range []string{"SECONDLY", "MINUTELY", "HOURLY", "DAILY", "WEEKLY"} {
+		obs := "BEGIN:STANDARD\nDTSTART:19900101T000000\nTZOFFSETFROM:+0500\nTZOFFSETTO:+0000\nEND:STANDARD\n" +
+			"BEGIN:DAYLIGHT\nDTSTART:19800101T000000\nRRULE:FREQ=" + freq + "\nTZOFFSETFROM:+0000\nTZOFFSETTO:+0500\nEND:DAYLIGHT\n"
+		_, events := mustParse(t, zoneCalendar("Fast Zone", obs, event))
+		if got := events[0].Start; !got.Equal(utc(2026, 7, 15, 9, 0, 0)) {
+			t.Errorf("FREQ=%s: start %v, want the STANDARD offset", freq, got)
+		}
+	}
+
+	// MONTHLY observances are used: +05 from the 10th, +00 from the 20th.
+	obs := "BEGIN:STANDARD\nDTSTART:19700120T000000\nRRULE:FREQ=MONTHLY;BYMONTHDAY=20\nTZOFFSETFROM:+0500\nTZOFFSETTO:+0000\nEND:STANDARD\n" +
+		"BEGIN:DAYLIGHT\nDTSTART:19700110T000000\nRRULE:FREQ=MONTHLY;BYMONTHDAY=10\nTZOFFSETFROM:+0000\nTZOFFSETTO:+0500\nEND:DAYLIGHT\n"
+	two := "BEGIN:VEVENT\nUID:a\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20260715T090000\nEND:VEVENT\n" +
+		"BEGIN:VEVENT\nUID:b\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20260725T090000\nEND:VEVENT\n"
+	_, events := mustParse(t, zoneCalendar("Monthly Zone", obs, two))
+	if !events[0].Start.Equal(utc(2026, 7, 15, 4, 0, 0)) || !events[1].Start.Equal(utc(2026, 7, 25, 9, 0, 0)) {
+		t.Fatalf("monthly observances: %v %v", events[0].Start, events[1].Start)
+	}
+}
+
+// Observance rules are expanded once, within a bounded amount of work, so
+// a rule with an onset every minute of every day is ignored, and rules
+// anchored in year 1 are still read correctly.
+func TestParseICSObservanceWorkBounded(t *testing.T) {
+	event := "BEGIN:VEVENT\nUID:u\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20260715T090000\nEND:VEVENT\n"
+	every := "FREQ=YEARLY;BYMONTH=" + seq(1, 12) + ";BYMONTHDAY=" + seq(1, 31) + ";BYHOUR=" + seq(0, 23) + ";BYMINUTE=" + seq(0, 59)
+	obs := "BEGIN:STANDARD\nDTSTART:19900101T000000\nTZOFFSETFROM:+0500\nTZOFFSETTO:+0000\nEND:STANDARD\n" +
+		"BEGIN:DAYLIGHT\nDTSTART:19800101T000000\nRRULE:" + every + "\nTZOFFSETFROM:+0000\nTZOFFSETTO:+0500\nEND:DAYLIGHT\n"
+	_, events := mustParse(t, zoneCalendar("Busy Zone", obs, event))
+	if got := events[0].Start; !got.Equal(utc(2026, 7, 15, 9, 0, 0)) {
+		t.Errorf("every-minute observance: start %v, want the STANDARD offset", got)
+	}
+
+	ancient := "BEGIN:STANDARD\nDTSTART:00011025T030000\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\nTZOFFSETFROM:+0200\nTZOFFSETTO:+0100\nEND:STANDARD\n" +
+		"BEGIN:DAYLIGHT\nDTSTART:00010329T020000\nRRULE:FREQ=MONTHLY;INTERVAL=12;BYDAY=-1SU\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0200\nEND:DAYLIGHT\n"
+	two := "BEGIN:VEVENT\nUID:a\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20260715T090000\nEND:VEVENT\n" +
+		"BEGIN:VEVENT\nUID:b\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20261215T090000\nEND:VEVENT\n"
+	_, events = mustParse(t, zoneCalendar("Old Zone", ancient, two))
+	if !events[0].Start.Equal(utc(2026, 7, 15, 7, 0, 0)) || !events[1].Start.Equal(utc(2026, 12, 15, 8, 0, 0)) {
+		t.Fatalf("rules from year 1: %v %v", events[0].Start, events[1].Start)
+	}
+}
+
+// pacificRules are US Pacific rules under a name that is not an IANA or
+// Windows zone.
+const pacificRules = "BEGIN:STANDARD\nDTSTART:20071104T020000\nRRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU\nTZOFFSETFROM:-0700\nTZOFFSETTO:-0800\nEND:STANDARD\n" +
+	"BEGIN:DAYLIGHT\nDTSTART:20070311T020000\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU\nTZOFFSETFROM:-0800\nTZOFFSETTO:-0700\nEND:DAYLIGHT\n"
+
+// A series in a zone known only from its VTIMEZONE keeps its local wall
+// time across the zone's DST change, and its EXDATEs and overrides still
+// name instances.
+func TestExpandCustomZoneAcrossDST(t *testing.T) {
+	series := "BEGIN:VEVENT\nUID:s\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20261019T090000\nDTEND;TZID=TZ:20261019T093000\n" +
+		"RRULE:FREQ=WEEKLY;UNTIL=20261201T000000Z\nEXDATE;TZID=TZ:20261109T090000\nEND:VEVENT\n" +
+		"BEGIN:VEVENT\nUID:s\nDTSTAMP:20260101T000000Z\nRECURRENCE-ID;TZID=TZ:20261116T090000\n" +
+		"DTSTART;TZID=TZ:20261116T100000\nDTEND;TZID=TZ:20261116T103000\nEND:VEVENT\n"
+	data := zoneCalendar("Office Time", pacificRules, series)
+	_, events := mustParse(t, data)
+	if events[0].TZID != "" {
+		t.Fatalf("custom zone TZID = %q, want \"\"", events[0].TZID)
+	}
+	want := []time.Time{
+		utc(2026, 10, 19, 16, 0, 0), // PDT
+		utc(2026, 10, 26, 16, 0, 0),
+		utc(2026, 11, 2, 17, 0, 0),  // PST
+		utc(2026, 11, 16, 18, 0, 0), // the override, at 10:00
+		utc(2026, 11, 23, 17, 0, 0),
+		utc(2026, 11, 30, 17, 0, 0),
+	}
+	insts, _ := mustExpand(t, events, utc(2026, 10, 1, 0, 0, 0), utc(2026, 12, 1, 0, 0, 0), MaxInstances)
+	sameTimes(t, starts(insts), want)
+
+	// The rows a cache stores keep Raw, which is enough: the zone is read
+	// from it again.
+	stored := make([]Event, len(events))
+	for i, ev := range events {
+		ev.Raw = bytes.Clone(data)
+		stored[i] = ev
+	}
+	insts, _ = mustExpand(t, stored, utc(2026, 10, 1, 0, 0, 0), utc(2026, 12, 1, 0, 0, 0), MaxInstances)
+	sameTimes(t, starts(insts), want)
+}
+
+// The calendar's own VTIMEZONE wins over tzdata for a TZID it defines,
+// while Event.TZID still names the IANA zone. A TZID with no VTIMEZONE, or
+// one whose VTIMEZONE has no usable observance, uses tzdata.
+func TestParseICSPrefersEmbeddedZone(t *testing.T) {
+	fixed := "BEGIN:STANDARD\nDTSTART:19700101T000000\nTZOFFSETFROM:+0300\nTZOFFSETTO:+0300\nEND:STANDARD\n"
+	series := "BEGIN:VEVENT\nUID:s\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20261019T090000\nDTEND;TZID=TZ:20261019T100000\n" +
+		"RRULE:FREQ=WEEKLY;COUNT=3\nEND:VEVENT\n"
+	for _, tzid := range []string{"Europe/Berlin", "W. Europe Standard Time", "/mozilla.org/20050126_1/Europe/Berlin"} {
+		_, events := mustParse(t, zoneCalendar(tzid, fixed, series))
+		ev := events[0]
+		if ev.TZID != "Europe/Berlin" || !ev.Start.Equal(utc(2026, 10, 19, 6, 0, 0)) {
+			t.Errorf("%s: TZID %q start %v, want Europe/Berlin at 06:00Z", tzid, ev.TZID, ev.Start)
+			continue
+		}
+		// Berlin leaves DST on 2026-10-25; the embedded zone does not.
+		insts, _ := mustExpand(t, events, utc(2026, 10, 1, 0, 0, 0), utc(2026, 12, 1, 0, 0, 0), MaxInstances)
+		sameTimes(t, starts(insts), []time.Time{utc(2026, 10, 19, 6, 0, 0), utc(2026, 10, 26, 6, 0, 0), utc(2026, 11, 2, 6, 0, 0)})
+	}
+
+	broken := "BEGIN:STANDARD\nDTSTART:19700101T000000\nTZOFFSETFROM:+0300\nEND:STANDARD\n"
+	_, events := mustParse(t, zoneCalendar("Europe/Berlin", broken, series))
+	if ev := events[0]; ev.TZID != "Europe/Berlin" || !ev.Start.Equal(utc(2026, 10, 19, 7, 0, 0)) {
+		t.Fatalf("unusable VTIMEZONE: TZID %q start %v, want tzdata", ev.TZID, ev.Start)
+	}
+	insts, _ := mustExpand(t, events, utc(2026, 10, 1, 0, 0, 0), utc(2026, 12, 1, 0, 0, 0), MaxInstances)
+	sameTimes(t, starts(insts), []time.Time{utc(2026, 10, 19, 7, 0, 0), utc(2026, 10, 26, 8, 0, 0), utc(2026, 11, 2, 8, 0, 0)})
+}
+
+// A VTIMEZONE that lost part of its rules (here a DAILY observance rule,
+// which is ignored) does not replace tzdata for a TZID tzdata knows.
+func TestParseICSDegradedZoneFallsBackToTzdata(t *testing.T) {
+	rules := "BEGIN:STANDARD\nDTSTART:19701025T030000\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\nTZOFFSETFROM:+0200\nTZOFFSETTO:+0100\nEND:STANDARD\n" +
+		"BEGIN:DAYLIGHT\nDTSTART:19700329T020000\nRRULE:FREQ=DAILY\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0200\nEND:DAYLIGHT\n"
+	event := "BEGIN:VEVENT\nUID:u\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20260715T090000\nEND:VEVENT\n"
+	_, events := mustParse(t, zoneCalendar("Europe/Berlin", rules, event))
+	if ev := events[0]; ev.TZID != "Europe/Berlin" || !ev.Start.Equal(utc(2026, 7, 15, 7, 0, 0)) {
+		t.Fatalf("degraded VTIMEZONE: TZID %q start %v, want tzdata", ev.TZID, ev.Start)
+	}
+}
+
+// A UTC DTSTART with a TZID parameter is UTC, as ParseICS reads it, so the
+// series recurs in UTC.
+func TestExpandUTCStartIgnoresTZID(t *testing.T) {
+	series := "BEGIN:VEVENT\nUID:s\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20261019T160000Z\nDTEND;TZID=TZ:20261019T163000Z\n" +
+		"RRULE:FREQ=WEEKLY;COUNT=3\nEND:VEVENT\n"
+	_, events := mustParse(t, zoneCalendar("Office Time", pacificRules, series))
+	insts, _ := mustExpand(t, events, utc(2026, 10, 1, 0, 0, 0), utc(2026, 12, 1, 0, 0, 0), MaxInstances)
+	sameTimes(t, starts(insts), []time.Time{utc(2026, 10, 19, 16, 0, 0), utc(2026, 10, 26, 16, 0, 0), utc(2026, 11, 2, 16, 0, 0)})
+}
+
+// The zone embeddedZone remembers for one Raw is shared by every series
+// expanded from it, from any goroutine.
+func TestExpandSharedZoneConcurrently(t *testing.T) {
+	series := "BEGIN:VEVENT\nUID:s\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20261019T090000\nRRULE:FREQ=WEEKLY\nEND:VEVENT\n"
+	_, events := mustParse(t, zoneCalendar("Office Time", pacificRules, series))
+	// The first expansion reads the zone; the goroutines share it.
+	mustExpand(t, events, utc(2026, 10, 1, 0, 0, 0), utc(2026, 11, 1, 0, 0, 0), MaxInstances)
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := range 8 {
+		wg.Go(func() {
+			// Each goroutine reaches different years of the zone.
+			from := utc(2027+i, 1, 1, 0, 0, 0)
+			insts, _, err := Expand(events, from, from.AddDate(0, 1, 0), MaxInstances)
+			if err == nil && (len(insts) < 4 || insts[0].Start.Hour() != 17) {
+				err = fmt.Errorf("year %d: %d instances, first %v", from.Year(), len(insts), insts)
+			}
+			errs <- err
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Error(err)
+		}
 	}
 }
