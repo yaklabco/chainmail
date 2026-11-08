@@ -26,6 +26,9 @@ message GetCacheStatusResponse {
   // The [cache] max_size cap.
   int64 max_size_bytes = 2;
   repeated AccountCacheStatus accounts = 3;
+  // The calendar cache of every account with a calendar store, or of those
+  // named.
+  repeated AccountCalendarStatus calendars = 4;
 }
 
 // AccountCacheStatus is the cache of one account.
@@ -42,6 +45,20 @@ message AccountCacheStatus {
   // An api reason code, never server text.
   string last_error = 6;
   repeated FolderCacheStatus folders = 7;
+}
+
+// AccountCalendarStatus is the calendar cache of one account.
+message AccountCalendarStatus {
+  string account = 1;
+  // ready, syncing, auth_required or error.
+  string state = 2;
+  google.protobuf.Timestamp last_sync_at = 3;
+  // Calendars synced.
+  int64 calendars = 4;
+  // Events cached.
+  int64 events = 5;
+  // An api reason code, never server text.
+  string last_error = 6;
 }
 
 // FolderCacheStatus is the cache of one synced folder.
