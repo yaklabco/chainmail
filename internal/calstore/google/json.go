@@ -432,3 +432,13 @@ func patchTime(t time.Time, tzid string, allDay bool) map[string]any {
 	}
 	return m
 }
+
+// calendarZone returns a calendar's timeZone when Go can load it, UTC and
+// its aliases included, else "". Unlike an event's TZID, a calendar's zone
+// is kept as Google names it: "UTC" is a zone, not an unknown one.
+func calendarZone(tz string) string {
+	if _, err := loadZone(tz); err != nil {
+		return ""
+	}
+	return tz
+}

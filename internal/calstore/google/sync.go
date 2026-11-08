@@ -53,7 +53,7 @@ func (s *Store) ListCalendars(ctx context.Context) ([]calendar.Calendar, error) 
 			if it.AccessRole == "owner" || it.AccessRole == "writer" {
 				c.Access = calendar.AccessWrite
 			}
-			c.TimeZone = zoneName(it.TimeZone)
+			c.TimeZone = calendarZone(it.TimeZone)
 			out = append(out, c)
 		}
 		if page.NextPageToken == "" {

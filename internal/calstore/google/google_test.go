@@ -63,6 +63,8 @@ func TestListCalendars(t *testing.T) {
 	st, srv := newStore(t)
 	srv.AddCalendar(fakegcal.Calendar{ID: "w@group.calendar.google.com", Summary: "Shared", SummaryOverride: "My name", AccessRole: "writer", TimeZone: "Not/AZone"})
 	srv.AddCalendar(fakegcal.Calendar{ID: "fb@example.com", Summary: "Busy only", AccessRole: "freeBusyReader", TimeZone: "UTC"})
+	srv.AddCalendar(fakegcal.Calendar{ID: "etc@example.com", Summary: "Etc", AccessRole: "reader", TimeZone: "Etc/UTC"})
+	srv.AddCalendar(fakegcal.Calendar{ID: "local@example.com", Summary: "Local", AccessRole: "reader", TimeZone: "Local"})
 	srv.SetPageSize(1)
 	cals, err := st.ListCalendars(ctx(t))
 	if err != nil {
@@ -72,7 +74,9 @@ func TestListCalendars(t *testing.T) {
 		{ID: me, Name: "Me", Access: calendar.AccessWrite, Primary: true, TimeZone: la},
 		{ID: readOnly, Name: "Team", Access: calendar.AccessRead},
 		{ID: "w@group.calendar.google.com", Name: "My name", Access: calendar.AccessWrite},
-		{ID: "fb@example.com", Name: "Busy only", Access: calendar.AccessRead},
+		{ID: "fb@example.com", Name: "Busy only", Access: calendar.AccessRead, TimeZone: "UTC"},
+		{ID: "etc@example.com", Name: "Etc", Access: calendar.AccessRead, TimeZone: "Etc/UTC"},
+		{ID: "local@example.com", Name: "Local", Access: calendar.AccessRead},
 	}
 	if len(cals) != len(want) {
 		t.Fatalf("got %d calendars, want %d: %+v", len(cals), len(want), cals)
@@ -88,8 +92,8 @@ func TestListCalendars(t *testing.T) {
 			pages++
 		}
 	}
-	if pages != 4 {
-		t.Errorf("calendar list took %d requests, want 4 pages", pages)
+	if pages != len(want) {
+		t.Errorf("calendar list took %d requests, want %d pages", pages, len(want))
 	}
 }
 
