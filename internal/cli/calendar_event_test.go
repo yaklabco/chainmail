@@ -33,6 +33,8 @@ func TestEventCreateRequests(t *testing.T) {
 	ny := func(day, hour, minute int) time.Time {
 		return time.Date(2026, 11, day, hour, minute, 0, 0, mustZone(t, "America/New_York"))
 	}
+	// An all-day event goes on the wire as 00:00 UTC of its dates.
+	utcDay := func(day int) time.Time { return time.Date(2026, 11, day, 0, 0, 0, 0, time.UTC) }
 	tests := []struct {
 		name string
 		args []string
@@ -65,17 +67,17 @@ func TestEventCreateRequests(t *testing.T) {
 		{
 			name: "all day, the end date included",
 			args: []string{"--title", "Offsite", "--all-day", "--start", "2026-11-11", "--end", "2026-11-13"},
-			want: &chainmailv1.CreateEventRequest{Title: "Offsite", AllDay: true, Start: ts(ny(11, 0, 0)), End: ts(ny(14, 0, 0))},
+			want: &chainmailv1.CreateEventRequest{Title: "Offsite", AllDay: true, Start: ts(utcDay(11)), End: ts(utcDay(14))},
 		},
 		{
 			name: "all day for one day by default",
 			args: []string{"--title", "Holiday", "--all-day", "--start", "2026-11-26"},
-			want: &chainmailv1.CreateEventRequest{Title: "Holiday", AllDay: true, Start: ts(ny(26, 0, 0)), End: ts(ny(27, 0, 0))},
+			want: &chainmailv1.CreateEventRequest{Title: "Holiday", AllDay: true, Start: ts(utcDay(26)), End: ts(utcDay(27))},
 		},
 		{
 			name: "all day for two days by duration",
 			args: []string{"--title", "Trip", "--all-day", "--start", "2026-11-26", "--duration", "2d"},
-			want: &chainmailv1.CreateEventRequest{Title: "Trip", AllDay: true, Start: ts(ny(26, 0, 0)), End: ts(ny(28, 0, 0))},
+			want: &chainmailv1.CreateEventRequest{Title: "Trip", AllDay: true, Start: ts(utcDay(26)), End: ts(utcDay(28))},
 		},
 		{
 			name: "rfc 3339 times",
@@ -99,6 +101,56 @@ func TestEventCreateRequests(t *testing.T) {
 			req.IdempotencyKey = ""
 			if !proto.Equal(req, tt.want) {
 				t.Errorf("request = %v, want %v", req, tt.want)
+			}
+		})
+	}
+}
+
+// runCalIn runs chainmail against f at calNow with the CLI in loc.
+func runCalIn(t *testing.T, f *fakeCalendar, loc *time.Location, args ...string) cliResult {
+	t.Helper()
+	env := Env{TZ: loc, Now: func() time.Time { return calNow }}
+	return runCLI(t, env, append([]string{"--socket", startFakeCalendar(t, f)}, args...)...)
+}
+
+// An all-day event carries 00:00 UTC of the dates typed, end exclusive,
+// whatever zone the CLI runs in or --tz names (Amendment 17). The zones
+// here are far from UTC, so local midnight falls on another UTC date.
+func TestEventCreateAllDayDatesAreUTCMidnights(t *testing.T) {
+	t.Parallel()
+	day := func(d int) time.Time { return time.Date(2026, 11, d, 0, 0, 0, 0, time.UTC) }
+	tests := []struct {
+		name       string
+		zone       string
+		args       []string
+		start, end time.Time
+		tz         string
+	}{
+		{name: "fourteen hours ahead", zone: "Pacific/Kiritimati", args: []string{"--start", "2026-11-11", "--end", "2026-11-13"}, start: day(11), end: day(14)},
+		{name: "eleven hours behind", zone: "Pacific/Pago_Pago", args: []string{"--start", "2026-11-11", "--duration", "2d"}, start: day(11), end: day(13)},
+		{name: "one day by default", zone: "Asia/Tokyo", args: []string{"--start", "2026-11-30"}, start: day(30), end: time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)},
+		{
+			name: "--tz names the zone the dates are read in", zone: "Pacific/Kiritimati",
+			args: []string{"--start", "2026-11-11", "--tz", "America/Los_Angeles"}, start: day(11), end: day(12), tz: "America/Los_Angeles",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeCalendar{}
+			args := append([]string{"event", "create", "--title", "Away", "--all-day"}, tt.args...)
+			if got := runCalIn(t, f, mustZone(t, tt.zone), args...); got.code != 0 {
+				t.Fatalf("event create: %+v", got)
+			}
+			req := createReq(t, f)
+			if got := req.GetStart().AsTime(); !got.Equal(tt.start) {
+				t.Errorf("start = %v, want %v", got, tt.start)
+			}
+			if got := req.GetEnd().AsTime(); !got.Equal(tt.end) {
+				t.Errorf("end = %v, want %v", got, tt.end)
+			}
+			if !req.GetAllDay() || req.GetTimeZone() != tt.tz {
+				t.Errorf("all_day = %v, time_zone = %q, want true and %q", req.GetAllDay(), req.GetTimeZone(), tt.tz)
 			}
 		})
 	}
@@ -355,7 +407,7 @@ func TestEventEditRequests(t *testing.T) {
 			args: []string{"--etag", "x", "--all-day", "--start", "2026-11-10"},
 			want: &chainmailv1.UpdateEventRequest{
 				Ref: calInstRef, Etag: "x", AllDay: true, UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"start", "end", "all_day"}},
-				Start: ts(time.Date(2026, 11, 10, 5, 0, 0, 0, time.UTC)), End: ts(time.Date(2026, 11, 11, 5, 0, 0, 0, time.UTC)),
+				Start: ts(time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)), End: ts(time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)),
 			},
 		},
 	}

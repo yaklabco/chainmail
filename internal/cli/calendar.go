@@ -345,3 +345,10 @@ func newFreeBusyCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	cmd.Flags().StringVar(&account, "account", "", "the account whose provider is asked about the addresses")
 	return cmd
 }
+
+// utcDate is 00:00 UTC of t's date in t's own zone. All-day dates go on the
+// wire this way (Amendment 17), so the date the user typed is the date the
+// event takes, whatever zone the CLI runs in.
+func utcDate(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}

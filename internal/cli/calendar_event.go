@@ -37,11 +37,13 @@ const eventCreateHelp = `Create an event on an account's calendar, the default o
 --calendar names another. Each --attendee is invited.
 
 --all-day takes dates: --start is the first day and --end the last, or
---duration a number of days such as 2d; one day by default. Otherwise
---end or --duration, such as 30m or 1h30m, is required.
+--duration a number of days such as 2d; one day by default. The event
+takes the dates typed, in any zone: the CLI sends them as 00:00 UTC of
+those dates, as the daemon stores all-day events. Otherwise --end or
+--duration, such as 30m or 1h30m, is required.
 
---tz names the event's zone as well as the zone times are read in. Without
-it the event takes the daemon's [calendar] timezone.
+--tz names a timed event's zone as well as the zone times are read in.
+Without it the event takes the daemon's [calendar] timezone.
 
 Running the same create again within 7 days returns the event already
 created instead of creating it twice: without --idempotency-key, the key
@@ -88,7 +90,8 @@ func addEventFlags(cmd *cobra.Command, ef *eventFlags) {
 	f.StringVar(&ef.tz, "tz", "", "the event's IANA zone, also used to read times without a zone (default: this machine's zone for reading, the daemon's [calendar] timezone for the event)")
 }
 
-// parseStart reads --start. An all-day start must be a date.
+// parseStart reads --start. An all-day start must be a date, and is
+// 00:00 UTC of that date, as the wire carries all-day dates.
 func (ef *eventFlags) parseStart(cmd *cobra.Command, loc *time.Location, allDay bool) (time.Time, error) {
 	ct, err := parseCalTime(cmd, "start", ef.start, loc)
 	if err != nil {
@@ -96,6 +99,9 @@ func (ef *eventFlags) parseStart(cmd *cobra.Command, loc *time.Location, allDay 
 	}
 	if allDay && !ct.dateOnly {
 		return time.Time{}, usageError{err: errors.New("--all-day takes dates: give --start as a date, such as 2026-11-10"), hint: helpHint(cmd)}
+	}
+	if allDay {
+		return utcDate(ct.t), nil
 	}
 	return ct.t, nil
 }
@@ -117,6 +123,9 @@ func (ef *eventFlags) parseEnd(cmd *cobra.Command, start time.Time, loc *time.Lo
 		end := ct.t
 		if ct.dateOnly {
 			end = nextDay(ct.t)
+		}
+		if allDay {
+			end = nextDay(utcDate(ct.t))
 		}
 		if !end.After(start) {
 			return time.Time{}, false, usage("--end must be after --start")
