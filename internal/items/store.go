@@ -70,6 +70,9 @@ type Store struct {
 	now func() time.Time
 	// rnd feeds NewID. Nil uses crypto/rand.
 	rnd io.Reader
+	// dueHook, when set, checks due dates inside the writes that can bring
+	// an item into a due stage. SetDueHook sets it.
+	dueHook DueHook
 }
 
 // NewStore returns a Store over db, which must hold the state schema, that
@@ -80,6 +83,33 @@ func NewStore(db *sql.DB, log *watch.Log, now func() time.Time) *Store {
 		now = time.Now
 	}
 	return &Store{db: db, log: log, now: now}
+}
+
+// DueHook checks the due dates of items a write changed. It runs inside the
+// write's transaction after the item rows changed, may use only tx, and
+// returns events for the same transaction, which the write appends after its
+// own. now is the write's time. The daemon sets the rules package's due
+// checker here, so this package never imports it.
+type DueHook func(ctx context.Context, tx *sql.Tx, ids []string, now time.Time) ([]watch.Event, error)
+
+// SetDueHook makes Create, an Update that changes the due date or the state,
+// and Restore call h inside their transaction. Delete never calls it. Set it
+// once, before the Store is used: it is not safe alongside writes.
+func (s *Store) SetDueHook(h DueHook) {
+	s.dueHook = h
+}
+
+// dueEvents returns events followed by what the due hook returns for ids,
+// or events unchanged when no hook is set.
+func (s *Store) dueEvents(ctx context.Context, tx *sql.Tx, ids []string, now time.Time, events []watch.Event) ([]watch.Event, error) {
+	if s.dueHook == nil || len(ids) == 0 {
+		return events, nil
+	}
+	due, err := s.dueHook(ctx, tx, ids, now)
+	if err != nil {
+		return nil, fmt.Errorf("items: checking due dates: %w", err)
+	}
+	return append(events, due...), nil
 }
 
 // queryer is what *sql.DB and *sql.Tx share for reads.

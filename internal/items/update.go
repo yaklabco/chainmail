@@ -33,6 +33,8 @@ type Patch struct {
 // update that changes nothing writes nothing and returns the stored item.
 // Otherwise the item gets one revision and one event listing the changed
 // fields in mask order, op moved when parent_id changed and updated else.
+// When the due date or the state changed, a due hook set with SetDueHook
+// runs for the item inside the same transaction.
 func (s *Store) Update(ctx context.Context, a Actor, id string, p Patch) (Item, error) {
 	fields, err := maskFields(p.Fields)
 	if err != nil {
@@ -92,7 +94,11 @@ func (s *Store) Update(ctx context.Context, a Actor, id string, p Patch) (Item, 
 		if slices.Contains(changed, fieldParent) {
 			op = OpMoved
 		}
-		return []watch.Event{itemEvent(now, id, next.Type, r, op, changed)}, nil
+		events := []watch.Event{itemEvent(now, id, next.Type, r, op, changed)}
+		if !slices.Contains(changed, fieldDueDate) && !slices.Contains(changed, fieldState) {
+			return events, nil
+		}
+		return s.dueEvents(ctx, tx, []string{id}, now, events)
 	})
 	if err != nil {
 		return Item{}, err
