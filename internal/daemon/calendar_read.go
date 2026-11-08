@@ -384,11 +384,11 @@ func (s *Server) mailInviteOf(r calcache.MailInviteRow) (*chainmailv1.Invite, bo
 	return s.mailInviteProto(r, ev), true
 }
 
-// parseMailInvite reads a stored mail invite: its main event (the master,
+// parseMailInvite reads a stored mail invite, in its stored charset: its main event (the master,
 // or the first event) and every event. A row that no longer parses is
 // logged by its ref and skipped.
 func (s *Server) parseMailInvite(r calcache.MailInviteRow) (calendar.Event, []calendar.Event, bool) {
-	inv, err := calendar.ParseInvite(r.Raw, "")
+	inv, err := calendar.ParseInvite(r.Raw, r.Charset)
 	if err == nil && len(inv.Events) == 0 {
 		err = calendar.ErrNotInvite
 	}

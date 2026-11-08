@@ -1,6 +1,7 @@
 package daemon_test
 
 import (
+	"bytes"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -565,4 +566,42 @@ func TestFreeBusy(t *testing.T) {
 		t.Errorf("hint = %q, want the account's login", h)
 	}
 	noSecretInAudit(t, e.Harness)
+}
+
+// A mail invite stored in its own charset (the hook keeps the original bytes
+// when the UTF-8 copy would not fit) is read back in that charset.
+func TestListInvitesReadsAStoredCharset(t *testing.T) {
+	t.Parallel()
+	e := startCal(t, func(*calEnv) {})
+	ev := invitation("latin@x", "me@example.com", e.start.Add(time.Hour))
+	ev.Summary = "Café"
+	raw, err := calendar.EncodeICSAt("REQUEST", []calendar.Event{ev}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	latin := bytes.ReplaceAll(raw, []byte("Café"), []byte("Caf\xe9"))
+	inv, err := calendar.ParseInvite(latin, "iso-8859-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := calcache.MailInviteRow{
+		Account: "host", MessageRef: "host:INBOX:1:9", UID: inv.UID, Method: inv.Method, Sequence: inv.Sequence,
+		DTStamp: inv.DTStamp, Raw: latin, Charset: "iso-8859-1", FoundAt: time.Now(),
+	}
+	if err := e.cache.PutMailInvite(t.Context(), row); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := e.Client.Calendar.ListInvites(t.Context(), connect.NewRequest(&chainmailv1.ListInvitesRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, i := range resp.Msg.GetInvites() {
+		if i.GetEvent().GetUid() == "latin@x" {
+			if got := i.GetEvent().GetSummary().GetUntrusted(); got != "Café" {
+				t.Errorf("summary = %q, want Café", got)
+			}
+			return
+		}
+	}
+	t.Errorf("the latin-1 invite is not listed among %d invites", len(resp.Msg.GetInvites()))
 }
