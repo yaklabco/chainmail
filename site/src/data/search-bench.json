@@ -1,0 +1,12 @@
+{
+  "measured": "2026-11-05",
+  "rows": [
+    { "label": "Newest 50 messages, all accounts", "query": "chainmail search --limit 50", "server_ms": 2796, "cache_ms": 87.9 },
+    { "label": "Sender and date", "query": "from:amazon newer_than:30d", "server_ms": 1815, "cache_ms": 17.4 },
+    { "label": "A word in the last 30 days", "query": "invoice newer_than:30d", "server_ms": 1556, "cache_ms": 21.8 },
+    { "label": "The second page of results", "query": "from:amazon --cursor ...", "server_ms": 2775, "cache_ms": 239.3 },
+    { "label": "An old message, read again", "query": "chainmail get <ref>", "server_ms": 1539, "cache_ms": 21.5 },
+    { "label": "Open a thread", "query": "chainmail thread <ref>", "server_ms": 940, "cache_ms": 14.1 },
+    { "label": "Open a message", "query": "chainmail get <ref>", "server_ms": 397, "cache_ms": 14.4 }
+  ]
+}
