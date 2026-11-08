@@ -621,6 +621,30 @@ func TestCalendarScopeAuditsOnlyValidNames(t *testing.T) {
 	}
 }
 
+// James's busy time over a long range is complete even when one series
+// has more instances in it than one expansion returns.
+func TestFreeBusyOfAnHourlySeries(t *testing.T) {
+	t.Parallel()
+	e := startCal(t, func(e *calEnv) {
+		ev := own("hourly@x", "james@mw.example", e.start)
+		ev.End = e.start.Add(30 * time.Minute)
+		ev.RRule = "FREQ=HOURLY"
+		e.mw.Add(mwCal, ev)
+	})
+	from, to := e.start, e.start.Add(60*24*time.Hour)
+	resp, err := e.Client.Calendar.FreeBusy(t.Context(), connect.NewRequest(&chainmailv1.FreeBusyRequest{From: ts(from), To: ts(to)}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	busy := resp.Msg.GetSelfBusy()
+	if len(busy) != 60*24 {
+		t.Fatalf("busy blocks = %d, want one an hour for 60 days (%d)", len(busy), 60*24)
+	}
+	if last := busy[len(busy)-1]; !last.GetStart().AsTime().Equal(to.Add(-time.Hour)) {
+		t.Errorf("last block starts %v, want %v", last.GetStart().AsTime(), to.Add(-time.Hour))
+	}
+}
+
 // Calls that name an event by ref wait for the first sync: before it, an
 // event the cache does not hold yet may be one of the account's.
 func TestRefCallsBeforeTheFirstSync(t *testing.T) {

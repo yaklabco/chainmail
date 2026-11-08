@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/api"
 	"github.com/yaklabco/chainmail/internal/audit"
 	"github.com/yaklabco/chainmail/internal/calcache"
 	"github.com/yaklabco/chainmail/internal/calendar"
@@ -572,18 +573,11 @@ func (h *calendarService) FreeBusy(ctx context.Context, req *connect.Request[cha
 		}
 		out := &chainmailv1.FreeBusyResponse{SelfBusy: []*chainmailv1.BusyBlock{}, People: []*chainmailv1.PersonFreeBusy{}}
 		if wf, wt, ok := s.calendarWindow(from, to); ok {
-			insts, _, err := s.expandRange(ctx, accountNames(cas), nil, wf, wt)
+			blocks, err := s.selfBusy(ctx, accountNames(cas), wf, wt, from, to)
 			if err != nil {
 				return nil, err
 			}
-			var blocks []calendar.BusyBlock
-			for _, in := range insts {
-				if in.ev.Status == calendar.StatusCancelled || in.ev.Transparent || in.myPartStat == calendar.PartStatDeclined {
-					continue
-				}
-				blocks = append(blocks, calendar.BusyBlock{Start: maxTime(in.ev.Start, from), End: minTime(in.ev.End, to)})
-			}
-			out.SelfBusy = busyProto(calendar.MergeBusy(blocks))
+			out.SelfBusy = busyProto(blocks)
 		}
 		if len(m.GetPeople()) > 0 {
 			fb, err := asked.store.FreeBusy(ctx, m.GetPeople(), from, to)
@@ -597,6 +591,51 @@ func (h *calendarService) FreeBusy(ctx context.Context, req *connect.Request[cha
 		}
 		return out, nil
 	})
+}
+
+// maxBusyInstances bounds the instances one FreeBusy expands over every
+// series together. An hourly series over the longest range (400 days) has
+// 9,600; a range that needs more is refused rather than answered in part.
+const maxBusyInstances = 50_000
+
+var errBusyIncomplete = &calendarRefusal{
+	code: connect.CodeFailedPrecondition, reason: api.ReasonInvalidArgument,
+	msg:  "the range holds more event instances than chainmail expands for free/busy",
+	hint: "ask for a shorter range",
+}
+
+// selfBusy is James's merged busy time from the cached events of accounts
+// that overlap [from, to), each block clipped to [clipFrom, clipTo): every
+// instance but cancelled, transparent and declined ones. Each series is expanded whole, from a budget of
+// maxBusyInstances shared by all, so no busy time is left out: a series
+// the budget cannot hold refuses the call. A series whose rule chainmail
+// never expands is left out, as Agenda leaves it out.
+func (s *Server) selfBusy(ctx context.Context, accounts []string, from, to, clipFrom, clipTo time.Time) ([]calendar.BusyBlock, error) {
+	rows, err := s.calcache.Range(ctx, accounts, nil, from, to)
+	if err != nil {
+		return nil, err
+	}
+	var blocks []calendar.BusyBlock
+	budget := maxBusyInstances
+	for _, group := range seriesGroups(rows) {
+		// One more than the budget tells a series that does not fit.
+		insts, truncated, err := expandGroup(group, from, to, budget+1)
+		if err != nil {
+			s.opts.Logger.Info("a calendar series was not expanded", "account", group[0].Account, "ref", calendar.EventRef(group[0].Account, group[0].CalendarID, group[0].Event.ProviderID), "reason", expandReason(err))
+			continue
+		}
+		if truncated || len(insts) > budget {
+			return nil, errBusyIncomplete
+		}
+		budget -= len(insts)
+		for _, in := range insts {
+			if in.ev.Status == calendar.StatusCancelled || in.ev.Transparent || in.myPartStat == calendar.PartStatDeclined {
+				continue
+			}
+			blocks = append(blocks, calendar.BusyBlock{Start: maxTime(in.ev.Start, clipFrom), End: minTime(in.ev.End, clipTo)})
+		}
+	}
+	return calendar.MergeBusy(blocks), nil
 }
 
 // checkPeople refuses a free/busy list that is too long or holds something
