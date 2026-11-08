@@ -123,11 +123,11 @@ Everything but the entry point and the generated code lives under `internal/`, s
 1. It creates the two standing Admin items if they are missing.
 2. It recovers sends an earlier daemon left in progress, marking their outcome unknown so a repeat never sends them again.
 3. It opens `cache.db`.
-4. It starts the background loops: the idempotency pruner, the upload sweeper, the event log trimmer, the item and rule run tables' trimmer, the due checker and, with a cache, the evictor and the cache housekeeping.
-5. It starts one watch supervisor per synced account, and the cache workers of each account with the cache on. After the cache workers it starts one rule runner per account with a cache worker, and the rule scheduler.
+4. It starts one watch supervisor per synced account, and the cache workers of each account with the cache on. After the cache workers it starts one rule runner per account with a cache worker.
+5. It starts the background loops: the idempotency pruner, the upload sweeper, the event log trimmer, the item and rule run tables' trimmer, the due checker, the rule scheduler and, with a cache, the evictor and the cache housekeeping. They run even when no account is watched.
 6. It accepts connections.
 
-On shutdown it stops taking requests, cancels the ones in flight, waits for every handler to return, stops the supervisors and cache workers, and logs out of the mail servers. Only then does the CLI close `state.db`.
+On shutdown it stops taking requests, cancels the ones in flight, waits for every handler to return, stops the supervisors and cache workers, and logs out of the mail servers. It then stops the background loops, the rule scheduler among them, and closes `cache.db`. Only then does the CLI close `state.db`.
 
 Each account's `mailstore.Store` is built once, on its first use, with a connection pool sized from the probed connection limit. Watchers hold connections of their own outside the pool.
 
@@ -242,7 +242,7 @@ flowchart LR
 - The event log has named groups with Redis Streams semantics: each group has an acknowledged position, and a reader continues from it after a restart. Clients read through their own groups with `chainmail watch`, the `read_events` tool, or `WatchService`.
 - The cache of each account reads the same log through an internal group named `cache.` followed by the account name. Clients can never use such a name. The builder applies events to `cache.db` and acknowledges them only after they are applied, so a failure loses nothing. The backfill fetches the headers of mail that was in a folder before the cache tracked it, and the prefetcher fetches bodies inside the window. The internal `unreadable` event kind, which the API never shows, tells the cache about new mail a pass could not read.
 - The rule runner of each account reads the log through its own internal group, `rules.` followed by the account name, which clients cannot use either. It waits until the cache builder has applied a batch, matches the enabled `on_new` rules against `cache.db`, acts, and only then acknowledges. A transient failure leaves the batch unacknowledged, and the act-once table in `state.db` keeps the replay from acting twice.
-- The rule scheduler sleeps until the next scheduled rule is due and hands it to each covered account's runner. The due checker scans open items with due dates when the daemon starts and each day at `[rules] due_time`. It waits at most 5 minutes at a time and reads the wall clock after each wait, so a machine that wakes from sleep after `due_time` scans within about 5 minutes. `items.Store` calls it inside the transaction of each item write that can change a due stage. Rule changes append `rule` events through `rules.Store`.
+- The rule scheduler sleeps until the next scheduled rule is due and hands it to each covered account's runner. An account with no runner gets a `cache_not_ready` run with the reason `cache_disabled`, and the rule moves on to its next time. The scheduler sleeps at most 5 minutes at a time and reads the wall clock after each sleep, as the due checker does. The due checker scans open items with due dates when the daemon starts and each day at `[rules] due_time`. It waits at most 5 minutes at a time and reads the wall clock after each wait, so a machine that wakes from sleep after `due_time` scans within about 5 minutes. `items.Store` calls it inside the transaction of each item write that can change a due stage. Rule changes append `rule` events through `rules.Store`.
 
 [Watching for mail](../guide/watching.md) covers the user's view of events and groups.
 
