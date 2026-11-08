@@ -1,0 +1,217 @@
+package daemon_test
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"connectrpc.com/connect"
+
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/calendar"
+	calfake "github.com/yaklabco/chainmail/internal/calstore/fake"
+)
+
+// derivedUID is the UID the daemon gives an event created with key on
+// account (Amendment 14).
+func derivedUID(account, key string) string {
+	sum := sha256.Sum256([]byte(account + "\x00" + key))
+	return hex.EncodeToString(sum[:]) + "@chainmail"
+}
+
+func (e *calEnv) create(t *testing.T, req *chainmailv1.CreateEventRequest) (*chainmailv1.CreateEventResponse, error) {
+	t.Helper()
+	resp, err := e.Client.Calendar.CreateEvent(t.Context(), connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+// meetingRequest is a create of a one-hour meeting on mw.
+func (e *calEnv) meetingRequest(key string, attendees ...string) *chainmailv1.CreateEventRequest {
+	return &chainmailv1.CreateEventRequest{
+		Account: "mw", Title: "Plan " + secretText, Location: "Room " + secretText, Description: "Agenda " + secretText,
+		Start: ts(e.start), End: ts(e.start.Add(time.Hour)), TimeZone: "Europe/London",
+		Attendees: attendees, IdempotencyKey: key,
+	}
+}
+
+func TestCreateEvent(t *testing.T) {
+	t.Parallel()
+	e := startCal(t, nil)
+	got, err := e.create(t, e.meetingRequest("c1", allowedAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := derivedUID("mw", "c1")
+	ref := calendar.EventRef("mw", mwCal, calfake.ObjectName(uid))
+	ev := got.GetEvent()
+	if got.GetHeld() != nil || ev.GetRef() != ref || ev.GetUid() != uid || !ev.GetIsOrganizer() || ev.GetTimeZone() != "Europe/London" ||
+		ev.GetSummary().GetUntrusted() != "Plan "+secretText || !ev.GetStart().AsTime().Equal(e.start) {
+		t.Errorf("event = %v", got)
+	}
+	checkUntrusted(t, got)
+	calls := e.mw.CallsTo(calfake.MethodPut)
+	if len(calls) != 1 || calls[0].Notify != calendar.NotifySend || calls[0].ETag != "" || calls[0].CalendarID != mwCal {
+		t.Fatalf("Put calls = %+v", calls)
+	}
+	put := calls[0].Event
+	if put.UID != uid || put.Organizer == nil || put.Organizer.Email != "james@mw.example" || put.TZID != "Europe/London" ||
+		len(put.Attendees) != 2 || put.Attendees[0].Email != "james@mw.example" || put.Attendees[0].PartStat != calendar.PartStatAccepted ||
+		put.Attendees[1].Email != allowedAddr || put.Attendees[1].PartStat != calendar.PartStatNeedsAction {
+		t.Errorf("event put = %+v", put)
+	}
+	if r := auditRow(t, e.Harness, "calendar.create_event"); r.Result != "ok" || r.Account != "mw" ||
+		!strings.Contains(r.Targets, "calendar="+mwCal) || !strings.Contains(r.Targets, ref) {
+		t.Errorf("audit row %+v", r)
+	}
+
+	// The same key returns the event already created.
+	again, err := e.create(t, e.meetingRequest("c1", allowedAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.GetEvent().GetRef() != ref || e.mw.Count(calfake.MethodPut) != 1 {
+		t.Errorf("replay = %v, Put calls %d", again, e.mw.Count(calfake.MethodPut))
+	}
+	other := e.meetingRequest("c1", allowedAddr)
+	other.Title = "Another"
+	_, err = e.create(t, other)
+	wantReason(t, "key reused for another event", err, api.ReasonInvalidArgument)
+	noSecretInAudit(t, e.Harness)
+}
+
+func TestCreateEventHeld(t *testing.T) {
+	t.Parallel()
+	e := startCal(t, nil)
+	got, err := e.create(t, e.meetingRequest("held-1", allowedAddr, blockedAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := got.GetHeld()
+	ref := calendar.EventRef("mw", mwCal, calfake.ObjectName(derivedUID("mw", "held-1")))
+	if held == nil || held.GetEventRef() != ref || got.GetEvent().GetRef() != ref || len(held.GetBlocked()) != 1 ||
+		held.GetBlocked()[0].GetUntrusted() != blockedAddr || held.GetHint() == "" {
+		t.Fatalf("response = %v, want a held draft event", got)
+	}
+	calls := e.mw.CallsTo(calfake.MethodPut)
+	if len(calls) != 1 || calls[0].Notify != calendar.NotifyNone {
+		t.Errorf("Put calls = %+v, want one without notifications", calls)
+	}
+	if r := auditRow(t, e.Harness, "calendar.create_event"); r.Reason != api.ReasonHeld || !strings.Contains(r.Targets, "blocked:1") || strings.Contains(r.Targets, blockedAddr) {
+		t.Errorf("audit row %+v", r)
+	}
+}
+
+func TestCreateEventAfterACrash(t *testing.T) {
+	t.Parallel()
+	uid := derivedUID("mw", "crash-1")
+	e := startCal(t, func(e *calEnv) {
+		// The create reached the server before the daemon died.
+		e.mw.Add(mwCal, calendar.Event{UID: uid, Summary: "Plan", Start: e.start, End: e.start.Add(time.Hour), Organizer: &calendar.Person{Email: "james@mw.example"}})
+	})
+	got, err := e.create(t, e.meetingRequest("crash-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := calendar.EventRef("mw", mwCal, calfake.ObjectName(uid))
+	if got.GetEvent().GetRef() != ref {
+		t.Errorf("event = %v, want the one already there", got.GetEvent())
+	}
+	if _, ok := e.mw.Object(mwCal, calfake.ObjectName(uid)); !ok || e.mw.Count(calfake.MethodGetEvent) != 1 {
+		t.Errorf("object kept %v, GetEvent calls %d", ok, e.mw.Count(calfake.MethodGetEvent))
+	}
+
+	// A key an earlier daemon left in progress is settled as unknown at
+	// start-up; a repeat finds the event rather than reporting an unknown
+	// send.
+	if _, err := e.DB.ExecContext(t.Context(), "UPDATE idempotency SET state = 'unknown', result = x''"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = e.create(t, e.meetingRequest("crash-1"))
+	if err != nil {
+		t.Fatalf("repeat after an unknown outcome: %v", err)
+	}
+	if got.GetEvent().GetRef() != ref {
+		t.Errorf("event = %v", got.GetEvent())
+	}
+}
+
+func TestCreateAllDayEvent(t *testing.T) {
+	t.Parallel()
+	e := startCal(t, nil)
+	day := time.Date(2026, 12, 24, 0, 0, 0, 0, time.UTC)
+	la, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name       string
+		start, end time.Time
+		zone       string
+	}{
+		{"UTC midnights", day, day.Add(48 * time.Hour), ""},
+		{"midnights in the request zone", time.Date(2026, 12, 24, 0, 0, 0, 0, la), time.Date(2026, 12, 26, 0, 0, 0, 0, la), "America/Los_Angeles"},
+	} {
+		got, err := e.create(t, &chainmailv1.CreateEventRequest{
+			Account: "mw", Title: "Holiday", AllDay: true, Start: ts(tt.start), End: ts(tt.end), TimeZone: tt.zone, IdempotencyKey: "day-" + strings.ReplaceAll(tt.zone, "/", "."),
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", tt.name, err)
+		}
+		ev := got.GetEvent()
+		if !ev.GetAllDay() || !ev.GetStart().AsTime().Equal(day) || !ev.GetEnd().AsTime().Equal(day.Add(48*time.Hour)) {
+			t.Errorf("%s: event %v, want Dec 24 and 25", tt.name, ev)
+		}
+	}
+}
+
+func TestCreateEventRefusals(t *testing.T) {
+	t.Parallel()
+	e := startCal(t, nil)
+	base := func(mod func(r *chainmailv1.CreateEventRequest)) *chainmailv1.CreateEventRequest {
+		r := e.meetingRequest("r1", allowedAddr)
+		mod(r)
+		return r
+	}
+	many := make([]string, 501)
+	for i := range many {
+		many[i] = "a" + strconv.Itoa(i) + "@example.org"
+	}
+	for name, tt := range map[string]struct {
+		req  *chainmailv1.CreateEventRequest
+		want string
+	}{
+		"store none":      {base(func(r *chainmailv1.CreateEventRequest) { r.Account = "host" }), api.ReasonNoCalendarStore},
+		"read-only":       {base(func(r *chainmailv1.CreateEventRequest) { r.CalendarId = mwShared }), api.ReasonCalendarReadOnly},
+		"no calendar":     {base(func(r *chainmailv1.CreateEventRequest) { r.CalendarId = "/cal/none/" }), api.ReasonNotFound},
+		"two accounts":    {base(func(r *chainmailv1.CreateEventRequest) { r.Account = "" }), api.ReasonInvalidArgument},
+		"no key":          {base(func(r *chainmailv1.CreateEventRequest) { r.IdempotencyKey = "" }), api.ReasonInvalidArgument},
+		"bad key":         {base(func(r *chainmailv1.CreateEventRequest) { r.IdempotencyKey = "a b" }), api.ReasonInvalidArgument},
+		"no title":        {base(func(r *chainmailv1.CreateEventRequest) { r.Title = " " }), api.ReasonInvalidArgument},
+		"long title":      {base(func(r *chainmailv1.CreateEventRequest) { r.Title = strings.Repeat("x", 1025) }), api.ReasonInvalidArgument},
+		"backwards":       {base(func(r *chainmailv1.CreateEventRequest) { r.End = ts(e.start.Add(-time.Hour)) }), api.ReasonInvalidArgument},
+		"no start":        {base(func(r *chainmailv1.CreateEventRequest) { r.Start = nil }), api.ReasonInvalidArgument},
+		"bad zone":        {base(func(r *chainmailv1.CreateEventRequest) { r.TimeZone = "Mars/" + secretText }), api.ReasonInvalidArgument},
+		"bad attendee":    {base(func(r *chainmailv1.CreateEventRequest) { r.Attendees = []string{"not an address " + secretText} }), api.ReasonInvalidArgument},
+		"501 attendees":   {base(func(r *chainmailv1.CreateEventRequest) { r.Attendees = many }), api.ReasonInvalidArgument},
+		"unsafe rule":     {base(func(r *chainmailv1.CreateEventRequest) { r.RecurrenceRule = "FREQ=SECONDLY" }), api.ReasonInvalidArgument},
+		"broken rule":     {base(func(r *chainmailv1.CreateEventRequest) { r.RecurrenceRule = "FREQ=" + secretText }), api.ReasonInvalidArgument},
+		"unknown account": {base(func(r *chainmailv1.CreateEventRequest) { r.Account = "nope" }), api.ReasonNotFound},
+	} {
+		_, err := e.create(t, tt.req)
+		wantReason(t, name, err, tt.want)
+		if err != nil && strings.Contains(err.Error()+api.Detail(err).GetHint(), secretText) {
+			t.Errorf("%s: error %v repeats the request", name, err)
+		}
+	}
+	if n := e.mw.Count(calfake.MethodPut); n != 0 {
+		t.Errorf("Put calls = %d, want none", n)
+	}
+	noSecretInAudit(t, e.Harness)
+}
