@@ -22,8 +22,13 @@ const maxRedirects = 10
 var ErrPlainHTTP = errors.New("credentials go only over https, or plain http to 127.0.0.1 or localhost")
 
 // errRedirectHost refuses a redirect that would take the credentials to
-// another host.
-var errRedirectHost = errors.New("redirect to another host refused")
+// another host, or a discovery to another host or scheme.
+var errRedirectHost = errors.New("redirect to another host or scheme refused")
+
+// errTokenRedirect refuses a redirect of a token request. A 307 or 308
+// would send the form again, with the refresh token, the authorization code
+// and the PKCE verifier, and token endpoints never redirect a POST.
+var errTokenRedirect = errors.New("the token endpoint redirected, which chainmail never follows")
 
 // HTTPClient returns a client whose transport authenticates every request
 // for account: Bearer with the OAuth2 access token, which Credentials
@@ -96,6 +101,17 @@ func closeBody(req *http.Request) {
 func secureURL(u *url.URL) bool {
 	return u.Scheme == "https" || (u.Scheme == "http" && config.IsLoopbackHost(u.Hostname()))
 }
+
+// withRedirectPolicy returns a copy of c that follows redirects only as
+// policy allows. The copy shares c's transport, timeout and cookie jar.
+func withRedirectPolicy(c *http.Client, policy func(*http.Request, []*http.Request) error) *http.Client {
+	out := *c
+	out.CheckRedirect = policy
+	return &out
+}
+
+// refuseRedirect follows no redirect.
+func refuseRedirect(*http.Request, []*http.Request) error { return errTokenRedirect }
 
 // sameHostRedirect follows a redirect only to the scheme and host of the
 // first request.

@@ -104,6 +104,11 @@ type Manager struct {
 	httpClient *http.Client
 	endpoint   *oauth2.Endpoint
 
+	// tokenClient and discoveryClient are copies of httpClient with the
+	// redirect policies of token requests and OIDC discovery.
+	tokenClient     *http.Client
+	discoveryClient *http.Client
+
 	// discoverMu serializes OIDC discoveries, so concurrent first logins
 	// of a client fetch its document once. discovered holds each issuer
 	// client's endpoints by client name; a failed discovery is not kept.
@@ -129,8 +134,10 @@ type Option func(*Manager)
 // the oauth2 package's own clock.
 func WithClock(now func() time.Time) Option { return func(m *Manager) { m.now = now } }
 
-// WithHTTPClient sets the client used for token requests. A nil client keeps
-// the default.
+// WithHTTPClient sets the client used for token requests and OIDC discovery,
+// and whose transport HTTPClient builds on. A nil client keeps the default.
+// Its redirect policy is replaced by chainmail's own: token requests follow
+// no redirect, and discovery follows one only to the same scheme and host.
 func WithHTTPClient(c *http.Client) Option {
 	return func(m *Manager) {
 		if c != nil {
@@ -159,6 +166,8 @@ func NewManager(cfg *config.Config, store SecretStore, opts ...Option) *Manager 
 	for _, opt := range opts {
 		opt(m)
 	}
+	m.tokenClient = withRedirectPolicy(m.httpClient, refuseRedirect)
+	m.discoveryClient = withRedirectPolicy(m.httpClient, sameHostRedirect)
 	return m
 }
 
@@ -604,7 +613,7 @@ func (m *Manager) clientSecret(acct config.ResolvedAccount) ([]byte, error) {
 
 // withHTTPClient carries the HTTP client into a one-off oauth2 call.
 func (m *Manager) withHTTPClient(ctx context.Context) context.Context {
-	return context.WithValue(ctx, oauth2.HTTPClient, m.httpClient)
+	return context.WithValue(ctx, oauth2.HTTPClient, m.tokenClient)
 }
 
 // refreshContext carries the HTTP client into a token source. Token sources

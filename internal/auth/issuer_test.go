@@ -280,6 +280,9 @@ func TestIssuerDiscoveryFailures(t *testing.T) {
 		"plain http endpoint": func(w http.ResponseWriter, issuer string) {
 			writeJSON(w, map[string]string{"issuer": issuer, "authorization_endpoint": issuer + "/auth", "token_endpoint": "http://" + marker + ".example/token"})
 		},
+		"another realm": func(w http.ResponseWriter, issuer string) {
+			writeJSON(w, map[string]string{"issuer": issuer + "x", "authorization_endpoint": issuer + "/auth", "token_endpoint": issuer + "/token"})
+		},
 		"too large": func(w http.ResponseWriter, issuer string) {
 			writeJSON(w, map[string]string{"issuer": issuer, "authorization_endpoint": issuer + "/auth", "token_endpoint": issuer + "/token", "pad": strings.Repeat("x", 2<<20)})
 		},

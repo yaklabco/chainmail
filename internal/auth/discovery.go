@@ -59,7 +59,7 @@ func (m *Manager) discover(ctx context.Context, issuer string) (oauth2.Endpoint,
 		return oauth2.Endpoint{}, fmt.Errorf("building the request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := m.httpClient.Do(req)
+	resp, err := m.discoveryClient.Do(req)
 	if err != nil {
 		return oauth2.Endpoint{}, err
 	}
