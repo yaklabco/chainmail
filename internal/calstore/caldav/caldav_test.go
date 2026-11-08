@@ -314,6 +314,9 @@ func TestStatusErrors(t *testing.T) {
 		{opRead, 503, nil, calstore.ErrUnavailable},
 		{opWrite, 400, nil, ErrRejected},
 		{opWrite, 415, nil, ErrRejected},
+		{opRead, 300, nil, calstore.ErrUnavailable},
+		{opWrite, 304, nil, calstore.ErrUnavailable},
+		{opSync, 305, nil, calstore.ErrUnavailable},
 	}
 	for _, tc := range tests {
 		err := statusError(tc.op, tc.code, tc.body)

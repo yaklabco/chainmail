@@ -95,7 +95,7 @@ func TestWatchServesTheRuleAndDueKinds(t *testing.T) {
 	_, err := h.Client.Watch.ReadEvents(t.Context(), connect.NewRequest(&chainmailv1.ReadEventsRequest{Filter: &chainmailv1.WatchFilter{Kinds: []string{"bogus"}}}))
 	var cerr *connect.Error
 	if reasonOf(err) != api.ReasonInvalidArgument || !errors.As(err, &cerr) ||
-		cerr.Message() != "kinds must be new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due or item_overdue" {
+		cerr.Message() != "kinds must be new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due, item_overdue, invite, event_changed, event_cancelled or invite_reply" {
 		t.Errorf("unknown kind: %v, want INVALID_ARGUMENT listing every kind", err)
 	}
 }

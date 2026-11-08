@@ -15,6 +15,7 @@ import (
 	"filippo.io/age"
 
 	"github.com/yaklabco/chainmail/internal/auth"
+	"github.com/yaklabco/chainmail/internal/calstore"
 	"github.com/yaklabco/chainmail/internal/client"
 	"github.com/yaklabco/chainmail/internal/config"
 	"github.com/yaklabco/chainmail/internal/daemon"
@@ -52,6 +53,18 @@ type Options struct {
 	// the cache workers. It is off by default, so existing tests keep the
 	// server path.
 	Cache bool
+	// Calendar opens calendar.db in the state directory and runs a calendar
+	// syncer for each account with a calendar store. It is off by default,
+	// so no test reaches a real calendar server by accident.
+	Calendar bool
+	// CalendarStores gives the named accounts these calendar stores, such
+	// as a calstore/fake, in place of the real backends. When it is set,
+	// an account it does not list has no store; when it is empty, every
+	// account whose config gives it a store gets the real backend. An
+	// account whose config gives it no store gets none either way.
+	CalendarStores map[string]calstore.Store
+	// CalendarPoll replaces the [calendar] poll interval.
+	CalendarPoll time.Duration
 	// Secrets are stored in the vault before the daemon starts, by secret
 	// name such as "accounts/host". A watching test sets the account's
 	// password, so its supervisor does not park the account as needing
@@ -161,6 +174,9 @@ func Start(t testing.TB, configTOML string, opts Options) *Harness {
 		WatchSweepFloor:       opts.WatchSweepFloor,
 		CacheDir:              dir,
 		DisableCache:          !opts.Cache,
+		NewCalendarStore:      calendarStores(opts.CalendarStores),
+		DisableCalendar:       !opts.Calendar,
+		CalendarPoll:          opts.CalendarPoll,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -212,4 +228,18 @@ func (h *Harness) AuditRows(t testing.TB) []AuditRow {
 		t.Fatal(err)
 	}
 	return out
+}
+
+// calendarStores is the daemon's NewCalendarStore for stores: nil when
+// there are none, so every account gets its real backend.
+func calendarStores(stores map[string]calstore.Store) func(config.ResolvedAccount) calstore.Store {
+	if len(stores) == 0 {
+		return nil
+	}
+	return func(acct config.ResolvedAccount) calstore.Store {
+		if st, ok := stores[acct.Name]; ok {
+			return st
+		}
+		return nil
+	}
 }
