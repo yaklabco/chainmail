@@ -9,16 +9,19 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/yaklabco/chainmail/internal/auth"
 	"github.com/yaklabco/chainmail/internal/calendar"
 	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/mailstore/fake"
 	"github.com/yaklabco/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // testInviteICS is a small iTIP REQUEST.
@@ -470,10 +473,11 @@ type deferSink struct {
 	got []InviteCandidate
 }
 
-func (s *deferSink) on(_ context.Context, cands []InviteCandidate) {
+func (s *deferSink) on(_ context.Context, cands []InviteCandidate) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.got = append(s.got, cands...)
+	return nil
 }
 
 func (s *deferSink) candidates() []InviteCandidate {
@@ -541,6 +545,7 @@ func TestBuilderDefersInvitePartsOverTheCap(t *testing.T) {
 	if len(cands) == 1 && cands[0].Part.Size > 0 {
 		want.Part.Size = cands[0].Part.Size // the encoded size the header reported
 	}
+	want.FoundAt = r.newEventAt(last)
 	if len(cands) != 1 || cands[0] != want {
 		t.Fatalf("deferred = %+v, want [%+v]", cands, want)
 	}
@@ -681,5 +686,170 @@ func TestReadInvite(t *testing.T) {
 	}
 	if _, err := r.a.ReadInvite(t.Context(), c); !errors.Is(err, mailstore.ErrNotFound) && !errors.Is(err, mailstore.ErrStaleRef) {
 		t.Errorf("ReadInvite of an expunged message = %v, want ErrNotFound or ErrStaleRef", err)
+	}
+}
+
+// newEventAt returns the time of the new event of rf in the rig's log:
+// when the watcher found the message.
+func (r *acctRig) newEventAt(rf ref.Ref) time.Time {
+	r.t.Helper()
+	page, err := r.log.Read(r.t.Context(), watch.Query{Filter: watch.Filter{Kinds: []watch.Kind{watch.KindNew}}, Limit: 1000})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	for _, e := range page.Events {
+		if e.Ref == rf.String() {
+			return e.At
+		}
+	}
+	r.t.Fatalf("no new event of %s", rf)
+	return time.Time{}
+}
+
+// errQueueDown is a queue write that fails.
+var errQueueDown = errors.New("the invite queue is down")
+
+// failingDeferSink records each OnDeferredInvites call, and fails the
+// first fail of them with errQueueDown.
+type failingDeferSink struct {
+	mu    sync.Mutex
+	fail  int
+	calls [][]InviteCandidate
+}
+
+func (s *failingDeferSink) on(_ context.Context, cands []InviteCandidate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, slices.Clone(cands))
+	if s.fail > 0 {
+		s.fail--
+		return errQueueDown
+	}
+	return nil
+}
+
+func (s *failingDeferSink) snapshot() [][]InviteCandidate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.calls)
+}
+
+// When OnDeferredInvites fails, the deferred parts are not queued, so the
+// segment is not acknowledged: the step fails and backs off, and the same
+// segment is applied again, which reads the immediate invites again (an
+// idempotent upsert for the hook) and hands the deferred part over again.
+// Every invite carries the time the watcher found its message, the same
+// on the replay, though the builder's clock has moved.
+func TestBuilderReplaysASegmentWhoseDeferredPartsWereNotQueued(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r, sink := inviteRig(t, fs)
+	queue := &failingDeferSink{fail: 1}
+	r.onDeferred = queue.on
+	r.renew()
+	r.a.inviteCap = 1
+	r.pass("INBOX")
+	r.start()
+	r.waitApplied()
+
+	data := []byte(testInviteICS)
+	first := fs.Add(calMsg("invite-1", "text/calendar; method=REQUEST; charset=UTF-8", data))
+	second := fs.Add(calMsg("invite-2", "text/calendar; method=REQUEST; charset=UTF-8", data))
+	r.pass("INBOX")
+	r.clock.expectAfter(t, workRetryBase) // the builder's backoff after the failed queue write
+	if got, tail := r.acked(), r.tail(); got >= tail {
+		t.Fatalf("acked %d with the deferred part not queued, want below the tail %d", got, tail)
+	}
+	if calls := queue.snapshot(); len(calls) != 1 {
+		t.Fatalf("OnDeferredInvites ran %d times before the backoff, want 1", len(calls))
+	}
+	r.clock.Advance(workRetryBase)
+	r.waitApplied()
+
+	calls := queue.snapshot()
+	if len(calls) != 2 || len(calls[1]) != 1 || calls[1][0].MessageRef != second.String() {
+		t.Fatalf("OnDeferredInvites calls = %+v, want the part of %s handed over again", calls, second)
+	}
+	if got, tail := r.acked(), r.tail(); got != tail {
+		t.Errorf("acked %d after the replay, want the tail %d", got, tail)
+	}
+	if e := r.a.lastError(); e != "" {
+		t.Errorf("last error = %q after the replay, want none", e)
+	}
+	secondAt := r.newEventAt(second)
+	for i, c := range calls {
+		if !c[0].FoundAt.Equal(secondAt) {
+			t.Errorf("deferred call %d found at %v, want the new event's %v", i, c[0].FoundAt, secondAt)
+		}
+	}
+	found := sink.invites()
+	if len(found) != 2 {
+		t.Fatalf("OnInvites got %d invites, want the first message's twice", len(found))
+	}
+	firstAt := r.newEventAt(first)
+	for i, f := range found {
+		if f.MessageRef != first.String() || !f.FoundAt.Equal(firstAt) {
+			t.Errorf("invite %d = %s found at %v, want %s found at %v", i, f.MessageRef, f.FoundAt, first, firstAt)
+		}
+	}
+	later, err := r.a.ReadInvite(t.Context(), calls[1][0])
+	if err != nil || !later.FoundAt.Equal(secondAt) {
+		t.Errorf("ReadInvite = found at %v, %v; want the candidate's %v", later.FoundAt, err, secondAt)
+	}
+}
+
+// A part whose transfer encoding does not decode, or that the server sends
+// in a form chainmail cannot read, fails the same way on every read: the
+// step drops it, counted in a log line, and does not defer it, and
+// ReadInvite reports it as ErrInviteUndecodable. A failure that may pass
+// (the server unavailable, a login needed) is still deferred.
+func TestBuilderDropsInvitePartsThatDoNotDecode(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		err     error
+		deferIt bool
+	}{
+		{"bad base64", fmt.Errorf("decoding the part: %w", base64.CorruptInputError(12)), false},
+		{"bad quoted-printable", fmt.Errorf("decoding the part: %w", errors.New("quotedprintable: invalid hex byte 0x7a")), false},
+		{"cut quoted-printable", fmt.Errorf("decoding the part: %w", io.ErrUnexpectedEOF), false},
+		{"malformed", fmt.Errorf("%w: a body chainmail cannot read", mailstore.ErrMalformed), false},
+		{"unavailable", fmt.Errorf("%w: connection reset", mailstore.ErrUnavailable), true},
+		{"auth", auth.ErrAuthRequired, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fs := fake.New("acme", false)
+			r, sink, deferred := deferRig(t, fs)
+			logs := inviteLogs(r)
+			r.pass("INBOX")
+			r.start()
+			r.waitApplied()
+
+			fs.FailStreamAfter(10, tt.err)
+			rf := fs.Add(calMsg("invite", "text/calendar; method=REQUEST", []byte(testInviteICS)))
+			r.pass("INBOX")
+			r.waitApplied()
+			if got := sink.invites(); len(got) != 0 {
+				t.Errorf("found %d invites, want none", len(got))
+			}
+			if n := len(deferred.candidates()); (n == 1) != tt.deferIt || n > 1 {
+				t.Errorf("deferred %d parts, want deferred = %t", n, tt.deferIt)
+			}
+			if got, tail := r.acked(), r.tail(); got != tail {
+				t.Errorf("acked %d, want the tail %d", got, tail)
+			}
+			if e := r.a.lastError(); e != "" {
+				t.Errorf("last error = %q, want none", e)
+			}
+			c := InviteCandidate{Account: "acme", MessageRef: rf.String(), Part: mailstore.CalendarPart{Part: "2", Method: "REQUEST"}}
+			_, err := r.a.ReadInvite(t.Context(), c)
+			if broken := errors.Is(err, ErrInviteUndecodable); broken == tt.deferIt {
+				t.Errorf("ReadInvite = %v, want ErrInviteUndecodable = %t", err, !tt.deferIt)
+			}
+			if !tt.deferIt && !strings.Contains(logs.String(), "cache skipped invite parts that do not decode") {
+				t.Errorf("logs = %q, want the dropped part counted", logs.String())
+			}
+		})
 	}
 }

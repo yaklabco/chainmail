@@ -241,7 +241,7 @@ type acctRig struct {
 	onInvites func(context.Context, []FoundInvite)
 	// onDeferred is the OnDeferredInvites of the Accounts newAccount
 	// makes; set it, then renew.
-	onDeferred func(context.Context, []InviteCandidate)
+	onDeferred func(context.Context, []InviteCandidate) error
 
 	a      *Account
 	cancel context.CancelFunc

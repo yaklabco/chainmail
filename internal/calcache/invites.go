@@ -22,6 +22,8 @@ type MailInviteRow struct {
 	Raw []byte
 	// Charset is the MIME charset Raw is in, "" for UTF-8.
 	Charset string
+	// FoundAt is when chainmail first found the invite's message: the
+	// earliest time any PutMailInvite of the row gave.
 	FoundAt time.Time
 	// Announced reports that the invite event of the row's UID was
 	// published. MarkInviteAnnounced sets it on every row of the UID, and
@@ -46,10 +48,17 @@ const inviteColumns = "ref, account, message_ref, uid, method, sequence, dtstamp
 // is total.
 const latestFirst = "sequence DESC, dtstamp DESC, found_at DESC, message_ref DESC"
 
+// earliestFirst orders one UID's invites oldest first, the reverse of
+// latestFirst: in iTIP order (sequence, then DTSTAMP), so the order in
+// which chainmail happened to find the messages decides only ties.
+const earliestFirst = "sequence, dtstamp, found_at, message_ref"
+
 // PutMailInvite stores r, replacing the row of the same account, message
-// ref and UID, except that a row once announced or settled stays so. An empty
-// r.Ref is filled in as MailInviteRef(account, uid); any other ref than
-// that one is refused.
+// ref and UID, except that a row once announced or settled stays so, and
+// the row keeps the earliest FoundAt it was given (a zero FoundAt never
+// replaces one), so storing a message again never moves it later in its
+// UID's history. An empty r.Ref is filled in as MailInviteRef(account,
+// uid); any other ref than that one is refused.
 func (s *Store) PutMailInvite(ctx context.Context, r MailInviteRow) error {
 	if r.Account == "" || r.MessageRef == "" || r.UID == "" {
 		return errInviteKey
@@ -66,7 +75,9 @@ func (s *Store) PutMailInvite(ctx context.Context, r MailInviteRow) error {
 		"INSERT INTO mail_invites ("+inviteColumns+") VALUES ("+placeholders(12)+`)
 		ON CONFLICT (account, message_ref, uid) DO UPDATE SET
 			ref = excluded.ref, method = excluded.method, sequence = excluded.sequence, dtstamp = excluded.dtstamp,
-			raw = excluded.raw, charset = excluded.charset, found_at = excluded.found_at,
+			raw = excluded.raw, charset = excluded.charset,
+			found_at = CASE WHEN found_at = '' OR (excluded.found_at <> '' AND excluded.found_at < found_at)
+				THEN excluded.found_at ELSE found_at END,
 			announced = max(announced, excluded.announced), settled = max(settled, excluded.settled)`,
 		ref, r.Account, r.MessageRef, r.UID, r.Method, r.Sequence, formatTime(r.DTStamp), raw, r.Charset,
 		formatTime(r.FoundAt), r.Announced, r.Settled); err != nil {
@@ -85,17 +96,20 @@ func (s *Store) MarkInviteAnnounced(ctx context.Context, ref string) error {
 }
 
 // PendingInvites returns at most limit of the account's invites whose event
-// may still be due: for each UID first found as a REQUEST, with no row
+// may still be due: for each UID that began as a REQUEST, with no row
 // announced, its latest row when that is a REQUEST and not settled. A UID
-// whose latest row is a CANCEL is left out. The UIDs first found longest
-// ago come first, then by UID. The caller decides from the invite itself
-// whether the event is due, and settles the row when it never will be.
+// whose latest row is a CANCEL is left out. Which row began the UID is
+// decided in iTIP order (earliestFirst), not by when chainmail found the
+// messages, so a REQUEST read later than a CANCEL that followed it still
+// began its UID. The UIDs first found longest ago come first, then by
+// UID. The caller decides from the invite itself whether the event is
+// due, and settles the row when it never will be.
 func (s *Store) PendingInvites(ctx context.Context, account string, limit int) ([]MailInviteRow, error) {
 	return s.queryInvites(ctx, "reading pending mail invites", `
 		SELECT `+inviteColumns+` FROM (
 			SELECT `+inviteColumns+`,
 				row_number() OVER (PARTITION BY uid ORDER BY `+latestFirst+`) AS n,
-				first_value(method) OVER (PARTITION BY uid ORDER BY found_at, message_ref) AS first_method,
+				first_value(method) OVER (PARTITION BY uid ORDER BY `+earliestFirst+`) AS first_method,
 				min(found_at) OVER (PARTITION BY uid) AS first_found,
 				max(announced) OVER (PARTITION BY uid) AS any_announced
 			FROM mail_invites WHERE account = ?

@@ -2,17 +2,21 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/yaklabco/chainmail/internal/auth"
 	"github.com/yaklabco/chainmail/internal/cache"
 	"github.com/yaklabco/chainmail/internal/calcache"
+	"github.com/yaklabco/chainmail/internal/calendar"
 	"github.com/yaklabco/chainmail/internal/config"
 	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/mailstore/fake"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // readPart is the rig's ReadPart: it counts the read and runs readFn.
@@ -22,6 +26,15 @@ func (r *inviteRig) readPart(ctx context.Context, c cache.InviteCandidate) (cach
 		return cache.FoundInvite{}, errors.New("the rig reads no part")
 	}
 	return r.readFn(ctx, c)
+}
+
+// queue hands cands to the hook's OnDeferredInvites, as the cache builder
+// does, and fails the test if they are not queued.
+func (r *inviteRig) queue(cands []cache.InviteCandidate) {
+	r.t.Helper()
+	if err := r.h.onDeferred(r.t.Context(), cands); err != nil {
+		r.t.Fatalf("queueing deferred invite parts: %v", err)
+	}
 }
 
 // fetches returns every queued invite fetch, due or not.
@@ -56,7 +69,7 @@ func readsRequest(uid string) func(context.Context, cache.InviteCandidate) (cach
 func TestInviteFetchQueueStoresDeferredParts(t *testing.T) {
 	t.Parallel()
 	r := newInviteRig(t)
-	r.h.onDeferred(t.Context(), []cache.InviteCandidate{candidate("none", "msg-1")})
+	r.queue([]cache.InviteCandidate{candidate("none", "msg-1")})
 	rows := r.fetches()
 	want := calcache.InviteFetchRow{
 		Account: "none", MessageRef: "msg-1", Part: "2", Method: "REQUEST", Charset: "utf-8", Size: 321,
@@ -90,7 +103,7 @@ func TestInviteFetchQueueStoresDeferredParts(t *testing.T) {
 func TestInviteFetchQueueBacksOffABusyPool(t *testing.T) {
 	t.Parallel()
 	r := newInviteRig(t)
-	r.h.onDeferred(t.Context(), []cache.InviteCandidate{candidate("none", "msg-1")})
+	r.queue([]cache.InviteCandidate{candidate("none", "msg-1")})
 	r.readFn = func(context.Context, cache.InviteCandidate) (cache.FoundInvite, error) {
 		return cache.FoundInvite{}, mailstore.ErrBusy
 	}
@@ -115,8 +128,11 @@ func TestInviteFetchQueueBacksOffABusyPool(t *testing.T) {
 	}
 }
 
-// A part whose message or folder is gone, that is over the size limit, or
-// that is no usable invite is dropped from the queue, with nothing stored.
+// A part whose message or folder is gone, that is over the size limit, that
+// does not decode (a bad transfer encoding, or a form the server sends
+// that chainmail cannot read), or that is no usable invite (not iCalendar,
+// no invite, too large to parse) is dropped from the queue, with nothing
+// stored: no later read changes any of those.
 func TestInviteFetchQueueDropsWhatCannotBeRead(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -135,11 +151,26 @@ func TestInviteFetchQueueDropsWhatCannotBeRead(t *testing.T) {
 		{"not an invite", func(_ context.Context, c cache.InviteCandidate) (cache.FoundInvite, error) {
 			return found(c.Account, c.MessageRef, "REQUEST", []byte("not a calendar")), nil
 		}},
+		{"bad transfer encoding", func(context.Context, cache.InviteCandidate) (cache.FoundInvite, error) {
+			return cache.FoundInvite{}, cache.ErrInviteUndecodable
+		}},
+		{"malformed", func(context.Context, cache.InviteCandidate) (cache.FoundInvite, error) {
+			return cache.FoundInvite{}, fmt.Errorf("%w: body", mailstore.ErrMalformed)
+		}},
+		{"invalid ics", func(context.Context, cache.InviteCandidate) (cache.FoundInvite, error) {
+			return cache.FoundInvite{}, fmt.Errorf("reading: %w", calendar.ErrInvalidICS)
+		}},
+		{"not an invite error", func(context.Context, cache.InviteCandidate) (cache.FoundInvite, error) {
+			return cache.FoundInvite{}, calendar.ErrNotInvite
+		}},
+		{"ics too large", func(context.Context, cache.InviteCandidate) (cache.FoundInvite, error) {
+			return cache.FoundInvite{}, calendar.ErrTooLarge
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			r := newInviteRig(t)
-			r.h.onDeferred(t.Context(), []cache.InviteCandidate{candidate("none", "msg-1")})
+			r.queue([]cache.InviteCandidate{candidate("none", "msg-1")})
 			r.readFn = tt.read
 			r.h.pass(t.Context(), []string{"none"})
 			if rows := r.fetches(); len(rows) != 0 {
@@ -170,7 +201,7 @@ func TestInviteFetchBackoff(t *testing.T) {
 	}
 
 	r := newInviteRig(t)
-	r.h.onDeferred(t.Context(), []cache.InviteCandidate{candidate("none", "msg-1")})
+	r.queue([]cache.InviteCandidate{candidate("none", "msg-1")})
 	r.readFn = func(context.Context, cache.InviteCandidate) (cache.FoundInvite, error) {
 		return cache.FoundInvite{}, mailstore.ErrUnavailable
 	}
@@ -192,7 +223,7 @@ func TestInviteFetchPassIsBounded(t *testing.T) {
 	for i := range inviteFetchBatch + 1 {
 		cands = append(cands, candidate("none", fmt.Sprintf("msg-%03d", i)))
 	}
-	r.h.onDeferred(t.Context(), cands)
+	r.queue(cands)
 	var read []string
 	r.readFn = func(_ context.Context, c cache.InviteCandidate) (cache.FoundInvite, error) {
 		read = append(read, c.MessageRef)
@@ -209,7 +240,7 @@ func TestInviteFetchPassIsBounded(t *testing.T) {
 func TestInviteFetchPassStopsWhenCancelled(t *testing.T) {
 	t.Parallel()
 	r := newInviteRig(t)
-	r.h.onDeferred(t.Context(), []cache.InviteCandidate{candidate("none", "msg-1"), candidate("none", "msg-2"), candidate("none", "msg-3")})
+	r.queue([]cache.InviteCandidate{candidate("none", "msg-1"), candidate("none", "msg-2"), candidate("none", "msg-3")})
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	r.readFn = func(context.Context, cache.InviteCandidate) (cache.FoundInvite, error) {
@@ -263,10 +294,12 @@ func TestInviteFetchesThroughTheServer(t *testing.T) {
 		To:          []mailstore.Address{{Email: "me@example.com"}},
 		Attachments: []fake.Attachment{{Part: "2", ContentType: "text/calendar; method=REQUEST; charset=utf-8", Data: data}},
 	})
-	opts.OnDeferredInvites(t.Context(), []cache.InviteCandidate{{
+	if err := opts.OnDeferredInvites(t.Context(), []cache.InviteCandidate{{
 		Account: "host", MessageRef: rf.String(),
 		Part: mailstore.CalendarPart{Part: "2", Method: "REQUEST", Charset: "utf-8", Size: int64(len(data))},
-	}})
+	}}); err != nil {
+		t.Fatal(err)
+	}
 	if n := len(r.invites("host")); n != 20 {
 		t.Fatalf("stored %d invites before the retry pass, want 20", n)
 	}
@@ -279,5 +312,151 @@ func TestInviteFetchesThroughTheServer(t *testing.T) {
 	}
 	if n := fk.BackgroundCalls("StreamPart"); n != 1 {
 		t.Errorf("background part reads = %d, want 1", n)
+	}
+}
+
+// A failure that may pass keeps the part queued with its next read put
+// off: the server unavailable, a busy pool, a login needed or refused, the
+// account's cache not running, or an error nothing classifies.
+func TestInviteFetchQueueKeepsWhatMayPass(t *testing.T) {
+	t.Parallel()
+	for name, err := range map[string]error{
+		"unavailable": fmt.Errorf("%w: connection reset", mailstore.ErrUnavailable),
+		"busy":        mailstore.ErrBusy,
+		"login":       auth.ErrAuthRequired,
+		"rejected":    auth.ErrRejected,
+		"no cache":    errInviteNoCache,
+		"unknown":     errors.New("something else"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := newInviteRig(t)
+			r.queue([]cache.InviteCandidate{candidate("none", "msg-1")})
+			r.readFn = func(context.Context, cache.InviteCandidate) (cache.FoundInvite, error) {
+				return cache.FoundInvite{}, err
+			}
+			r.h.pass(t.Context(), []string{"none"})
+			if rows := r.fetches(); len(rows) != 1 || rows[0].Attempts != 1 {
+				t.Errorf("queued = %+v, want the part kept with 1 attempt", rows)
+			}
+		})
+	}
+}
+
+// A queue write that fails is returned to the cache builder, which then
+// applies the segment again: the immediate invites a second time (one
+// event, however often) and the deferred part, now queued, which the retry
+// pass stores and announces.
+func TestInviteFetchQueueWriteFailureIsReturned(t *testing.T) {
+	t.Parallel()
+	r := newInviteRig(t)
+	ctx := t.Context()
+	conn, err := sql.Open("sqlite", "file:"+r.calPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() }) // a close error at test end changes nothing
+	if _, err := conn.ExecContext(ctx, "CREATE TRIGGER queue_down BEFORE INSERT ON invite_fetches BEGIN SELECT RAISE(ABORT, 'queue down'); END"); err != nil {
+		t.Fatal(err)
+	}
+	segment := func() error {
+		r.hook(ctx, []cache.FoundInvite{found("none", "msg-1", "REQUEST", request("u1"))})
+		return r.h.onDeferred(ctx, []cache.InviteCandidate{candidate("none", "msg-2")})
+	}
+	if err := segment(); err == nil {
+		t.Fatal("onDeferred = nil with calendar.db refusing the queue write, want the error")
+	}
+	if rows := r.fetches(); len(rows) != 0 {
+		t.Fatalf("queued = %+v after a failed write, want none", rows)
+	}
+	if _, err := conn.ExecContext(ctx, "DROP TRIGGER queue_down"); err != nil {
+		t.Fatal(err)
+	}
+	if err := segment(); err != nil {
+		t.Fatalf("onDeferred on the replay = %v, want nil", err)
+	}
+	if rows := r.fetches(); len(rows) != 1 || rows[0].MessageRef != "msg-2" {
+		t.Fatalf("queued = %+v after the replay, want msg-2", rows)
+	}
+	if n := len(r.events()); n != 1 {
+		t.Fatalf("published %d invite events after the replay, want u1's once", n)
+	}
+
+	r.readFn = readsRequest("u2")
+	r.h.pass(ctx, []string{"none"})
+	if got := r.rowOf("none", "msg-2", "u2"); got.UID != "u2" {
+		t.Errorf("stored = %+v, want u2 from msg-2", got)
+	}
+	if n := len(r.events()); n != 2 {
+		t.Errorf("published %d invite events, want u1's and u2's", n)
+	}
+}
+
+// foundAtOf returns the found_at stored for account's message msg and
+// uid, read through a second connection to calendar.db, since the store
+// reads only each UID's latest row.
+func (r *inviteRig) foundAtOf(account, msg, uid string) time.Time {
+	r.t.Helper()
+	conn, err := sql.Open("sqlite", "file:"+r.calPath+"?mode=ro")
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }() // a read-only connection: nothing to flush
+	var s string
+	if err := conn.QueryRowContext(r.t.Context(), "SELECT found_at FROM mail_invites WHERE account = ? AND message_ref = ? AND uid = ?",
+		account, msg, uid).Scan(&s); err != nil {
+		r.t.Fatal(err)
+	}
+	at, err := watch.ParseTime(s)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return at
+}
+
+// A deferred part keeps the time its message was found, the cache's, from
+// the queue row through to the stored invite, not the time the retry pass
+// read it. So an original REQUEST that the builder deferred still began
+// its UID when a CANCEL of the UID was stored at once, and a later REQUEST
+// with a higher SEQUENCE is announced.
+func TestInviteDeferredRequestKeepsItsDiscoveryTime(t *testing.T) {
+	t.Parallel()
+	r := newInviteRig(t)
+	ctx := t.Context()
+	segmentAt := inviteNow.Add(-time.Minute)
+	original := candidate("none", "msg-1")
+	original.FoundAt = segmentAt
+	r.queue([]cache.InviteCandidate{original})
+	if rows := r.fetches(); len(rows) != 1 || !rows[0].FoundAt.Equal(segmentAt) || !rows[0].NextAt.Equal(inviteNow) {
+		t.Fatalf("queued = %+v, want msg-1 found at %v, due at %v", rows, segmentAt, inviteNow)
+	}
+
+	cancelled := found("none", "msg-2", "CANCEL", inviteICS("CANCEL", "u1", 1, "ann@example.com", "20261110T170000Z", "20261110T173000Z"))
+	cancelled.FoundAt = segmentAt.Add(time.Second)
+	r.advance(time.Minute)
+	r.hook(ctx, []cache.FoundInvite{cancelled})
+
+	r.advance(5 * time.Minute)
+	r.readFn = readsRequest("u1")
+	r.h.pass(ctx, []string{"none"})
+	if at := r.foundAtOf("none", "msg-1", "u1"); !at.Equal(segmentAt) {
+		t.Errorf("msg-1 found at %v, want the queue row's %v", at, segmentAt)
+	}
+	if at := r.foundAtOf("none", "msg-2", "u1"); !at.Equal(cancelled.FoundAt) {
+		t.Errorf("msg-2 found at %v, want the invite's %v", at, cancelled.FoundAt)
+	}
+	if n := len(r.events()); n != 0 {
+		t.Fatalf("published %d invite events for a cancelled UID, want none", n)
+	}
+
+	r.advance(time.Hour)
+	again := found("none", "msg-3", "REQUEST", inviteICS("REQUEST", "u1", 2, "ann@example.com", "20261110T170000Z", "20261110T173000Z"))
+	r.hook(ctx, []cache.FoundInvite{again})
+	evs := r.events()
+	if len(evs) != 1 || evs[0].Calendar == nil || evs[0].Calendar.MessageRef != "msg-3" {
+		t.Fatalf("events = %+v, want one invite event from msg-3", evs)
+	}
+	if at := r.foundAtOf("none", "msg-3", "u1"); !at.Equal(r.now()) {
+		t.Errorf("msg-3 found at %v, want the hook's clock %v for an invite without a time", at, r.now())
 	}
 }

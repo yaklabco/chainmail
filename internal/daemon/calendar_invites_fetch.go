@@ -9,6 +9,7 @@ import (
 
 	"github.com/yaklabco/chainmail/internal/cache"
 	"github.com/yaklabco/chainmail/internal/calcache"
+	"github.com/yaklabco/chainmail/internal/calendar"
 	"github.com/yaklabco/chainmail/internal/mailstore"
 )
 
@@ -43,14 +44,28 @@ func inviteFetchBackoff(attempts int) time.Duration {
 }
 
 // inviteFetchDone reports whether a read error means the part will never
-// be read: its message or folder is gone, or it is over the size limit.
+// be read, so its row leaves the queue: its message or folder is gone, it
+// is over the size limit, its content fails the same way on every read (a
+// transfer encoding that does not decode, a form the server sends that
+// chainmail cannot read), or it is no usable invite (calendar's
+// ErrInvalidICS, ErrNotInvite, ErrTooLarge). Every other error, the
+// server unavailable, a busy pool, a login needed or refused, the cache
+// not running, may pass, and keeps the row.
 func inviteFetchDone(err error) bool {
-	return errors.Is(err, mailstore.ErrNotFound) || errors.Is(err, mailstore.ErrStaleRef) ||
-		errors.Is(err, cache.ErrInviteTooLarge)
+	for _, done := range []error{
+		mailstore.ErrNotFound, mailstore.ErrStaleRef, mailstore.ErrMalformed,
+		cache.ErrInviteTooLarge, cache.ErrInviteUndecodable,
+		calendar.ErrInvalidICS, calendar.ErrNotInvite, calendar.ErrTooLarge,
+	} {
+		if errors.Is(err, done) {
+			return true
+		}
+	}
+	return false
 }
 
 // deferredFunc is h's OnDeferredInvites, nil when h is.
-func (h *inviteHook) deferredFunc() func(context.Context, []cache.InviteCandidate) {
+func (h *inviteHook) deferredFunc() func(context.Context, []cache.InviteCandidate) error {
 	if h == nil {
 		return nil
 	}
@@ -58,21 +73,31 @@ func (h *inviteHook) deferredFunc() func(context.Context, []cache.InviteCandidat
 }
 
 // onDeferred queues the invite parts the cache builder could not read in
-// its bounded step, due at once, for the retry loop to read. A part
-// queued already keeps its attempts and backoff. A failure is logged with
-// a count: the builder acknowledges the segment whatever happens here.
-func (h *inviteHook) onDeferred(ctx context.Context, cands []cache.InviteCandidate) {
+// its bounded step, due at once, for the retry loop to read. Each row
+// keeps the time the candidate's message was found (now when it has
+// none), which the stored invite takes once the part is read. A part
+// queued already keeps its attempts, backoff and found time. A failed
+// write is returned: the builder then does not acknowledge the segment,
+// and applies it again after its backoff, so no deferred part is lost to
+// a calendar.db failure that passes.
+func (h *inviteHook) onDeferred(ctx context.Context, cands []cache.InviteCandidate) error {
 	now := h.o.Now()
 	rows := make([]calcache.InviteFetchRow, 0, len(cands))
 	for _, c := range cands {
+		found := c.FoundAt
+		if found.IsZero() {
+			found = now
+		}
 		rows = append(rows, calcache.InviteFetchRow{
 			Account: c.Account, MessageRef: c.MessageRef, Part: c.Part.Part, Method: c.Part.Method,
-			Charset: c.Part.Charset, Size: c.Part.Size, NextAt: now, FoundAt: now,
+			Charset: c.Part.Charset, Size: c.Part.Size, NextAt: now, FoundAt: found,
 		})
 	}
 	if err := h.o.Cache.PutInviteFetches(ctx, rows); err != nil {
-		h.o.Logger.WarnContext(ctx, "could not queue invite parts to read later; they are lost", "count", len(rows))
+		h.o.Logger.WarnContext(ctx, "could not queue invite parts to read later; the cache applies their mail again", "count", len(rows))
+		return err
 	}
+	return nil
 }
 
 // pass is one run of the retry loop: it reads the queued invite parts that
@@ -90,9 +115,10 @@ func (h *inviteHook) pass(ctx context.Context, accounts []string) {
 
 // drainFetches reads at most inviteFetchBatch queued invite parts that are
 // due, the ones queued longest ago first, through ReadPart, and runs each
-// invite read through the hook as the builder's are: stored, announced
-// and its account poked. A part read and handled, or that will never be
-// read (its message is gone, it is over the limit, or it is no usable
+// invite read through the hook as the builder's are: stored with the time
+// its queue row was found, announced and its account poked. A part read
+// and handled, or that will never be read (inviteFetchDone: its message is
+// gone, it is over the limit, it does not decode, or it is no usable
 // invite), leaves the queue. Any other failure puts its next read off by
 // inviteFetchBackoff; a part is never dropped for its attempts, since its
 // message may still be there. It stops between parts once ctx ends, and a
@@ -133,6 +159,9 @@ func (h *inviteHook) drainFetches(ctx context.Context) {
 		case err != nil:
 			log.InfoContext(ctx, "could not read a queued invite part", "reason", apiReason(err))
 		default:
+			// The invite was found when the cache found its message, as the
+			// queue row has it, not when the part was read.
+			f.FoundAt = row.FoundAt
 			if !slices.Contains(accounts, row.Account) {
 				accounts = append(accounts, row.Account)
 			}
@@ -161,7 +190,7 @@ func (h *inviteHook) drainFetches(ctx context.Context) {
 		}
 	}
 	if dropped > 0 {
-		h.o.Logger.InfoContext(ctx, "dropped queued invite parts whose messages are gone or too large", "count", dropped)
+		h.o.Logger.InfoContext(ctx, "dropped queued invite parts that will never be read", "count", dropped)
 	}
 	if delayed > 0 {
 		h.o.Logger.InfoContext(ctx, "put off queued invite parts that could not be read", "count", delayed)
@@ -187,6 +216,6 @@ func (s *Server) readInvitePart(ctx context.Context, c cache.InviteCandidate) (c
 // calendarDeferredInvites returns the OnDeferredInvites hook of the cache
 // workers over the calendar cache cal, or nil when cal is nil. It shares
 // the server's invite hook.
-func (s *Server) calendarDeferredInvites(cal *calcache.Store, poke func(account string)) func(context.Context, []cache.InviteCandidate) {
+func (s *Server) calendarDeferredInvites(cal *calcache.Store, poke func(account string)) func(context.Context, []cache.InviteCandidate) error {
 	return s.serverInviteHook(cal, poke).deferredFunc()
 }
