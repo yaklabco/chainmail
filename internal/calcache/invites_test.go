@@ -341,3 +341,81 @@ func TestInviteFetches(t *testing.T) {
 		t.Error("PutInviteFetches accepted a row without a message ref")
 	}
 }
+
+// Storing a row again keeps the earliest time it was found, so a segment
+// the cache builder applies again, or a part read later than its message
+// was found, never moves the row later in the UID's history. A row first
+// stored with no time takes the next one given.
+func TestPutMailInviteKeepsTheEarliestFoundAt(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, _ := openCache(t)
+	r := mailInvite("m1", "u1", calendar.MethodRequest, 0, t0)
+	r.FoundAt = t0.Add(time.Hour)
+	for _, found := range []time.Time{t0.Add(time.Hour), t0, t0.Add(2 * time.Hour), {}} {
+		r.FoundAt = found
+		if err := s.PutMailInvite(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.MailInvite(ctx, calendar.MailInviteRef("acme", "u1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.FoundAt.Equal(t0) {
+		t.Errorf("found at %v, want the earliest %v", got.FoundAt, t0)
+	}
+
+	none := mailInvite("m2", "u2", calendar.MethodRequest, 0, t0)
+	none.FoundAt = time.Time{}
+	if err := s.PutMailInvite(ctx, none); err != nil {
+		t.Fatal(err)
+	}
+	none.FoundAt = t0
+	if err := s.PutMailInvite(ctx, none); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.MailInvite(ctx, calendar.MailInviteRef("acme", "u2")); err != nil || !got.FoundAt.Equal(t0) {
+		t.Errorf("found at %v, %v; want %v after a row with no time", got.FoundAt, err, t0)
+	}
+}
+
+// Whether a UID began as a REQUEST is decided in iTIP order (SEQUENCE,
+// then DTSTAMP), not in the order chainmail found its messages: a REQUEST
+// found after a later CANCEL of the same UID still began it, so a REQUEST
+// that follows the CANCEL with a higher SEQUENCE is pending. A UID whose
+// earliest message in iTIP order is a CANCEL stays out, whenever its
+// REQUESTs were found.
+func TestPendingInvitesDecideTheFirstMethodInITIPOrder(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, _ := openCache(t)
+	at := func(r calcache.MailInviteRow, found time.Time) calcache.MailInviteRow {
+		r.FoundAt = found
+		return r
+	}
+	rows := []calcache.MailInviteRow{
+		at(mailInvite("m1", "u1", calendar.MethodCancel, 1, t0), t0),                     // found first
+		at(mailInvite("m2", "u1", calendar.MethodRequest, 0, t0), t0.Add(time.Minute)),   // the original, found later
+		at(mailInvite("m3", "u1", calendar.MethodRequest, 2, t0), t0.Add(2*time.Minute)), // invited again
+		at(mailInvite("m4", "u2", calendar.MethodRequest, 1, t0), t0),                    // found first
+		at(mailInvite("m5", "u2", calendar.MethodCancel, 0, t0), t0.Add(time.Minute)),    // began as a CANCEL
+		at(mailInvite("m6", "u3", calendar.MethodCancel, 0, t0.Add(time.Hour)), t0),      // same sequence, later stamp
+		at(mailInvite("m7", "u3", calendar.MethodRequest, 0, t0), t0.Add(time.Minute)),   // began u3
+		at(mailInvite("m8", "u3", calendar.MethodRequest, 1, t0), t0.Add(2*time.Minute)), // invited again
+	}
+	for _, r := range rows {
+		if err := s.PutMailInvite(ctx, r); err != nil {
+			t.Fatalf("PutMailInvite %s: %v", r.MessageRef, err)
+		}
+	}
+	got, err := s.PendingInvites(ctx, "acme", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msgs []string
+	for _, r := range got {
+		msgs = append(msgs, r.MessageRef)
+	}
+	same(t, "PendingInvites", []string{"m3", "m8"}, msgs)
+}
