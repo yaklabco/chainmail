@@ -104,9 +104,7 @@ func TestGoogleLabelRule(t *testing.T) {
 	if run.GetMatched() != 1 || run.GetApplied() != 1 || run.GetFailed() != 0 || run.GetOutcome() != "ok" {
 		t.Errorf("run %d: outcome %s, matched %d, applied %d, failed %d; want ok with the one message applied", run.GetId(), run.GetOutcome(), run.GetMatched(), run.GetApplied(), run.GetFailed())
 	}
-	if !slices.Contains(getOne(t, c, m, false).GetLabels(), label) {
-		t.Errorf("%s lacks the label %s after the run", m, label)
-	}
+	waitLiveLabel(t, c, m, label)
 	checkLiveRuleAudit(t, c, rule.GetId(), run.GetId())
 
 	// 5. A second run skips the message: it is in the act-once table.
@@ -252,4 +250,35 @@ func checkLiveRuleAudit(t *testing.T, c *client.Client, ruleID string, runID int
 		}
 	}
 	t.Errorf("no labels row under client rule names rule %s and run %d", ruleID, runID)
+}
+
+// waitLiveLabel waits until a get of ref shows label. get reads flags and
+// labels from the cache while the folder counts as fresh, which allows the
+// cache to lag the server by up to [cache] fresh_lag, so a label a rule
+// just stored can take a sync pass to show.
+func waitLiveLabel(t *testing.T, c *client.Client, ref, label string) {
+	t.Helper()
+	within := waitBudget(t, searchTimeout)
+	ctx, cancel := context.WithTimeout(t.Context(), within)
+	defer cancel()
+	start := time.Now()
+	for n := 0; ; n++ {
+		resp, err := c.Message.Get(ctx, connect.NewRequest(&chainmailv1.GetRequest{Refs: []string{ref}}))
+		if err != nil && ctx.Err() == nil {
+			t.Fatalf("Get %s: %v (%s)", ref, err, hint(err))
+		}
+		if err == nil {
+			items := resp.Msg.GetItems()
+			if len(items) == 1 && slices.Contains(items[0].GetMessage().GetLabels(), label) {
+				t.Logf("%s shows the label %s after %v", ref, label, time.Since(start).Round(time.Second))
+				return
+			}
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("%s lacks the label %s %v after the run", ref, label, within)
+		}
+		if err := pause(ctx, n); err != nil && ctx.Err() == nil {
+			t.Fatalf("waiting for the label: %v", err)
+		}
+	}
 }
