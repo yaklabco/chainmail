@@ -82,7 +82,7 @@ A rule file uses the field names below as its keys, all but `id`, and so do the 
 | `priority` | `-1000000` to `1000000`, default `100`. Lower runs first, and rules of equal priority run in ID order. |
 | `stop` | `true` to keep later rules from acting on a message this rule matched. |
 | `actions` | 1 to 16 actions, run in order. See [Actions](#actions). |
-| `max_per_run` | `1` to `5000`, default `500`. The most messages a scheduled or manual run acts on per account. |
+| `max_per_run` | `1` to `5000`, default `500`. The most messages one run acts on per account, for new mail, scheduled and manual runs alike. |
 | `enabled` | `true` or `false`, default `true`. |
 
 A rule read back also holds its `revision`, its `disabled_reason` when it turned itself off, its creation and update times with who made each change, and its next and last scheduled runs.
@@ -167,11 +167,11 @@ chainmail rule create --name morning-flags --account work --query 'is:unread fro
 
 On a daylight saving change, an `at:` time that does not exist runs at the first instant after the gap. A time that happens twice runs once, at the first. After the daemon was down, a rule whose time passed runs once when it starts, and missed runs are not repeated. The scheduler starts with the watchers, so a daemon that watches no account runs no scheduled rule.
 
-A scheduled run matches the rule against the whole cache of each account it covers, oldest first. It acts on at most `max_per_run` messages per account, not counting those it already acted on. The cache must be able to answer the query completely. When it cannot, the run is recorded with outcome `cache_not_ready` and acts on nothing, and the rule tries again 5 minutes later. An account with no runner gets a `cache_not_ready` run with the reason `cache_disabled`, and the rule waits for its next scheduled time. `[rules]` is in the [configuration reference](../reference/configuration.md#rules).
+A scheduled run matches the rule against the whole cache of each account it covers, oldest first. It acts on at most `max_per_run` messages per account, not counting those it already acted on. Before it matches, the run waits up to a minute for the cache to take in every change the daemon had seen when the run began. The cache must then be able to answer the query completely. When it cannot, or the cache has not caught up within that minute (the reason `stale`), the run is recorded with outcome `cache_not_ready` and acts on nothing, and the rule tries again 5 minutes later. An account with no runner gets a `cache_not_ready` run with the reason `cache_disabled`, and the rule waits for its next scheduled time. `[rules]` is in the [configuration reference](../reference/configuration.md#rules).
 
 ### Running by hand
 
-`rule run <rule>` runs a rule now, as a scheduled run does. It runs on each account the rule covers, or on the one `--account` names. `--max` caps the messages it acts on per account, from 1 to 5000, and without it the cap is the rule's `max_per_run`. The command waits for the account's runner and for the run, up to 10 minutes, and prints one run per account. A disabled rule runs too, since you asked for it. A deleted rule does not.
+`rule run <rule>` runs a rule now, as a scheduled run does. Like a scheduled run, it first waits up to a minute for the cache to catch up. It runs on each account the rule covers, or on the one `--account` names. `--max` caps the messages it acts on per account, from 1 to 5000, and without it the cap is the rule's `max_per_run`. The command waits for the account's runner and for the run, up to 10 minutes, and prints one run per account. A disabled rule runs too, since you asked for it. A deleted rule does not.
 
 ```sh
 chainmail rule dry-run inbox-cleanup --trigger manual
@@ -207,7 +207,7 @@ A `move`, `archive`, `trash` or `copy` can report where the message landed. The 
 
 ### Caps
 
-A scheduled or manual run stops at its cap with outcome `capped`. The next run goes on, oldest first, since the messages already done are skipped.
+A run stops at its cap with outcome `capped`. A scheduled run or a run by hand goes on next time, oldest first, since the messages already done are skipped. A new-mail run that reaches its cap leaves the rest of that batch: new-mail matching does not come back to them, so a scheduled run or a run by hand has to act on them. Keep `max_per_run` above the mail a rule can see arrive at once, or give the rule a schedule as well.
 
 ### Failures
 
@@ -230,7 +230,7 @@ So a crash can lose a forward or a copy, but never repeats one.
 
 ### Auto-disable
 
-A rule turns itself off when a run fails on every message it did not skip, with the reason `all_failed`. It also turns itself off after 5 runs with failures and no clean run between them, with the reason `repeated_failures`. `rule show` shows the reason, and a `rule` event reports the change. `rule enable` turns the rule back on and clears the reason and the count.
+A rule turns itself off when a run fails on every message it did not skip, with the reason `all_failed`. Only failed actions count for this: a run whose every failure is `body_not_cached`, where no action was tried, does not turn the rule off on its own. Those failures still count toward `repeated_failures`. It also turns itself off after 5 runs with failures and no clean run between them, with the reason `repeated_failures`. `rule show` shows the reason, and a `rule` event reports the change. `rule enable` turns the rule back on and clears the reason and the count.
 
 ```sh
 chainmail rule list --disabled --output table
