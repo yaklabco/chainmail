@@ -512,3 +512,16 @@ func TestConcurrentUse(t *testing.T) {
 		t.Errorf("events after concurrent adds = %d, want 80", len(full.Upserts))
 	}
 }
+
+// TestStoreObjectID checks that ObjectID names the object a create of the
+// UID makes.
+func TestStoreObjectID(t *testing.T) {
+	s := newStore(t, false)
+	got, err := s.Put(context.Background(), "work", meeting("u1@x"), "", calendar.NotifySend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id := s.ObjectID("work", "u1@x"); id != got.ProviderID || id != fake.ObjectName("u1@x") {
+		t.Errorf("ObjectID = %q, want %q", id, got.ProviderID)
+	}
+}

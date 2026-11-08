@@ -342,6 +342,7 @@ func New(opts Options) (*Server, error) {
 	mux.Handle(chainmailv1connect.NewCacheServiceHandler(&cacheService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewItemsServiceHandler(&itemsService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewRulesServiceHandler(&rulesService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
+	mux.Handle(chainmailv1connect.NewCalendarServiceHandler(&calendarService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)

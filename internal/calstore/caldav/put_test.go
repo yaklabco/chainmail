@@ -556,3 +556,22 @@ func TestPutReplaceEndOnlyRaisesSequence(t *testing.T) {
 		t.Errorf("Sequence %d, line %q; want 1", got.Sequence, line(raw, "SEQUENCE"))
 	}
 }
+
+// TestStoreObjectID checks that ObjectID names the object a create of the
+// UID makes, so the daemon can read back an event a crashed create left.
+func TestStoreObjectID(t *testing.T) {
+	f := newFakeServer(t)
+	s := f.store(t, WithClock(clock))
+	for _, uid := range []string{"abc@chainmail", "a/b c@chainmail"} {
+		got, err := s.Put(context.Background(), testCal, newMeeting(uid), "", calendar.NotifySend)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id := s.ObjectID(testCal, uid); id != got.ProviderID {
+			t.Errorf("ObjectID(%q) = %q, want the created object %q", uid, id, got.ProviderID)
+		}
+	}
+	if id := s.ObjectID("relative", "abc@chainmail"); id != "" {
+		t.Errorf("ObjectID of a bad calendar ID = %q, want empty", id)
+	}
+}
