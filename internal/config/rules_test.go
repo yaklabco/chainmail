@@ -14,9 +14,15 @@ import (
 )
 
 // describeRules writes resolved [rules] settings as "<zone> HH:MM soon <n>",
-// so a test compares them, the zone's name included, as one string.
+// so a test compares them, the zone's name included, as one string. The
+// host's zone is written "Local" whatever TZ names it, so the expectation
+// holds on every host; any other zone is written by its name.
 func describeRules(s RulesSettings) string {
-	return fmt.Sprintf("%s %02d:%02d soon %d", s.Location, s.DueHour, s.DueMinute, s.DueSoonDays)
+	zone := s.Location.String()
+	if s.Location == time.Local {
+		zone = "Local"
+	}
+	return fmt.Sprintf("%s %02d:%02d soon %d", zone, s.DueHour, s.DueMinute, s.DueSoonDays)
 }
 
 // showIntPtr writes an *int for a test message.
