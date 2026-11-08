@@ -602,3 +602,72 @@ func TestObjectReplaceQuietForPrunedRows(t *testing.T) {
 		t.Errorf("events = %+v, want none", evs)
 	}
 }
+
+// TestRecurringInviteMovedIntoFuture checks that a new series whose own
+// occurrences are all past, but whose override moves one into the future,
+// gives one invite for the series.
+func TestRecurringInviteMovedIntoFuture(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.sync(t)
+	master := invited("s@x", t0.AddDate(0, 0, -21), calendar.PartStatNeedsAction)
+	master.RRule = "FREQ=WEEKLY;COUNT=2"
+	moved := master
+	moved.RRule = ""
+	moved.RecurrenceID = master.Start.AddDate(0, 0, 7)
+	moved.Start = t0.AddDate(0, 0, 3)
+	moved.End = moved.Start.Add(time.Hour)
+	p := r.store.Add("work", master, moved)
+	r.sync(t)
+	evs := r.events(t)
+	if len(evs) != 1 || evs[0].Kind != "invite" || evs[0].Ref != calendar.EventRef(account, "work", p) {
+		t.Errorf("events = %+v, want one invite for the series", evs)
+	}
+}
+
+// TestRecurringNoInviteWhenFutureCancelled checks that a new series whose
+// only future occurrence is cancelled by an override gives no invite.
+func TestRecurringNoInviteWhenFutureCancelled(t *testing.T) {
+	t.Parallel()
+	master := invited("s@x", t0.AddDate(0, 0, -8), calendar.PartStatNeedsAction)
+	master.RRule = "FREQ=WEEKLY;COUNT=3"
+	rid := master.Start.AddDate(0, 0, 14) // t0 + 6 days, the only future one
+	full := master
+	full.RRule = ""
+	full.RecurrenceID = rid
+	full.Start, full.End = rid, rid.Add(time.Hour)
+	full.Status = calendar.StatusCancelled
+	sparse := calendar.Event{UID: master.UID, RecurrenceID: rid, Status: calendar.StatusCancelled}
+	for name, cancelled := range map[string]calendar.Event{"full": full, "sparse": sparse} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t)
+			r.sync(t)
+			r.store.Add("work", master, cancelled)
+			r.sync(t)
+			if evs := r.events(t); len(evs) != 0 {
+				t.Errorf("events = %+v, want none", evs)
+			}
+		})
+	}
+}
+
+// TestRecurringInviteOnOverride checks that a new series James has already
+// accepted, with one instance that asks him again, gives one invite for
+// that instance.
+func TestRecurringInviteOnOverride(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.sync(t)
+	master := invited("s@x", t0.Add(24*time.Hour), calendar.PartStatAccepted)
+	master.RRule = "FREQ=WEEKLY;COUNT=3"
+	asks := invited("s@x", master.Start.AddDate(0, 0, 7), calendar.PartStatNeedsAction)
+	asks.RecurrenceID = asks.Start
+	p := r.store.Add("work", master, asks)
+	r.sync(t)
+	want := calendar.InstanceRef(calendar.EventRef(account, "work", p), asks.RecurrenceID)
+	evs := r.events(t)
+	if len(evs) != 1 || evs[0].Kind != "invite" || evs[0].Ref != want {
+		t.Errorf("events = %+v, want one invite for %s", evs, want)
+	}
+}

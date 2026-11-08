@@ -42,7 +42,8 @@ type eventInput struct {
 //   - invite: a new row (or a row James was just added to) where James's
 //     PARTSTAT is NEEDS-ACTION, he does not organize it, it is not
 //     cancelled, and it ends after now. A new series gives one invite, not
-//     one per override.
+//     one per override, when any instance of it as its overrides leave it
+//     (moved or cancelled) asks for an answer and ends after now.
 //   - event_changed: start, end, location, recurrence or the attendee set
 //     changed on a row James attends or organizes, including a new override
 //     that moves one instance of a stored series.
@@ -55,11 +56,18 @@ type eventInput struct {
 // Rows that ended before now - windowPast give no events, so a sync that
 // sends old rows again (after a prune or a full sync) stays quiet.
 func calendarEvents(in eventInput) []watch.Event {
-	b := eventBuilder{in: in, past: in.now.Add(-in.windowPast), base: map[string]*calcache.Change{}}
+	b := eventBuilder{
+		in: in, past: in.now.Add(-in.windowPast),
+		base: map[string]*calcache.Change{}, overrides: map[string][]*calcache.EventRow{},
+	}
 	for i := range in.changes {
 		c := &in.changes[i]
-		if row := changeRow(c); row.Event.RecurrenceID.IsZero() {
+		row := changeRow(c)
+		switch {
+		case row.Event.RecurrenceID.IsZero():
 			b.base[row.Event.ProviderID] = c
+		case c.After != nil:
+			b.overrides[row.Event.ProviderID] = append(b.overrides[row.Event.ProviderID], c.After)
 		}
 	}
 	for i := range in.changes {
@@ -82,7 +90,10 @@ type eventBuilder struct {
 	// base holds the change of each ProviderID's base row (the master or
 	// the single event), when the diff has one.
 	base map[string]*calcache.Change
-	out  []watch.Event
+	// overrides holds the overrides of each ProviderID as the diff leaves
+	// them, deleted ones left out.
+	overrides map[string][]*calcache.EventRow
+	out       []watch.Event
 }
 
 func changeRow(c *calcache.Change) *calcache.EventRow {
@@ -138,21 +149,27 @@ func (b *eventBuilder) roleOf(row *calcache.EventRow) role {
 
 func (b *eventBuilder) created(row *calcache.EventRow) {
 	override := !row.Event.RecurrenceID.IsZero()
+	if override && b.baseCreated(row) {
+		// A new series is decided once, by its base row.
+		return
+	}
+	if !override && b.isSeries(row) {
+		b.newSeries(row)
+		return
+	}
 	r := b.roleOf(row)
 	if row.Event.Status == calendar.StatusCancelled {
 		// A new cancelled override is one cancelled instance.
-		if override && !b.baseCreated(row) && r.attends() && b.endsAfter(row, b.past) {
+		if override && r.attends() && b.endsAfter(row, b.past) {
 			b.cancelled(row)
 		}
 		return
 	}
 	if row.MyPartStat == calendar.PartStatNeedsAction && !r.organizer && b.endsAfter(row, b.in.now) {
-		if !override || !b.baseCreated(row) {
-			b.invite(row)
-		}
+		b.invite(row)
 		return
 	}
-	if !override || b.baseCreated(row) || !r.involved() || !b.endsAfter(row, b.past) {
+	if !override || !r.involved() || !b.endsAfter(row, b.past) {
 		return
 	}
 	// A new override of a stored series: what it changed from the
@@ -167,6 +184,75 @@ func (b *eventBuilder) created(row *calcache.EventRow) {
 	if r.organizer {
 		b.replies(row, m.Event.Attendees, row.Event.Attendees)
 	}
+}
+
+// isSeries reports whether the base row m has more than one instance: a
+// rule, RDATEs, or overrides in the diff.
+func (b *eventBuilder) isSeries(m *calcache.EventRow) bool {
+	return m.Event.RRule != "" || len(m.Event.RDates) > 0 || len(b.overrides[m.Event.ProviderID]) > 0
+}
+
+// needsReply reports whether row asks James for an answer: it is not
+// cancelled, he does not organize it, and his PARTSTAT is NEEDS-ACTION.
+func (b *eventBuilder) needsReply(row *calcache.EventRow) bool {
+	r := b.roleOf(row)
+	return row.Event.Status != calendar.StatusCancelled && !r.organizer && r.partStat == calendar.PartStatNeedsAction
+}
+
+// newSeries gives the invite of a series the diff creates, decided on the
+// series as its master and overrides make it: one invite when an instance
+// James must answer ends after now, on the master when it asks for an
+// answer, else on that override. A cancelled override removes its instance
+// and a moved one counts where it now is. Nothing else is reported for a
+// new series.
+func (b *eventBuilder) newSeries(m *calcache.EventRow) {
+	if m.Event.Status == calendar.StatusCancelled {
+		return
+	}
+	now := b.in.now
+	overrides := b.overrides[m.Event.ProviderID]
+	series := make([]calendar.Event, 0, len(overrides)+1)
+	series = append(series, m.Event)
+	for _, o := range overrides {
+		series = append(series, placed(o.Event, m.Event))
+	}
+	masterAsks := b.needsReply(m)
+	// Every override in the range is an instance, so the first
+	// len(overrides)+1 instances hold one the master gives, when there is
+	// one.
+	insts, _, err := calendar.Expand(series, now, now.Add(seriesHorizon), len(overrides)+1)
+	if err != nil {
+		// A rule chainmail does not expand still counts as going on.
+		if masterAsks {
+			b.invite(m)
+		}
+		return
+	}
+	if masterAsks && slices.ContainsFunc(insts, func(in calendar.Instance) bool { return in.Event.RecurrenceID.IsZero() }) {
+		b.invite(m)
+		return
+	}
+	for i, o := range overrides {
+		if !b.needsReply(o) || !series[i+1].End.After(now) {
+			continue
+		}
+		if masterAsks {
+			b.invite(m)
+		} else {
+			b.invite(o)
+		}
+		return
+	}
+}
+
+// placed returns the override o of master m with a sparse override's start
+// and end filled in from its recurrence ID and the master's length.
+func placed(o, m calendar.Event) calendar.Event {
+	if o.Start.IsZero() {
+		o.Start = o.RecurrenceID
+		o.End = o.RecurrenceID.Add(max(m.End.Sub(m.Start), 0))
+	}
+	return o
 }
 
 func (b *eventBuilder) updated(before, after *calcache.EventRow) {
