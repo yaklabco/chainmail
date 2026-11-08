@@ -271,11 +271,15 @@ message CreateEventRequest {
   // Empty means the account's default calendar.
   string calendar_id = 2;
   string title = 3;
-  // start is before end. An all-day event uses 00:00 of its dates in
-  // time_zone, end exclusive.
+  // start is before end. An all-day event (all_day set) gives 00:00 UTC of
+  // its first date and 00:00 UTC of the day after its last date, end
+  // exclusive, exactly as CalendarEvent carries them. The daemon never
+  // shifts them into a zone. A client reads the dates the user typed in its
+  // own zone and sends those dates as UTC midnights.
   google.protobuf.Timestamp start = 4;
   google.protobuf.Timestamp end = 5;
-  // IANA zone. Empty means the [calendar] timezone.
+  // IANA zone of a timed event. Empty means the [calendar] timezone. It is
+  // ignored for the dates of an all-day event.
   string time_zone = 6;
   bool all_day = 7;
   string location = 8;
@@ -306,8 +310,12 @@ message UpdateEventRequest {
   // attendees or recurrence_rule. Other paths are refused.
   google.protobuf.FieldMask update_mask = 3;
   string title = 4;
+  // As in CreateEventRequest: for an all-day event, after the change or
+  // with all_day set, 00:00 UTC of the first date and of the day after the
+  // last date, end exclusive. The daemon never shifts them into a zone.
   google.protobuf.Timestamp start = 5;
   google.protobuf.Timestamp end = 6;
+  // IANA zone of a timed event. It is ignored for all-day dates.
   string time_zone = 7;
   bool all_day = 8;
   string location = 9;

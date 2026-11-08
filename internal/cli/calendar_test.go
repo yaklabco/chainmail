@@ -495,3 +495,70 @@ func errorMessage(t *testing.T, stderr string) string {
 	}
 	return out.Error.Message
 }
+
+// A span that crosses a change of daylight saving time names the zone of
+// each end, so neither end is labelled with the other's offset.
+func TestTimedRangeAcrossDaylightSaving(t *testing.T) {
+	t.Parallel()
+	ny := mustZone(t, "America/New_York")
+	tests := []struct {
+		start, end time.Time
+		want       string
+	}{
+		{
+			start: time.Date(2026, 3, 8, 6, 0, 0, 0, time.UTC), end: time.Date(2026, 3, 8, 8, 0, 0, 0, time.UTC),
+			want: "Sun 2026-03-08 01:00 EST-04:00 EDT",
+		},
+		{
+			start: time.Date(2026, 3, 8, 3, 0, 0, 0, time.UTC), end: time.Date(2026, 3, 8, 8, 0, 0, 0, time.UTC),
+			want: "Sat 2026-03-07 22:00 EST to Sun 2026-03-08 04:00 EDT",
+		},
+		{
+			start: time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC), end: time.Date(2026, 11, 10, 14, 30, 0, 0, time.UTC),
+			want: "Tue 2026-11-10 09:00-09:30 EST",
+		},
+	}
+	for _, tt := range tests {
+		if got := timedRange(tt.start, tt.end, ny); got != tt.want {
+			t.Errorf("timedRange(%v, %v) = %q, want %q", tt.start, tt.end, got, tt.want)
+		}
+	}
+}
+
+// An agenda or invites row for an event whose own zone shows another time
+// than the display zone adds the time in the event's zone, on the same
+// line, as event does.
+func TestCalendarRowsShowTheEventZone(t *testing.T) {
+	t.Parallel()
+	f := &fakeCalendar{
+		agenda: func(*chainmailv1.AgendaRequest) (*chainmailv1.AgendaResponse, error) { return agendaFixture(), nil },
+		invites: func(*chainmailv1.ListInvitesRequest) (*chainmailv1.ListInvitesResponse, error) {
+			return invitesFixture(), nil
+		},
+	}
+	for _, cmd := range []string{"agenda", "invites"} {
+		got := runCal(t, f, "--output", "table", cmd)
+		if got.code != 0 {
+			t.Fatalf("%s: %+v", cmd, got)
+		}
+		var row string
+		for line := range strings.Lines(got.stdout) {
+			if strings.Contains(line, calInstRef) {
+				row = line
+			}
+		}
+		if want := "Tue 2026-11-10 09:00-09:30 EST (15:00-15:30 CET Europe/Paris)"; !strings.HasPrefix(row, want) {
+			t.Errorf("%s row = %q, want it to start %q", cmd, row, want)
+		}
+		// The late call is in New York, the display zone, so its row has no second time.
+		if strings.Contains(got.stdout, "(America/New_York)") || strings.Contains(got.stdout, "New_York)") {
+			t.Errorf("%s shows the display zone again:\n%s", cmd, got.stdout)
+		}
+	}
+	// The event zone's dates are shown when they are not the display dates.
+	late := lateFixture()
+	late.TimeZone = "Asia/Tokyo"
+	if got, want := ownZoneRow(late, mustZone(t, "America/New_York")), " (Fri 2026-11-13 12:00-15:00 JST Asia/Tokyo)"; got != want {
+		t.Errorf("ownZoneRow = %q, want %q", got, want)
+	}
+}

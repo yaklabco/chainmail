@@ -38,13 +38,28 @@ func allDayDates(start, end *timestamppb.Timestamp) (first, last time.Time) {
 }
 
 // timedRange is a span in loc: "Tue 2026-11-10 09:00-09:30 EST", or with
-// both dates when it ends on another day.
+// both dates when it ends on another day, and with the zone of each end
+// when a change of daylight saving time falls inside it.
 func timedRange(start, end time.Time, loc *time.Location) string {
-	s, e := start.In(loc), end.In(loc)
-	if s.Format(time.DateOnly) == e.Format(time.DateOnly) {
-		return s.Format(calMinuteLayout) + "-" + e.Format(calClockLayout) + " " + e.Format("MST")
+	return span(start.In(loc), end.In(loc), true)
+}
+
+// span is s to e in their zone: the start's date when dated, both dates
+// when they fall on different days, and each end's zone abbreviation when
+// the two differ, else the end's alone.
+func span(s, e time.Time, dated bool) string {
+	sameDay := s.Format(time.DateOnly) == e.Format(time.DateOnly)
+	from, sep, to := s.Format(calClockLayout), "-", e.Format(calClockLayout)
+	if dated || !sameDay {
+		from = s.Format(calMinuteLayout)
 	}
-	return s.Format(calMinuteLayout) + " to " + e.Format(calMinuteLayout) + " " + e.Format("MST")
+	if !sameDay {
+		sep, to = " to ", e.Format(calMinuteLayout)
+	}
+	if sz := s.Format("MST"); sz != e.Format("MST") {
+		from += " " + sz
+	}
+	return from + sep + to + " " + e.Format("MST")
 }
 
 // whenText is when an event takes place, in loc unless it is all day.
@@ -68,23 +83,47 @@ func whenShort(e *chainmailv1.CalendarEvent, loc *time.Location) string {
 	return e.GetStart().AsTime().In(loc).Format(calShortLayout)
 }
 
-// ownZoneText is when a timed event takes place in its own zone, when that
-// zone's offset differs from loc's at its start, else "".
-func ownZoneText(e *chainmailv1.CalendarEvent, loc *time.Location) string {
+// ownZone is a timed event's own zone, when its offset differs from loc's
+// at the event's start, else nil.
+func ownZone(e *chainmailv1.CalendarEvent, loc *time.Location) *time.Location {
 	if e.GetAllDay() || e.GetTimeZone() == "" {
-		return ""
+		return nil
 	}
 	own, err := time.LoadLocation(e.GetTimeZone())
 	if err != nil {
-		return ""
+		return nil
 	}
 	start := e.GetStart().AsTime()
 	_, ownOffset := start.In(own).Zone()
 	_, locOffset := start.In(loc).Zone()
 	if ownOffset == locOffset {
+		return nil
+	}
+	return own
+}
+
+// ownZoneText is when a timed event takes place in its own zone, when that
+// zone's offset differs from loc's at its start, else "".
+func ownZoneText(e *chainmailv1.CalendarEvent, loc *time.Location) string {
+	own := ownZone(e, loc)
+	if own == nil {
 		return ""
 	}
-	return timedRange(start, e.GetEnd().AsTime(), own) + " (" + termText(e.GetTimeZone()) + ")"
+	return timedRange(e.GetStart().AsTime(), e.GetEnd().AsTime(), own) + " (" + termText(e.GetTimeZone()) + ")"
+}
+
+// ownZoneRow is ownZoneText for a table row, to follow whenText on the same
+// line: " (15:00-15:30 CET Europe/Paris)", with dates only when they are
+// not the dates loc shows. It is "" when ownZoneText is.
+func ownZoneRow(e *chainmailv1.CalendarEvent, loc *time.Location) string {
+	own := ownZone(e, loc)
+	if own == nil {
+		return ""
+	}
+	start, end := e.GetStart().AsTime(), e.GetEnd().AsTime()
+	s, en := start.In(own), end.In(own)
+	dated := s.Format(time.DateOnly) != start.In(loc).Format(time.DateOnly) || en.Format(time.DateOnly) != end.In(loc).Format(time.DateOnly)
+	return " (" + span(s, en, dated) + " " + termText(e.GetTimeZone()) + ")"
 }
 
 // partstatText is how James stands with an event: organizer, his PARTSTAT
@@ -123,14 +162,15 @@ func calendarsTable(w io.Writer, r *chainmailv1.ListCalendarsResponse) error {
 	return tw.Flush()
 }
 
-// agendaTable prints one line per event, in loc, and says when instances
-// were left out.
+// agendaTable prints one line per event, in loc, with the time in the
+// event's own zone when that differs, and says when instances were left
+// out.
 func agendaTable(w io.Writer, loc *time.Location, r *chainmailv1.AgendaResponse) error {
 	tw := newTable(w)
 	_, _ = fmt.Fprintln(tw, "WHEN\tACCOUNT\tSTATUS\tME\tREF\tSUMMARY")
 	for _, e := range r.GetEvents() {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			whenText(e, loc), termText(e.GetAccount()), orDash(strings.ToLower(termText(e.GetStatus()))), partstatText(e),
+			whenText(e, loc)+ownZoneRow(e, loc), termText(e.GetAccount()), orDash(strings.ToLower(termText(e.GetStatus()))), partstatText(e),
 			termText(e.GetRef()), orDash(clip(termText(e.GetSummary().GetUntrusted()), summaryWidth)))
 	}
 	if err := tw.Flush(); err != nil {
@@ -142,14 +182,15 @@ func agendaTable(w io.Writer, loc *time.Location, r *chainmailv1.AgendaResponse)
 	return nil
 }
 
-// invitesTable prints one line per invite, in loc.
+// invitesTable prints one line per invite, in loc, with the time in the
+// event's own zone when that differs.
 func invitesTable(w io.Writer, loc *time.Location, r *chainmailv1.ListInvitesResponse) error {
 	tw := newTable(w)
 	_, _ = fmt.Fprintln(tw, "WHEN\tACCOUNT\tSOURCE\tMETHOD\tORGANIZER\tREF\tSUMMARY")
 	for _, inv := range r.GetInvites() {
 		e := inv.GetEvent()
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			whenText(e, loc), termText(e.GetAccount()), orDash(termText(inv.GetSource())), orDash(termText(inv.GetMethod())),
+			whenText(e, loc)+ownZoneRow(e, loc), termText(e.GetAccount()), orDash(termText(inv.GetSource())), orDash(termText(inv.GetMethod())),
 			orDash(clip(termText(e.GetOrganizer().GetEmail().GetUntrusted()), summaryWidth)), termText(e.GetRef()),
 			orDash(clip(termText(e.GetSummary().GetUntrusted()), summaryWidth)))
 	}

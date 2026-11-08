@@ -33,6 +33,8 @@ func TestEventCreateRequests(t *testing.T) {
 	ny := func(day, hour, minute int) time.Time {
 		return time.Date(2026, 11, day, hour, minute, 0, 0, mustZone(t, "America/New_York"))
 	}
+	// An all-day event goes on the wire as 00:00 UTC of its dates.
+	utcDay := func(day int) time.Time { return time.Date(2026, 11, day, 0, 0, 0, 0, time.UTC) }
 	tests := []struct {
 		name string
 		args []string
@@ -65,17 +67,17 @@ func TestEventCreateRequests(t *testing.T) {
 		{
 			name: "all day, the end date included",
 			args: []string{"--title", "Offsite", "--all-day", "--start", "2026-11-11", "--end", "2026-11-13"},
-			want: &chainmailv1.CreateEventRequest{Title: "Offsite", AllDay: true, Start: ts(ny(11, 0, 0)), End: ts(ny(14, 0, 0))},
+			want: &chainmailv1.CreateEventRequest{Title: "Offsite", AllDay: true, Start: ts(utcDay(11)), End: ts(utcDay(14))},
 		},
 		{
 			name: "all day for one day by default",
 			args: []string{"--title", "Holiday", "--all-day", "--start", "2026-11-26"},
-			want: &chainmailv1.CreateEventRequest{Title: "Holiday", AllDay: true, Start: ts(ny(26, 0, 0)), End: ts(ny(27, 0, 0))},
+			want: &chainmailv1.CreateEventRequest{Title: "Holiday", AllDay: true, Start: ts(utcDay(26)), End: ts(utcDay(27))},
 		},
 		{
 			name: "all day for two days by duration",
 			args: []string{"--title", "Trip", "--all-day", "--start", "2026-11-26", "--duration", "2d"},
-			want: &chainmailv1.CreateEventRequest{Title: "Trip", AllDay: true, Start: ts(ny(26, 0, 0)), End: ts(ny(28, 0, 0))},
+			want: &chainmailv1.CreateEventRequest{Title: "Trip", AllDay: true, Start: ts(utcDay(26)), End: ts(utcDay(28))},
 		},
 		{
 			name: "rfc 3339 times",
@@ -99,6 +101,56 @@ func TestEventCreateRequests(t *testing.T) {
 			req.IdempotencyKey = ""
 			if !proto.Equal(req, tt.want) {
 				t.Errorf("request = %v, want %v", req, tt.want)
+			}
+		})
+	}
+}
+
+// runCalIn runs chainmail against f at calNow with the CLI in loc.
+func runCalIn(t *testing.T, f *fakeCalendar, loc *time.Location, args ...string) cliResult {
+	t.Helper()
+	env := Env{TZ: loc, Now: func() time.Time { return calNow }}
+	return runCLI(t, env, append([]string{"--socket", startFakeCalendar(t, f)}, args...)...)
+}
+
+// An all-day event carries 00:00 UTC of the dates typed, end exclusive,
+// whatever zone the CLI runs in or --tz names (Amendment 17). The zones
+// here are far from UTC, so local midnight falls on another UTC date.
+func TestEventCreateAllDayDatesAreUTCMidnights(t *testing.T) {
+	t.Parallel()
+	day := func(d int) time.Time { return time.Date(2026, 11, d, 0, 0, 0, 0, time.UTC) }
+	tests := []struct {
+		name       string
+		zone       string
+		args       []string
+		start, end time.Time
+		tz         string
+	}{
+		{name: "fourteen hours ahead", zone: "Pacific/Kiritimati", args: []string{"--start", "2026-11-11", "--end", "2026-11-13"}, start: day(11), end: day(14)},
+		{name: "eleven hours behind", zone: "Pacific/Pago_Pago", args: []string{"--start", "2026-11-11", "--duration", "2d"}, start: day(11), end: day(13)},
+		{name: "one day by default", zone: "Asia/Tokyo", args: []string{"--start", "2026-11-30"}, start: day(30), end: time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)},
+		{
+			name: "--tz names the zone the dates are read in", zone: "Pacific/Kiritimati",
+			args: []string{"--start", "2026-11-11", "--tz", "America/Los_Angeles"}, start: day(11), end: day(12), tz: "America/Los_Angeles",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeCalendar{}
+			args := append([]string{"event", "create", "--title", "Away", "--all-day"}, tt.args...)
+			if got := runCalIn(t, f, mustZone(t, tt.zone), args...); got.code != 0 {
+				t.Fatalf("event create: %+v", got)
+			}
+			req := createReq(t, f)
+			if got := req.GetStart().AsTime(); !got.Equal(tt.start) {
+				t.Errorf("start = %v, want %v", got, tt.start)
+			}
+			if got := req.GetEnd().AsTime(); !got.Equal(tt.end) {
+				t.Errorf("end = %v, want %v", got, tt.end)
+			}
+			if !req.GetAllDay() || req.GetTimeZone() != tt.tz {
+				t.Errorf("all_day = %v, time_zone = %q, want true and %q", req.GetAllDay(), req.GetTimeZone(), tt.tz)
 			}
 		})
 	}
@@ -333,7 +385,9 @@ func TestEventEditRequests(t *testing.T) {
 			},
 		},
 		{
-			name: "every field",
+			// --start reads the event, to learn whether it is all day.
+			name:    "every field",
+			readsIt: true,
 			args: []string{
 				"--etag", "x", "--title", "T", "--start", "2026-11-10 10:00", "--end", "2026-11-10 11:00", "--tz", "UTC",
 				"--location", "L", "--description", "D", "--attendee", "a@example.com", "--rrule", "",
@@ -355,7 +409,7 @@ func TestEventEditRequests(t *testing.T) {
 			args: []string{"--etag", "x", "--all-day", "--start", "2026-11-10"},
 			want: &chainmailv1.UpdateEventRequest{
 				Ref: calInstRef, Etag: "x", AllDay: true, UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"start", "end", "all_day"}},
-				Start: ts(time.Date(2026, 11, 10, 5, 0, 0, 0, time.UTC)), End: ts(time.Date(2026, 11, 11, 5, 0, 0, 0, time.UTC)),
+				Start: ts(time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)), End: ts(time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)),
 			},
 		},
 	}
@@ -385,6 +439,102 @@ func TestEventEditRequests(t *testing.T) {
 	}
 }
 
+// An edit of an all-day event's times keeps it all day: it takes dates,
+// whole days and calendar-day arithmetic, sent as 00:00 UTC of the dates
+// (Amendment 17), and all_day stays out of the mask. --timed makes it timed.
+func TestEventEditKeepsAllDay(t *testing.T) {
+	t.Parallel()
+	day := func(month time.Month, d int) time.Time { return time.Date(2026, month, d, 0, 0, 0, 0, time.UTC) }
+	// The day before daylight saving time starts in New York, 8 March 2026.
+	current := &chainmailv1.CalendarEvent{
+		Ref: calRef2, Account: "home", CalendarId: "personal", Start: ts(day(time.March, 7)), End: ts(day(time.March, 8)),
+		AllDay: true, Etag: `"e2"`,
+	}
+	mask := func(paths ...string) *fieldmaskpb.FieldMask { return &fieldmaskpb.FieldMask{Paths: paths} }
+	tests := []struct {
+		name string
+		args []string
+		want *chainmailv1.UpdateEventRequest
+	}{
+		{
+			name: "a duration in days across the change to daylight saving time",
+			args: []string{"--duration", "2d"},
+			want: &chainmailv1.UpdateEventRequest{Ref: calRef2, Etag: `"e2"`, UpdateMask: mask("end"), End: ts(day(time.March, 9))},
+		},
+		{
+			name: "a new first date and two days",
+			args: []string{"--start", "2026-03-07", "--duration", "2d"},
+			want: &chainmailv1.UpdateEventRequest{
+				Ref: calRef2, Etag: `"e2"`, UpdateMask: mask("start", "end"), Start: ts(day(time.March, 7)), End: ts(day(time.March, 9)),
+			},
+		},
+		{
+			name: "a new first date keeps the number of days",
+			args: []string{"--start", "2026-03-20"},
+			want: &chainmailv1.UpdateEventRequest{
+				Ref: calRef2, Etag: `"e2"`, UpdateMask: mask("start", "end"), Start: ts(day(time.March, 20)), End: ts(day(time.March, 21)),
+			},
+		},
+		{
+			name: "a new last date, included",
+			args: []string{"--end", "2026-03-09"},
+			want: &chainmailv1.UpdateEventRequest{Ref: calRef2, Etag: `"e2"`, UpdateMask: mask("end"), End: ts(day(time.March, 10))},
+		},
+		{
+			name: "made timed",
+			args: []string{"--timed", "--start", "2026-03-07 09:00", "--duration", "1h"},
+			want: &chainmailv1.UpdateEventRequest{
+				Ref: calRef2, Etag: `"e2"`, UpdateMask: mask("start", "end", "all_day"),
+				Start: ts(time.Date(2026, 3, 7, 14, 0, 0, 0, time.UTC)), End: ts(time.Date(2026, 3, 7, 15, 0, 0, 0, time.UTC)),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeCalendar{event: func(*chainmailv1.GetEventRequest) (*chainmailv1.GetEventResponse, error) {
+				return &chainmailv1.GetEventResponse{Event: current}, nil
+			}}
+			got := runCal(t, f, append([]string{"--output", "table", "event", "edit", calRef2}, tt.args...)...)
+			if got.code != 0 {
+				t.Fatalf("event edit: %+v", got)
+			}
+			want := []proto.Message{&chainmailv1.GetEventRequest{Ref: calRef2}, tt.want}
+			if reqs := f.requests(); !slices.EqualFunc(reqs, want, proto.Equal) {
+				t.Errorf("requests = %v, want %v", reqs, want)
+			}
+		})
+	}
+
+	refused := []struct {
+		name string
+		args []string
+		msg  string
+	}{
+		{name: "a time for an all-day event", args: []string{"--start", "2026-03-07 09:00"}, msg: "--timed"},
+		{name: "a time as the last date", args: []string{"--end", "2026-03-09 09:00"}, msg: "--timed"},
+		{name: "part days", args: []string{"--duration", "36h"}, msg: "whole days"},
+		{name: "timed with no end", args: []string{"--timed", "--start", "2026-03-07 09:00"}, msg: "give --end or --duration"},
+	}
+	for _, tt := range refused {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeCalendar{event: func(*chainmailv1.GetEventRequest) (*chainmailv1.GetEventResponse, error) {
+				return &chainmailv1.GetEventResponse{Event: current}, nil
+			}}
+			got := runCal(t, f, append([]string{"event", "edit", calRef2}, tt.args...)...)
+			if got.code != api.ExitUsage || !strings.Contains(errorMessage(t, got.stderr), tt.msg) {
+				t.Errorf("%v: %+v, want exit 2 with %q", tt.args, got, tt.msg)
+			}
+			for _, req := range f.requests() {
+				if _, ok := req.(*chainmailv1.UpdateEventRequest); ok {
+					t.Errorf("%v sent %v, want no update", tt.args, req)
+				}
+			}
+		})
+	}
+}
+
 func TestEventEditUsageErrors(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -396,6 +546,8 @@ func TestEventEditUsageErrors(t *testing.T) {
 		{name: "attendees and none", args: []string{"--attendee", "a@example.com", "--no-attendees"}, msg: "--attendee and --no-attendees cannot be used together"},
 		{name: "end and duration", args: []string{"--end", "2026-11-10 10:00", "--duration", "1h"}, msg: "--end and --duration cannot be used together"},
 		{name: "all day without dates", args: []string{"--all-day"}, msg: "--all-day needs --start"},
+		{name: "timed without times", args: []string{"--timed"}, msg: "--timed needs --start"},
+		{name: "all day and timed", args: []string{"--all-day", "--timed", "--start", "2026-11-10"}, msg: "--all-day and --timed cannot be used together"},
 		{name: "no ref", args: nil, msg: "accepts 1 arg"},
 	}
 	for _, tt := range tests {
@@ -442,5 +594,93 @@ func TestEventCancel(t *testing.T) {
 	want = []proto.Message{&chainmailv1.CancelEventRequest{Ref: calRef2, Etag: "x"}}
 	if reqs := withTag.requests(); !slices.EqualFunc(reqs, want, proto.Equal) {
 		t.Errorf("requests = %v, want %v", reqs, want)
+	}
+}
+
+// A time without a zone that the clocks skip when daylight saving time
+// starts is refused. A time the clocks show twice when it ends is the
+// first of the two, whichever side of UTC the zone is on.
+func TestCalendarTimesAroundDaylightSaving(t *testing.T) {
+	t.Parallel()
+	create := func(tz, start string) (cliResult, *fakeCalendar) {
+		f := &fakeCalendar{}
+		return runCal(t, f, "event", "create", "--title", "x", "--tz", tz, "--start", start, "--duration", "30m"), f
+	}
+	for _, tt := range []struct{ tz, start string }{
+		{tz: "America/New_York", start: "2026-03-08 02:30"},
+		{tz: "Europe/London", start: "2026-03-29 01:00"},
+	} {
+		got, f := create(tt.tz, tt.start)
+		msg := "does not exist in " + tt.tz
+		if got.code != api.ExitUsage || !strings.Contains(errorMessage(t, got.stderr), msg) || len(f.requests()) != 0 {
+			t.Errorf("--start %q in %s: %+v, want exit 2 with %q and no request", tt.start, tt.tz, got, msg)
+		}
+	}
+	f := &fakeCalendar{}
+	if got := runCal(t, f, "agenda", "--tz", "America/New_York", "--from", "2026-03-08 02:00"); got.code != api.ExitUsage || len(f.requests()) != 0 {
+		t.Errorf("agenda --from in the gap: %+v, want exit 2 and no request", got)
+	}
+
+	for _, tt := range []struct {
+		tz, start string
+		want      time.Time
+	}{
+		{tz: "America/New_York", start: "2026-11-01 01:30", want: time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC)},
+		{tz: "Europe/London", start: "2026-10-25 01:30", want: time.Date(2026, 10, 25, 0, 30, 0, 0, time.UTC)},
+		{tz: "Australia/Sydney", start: "2026-04-05 02:30", want: time.Date(2026, 4, 4, 15, 30, 0, 0, time.UTC)},
+	} {
+		got, f := create(tt.tz, tt.start)
+		if got.code != 0 {
+			t.Errorf("--start %q in %s: %+v", tt.start, tt.tz, got)
+			continue
+		}
+		if start := createReq(t, f).GetStart().AsTime(); !start.Equal(tt.want) {
+			t.Errorf("--start %q in %s = %v, want the first one, %v", tt.start, tt.tz, start, tt.want)
+		}
+	}
+}
+
+// The request carries the attendees in one order, sorted, with addresses
+// that differ only in case kept once, so the derived key and the request
+// agree: a retry with the attendees in another order sends the same
+// request under the same key.
+func TestEventAttendeesAreCanonical(t *testing.T) {
+	t.Parallel()
+	create := func(attendees ...string) *chainmailv1.CreateEventRequest {
+		t.Helper()
+		f := &fakeCalendar{}
+		args := []string{"event", "create", "--title", "x", "--start", "2026-11-10 09:00", "--duration", "1h"}
+		for _, a := range attendees {
+			args = append(args, "--attendee", a)
+		}
+		if got := runCal(t, f, args...); got.code != 0 {
+			t.Fatalf("event create: %+v", got)
+		}
+		return createReq(t, f)
+	}
+	first := create("carol@example.com", "Bob@example.com", "alice@example.com", "bob@example.com")
+	again := create("bob@example.com", "alice@example.com", "carol@example.com", "Bob@example.com", "ALICE@example.com")
+	want := []string{"alice@example.com", "Bob@example.com", "carol@example.com"}
+	if got := first.GetAttendees(); !slices.Equal(got, want) {
+		t.Errorf("attendees = %q, want %q", got, want)
+	}
+	if got, want := again.GetAttendees(), []string{"ALICE@example.com", "Bob@example.com", "carol@example.com"}; !slices.Equal(got, want) {
+		t.Errorf("attendees = %q, want %q", got, want)
+	}
+	if deriveEventKey(again) != again.GetIdempotencyKey() || deriveEventKey(first) != first.GetIdempotencyKey() {
+		t.Error("the derived key does not match the request it was sent with")
+	}
+
+	f := &fakeCalendar{}
+	if got := runCal(t, f, "event", "edit", calRef, "--etag", "x", "--attendee", "b@example.com", "--attendee", "a@example.com", "--attendee", "B@example.com"); got.code != 0 {
+		t.Fatalf("event edit: %+v", got)
+	}
+	reqs := f.requests()
+	if len(reqs) != 1 {
+		t.Fatalf("requests = %v, want one UpdateEvent", reqs)
+	}
+	update, ok := reqs[0].(*chainmailv1.UpdateEventRequest)
+	if want := []string{"a@example.com", "B@example.com"}; !ok || !slices.Equal(update.GetAttendees(), want) {
+		t.Errorf("edit request = %v, want attendees %q", reqs[0], want)
 	}
 }

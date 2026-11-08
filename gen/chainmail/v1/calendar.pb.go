@@ -1481,11 +1481,15 @@ type CreateEventRequest struct {
 	// Empty means the account's default calendar.
 	CalendarId string `protobuf:"bytes,2,opt,name=calendar_id,json=calendarId,proto3" json:"calendar_id,omitempty"`
 	Title      string `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
-	// start is before end. An all-day event uses 00:00 of its dates in
-	// time_zone, end exclusive.
+	// start is before end. An all-day event (all_day set) gives 00:00 UTC of
+	// its first date and 00:00 UTC of the day after its last date, end
+	// exclusive, exactly as CalendarEvent carries them. The daemon never
+	// shifts them into a zone. A client reads the dates the user typed in its
+	// own zone and sends those dates as UTC midnights.
 	Start *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=start,proto3" json:"start,omitempty"`
 	End   *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=end,proto3" json:"end,omitempty"`
-	// IANA zone. Empty means the [calendar] timezone.
+	// IANA zone of a timed event. Empty means the [calendar] timezone. It is
+	// ignored for the dates of an all-day event.
 	TimeZone    string `protobuf:"bytes,6,opt,name=time_zone,json=timeZone,proto3" json:"time_zone,omitempty"`
 	AllDay      bool   `protobuf:"varint,7,opt,name=all_day,json=allDay,proto3" json:"all_day,omitempty"`
 	Location    string `protobuf:"bytes,8,opt,name=location,proto3" json:"location,omitempty"`
@@ -1678,14 +1682,18 @@ type UpdateEventRequest struct {
 	Etag string `protobuf:"bytes,2,opt,name=etag,proto3" json:"etag,omitempty"`
 	// title, start, end, time_zone, all_day, location, description,
 	// attendees or recurrence_rule. Other paths are refused.
-	UpdateMask  *fieldmaskpb.FieldMask `protobuf:"bytes,3,opt,name=update_mask,json=updateMask,proto3" json:"update_mask,omitempty"`
-	Title       string                 `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`
-	Start       *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=start,proto3" json:"start,omitempty"`
-	End         *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=end,proto3" json:"end,omitempty"`
-	TimeZone    string                 `protobuf:"bytes,7,opt,name=time_zone,json=timeZone,proto3" json:"time_zone,omitempty"`
-	AllDay      bool                   `protobuf:"varint,8,opt,name=all_day,json=allDay,proto3" json:"all_day,omitempty"`
-	Location    string                 `protobuf:"bytes,9,opt,name=location,proto3" json:"location,omitempty"`
-	Description string                 `protobuf:"bytes,10,opt,name=description,proto3" json:"description,omitempty"`
+	UpdateMask *fieldmaskpb.FieldMask `protobuf:"bytes,3,opt,name=update_mask,json=updateMask,proto3" json:"update_mask,omitempty"`
+	Title      string                 `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`
+	// As in CreateEventRequest: for an all-day event, after the change or
+	// with all_day set, 00:00 UTC of the first date and of the day after the
+	// last date, end exclusive. The daemon never shifts them into a zone.
+	Start *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=start,proto3" json:"start,omitempty"`
+	End   *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=end,proto3" json:"end,omitempty"`
+	// IANA zone of a timed event. It is ignored for all-day dates.
+	TimeZone    string `protobuf:"bytes,7,opt,name=time_zone,json=timeZone,proto3" json:"time_zone,omitempty"`
+	AllDay      bool   `protobuf:"varint,8,opt,name=all_day,json=allDay,proto3" json:"all_day,omitempty"`
+	Location    string `protobuf:"bytes,9,opt,name=location,proto3" json:"location,omitempty"`
+	Description string `protobuf:"bytes,10,opt,name=description,proto3" json:"description,omitempty"`
 	// The whole new attendee list.
 	Attendees []string `protobuf:"bytes,11,rep,name=attendees,proto3" json:"attendees,omitempty"`
 	// Empty with recurrence_rule in update_mask removes the recurrence.
