@@ -241,3 +241,58 @@ func TestFetchHeadersReadsGmailAttachedMessageWithoutEnvelope(t *testing.T) {
 		}
 	}
 }
+
+// headersInvite is a calendar invite as Outlook sends one: the text and
+// the text/calendar alternative, quoted-printable, with no attachment.
+const headersInvite = "From: olive@example.net\r\nTo: Host <host@example.test>\r\nSubject: Invite\r\n" +
+	"Date: Wed, 28 Oct 2026 09:00:00 +0000\r\nMessage-ID: <invite@example.net>\r\nMIME-Version: 1.0\r\n" +
+	"Content-Type: multipart/alternative; boundary=\"alt\"\r\n\r\n" +
+	"--alt\r\nContent-Type: text/plain; charset=\"us-ascii\"\r\n\r\nPlanning\r\n" +
+	"--alt\r\nContent-Type: text/calendar; charset=\"utf-8\"; method=CANCEL\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n" +
+	headersInviteBody + "\r\n--alt--\r\n"
+
+const headersInviteBody = "BEGIN:VCALENDAR\r\nMETHOD:CANCEL\r\nBEGIN:VEVENT\r\nUID:invite@example.net\r\nEND:VEVENT\r\nEND:VCALENDAR"
+
+// headersSingleInvite is a single-part, base64-encoded cancellation.
+const headersSingleInvite = "From: olive@example.net\r\nTo: host@example.test\r\nSubject: Cancelled\r\n" +
+	"Date: Thu, 29 Oct 2026 09:00:00 +0000\r\nMIME-Version: 1.0\r\n" +
+	"Content-Type: text/calendar; method=cancel; charset=ISO-8859-1\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+	headersInviteB64 + "\r\n"
+
+const headersInviteB64 = "QkVHSU46VkNBTEVOREFSDQpFTkQ6VkNBTEVOREFS"
+
+// FetchHeaders on a standard server lists a message's calendar parts, with
+// the method and charset of each, and a message without one lists none.
+func TestFetchHeadersCalendarParts(t *testing.T) {
+	t.Parallel()
+	ca := tlstest.New(t)
+	ep := imaptest.Start(t, ca, provider.SecurityTLS, imaptest.User{
+		Username: "host@example.test", Password: "pw", Mail: map[string][]string{"INBOX": {headersInvite, headersRich, headersSingleInvite}},
+	})
+	s := New(testAccount("host", ep, false), passwordCreds("host@example.test", "pw"), Options{RootCAs: ca.Pool, Backoff: noBackoff})
+	t.Cleanup(func() { _ = s.Close() })
+	res, err := s.Search(t.Context(), mailstore.SearchRequest{})
+	if err != nil || len(res) != 1 {
+		t.Fatalf("Search = %+v, %v", res, err)
+	}
+	hs, err := s.FetchHeaders(t.Context(), res[0].Source, []uint32{1, 2, 3})
+	if err != nil || len(hs) != 3 {
+		t.Fatalf("FetchHeaders = %+v, %v", hs, err)
+	}
+	want := []mailstore.CalendarPart{{Part: "2", Method: "CANCEL", Charset: "utf-8", Size: int64(len(headersInviteBody))}}
+	if !reflect.DeepEqual(hs[0].CalendarParts, want) {
+		t.Errorf("calendar parts = %+v, want %+v", hs[0].CalendarParts, want)
+	}
+	if hs[0].Attachments != nil {
+		t.Errorf("attachments = %+v, want none: the calendar alternative is not an attachment", hs[0].Attachments)
+	}
+	if hs[1].CalendarParts != nil {
+		t.Errorf("calendar parts of a message without any = %+v", hs[1].CalendarParts)
+	}
+	// A single-part message is part 1, and its body runs to the end of the
+	// message, the last line break included.
+	single := []mailstore.CalendarPart{{Part: "1", Method: "CANCEL", Charset: "iso-8859-1", Size: int64(len(headersInviteB64) + 2)}}
+	if !reflect.DeepEqual(hs[2].CalendarParts, single) {
+		t.Errorf("calendar parts of a single-part message = %+v, want %+v", hs[2].CalendarParts, single)
+	}
+}
