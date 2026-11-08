@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -59,6 +60,8 @@ type inviteRig struct {
 	h         *inviteHook
 	failing   atomic.Int32
 	publishes atomic.Int32
+	// nowNS is the hook's clock, inviteNow unless a test moves it.
+	nowNS atomic.Int64
 }
 
 func newInviteRig(t *testing.T) *inviteRig {
@@ -75,6 +78,7 @@ func newInviteRig(t *testing.T) *inviteRig {
 	}
 	t.Cleanup(func() { _ = cal.Close() }) // a close error at test end changes nothing
 	r := &inviteRig{t: t, cal: cal, log: watch.NewLog(stateDB, func() time.Time { return inviteNow }, nil)}
+	r.nowNS.Store(inviteNow.UnixNano())
 	r.h = newInviteHook(inviteHookOptions{
 		Cache:     cal,
 		Log:       r.log,
@@ -82,7 +86,7 @@ func newInviteRig(t *testing.T) *inviteRig {
 		Poke:      r.poke,
 		StoreNone: func(account string) bool { return account == "none" },
 		Self:      func(addr string) bool { return strings.EqualFold(addr, "me@example.com") },
-		Now:       func() time.Time { return inviteNow },
+		Now:       r.now,
 	})
 	r.hook = r.h.onInvites
 	return r
@@ -536,5 +540,163 @@ func TestStartBackgroundAnnouncesPendingInvites(t *testing.T) {
 	evs := r.events()
 	if len(evs) != 1 || evs[0].Account != "host" || evs[0].Ref != calendar.MailInviteRef("host", "u1") {
 		t.Errorf("events = %+v, want host's u1 invite", evs)
+	}
+}
+
+// now is the rig's clock.
+func (r *inviteRig) now() time.Time { return time.Unix(0, r.nowNS.Load()).UTC() }
+
+// advance moves the rig's clock on by d.
+func (r *inviteRig) advance(d time.Duration) { r.nowNS.Add(int64(d)) }
+
+// rowOf returns the stored row of account's message msg for uid.
+func (r *inviteRig) rowOf(account, msg, uid string) calcache.MailInviteRow {
+	r.t.Helper()
+	got, err := r.cal.MailInvite(r.t.Context(), calendar.MailInviteRef(account, uid))
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if got.MessageRef != msg {
+		r.t.Fatalf("latest row of %s is from %s, want %s", uid, got.MessageRef, msg)
+	}
+	return got
+}
+
+// A pending invite stays pending for as long as its meeting is still to
+// come: a publish that failed is retried eight days later, for a meeting
+// next month, however long the outage lasted.
+func TestInviteHookRetriesAnUpcomingMeetingAfterAWeek(t *testing.T) {
+	t.Parallel()
+	r := newInviteRig(t)
+	r.failing.Store(1)
+	nextMonth := inviteICS("REQUEST", "u1", 0, "ann@example.com", "20261202T170000Z", "20261202T173000Z")
+	r.hook(t.Context(), []cache.FoundInvite{found("none", "msg-1", "REQUEST", nextMonth)})
+	if n := len(r.events()); n != 0 {
+		t.Fatalf("published %d invite events with a failing log, want none", n)
+	}
+	r.advance(8 * 24 * time.Hour)
+	r.h.announce(t.Context(), "none")
+	evs := r.events()
+	if len(evs) != 1 || evs[0].Ref != calendar.MailInviteRef("none", "u1") {
+		t.Fatalf("events = %+v, want u1's invite after eight days", evs)
+	}
+	if row := r.rowOf("none", "msg-1", "u1"); !row.Announced {
+		t.Error("u1 is not marked announced after its publish")
+	}
+}
+
+// A pending invite that will never get an event (it ended, James
+// organizes it, it is cancelled, or its stored data does not parse) is
+// settled the first time it is looked at, so later passes do not read it
+// again; a pending one whose publish failed is not.
+func TestInviteHookSettlesInvitesThatNeedNoEvent(t *testing.T) {
+	t.Parallel()
+	r := newInviteRig(t)
+	cancelled := bytes.Replace(request("u3"), []byte("SUMMARY:"), []byte("STATUS:CANCELLED\r\nSUMMARY:"), 1)
+	r.failing.Store(1)
+	r.hook(t.Context(), []cache.FoundInvite{
+		found("none", "msg-1", "REQUEST", inviteICS("REQUEST", "u1", 0, "ann@example.com", "20261101T170000Z", "20261101T173000Z")),
+		found("none", "msg-2", "REQUEST", inviteICS("REQUEST", "u2", 0, "me@example.com", "20261110T170000Z", "20261110T173000Z")),
+		found("none", "msg-3", "REQUEST", cancelled),
+		found("none", "msg-4", "REQUEST", request("u4")),
+	})
+	broken := calcache.MailInviteRow{
+		Account: "none", MessageRef: "msg-5", UID: "u5", Method: calendar.MethodRequest,
+		DTStamp: inviteNow, Raw: []byte("not a calendar"), FoundAt: inviteNow,
+	}
+	if err := r.cal.PutMailInvite(t.Context(), broken); err != nil {
+		t.Fatal(err)
+	}
+	r.h.announce(t.Context(), "none")
+	for _, w := range []struct {
+		msg, uid string
+		settled  bool
+	}{{"msg-1", "u1", true}, {"msg-2", "u2", true}, {"msg-3", "u3", true}, {"msg-4", "u4", false}, {"msg-5", "u5", true}} {
+		if row := r.rowOf("none", w.msg, w.uid); row.Settled != w.settled {
+			t.Errorf("%s settled = %t, want %t", w.uid, row.Settled, w.settled)
+		}
+	}
+	pending, err := r.cal.PendingInvites(t.Context(), "none", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("pending = %d rows after u4 was announced, want none", len(pending))
+	}
+	if n := len(r.events()); n != 1 {
+		t.Errorf("published %d invite events, want u4's", n)
+	}
+}
+
+// An invite stays actionable while any of its events is still to come: an
+// override after the master's end keeps it due.
+func TestInviteDueWhileAnyEventIsToCome(t *testing.T) {
+	t.Parallel()
+	r := newInviteRig(t)
+	ics := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nMETHOD:REQUEST\r\n" +
+		"BEGIN:VEVENT\r\nUID:u1\r\nDTSTAMP:20261101T120000Z\r\nDTSTART:20261101T170000Z\r\nDTEND:20261101T173000Z\r\n" +
+		"ORGANIZER:mailto:ann@example.com\r\nEND:VEVENT\r\n" +
+		"BEGIN:VEVENT\r\nUID:u1\r\nRECURRENCE-ID:20261101T170000Z\r\nDTSTAMP:20261101T120000Z\r\n" +
+		"DTSTART:20261120T170000Z\r\nDTEND:20261120T173000Z\r\nORGANIZER:mailto:ann@example.com\r\nEND:VEVENT\r\n" +
+		"END:VCALENDAR\r\n"
+	inv, err := calendar.ParseInvite([]byte(ics), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.h.due(inv, inviteNow) {
+		t.Error("an invite with an override still to come is not due")
+	}
+	if r.h.due(inv, time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)) {
+		t.Error("an invite whose every event has ended is due")
+	}
+}
+
+// One announcing pass reads at most inviteAnnounceBatch pending invites,
+// the ones first found longest ago first.
+func TestInviteAnnouncePassIsBounded(t *testing.T) {
+	t.Parallel()
+	r := newInviteRig(t)
+	for i := range inviteAnnounceBatch + 1 {
+		uid := fmt.Sprintf("u%03d", i)
+		row := calcache.MailInviteRow{
+			Account: "none", MessageRef: "msg-" + uid, UID: uid, Method: calendar.MethodRequest,
+			DTStamp: inviteNow, Raw: request(uid), FoundAt: inviteNow.Add(time.Duration(i) * time.Second),
+		}
+		if err := r.cal.PutMailInvite(t.Context(), row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.failing.Store(1000)
+	r.h.announce(t.Context(), "none")
+	if n := r.publishes.Load(); n != inviteAnnounceBatch {
+		t.Errorf("one pass tried %d publishes, want %d", n, inviteAnnounceBatch)
+	}
+}
+
+// An announcing pass stops between rows once its context ends, so a
+// shutdown does not wait for the rest of the batch.
+func TestInviteAnnounceStopsWhenCancelled(t *testing.T) {
+	t.Parallel()
+	r := newInviteRig(t)
+	for _, uid := range []string{"u1", "u2", "u3"} {
+		row := calcache.MailInviteRow{
+			Account: "none", MessageRef: "msg-" + uid, UID: uid, Method: calendar.MethodRequest,
+			DTStamp: inviteNow, Raw: request(uid), FoundAt: inviteNow,
+		}
+		if err := r.cal.PutMailInvite(t.Context(), row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var tried atomic.Int32
+	r.h.o.Publish = func(context.Context, watch.Event) error {
+		tried.Add(1)
+		cancel()
+		return context.Canceled
+	}
+	r.h.announce(ctx, "none")
+	if n := tried.Load(); n != 1 {
+		t.Errorf("a cancelled pass tried %d publishes, want 1", n)
 	}
 }

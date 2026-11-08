@@ -20,10 +20,9 @@ const (
 	// inviteRetryInterval is how often the retry loop announces the
 	// invites whose event could not be published.
 	inviteRetryInterval = 5 * time.Minute
-	// inviteRetryWindow bounds how long after it was first found an
-	// invite's event is still tried, so invites that never get one (James
-	// organizes them, or they ended) are not read again for ever.
-	inviteRetryWindow = 7 * 24 * time.Hour
+	// inviteAnnounceBatch is how many pending invites of an account one
+	// announcing pass reads at most.
+	inviteAnnounceBatch = 100
 )
 
 // inviteHookOptions are what the invite hook works with. Only Cache is
@@ -233,7 +232,13 @@ func (h *inviteHook) handle(ctx context.Context, f cache.FoundInvite) bool {
 // announce publishes the invite event of each of account's pending
 // invites that is due one, and marks it announced once published. It does
 // nothing unless the account's store is none and the hook has a log. A
-// publish that fails leaves the invite pending for the next call.
+// publish that fails leaves the invite pending for the next call, for as
+// long as the invite stays actionable: an invite that is not (it is
+// cancelled, James organizes it, every event of it has ended, or its data
+// does not parse) is settled, so no later pass reads it again. A UID whose
+// latest row is a CANCEL is never pending. One call reads at most
+// inviteAnnounceBatch invites, those first found longest ago first, and
+// stops between invites once ctx ends.
 func (h *inviteHook) announce(ctx context.Context, account string) {
 	if h.o.Publish == nil || h.o.StoreNone == nil || !h.o.StoreNone(account) {
 		return
@@ -242,7 +247,7 @@ func (h *inviteHook) announce(ctx context.Context, account string) {
 	defer h.mu.Unlock()
 	log := h.o.Logger.With("account", account)
 	now := h.o.Now()
-	rows, err := h.o.Cache.PendingInvites(ctx, account, now.Add(-inviteRetryWindow))
+	rows, err := h.o.Cache.PendingInvites(ctx, account, inviteAnnounceBatch)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.WarnContext(ctx, "could not read the pending mail invites")
@@ -251,12 +256,17 @@ func (h *inviteHook) announce(ctx context.Context, account string) {
 	}
 	failed := 0
 	for _, row := range rows {
+		if ctx.Err() != nil {
+			return
+		}
 		inv, err := calendar.ParseInvite(row.Raw, row.Charset)
 		if err != nil {
 			log.WarnContext(ctx, "a stored mail invite does not parse", "ref", row.Ref, "reason", inviteReason(err))
+			h.settle(ctx, log, row)
 			continue
 		}
 		if !h.due(inv, now) {
+			h.settle(ctx, log, row)
 			continue
 		}
 		if err := h.publish(ctx, row, inv, now); err != nil {
@@ -272,9 +282,18 @@ func (h *inviteHook) announce(ctx context.Context, account string) {
 	}
 }
 
+// settle marks a pending invite row that will never get an event, so
+// PendingInvites leaves it out from now on. A failure is logged; the row
+// is then looked at again on the next pass.
+func (h *inviteHook) settle(ctx context.Context, log *slog.Logger, row calcache.MailInviteRow) {
+	if err := h.o.Cache.MarkInviteSettled(ctx, row.Account, row.MessageRef, row.UID); err != nil && ctx.Err() == nil {
+		log.WarnContext(ctx, "could not settle a mail invite", "ref", row.Ref)
+	}
+}
+
 // due reports whether an invite gets an invite event: the method is
-// REQUEST, the event is not cancelled, James does not organize it, and it
-// has not ended at now (a recurring one never has).
+// REQUEST, the event is not cancelled, James does not organize it, and not
+// every event of it has ended at now (a recurring one never has).
 func (h *inviteHook) due(inv calendar.MailInvite, now time.Time) bool {
 	if inv.Method != calendar.MethodRequest {
 		return false
@@ -286,10 +305,18 @@ func (h *inviteHook) due(inv calendar.MailInvite, now time.Time) bool {
 	if ev.Organizer != nil && h.o.Self != nil && h.o.Self(ev.Organizer.Email) {
 		return false
 	}
-	if ev.RRule != "" || len(ev.RDates) > 0 {
-		return true
+	return !inviteEnded(inv, now)
+}
+
+// inviteEnded reports whether every event of inv has ended at now. A
+// recurring event never has.
+func inviteEnded(inv calendar.MailInvite, now time.Time) bool {
+	for _, ev := range inv.Events {
+		if ev.RRule != "" || len(ev.RDates) > 0 || inviteEnd(ev).After(now) {
+			return false
+		}
 	}
-	return inviteEnd(ev).After(now)
+	return true
 }
 
 // publish appends the invite event of a pending mail invite.
