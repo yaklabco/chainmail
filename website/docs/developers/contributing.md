@@ -85,7 +85,7 @@ A change with no user-visible effect, such as a test or a refactor, needs no ent
 
 ## Documentation
 
-A change to behaviour updates the docs in the same pull request. The pages are Markdown under `website/docs/`, and the build fails on a broken link between them.
+A change to behaviour updates the docs in the same pull request. The pages are Markdown under `website/docs/`, and the build fails on a broken link between them. The landing page lives in `site/`, an Astro project.
 
 - Link to another page with a relative file link, such as `../concepts/policy.md`, so the build checks it.
 - Mark a shell block `sh` only when it runs unchanged in both bash and fish. A command that needs shell state, such as an exported variable, goes in an `.mdx` page as a pair of `bash` and `fish` tabs with `groupId="shell"`. `scripts/check-doc-shell.sh` checks each block with its shells, and CI runs it.
@@ -93,7 +93,7 @@ A change to behaviour updates the docs in the same pull request. The pages are M
 - Write `<placeholder>` text in prose inside backticks, since a bare angle bracket in Markdown is HTML.
 - Use Mermaid for diagrams.
 
-`nix develop -c go tool stave docs:serve` shows the site with live reload.
+`nix develop -c go tool stave docs:serve` shows the manual with live reload, and `site:serve` shows the landing page.
 
 ## Before you open a pull request
 

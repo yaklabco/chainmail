@@ -1,6 +1,6 @@
 ---
 title: Building
-description: The Nix dev shell, the stave targets, code generation, the flake's package and the docs site.
+description: The Nix dev shell, the stave targets, code generation, the flake's package and the website.
 sidebar_position: 2
 ---
 
@@ -17,7 +17,7 @@ nix develop -c go version
 nix develop -c golangci-lint --version
 ```
 
-Without Nix, install Go at the version in `go.mod` (`go 1.26.10` today), [buf](https://buf.build/docs/cli/installation/), and golangci-lint v2.15.0, which is the version CI pins. Bun is needed only for the docs site, and goreleaser only for release snapshots.
+Without Nix, install Go at the version in `go.mod` (`go 1.26.10` today), [buf](https://buf.build/docs/cli/installation/), and golangci-lint v2.15.0, which is the version CI pins. Bun is needed only for the website, and goreleaser only for release snapshots.
 
 stave, `protoc-gen-go` and `protoc-gen-connect-go` are Go tool dependencies in `go.mod`, so `go tool` runs them at the pinned version with nothing to install.
 
@@ -38,8 +38,11 @@ Run a target with `go tool stave <target>`. With no target, stave runs `check`. 
 | `test:integration` | Runs the integration suite: Dovecot in a Docker container and the fake Gmail server, plus the daemon's held-send test against Dovecot and the MCP server run as `chainmail mcp` against Dovecot. |
 | `test:live` | Runs the smoke test against real accounts through the daemon at `$CHAINMAIL_SOCKET`. |
 | `docs:commands` | Writes the command reference pages from the CLI's help. |
-| `docs:build` | Builds the docs site into `website/build`. |
-| `docs:serve` | Runs the docs site locally with live reload. |
+| `docs:build` | Builds the manual into `website/build`, for serving under `/docs/`. |
+| `docs:serve` | Runs the manual locally with live reload at http://localhost:3000/docs/. |
+| `site:build` | Builds the landing page into `site/dist`. |
+| `site:serve` | Runs the landing page locally with live reload at http://localhost:4321/. |
+| `pages` | Builds the landing page and the manual into `pages-dist`, as CI deploys them. |
 | `release` | Tags the next version and publishes it with goreleaser: the GitHub release and the Homebrew Cask. |
 | `snapshot` | Builds the release archives and the Cask into `dist/` as `release` would, without tagging, pushing or publishing anything. |
 
@@ -113,18 +116,28 @@ If the hash is stale, Nix stops with a hash mismatch and prints the hash it expe
 
 `go.mod` replaces `github.com/emersion/go-imap/v2` with a fork. The vendored download includes it, so changing the replace also changes `vendorHash`.
 
-## The docs site
+## The website
 
-The site at https://chainmail.sh is a Docusaurus project in `website/`. Its pages are Markdown under `website/docs/`, and Bun from the dev shell installs and runs it. To work on it with live reload:
+The site at https://chainmail.sh has two parts. The landing page is an Astro project in `site/`. The manual is a Docusaurus project in `website/`, served under `/docs/`, with its pages as Markdown under `website/docs/`. Bun from the dev shell installs and runs both.
+
+`scripts/build-pages.sh` builds both and assembles them into `pages-dist/`: the landing page at the root and the manual under `docs/`. CI deploys `pages-dist/` to Cloudflare Pages.
+
+To work on the landing page with live reload, at http://localhost:4321/:
+
+```sh
+nix develop -c go tool stave site:serve
+```
+
+To work on the manual with live reload, at http://localhost:3000/docs/:
 
 ```sh
 nix develop -c go tool stave docs:serve
 ```
 
-To build it as CI does, into `website/build`:
+To build both as CI does, into `pages-dist/`:
 
 ```sh
-nix develop -c go tool stave docs:build
+nix develop -c go tool stave pages
 ```
 
-Both run `bun install --frozen-lockfile` first. The build copies the root `CHANGELOG.md` into `website/docs/reference/changelog.md`, which is not committed, and fails on any broken link between pages. [Contributing](./contributing.md) has the rules for writing pages.
+Each runs `bun install --frozen-lockfile` first. The manual's build copies the root `CHANGELOG.md` into `website/docs/reference/changelog.md`, which is not committed, and fails on any broken link between pages. CI also runs `scripts/check-pages-links.sh pages-dist`, which fails on any link in the assembled site that points to no file. [Contributing](./contributing.md) has the rules for writing pages.

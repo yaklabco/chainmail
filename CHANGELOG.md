@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Due events for work items: `item_due_soon`, `item_due` and `item_overdue`. The new `[rules]` config table sets their time with `timezone`, `due_time` and `due_soon_days`.
 - The opt-in `rule` event kind, which reports every change to a rule. `chainmail watch` and `read_events` accept it and the three due kinds.
 - `chainmail audit --client`, which keeps the rows of one client kind, such as `rule` for the actions rules take.
+- A landing page at https://chainmail.sh, with the manual under https://chainmail.sh/docs/.
 
 ### Changed
 
@@ -22,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Watch group names that start with `rules.` are refused, as names that start with `cache.` are. The upgrade deletes any such group.
 - A client that names itself `rule` or `daemon` is recorded in the audit log as `(invalid)`, so those client kinds mark only the daemon's own work.
 - The upgrade applies `state.db` migration 6, and an older binary refuses the database afterwards. Take a snapshot before you upgrade.
+- The manual has the landing page's look, and the chainmail gopher is redrawn.
 
 ### Fixed
 

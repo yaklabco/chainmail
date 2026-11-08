@@ -11,7 +11,7 @@ const config: Config = {
   favicon: 'img/favicon.ico',
 
   url: 'https://chainmail.sh',
-  baseUrl: '/',
+  baseUrl: '/docs/',
 
   organizationName: 'yaklabco',
   projectName: 'chainmail',
@@ -30,15 +30,15 @@ const config: Config = {
   i18n: { defaultLocale: 'en', locales: ['en'] },
 
   headTags: [
-    { tagName: 'link', attributes: { rel: 'icon', type: 'image/png', sizes: '192x192', href: '/img/favicon-192.png' } },
-    { tagName: 'link', attributes: { rel: 'apple-touch-icon', href: '/img/favicon-192.png' } },
+    { tagName: 'link', attributes: { rel: 'icon', type: 'image/png', sizes: '192x192', href: '/docs/img/favicon-192.png' } },
+    { tagName: 'link', attributes: { rel: 'apple-touch-icon', href: '/docs/img/apple-touch-icon.png' } },
   ],
 
   themes: [
     '@docusaurus/theme-mermaid',
     [
       '@easyops-cn/docusaurus-search-local',
-      { hashed: true, indexBlog: false, docsRouteBasePath: '/docs' },
+      { hashed: true, indexBlog: false, docsRouteBasePath: '/' },
     ],
   ],
 
@@ -47,6 +47,7 @@ const config: Config = {
       'classic',
       {
         docs: {
+          routeBasePath: '/',
           sidebarPath: './sidebars.ts',
           editUrl: 'https://github.com/yaklabco/chainmail/edit/main/website/',
         },
@@ -58,14 +59,28 @@ const config: Config = {
 
   themeConfig: {
     image: 'img/social-card.png',
-    colorMode: { respectPrefersColorScheme: true },
+    colorMode: { defaultMode: 'dark', respectPrefersColorScheme: true },
     navbar: {
       title: 'chainmail',
-      logo: { alt: 'The chainmail gopher', src: 'img/logo.png' },
+      logo: {
+        alt: 'chainmail',
+        src: 'img/logo-tile.png',
+        href: 'https://chainmail.sh/',
+        target: '_self',
+        width: 28,
+        height: 28,
+      },
       items: [
         { type: 'docSidebar', sidebarId: 'docs', position: 'left', label: 'Docs' },
-        { to: '/docs/reference/changelog', label: 'Changelog', position: 'left' },
+        { to: '/reference/changelog', label: 'Changelog', position: 'left' },
         { href: 'https://github.com/yaklabco/chainmail', label: 'GitHub', position: 'right' },
+        {
+          href: 'https://chainmail.sh/#install',
+          label: 'Get chainmail',
+          position: 'right',
+          className: 'navbar-cta',
+          target: '_self',
+        },
       ],
     },
     footer: {
@@ -74,10 +89,10 @@ const config: Config = {
         {
           title: 'Docs',
           items: [
-            { label: 'Getting started', to: '/docs/getting-started/install' },
-            { label: 'User guide', to: '/docs/guide/reading-and-searching' },
-            { label: 'Operations', to: '/docs/operations/deploy' },
-            { label: 'Developer guide', to: '/docs/developers/architecture' },
+            { label: 'Getting started', to: '/getting-started/install' },
+            { label: 'User guide', to: '/guide/reading-and-searching' },
+            { label: 'Operations', to: '/operations/deploy' },
+            { label: 'Developer guide', to: '/developers/architecture' },
           ],
         },
         {
@@ -85,7 +100,7 @@ const config: Config = {
           items: [
             { label: 'GitHub', href: 'https://github.com/yaklabco/chainmail' },
             { label: 'Releases', href: 'https://github.com/yaklabco/chainmail/releases' },
-            { label: 'Changelog', to: '/docs/reference/changelog' },
+            { label: 'Changelog', to: '/reference/changelog' },
             { label: 'License', href: 'https://github.com/yaklabco/chainmail/blob/main/LICENSE' },
           ],
         },
@@ -94,7 +109,7 @@ const config: Config = {
     },
     prism: {
       theme: prismThemes.github,
-      darkTheme: prismThemes.dracula,
+      darkTheme: prismThemes.oneDark,
       additionalLanguages: ['bash', 'toml', 'nix', 'go', 'protobuf', 'json'],
     },
     mermaid: { theme: { light: 'neutral', dark: 'dark' } },

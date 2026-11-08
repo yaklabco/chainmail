@@ -6,3 +6,7 @@
 /website/build/
 /website/.docusaurus/
 /website/docs/reference/changelog.md
+/pages-dist/
+/site/node_modules/
+/site/dist/
+/site/.astro/
