@@ -545,3 +545,25 @@ func TestParseICSLongParameterValue(t *testing.T) {
 		t.Fatalf("long value: %v", err)
 	}
 }
+
+// go-ical reads an equals sign inside an unquoted parameter value as part
+// of the value, so it does not end one for the length guard either.
+func TestParseICSLongParameterValueWithEquals(t *testing.T) {
+	head := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:x\r\nBEGIN:VEVENT\r\nUID:u\r\nDTSTAMP:20261101T000000Z\r\nDTSTART:20261110T090000Z\r\n"
+	tail := ":mailto:a@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	for name, param := range map[string]string{
+		"equals":        "CN=" + strings.Repeat("a=", maxParamValue),
+		"second param":  "ROLE=CHAIR;CN=" + strings.Repeat("=", maxParamValue+1),
+		"after a comma": "DELEGATED-TO=x," + strings.Repeat("a=", maxParamValue),
+	} {
+		if _, _, err := ParseICS([]byte(head + "ATTENDEE;" + param + tail)); !errors.Is(err, ErrInvalidICS) {
+			t.Errorf("%s: err = %v, want ErrInvalidICS", name, err)
+		}
+	}
+	// Values separated by commas are bounded one by one.
+	short := strings.Repeat("a=", maxParamValue/4)
+	_, events := mustParse(t, []byte(head+"ATTENDEE;DELEGATED-TO="+short+","+short+","+short+tail))
+	if len(events) != 1 || len(events[0].Attendees) != 1 {
+		t.Fatalf("comma-separated values: %+v", events)
+	}
+}

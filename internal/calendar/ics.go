@@ -84,38 +84,76 @@ func parseICS(data []byte, limit int) (string, []parsedEvent, error) {
 // a longer one is refused before decoding.
 const maxParamValue = 2048
 
+// paramState is where checkParams is in a content line.
+type paramState int
+
+const (
+	inName      paramState = iota // the property name
+	inParamName                   // a parameter name, up to its '='
+	atValue                       // the first byte of a parameter value
+	inQuoted                      // a quoted parameter value
+	inUnquoted                    // an unquoted parameter value
+	afterQuote                    // just after a quoted value's closing quote
+	inValue                       // the property value
+)
+
 // checkParams refuses a content line with a parameter value longer than
-// maxParamValue. It follows the decoder's grammar: lines are unfolded,
-// parameters end at the first colon outside double quotes, and values are
-// separated by semicolons, commas and equals signs.
+// maxParamValue. It follows go-ical's decoder: lines are unfolded, the
+// property name ends at the first semicolon or colon, a parameter name at
+// the next equals sign, a quoted value at its closing quote, and an
+// unquoted value at a semicolon, comma or colon. An equals sign inside a
+// value is part of the value. A comma starts the next value of the same
+// parameter, a semicolon the next parameter, and a colon the property
+// value, which is not bounded.
 func checkParams(data []byte) error {
-	inParams, inQuote, n := true, false, 0
+	state, n := inName, 0
 	for i := 0; i < len(data); i++ {
 		c := data[i]
+		if c == '\r' && i+1 < len(data) && data[i+1] == '\n' {
+			continue // the line break is handled at its '\n'
+		}
 		if c == '\n' {
 			if i+1 < len(data) && (data[i+1] == ' ' || data[i+1] == '\t') {
 				i++ // a folded line continues the logical line
 				continue
 			}
-			inParams, inQuote, n = true, false, 0
+			state, n = inName, 0
 			continue
 		}
-		if !inParams || c == '\r' {
-			continue
-		}
-		switch {
-		case inQuote && c == '"':
-			inQuote = false
-		case inQuote:
-			n++
-		case c == '"':
-			inQuote = true
-		case c == ';' || c == ',' || c == '=':
-			n = 0
-		case c == ':':
-			inParams = false
-		default:
-			n++
+		switch state {
+		case inName:
+			switch c {
+			case ';':
+				state = inParamName
+			case ':':
+				state = inValue
+			}
+		case inParamName:
+			if c == '=' {
+				state, n = atValue, 0
+			}
+		case atValue, inUnquoted, afterQuote:
+			switch {
+			case c == ',':
+				state, n = atValue, 0
+			case c == ';':
+				state = inParamName
+			case c == ':':
+				state = inValue
+			case state == atValue && c == '"':
+				state = inQuoted
+			case state == afterQuote:
+				state = inValue // the decoder refuses the line
+			default:
+				state = inUnquoted
+				n++
+			}
+		case inQuoted:
+			if c == '"' {
+				state = afterQuote
+			} else {
+				n++
+			}
 		}
 		if n > maxParamValue {
 			return fmt.Errorf("%w: parameter value too long", ErrInvalidICS)
