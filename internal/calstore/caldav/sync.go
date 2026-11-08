@@ -180,7 +180,7 @@ func (s *Store) collectionSync(ctx context.Context, coll, token string, full boo
 			path:        coll,
 			body:        syncCollectionBody(token),
 			contentType: `application/xml; charset="utf-8"`,
-			depth:       "1",
+			depth:       "0", // RFC 6578 section 3.2 fixes Depth at 0
 			limit:       maxMultistatus,
 		})
 		if err != nil {

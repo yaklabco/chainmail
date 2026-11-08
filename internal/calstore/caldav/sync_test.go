@@ -127,6 +127,12 @@ func syncServer(t *testing.T, replies map[string]func(w http.ResponseWriter)) *d
 		b := string(body)
 		switch {
 		case strings.Contains(b, "sync-collection"):
+			// RFC 6578 section 3.2: the report is sent with Depth: 0, and
+			// an absent Depth means the same. Mailwright refuses others.
+			if dep := r.Header.Get("Depth"); dep != "" && dep != "0" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			if !strings.Contains(b, "<d:sync-level>1</d:sync-level>") || !strings.Contains(b, "getetag") {
 				t.Errorf("sync-collection body %s", b)
 			}
