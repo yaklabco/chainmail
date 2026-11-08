@@ -17,6 +17,9 @@ const (
 	prodID = "-//chainmail//EN"
 	// foldWidth is the longest content line RFC 5545 allows, in octets.
 	foldWidth = 75
+	// maxEncodedICS bounds what EncodeICS writes, in octets. Events parsed
+	// from an invite can come from up to three times MaxICSBytes of text.
+	maxEncodedICS = 3 * MaxICSBytes
 )
 
 // tokenRE matches parameter values chainmail writes unquoted, such as
@@ -418,7 +421,8 @@ func cleanLine(s string) string {
 // be escaped (UID, RRULE, addresses, PARTSTAT, ROLE) are refused with
 // ErrInvalidICS when they hold a line break or control character, so no
 // field can inject a property. ProviderID, ETag, Raw and AttendeesTruncated
-// are not written.
+// are not written. Output over three times MaxICSBytes is refused with
+// ErrTooLarge.
 func EncodeICS(method string, events []Event) ([]byte, error) {
 	return EncodeICSAt(method, events, time.Unix(0, 0))
 }
@@ -465,7 +469,7 @@ func encodeCalendar(cal *ical.Calendar) ([]byte, error) {
 	if err := ical.NewEncoder(&buf).Encode(cal); err != nil {
 		return nil, fmt.Errorf("%w: cannot encode", ErrInvalidICS)
 	}
-	return fold(buf.Bytes()), nil
+	return Fold(buf.Bytes(), maxEncodedICS)
 }
 
 // timeStyle writes the date and time properties of one event in one form.
@@ -617,12 +621,15 @@ func personProp(name string, person Person) (*ical.Prop, error) {
 	return p, nil
 }
 
-// fold folds content lines longer than 75 octets, never inside a UTF-8
-// sequence.
-func fold(data []byte) []byte {
+// Fold folds content lines longer than 75 octets (RFC 5545 section 3.1),
+// never inside a valid UTF-8 sequence. Every fold moves past at least one
+// octet: a run of octets with no rune start, which is not UTF-8, is cut at
+// the line width. Output over limit octets is refused with ErrTooLarge
+// before more of it is built.
+func Fold(data []byte, limit int) ([]byte, error) {
 	var out bytes.Buffer
-	out.Grow(len(data) + len(data)/foldWidth*3)
-	for _, line := range bytes.SplitAfter(data, []byte("\r\n")) {
+	out.Grow(min(len(data)+len(data)/foldWidth*3, limit))
+	for line := range bytes.SplitAfterSeq(data, []byte("\r\n")) {
 		body, terminated := bytes.CutSuffix(line, []byte("\r\n"))
 		width := foldWidth
 		for len(body) > width {
@@ -630,15 +637,24 @@ func fold(data []byte) []byte {
 			for cut > 0 && !utf8.RuneStart(body[cut]) {
 				cut--
 			}
+			if cut == 0 {
+				cut = width
+			}
 			out.Write(body[:cut])
 			out.WriteString("\r\n ")
 			body = body[cut:]
 			width = foldWidth - 1
+			if out.Len() > limit {
+				return nil, ErrTooLarge
+			}
 		}
 		out.Write(body)
 		if terminated {
 			out.WriteString("\r\n")
 		}
+		if out.Len() > limit {
+			return nil, ErrTooLarge
+		}
 	}
-	return out.Bytes()
+	return out.Bytes(), nil
 }

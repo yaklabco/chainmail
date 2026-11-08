@@ -16,8 +16,7 @@ import (
 )
 
 const (
-	prodID    = "-//chainmail//EN"
-	foldWidth = 75
+	prodID = "-//chainmail//EN"
 
 	paramScheduleAgent = "SCHEDULE-AGENT"
 	propComment        = "COMMENT"
@@ -34,8 +33,14 @@ type object struct {
 
 // decodeObject parses data with calendar.ParseICS, which bounds its size
 // and parameter lengths and refuses malformed input, and then with go-ical
-// for patching. It is the only way server bytes reach go-ical.
+// for patching. It is the only way server bytes reach go-ical. A stored
+// object is UTF-8 (RFC 5545 section 3.1.4): one that is not is refused, so
+// no octets that are not UTF-8 reach the encoder, and a patched object
+// keeps its UID exactly.
 func decodeObject(data []byte) (*object, error) {
+	if !utf8.Valid(data) {
+		return nil, fmt.Errorf("%w: not UTF-8", calendar.ErrInvalidICS)
+	}
 	_, events, err := calendar.ParseICS(data)
 	if err != nil {
 		return nil, err
@@ -96,11 +101,7 @@ func encodeObject(cal *ical.Calendar) ([]byte, error) {
 	if err := ical.NewEncoder(&buf).Encode(cal); err != nil {
 		return nil, fmt.Errorf("%w: cannot encode", calendar.ErrInvalidICS)
 	}
-	out := fold(buf.Bytes())
-	if len(out) > calendar.MaxICSBytes {
-		return nil, calendar.ErrTooLarge
-	}
-	return out, nil
+	return calendar.Fold(buf.Bytes(), calendar.MaxICSBytes)
 }
 
 // newObject encodes one event as a new calendar object.
@@ -574,32 +575,6 @@ func addTimezones(cal *ical.Calendar, now time.Time) {
 		zones = append(zones, vtimezone(id, loc, first, last, open))
 	}
 	cal.Children = append(zones, cal.Children...)
-}
-
-// fold folds content lines longer than 75 octets, never inside a UTF-8
-// sequence (RFC 5545 section 3.1).
-func fold(data []byte) []byte {
-	var out bytes.Buffer
-	out.Grow(len(data) + len(data)/foldWidth*3)
-	for _, line := range bytes.SplitAfter(data, []byte("\r\n")) {
-		body, terminated := bytes.CutSuffix(line, []byte("\r\n"))
-		width := foldWidth
-		for len(body) > width {
-			cut := width
-			for cut > 0 && !utf8.RuneStart(body[cut]) {
-				cut--
-			}
-			out.Write(body[:cut])
-			out.WriteString("\r\n ")
-			body = body[cut:]
-			width = foldWidth - 1
-		}
-		out.Write(body)
-		if terminated {
-			out.WriteString("\r\n")
-		}
-	}
-	return out.Bytes()
 }
 
 // cleanText makes untrusted text valid UTF-8 without control characters
