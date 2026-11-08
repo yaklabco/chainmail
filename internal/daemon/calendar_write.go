@@ -253,7 +253,7 @@ func (s *Server) createEvent(ctx context.Context, ca *calAccount, calID string, 
 		ref: ref, account: ca.name, calendarID: calID, ev: created, myPartStat: selfPartStat(created, s.ownAddress),
 		isOrganizer: true, rrule: created.RRule, recurring: isSeries(created),
 	}
-	if row, err := s.calcache.Event(ctx, ref); err == nil {
+	if row, err := s.calcache.Event(ctx, ref); err == nil && (created.ETag == "" || row.Event.ETag == created.ETag) {
 		v = viewOfRow(row)
 	}
 	out := &chainmailv1.CreateEventResponse{Event: eventProto(v, s.ownAddress)}
@@ -519,7 +519,7 @@ func (h *calendarService) UpdateEvent(ctx context.Context, req *connect.Request[
 		if err != nil {
 			return nil, err
 		}
-		audience, err := s.audience(ctx, res)
+		audience, err := s.audience(ctx, ca, res)
 		if err != nil {
 			return nil, err
 		}
@@ -531,16 +531,12 @@ func (h *calendarService) UpdateEvent(ctx context.Context, req *connect.Request[
 			}}, nil
 		}
 		entry.Decision = decisionAllowed
-		if _, err := ca.store.Put(ctx, res.row.CalendarID, ev, m.GetEtag(), calendar.NotifySend); err != nil {
+		written, err := ca.store.Put(ctx, res.row.CalendarID, ev, m.GetEtag(), calendar.NotifySend)
+		if err != nil {
 			return nil, calendarError(ca.name, err)
 		}
 		s.syncAfterWrite(ctx, ca)
-		v := viewOfResolved(res)
-		v.ev = ev
-		if after, err := s.resolveEvent(ctx, res.ref); err == nil {
-			v = viewOfResolved(after)
-		}
-		return &chainmailv1.UpdateEventResponse{Event: eventProto(v, s.ownAddress)}, nil
+		return &chainmailv1.UpdateEventResponse{Event: eventProto(s.writtenView(ctx, res, written), s.ownAddress)}, nil
 	})
 }
 
@@ -548,7 +544,8 @@ func (h *calendarService) UpdateEvent(ctx context.Context, req *connect.Request[
 // organizer of an event with other attendees cancels it and notifies
 // them, under the send policy; a held cancel is not applied. An event with
 // no other attendees is deleted. One instance of a series is cancelled as
-// an override.
+// an override. Removing an event someone else organizes tells that
+// organizer, so the organizer is checked against the send policy too.
 func (h *calendarService) CancelEvent(ctx context.Context, req *connect.Request[chainmailv1.CancelEventRequest]) (*connect.Response[chainmailv1.CancelEventResponse], error) {
 	s := h.s
 	return calendarCall(ctx, s, req, "calendar.cancel_event", calendarWriteTimeout, func(ctx context.Context, _ caller, entry *audit.Entry) (*chainmailv1.CancelEventResponse, error) {
@@ -565,11 +562,11 @@ func (h *calendarService) CancelEvent(ctx context.Context, req *connect.Request[
 		if err != nil {
 			return nil, err
 		}
-		audience, err := s.audience(ctx, res)
+		audience, err := s.audience(ctx, ca, res)
 		if err != nil {
 			return nil, err
 		}
-		notified := s.notified(audience)
+		notified := s.notified(slices.Concat(audience, s.removalNotice(res)))
 		if d := s.policy.CheckSend(ca.name, notified); len(notified) > 0 && !d.Allowed {
 			heldTargets(entry, len(d.Blocked), d.TooMany)
 			return &chainmailv1.CancelEventResponse{Held: &chainmailv1.CalendarHeld{
@@ -644,15 +641,27 @@ func (s *Server) editable(ctx context.Context, res resolvedEvent) (*calAccount, 
 	return ca, nil
 }
 
+// errSeriesUnread refuses a change of a whole series that could not be
+// read from the store: calendar.db prunes old overrides, so it alone
+// cannot say whom the change notifies.
+var errSeriesUnread = fmt.Errorf("%w: the series could not be read to check whom the change notifies", calstore.ErrUnavailable)
+
 // audience is every attendee a change of res notifies: the event's
 // effective attendees, or for a whole series those of its master and of
-// every override, as each instance's attendees hear of the change. A list
+// every override, as each instance's attendees hear of the change. The
+// overrides of a series come from calendar.db and from the store, read
+// now, since calendar.db prunes old overrides the store still notifies
+// (Amendment 18); a store read that fails refuses the change. A list
 // that is incomplete (cut at calendar.MaxAttendees) has attendees nobody
 // can check, so the change is refused.
-func (s *Server) audience(ctx context.Context, res resolvedEvent) ([]calendar.Attendee, error) {
+func (s *Server) audience(ctx context.Context, ca *calAccount, res resolvedEvent) ([]calendar.Attendee, error) {
 	atts, truncated := res.attendees()
 	if res.rid.IsZero() && isSeries(res.row.Event) {
 		rows, err := s.calcache.Series(ctx, res.row.Account, res.row.CalendarID, res.row.Event.ProviderID)
+		if err != nil {
+			return nil, err
+		}
+		fresh, err := s.freshSeries(ctx, ca, res)
 		if err != nil {
 			return nil, err
 		}
@@ -661,11 +670,68 @@ func (s *Server) audience(ctx context.Context, res resolvedEvent) ([]calendar.At
 			atts = append(atts, r.Event.Attendees...)
 			truncated = truncated || r.Event.AttendeesTruncated
 		}
+		for _, ev := range fresh {
+			atts = append(atts, ev.Attendees...)
+			truncated = truncated || ev.AttendeesTruncated
+		}
 	}
 	if truncated {
 		return nil, errIncompleteAudience
 	}
 	return atts, nil
+}
+
+// freshSeries reads res's series, its master and every override, from
+// the store. A refused login stays AUTH_REQUIRED and a series that is
+// gone NOT_FOUND; any other failure is errSeriesUnread, and the store's
+// error never reaches the client.
+func (s *Server) freshSeries(ctx context.Context, ca *calAccount, res resolvedEvent) ([]calendar.Event, error) {
+	evs, err := ca.store.GetEvent(ctx, res.row.CalendarID, res.row.Event.ProviderID)
+	switch {
+	case err == nil:
+		return evs, nil
+	case ctx.Err() != nil:
+		return nil, ctx.Err()
+	case errors.Is(err, calstore.ErrAuth), errors.Is(err, calstore.ErrNotFound):
+		return nil, calendarError(ca.name, err)
+	}
+	return nil, errSeriesUnread
+}
+
+// removalNotice is who a cancel of res tells besides its attendees: the
+// organizer, when someone other than James organizes it. Removing such an
+// event from James's calendar is an attendee's removal, which tells the
+// organizer (a CalDAV scheduling server sends a REPLY, RFC 6638 section
+// 8.1; Google a decline) whether or not he is listed as an attendee.
+func (s *Server) removalNotice(res resolvedEvent) []calendar.Attendee {
+	if _, org := res.role(); org {
+		return nil
+	}
+	o := res.organizer()
+	if o == nil || s.ownAddress(o.Email) {
+		return nil
+	}
+	return []calendar.Attendee{{Person: calendar.Person{Email: o.Email}}}
+}
+
+// writtenView is the view of the event a write to res stored: written,
+// the store's answer, with the ref and role res had. calendar.db's
+// version is used only when it is the one written (the same etag), as
+// after a sync that worked; a sync that failed leaves the version from
+// before the write there. When the store gave no etag, a cached version
+// newer than res stands for the write.
+func (s *Server) writtenView(ctx context.Context, res resolvedEvent, written calendar.Event) eventView {
+	if after, err := s.resolveEvent(ctx, res.ref); err == nil {
+		if (written.ETag != "" && after.ev.ETag == written.ETag) || (written.ETag == "" && after.ev.ETag != res.ev.ETag) {
+			return viewOfResolved(after)
+		}
+	}
+	v := viewOfResolved(res)
+	v.ev = written
+	if len(written.Attendees) > 0 {
+		v.myPartStat = selfPartStat(written, s.ownAddress)
+	}
+	return v
 }
 
 // mayChange reports whether James may change an event: he organizes it,

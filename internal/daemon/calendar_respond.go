@@ -234,9 +234,14 @@ func (s *Server) respondInStore(ctx context.Context, m *chainmailv1.RespondReque
 // is synced and resolved again, every check is repeated on the new
 // version, and the answer is retried once when James's own answer is
 // still what the caller saw (spec 6.1 step 5); otherwise EVENT_CONFLICT.
+// The response is the version the store wrote, whether or not the sync
+// after it works.
 func (s *Server) answerInStore(ctx context.Context, m *chainmailv1.RespondRequest, t rsvpTarget, ps calendar.PartStat, entry *audit.Entry) (*chainmailv1.RespondResponse, error) {
 	before, _ := t.cal.role()
-	var res resolvedEvent
+	var (
+		res     resolvedEvent
+		written calendar.Event
+	)
 	for attempt := 0; ; attempt++ {
 		res = *t.cal
 		if err := s.answerableCalendar(ctx, res); err != nil {
@@ -250,8 +255,9 @@ func (s *Server) answerInStore(ctx context.Context, m *chainmailv1.RespondReques
 		}
 		entry.Decision = decisionAllowed
 		r := calendar.Response{Self: t.self, PartStat: ps, Comment: m.GetComment(), RecurrenceID: res.ev.RecurrenceID, ETag: res.ev.ETag}
-		_, err := t.ca.store.Respond(ctx, res.row.CalendarID, res.row.Event.ProviderID, r)
+		w, err := t.ca.store.Respond(ctx, res.row.CalendarID, res.row.Event.ProviderID, r)
 		if err == nil {
+			written = w
 			break
 		}
 		if !errors.Is(err, calstore.ErrConflict) || attempt > 0 {
@@ -271,13 +277,7 @@ func (s *Server) answerInStore(ctx context.Context, m *chainmailv1.RespondReques
 		t = again
 	}
 	s.syncAfterWrite(ctx, t.ca)
-	v := viewOfResolved(res)
-	if after, err := s.resolveEvent(ctx, res.ref); err == nil {
-		v = viewOfResolved(after)
-	} else {
-		v.ev, v.myPartStat = withPartStat(v.ev, t.self, ps), ps
-	}
-	return &chainmailv1.RespondResponse{Via: viaStore, Event: eventProto(v, s.ownAddress)}, nil
+	return &chainmailv1.RespondResponse{Via: viaStore, Event: eventProto(s.writtenView(ctx, res, written), s.ownAddress)}, nil
 }
 
 // answerableCalendar refuses an answer through the store to an event in a
