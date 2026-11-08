@@ -330,3 +330,42 @@ func TestRunRuleGivesUpOnAStuckBuilder(t *testing.T) {
 		t.Errorf("stored run = %+v, want the cache_not_ready run", last)
 	}
 }
+
+// TestRunRuleRescopesAfterTheBuilderWait checks that a run scopes the rule
+// again once the builder has applied the log's tail. A UIDVALIDITY gap the
+// builder applies during the wait drops the folder's rows and starts its
+// backfill again under the new UIDVALIDITY, so the run is recorded
+// cache_not_ready, backfilling, and acts on nothing, rather than paging
+// the old UIDVALIDITY and finding nothing to do.
+func TestRunRuleRescopesAfterTheBuilderWait(t *testing.T) {
+	t.Parallel()
+	g, _, rule := newBatchRig(t)
+	_, tail := lateBatch(t, g)
+	done := startRunRule(t, g, rule, rules.TriggerSchedule)
+	awaitCacheWait(t, g, done, tail)
+	// The sync found INBOX's UIDVALIDITY changed, and the builder applies
+	// the gap: the folder is reset under the new UIDVALIDITY.
+	row, ok, err := g.f.s.watchState.Folder(t.Context(), "host", "INBOX")
+	if err != nil || !ok {
+		t.Fatalf("sync row host/INBOX: %v, %t", err, ok)
+	}
+	row.UIDValidity++
+	g.f.putSync(t, row)
+	if _, err := g.f.accounts["host"].Rebuild(t.Context(), "INBOX"); err != nil {
+		t.Fatal(err)
+	}
+	g.sig.set(tail)
+	res := <-done
+	if res.err != nil {
+		t.Fatal(res.err)
+	}
+	if run := res.run; run.Outcome != rules.OutcomeCacheNotReady || run.Reason != "backfilling" || run.Hint != ruleCacheNotReadyHint || run.Matched != 0 {
+		t.Errorf("run = %+v, want cache_not_ready, backfilling", run)
+	}
+	if n := g.fk.Calls("StoreFlags"); n != 0 {
+		t.Errorf("flagged %d times", n)
+	}
+	if last := g.lastRun(t, rule.ID); last.ID != res.run.ID || last.Outcome != rules.OutcomeCacheNotReady {
+		t.Errorf("stored run = %+v, want the cache_not_ready run", last)
+	}
+}

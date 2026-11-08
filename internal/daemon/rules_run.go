@@ -920,7 +920,10 @@ func relocates(rule rules.Rule) bool {
 // with a nil error whatever its outcome. A complete cache can still lag
 // the log by less than fresh_lag, so the run first waits for the builder
 // to apply the log's tail (builderAtTail): mail the sync has just found,
-// such as what a downtime catch-up is for, is matched in this run. An
+// such as what a downtime catch-up is for, is matched in this run. What
+// the builder applied can reset a folder, which drops its rows and starts
+// its backfill under a new UIDVALIDITY, so the run scopes the rule again
+// after the wait and is cache_not_ready while that backfill runs. An
 // error means the turn was not taken, or the builder not waited for,
 // before ctx ended, the rule does not cover the account (errRuleAccount),
 // or the log's tail could not be read or the run written.
@@ -934,21 +937,19 @@ func (r *ruleRunner) runRule(ctx context.Context, rule rules.Rule, t rules.Trigg
 		limit = rule.MaxPerRun
 	}
 	start := r.s.opts.Now()
-	sc, covered, reason, err := r.scope(ctx, rule, true)
-	transient := err != nil && classifyReason(errDetail(err).GetReason()) == actTransient
-	switch {
-	case err != nil && !transient:
-		return r.scopeFailed(ctx, rule, t, start, err)
-	case err == nil && !covered:
-		return rules.Run{}, errRuleAccount
+	sc, reason, transient, err := r.scopeRun(ctx, rule)
+	if err != nil {
+		return r.scopeEnded(ctx, rule, t, start, err)
 	}
-	if err == nil && reason == "" {
+	if transient == nil && reason == "" {
 		at, werr := r.builderAtTail(ctx)
 		if werr != nil {
 			return rules.Run{}, werr
 		}
 		if !at {
 			reason = cache.ReasonStale
+		} else if sc, reason, transient, err = r.scopeRun(ctx, rule); err != nil {
+			return r.scopeEnded(ctx, rule, t, start, err)
 		}
 	}
 	run, berr := r.begin(ctx, rule, t, start)
@@ -956,8 +957,8 @@ func (r *ruleRunner) runRule(ctx context.Context, rule rules.Rule, t rules.Trigg
 		return rules.Run{}, berr
 	}
 	switch {
-	case transient:
-		err = r.settle(ctx, &run, false, err)
+	case transient != nil:
+		err = r.settle(ctx, &run, false, transient)
 	case reason != "":
 		run.Outcome, run.Reason, run.Hint = rules.OutcomeCacheNotReady, reason, ruleCacheNotReadyHint
 		err = r.write(ctx, &run)
@@ -966,6 +967,34 @@ func (r *ruleRunner) runRule(ctx context.Context, rule rules.Rule, t rules.Trigg
 		err = r.settle(ctx, &run, capped, cause)
 	}
 	return run, err
+}
+
+// scopeRun scopes rule for a scheduled or manual run on the account. It
+// returns the scope and, when the cache cannot answer the rule completely,
+// why; a transient failure to record as the run's; or an error that ends
+// the run before it begins, which scopeEnded handles: errRuleAccount when
+// the rule does not cover the account, or a permanent scope failure.
+func (r *ruleRunner) scopeRun(ctx context.Context, rule rules.Rule) (sc ruleScope, reason string, transient, err error) {
+	sc, covered, reason, err := r.scope(ctx, rule, true)
+	switch {
+	case err != nil && classifyReason(errDetail(err).GetReason()) == actTransient:
+		return sc, "", err, nil
+	case err != nil:
+		return sc, "", nil, err
+	case !covered:
+		return sc, "", nil, errRuleAccount
+	}
+	return sc, reason, nil, nil
+}
+
+// scopeEnded ends a run that scopeRun refused with err: a rule that does
+// not cover the account is returned as errRuleAccount, and any other error
+// is recorded as a permanent failure of the run (scopeFailed).
+func (r *ruleRunner) scopeEnded(ctx context.Context, rule rules.Rule, t rules.Trigger, start time.Time, err error) (rules.Run, error) {
+	if errors.Is(err, errRuleAccount) {
+		return rules.Run{}, err
+	}
+	return r.scopeFailed(ctx, rule, t, start, err)
 }
 
 // builderAtTail waits until the account's cache builder has applied the
