@@ -1,7 +1,7 @@
 ---
 title: "chainmail version"
 sidebar_label: "version"
-sidebar_position: 66
+sidebar_position: 79
 description: "Print the chainmail version"
 ---
 

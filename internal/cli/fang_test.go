@@ -57,7 +57,7 @@ func TestTerminalHelpShowsGroups(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, stderr %q", got.code, got.stderr)
 	}
-	for _, title := range []string{"READ", "COMPOSE", "ORGANIZE", "WATCH", "ITEMS", "ACCOUNTS AND AUTH", "ADMIN"} {
+	for _, title := range []string{"READ", "COMPOSE", "ORGANIZE", "WATCH", "ITEMS", "RULES", "ACCOUNTS AND AUTH", "ADMIN"} {
 		if !strings.Contains(got.stdout, title) {
 			t.Errorf("help does not show group %q:\n%s", title, got.stdout)
 		}
@@ -70,7 +70,7 @@ func TestPlainHelpShowsGroups(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("exit code = %d, stderr %q", got.code, got.stderr)
 	}
-	for _, title := range []string{"Read", "Compose", "Organize", "Watch", "Items", "Accounts and auth", "Admin"} {
+	for _, title := range []string{"Read", "Compose", "Organize", "Watch", "Items", "Rules", "Accounts and auth", "Admin"} {
 		if !strings.Contains(got.stdout, "\n"+title+"\n") {
 			t.Errorf("help does not show group %q:\n%s", title, got.stdout)
 		}

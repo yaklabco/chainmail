@@ -1,7 +1,7 @@
 ---
 title: "chainmail send-raw"
 sidebar_label: "send-raw"
-sidebar_position: 61
+sidebar_position: 74
 description: "Send a complete RFC 5322 message as given"
 ---
 
