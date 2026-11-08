@@ -94,6 +94,13 @@ func TestDrainJoinsTheRuleSchedulerBeforeClosingStores(t *testing.T) {
 	g.clk.advance(2 * time.Hour)
 	stop := g.f.s.startBackground(t.Context())
 	t.Cleanup(stop)
+	// Cleanups run last first: the hold is released, then drain is joined,
+	// then the background loops stop, so a failed wait below never leaves
+	// the scheduled run parked on the hold or drain running.
+	var drainWG sync.WaitGroup
+	t.Cleanup(drainWG.Wait)
+	release := sync.OnceFunc(func() { close(hold.release) })
+	t.Cleanup(release)
 
 	wait := func(what string, ch <-chan struct{}) {
 		t.Helper()
@@ -105,10 +112,10 @@ func TestDrainJoinsTheRuleSchedulerBeforeClosingStores(t *testing.T) {
 	}
 	wait("the scheduled run's flag", hold.entered)
 	drained := make(chan struct{})
-	go func() {
+	drainWG.Go(func() {
 		defer close(drained)
 		g.f.s.drain()
-	}()
+	})
 	select {
 	case <-hold.closedEarly:
 		t.Error("drain closed the mail store while a scheduled run was still in a store call")
@@ -116,7 +123,7 @@ func TestDrainJoinsTheRuleSchedulerBeforeClosingStores(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("drain neither stopped the scheduler nor closed the stores within 10s")
 	}
-	close(hold.release)
+	release()
 	wait("drain", drained)
 	buildMu.Lock()
 	defer buildMu.Unlock()
