@@ -150,6 +150,11 @@ type ruleScope struct {
 	sources []mailstore.Source
 	// excludeLabels are the labels whose messages the rule skips.
 	excludeLabels []string
+	// header is the query with its text terms relaxed away, set when
+	// needsBodies is: every message the query can match passes it, whatever
+	// its body holds. headerNone says no message can pass.
+	header     cache.Where
+	headerNone bool
 }
 
 // scopeRule parses and splits the query, resolves item: terms through
@@ -177,7 +182,8 @@ func (s *Server) scopeRule(ctx context.Context, ruleID string, d rules.Definitio
 	if err != nil {
 		return sc, "", err
 	}
-	plan, err := cache.Compile(rest, scope.In, acct.Provider.Gmail, s.cacheClock.Now(), threads)
+	now := s.cacheClock.Now()
+	plan, err := cache.Compile(rest, scope.In, acct.Provider.Gmail, now, threads)
 	if err != nil {
 		return sc, "", ruleCompileErr(err)
 	}
@@ -185,6 +191,11 @@ func (s *Server) scopeRule(ctx context.Context, ruleID string, d rules.Definitio
 		return sc, "", errRuleUnsupported
 	}
 	sc.where, sc.needsBodies = plan.Where, plan.NeedsBodies
+	if sc.needsBodies {
+		if err := sc.setHeaderFilter(rest, scope.In, now, threads); err != nil {
+			return sc, "", ruleCompileErr(err)
+		}
+	}
 	ca := s.cacheAccount(acct.Name)
 	if ca == nil || s.cache == nil {
 		return sc, reasonCacheDisabled, nil

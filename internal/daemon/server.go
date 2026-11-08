@@ -29,6 +29,7 @@ import (
 	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/mailstore/imapstore"
 	"github.com/yaklabco/chainmail/internal/policy"
+	"github.com/yaklabco/chainmail/internal/rules"
 	"github.com/yaklabco/chainmail/internal/upload"
 	"github.com/yaklabco/chainmail/internal/vault"
 	"github.com/yaklabco/chainmail/internal/watch"
@@ -192,6 +193,12 @@ type Server struct {
 	// itemThreads resolves item: search terms into thread keys. Nil when
 	// the daemon has no item store, which makes item: an invalid argument.
 	itemThreads itemResolver
+	// rules keeps the rule definitions, their revisions and runs, and the
+	// act-once table in state.db, and appends rule events to watchLog.
+	rules *rules.Store
+	// rulesClock is the time of the rule runners' waits: Options.Now and
+	// time.After. Internal tests replace it before a runner is made.
+	rulesClock watch.Clock
 	// ruleApplied reads the rules' act-once table, for the skipped count
 	// of a dry-run. Nil until the rule store is built, which makes every
 	// dry-run skip nothing.
@@ -249,6 +256,14 @@ func New(opts Options) (*Server, error) {
 	s.items = items.NewStore(opts.StateDB, s.watchLog, opts.Now)
 	// item: searches resolve item IDs to thread keys through the store.
 	s.itemThreads = s.items
+	// Rules live in state.db beside the items. at schedules follow the
+	// [rules] time zone.
+	s.rules = rules.NewStore(rules.StoreOptions{
+		DB: opts.StateDB, Log: s.watchLog, Now: opts.Now,
+		Location: opts.Config.RulesSettings().Location,
+	})
+	s.ruleApplied = s.rules
+	s.rulesClock = daemonClock{now: opts.Now}
 	if err := s.openSendState(); err != nil {
 		return nil, err
 	}

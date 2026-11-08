@@ -102,35 +102,52 @@ func (s *Store) MarkPending(ctx context.Context, ruleID, account, key string, ru
 }
 
 // MarkApplied upserts ruleID's row for one message with outcome applied or
-// held, the note, the run and now. When alias is set and differs from key
-// (the message's key after a move, archive, trash or copy), it then copies
-// every rule's row for (account, key) to (account, alias) with INSERT OR
-// IGNORE, in the same transaction, so a row already at the alias is never
-// overwritten and the copies keep their run, outcome, note and time.
-func (s *Store) MarkApplied(ctx context.Context, ruleID, account, key string, runID int64, o AppliedOutcome, note, alias string) error {
+// held, the note, the run and now. For each alias that is set and differs
+// from key (the message's key after a move, archive, trash or copy), it
+// then upserts ruleID's row at the alias with the same values, which a
+// runner may have written right after a copy, and copies every other
+// rule's row for (account, key) to (account, alias) with INSERT OR IGNORE,
+// so another rule's row already at the alias is never overwritten and the
+// copies keep their run, outcome, note and time. Every row commits in one
+// transaction, or none does (spec amendment 6).
+func (s *Store) MarkApplied(ctx context.Context, ruleID, account, key string, runID int64, o AppliedOutcome, note string, aliases ...string) error {
 	if o != AppliedDone && o != AppliedHeld {
 		return errAppliedOutcome
 	}
 	now := s.now().UTC()
 	return s.write(ctx, func(tx *sql.Tx) ([]watch.Event, error) {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO rule_applied (rule_id, account, message_key, run_id, outcome, note, at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)
-			 ON CONFLICT (rule_id, account, message_key) DO UPDATE SET
-			   run_id = excluded.run_id, outcome = excluded.outcome, note = excluded.note, at = excluded.at`,
-			ruleID, account, key, runID, string(o), note, dbTime(now)); err != nil {
-			return nil, fmt.Errorf("rules: marking a message applied: %w", err)
+		if err := upsertApplied(ctx, tx, ruleID, account, key, runID, o, note, now); err != nil {
+			return nil, err
 		}
-		if alias == "" || alias == key {
-			return nil, nil
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT OR IGNORE INTO rule_applied (rule_id, account, message_key, run_id, outcome, note, at)
-			 SELECT rule_id, account, ?, run_id, outcome, note, at FROM rule_applied
-			 WHERE account = ? AND message_key = ?`,
-			alias, account, key); err != nil {
-			return nil, fmt.Errorf("rules: copying act-once rows to a new key: %w", err)
+		for _, alias := range aliases {
+			if alias == "" || alias == key {
+				continue
+			}
+			if err := upsertApplied(ctx, tx, ruleID, account, alias, runID, o, note, now); err != nil {
+				return nil, err
+			}
+			if _, err := tx.ExecContext(ctx,
+				`INSERT OR IGNORE INTO rule_applied (rule_id, account, message_key, run_id, outcome, note, at)
+				 SELECT rule_id, account, ?, run_id, outcome, note, at FROM rule_applied
+				 WHERE account = ? AND message_key = ?`,
+				alias, account, key); err != nil {
+				return nil, fmt.Errorf("rules: copying act-once rows to a new key: %w", err)
+			}
 		}
 		return nil, nil
 	})
+}
+
+// upsertApplied writes ruleID's row for key with outcome o, the note, the
+// run and now, replacing a row already there.
+func upsertApplied(ctx context.Context, tx *sql.Tx, ruleID, account, key string, runID int64, o AppliedOutcome, note string, now time.Time) error {
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO rule_applied (rule_id, account, message_key, run_id, outcome, note, at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (rule_id, account, message_key) DO UPDATE SET
+		   run_id = excluded.run_id, outcome = excluded.outcome, note = excluded.note, at = excluded.at`,
+		ruleID, account, key, runID, string(o), note, dbTime(now)); err != nil {
+		return fmt.Errorf("rules: marking a message applied: %w", err)
+	}
+	return nil
 }

@@ -53,6 +53,12 @@ type Run struct {
 	Matched, Applied, Held, Skipped, Failed int
 	Outcome                                 Outcome
 	Reason, Hint                            string
+	// Unattempted is how many of Failed failed before any action was
+	// attempted, such as a text rule's message whose body the cache did not
+	// hold in time (body_not_cached). They count in Matched and Failed but
+	// never toward the all_failed auto-disable. It is not stored: a run read
+	// back has 0.
+	Unattempted int
 }
 
 // RunQuery selects runs, newest first. Empty fields match everything.
@@ -106,7 +112,8 @@ func (s *Store) BeginRun(ctx context.Context, ruleID, account string, t Trigger,
 // ID and trigger come from the stored run. failed_runs goes up by one when
 // r.Failed > 0, and back to 0 when r.Failed == 0 and the outcome is ok or
 // capped. A live, enabled rule is disabled with ReasonAllFailed when every
-// match not skipped failed, or with ReasonRepeatedFailures when failed_runs
+// match not skipped failed, r.Unattempted aside, with at least one acted-on
+// failure, or with ReasonRepeatedFailures when failed_runs
 // reaches 5. The disable is a change: a new revision with its row (change
 // disabled, actor "<daemon uid>/rule") and a rule event with the reason. A
 // scheduled run sets last_run_at to its finish time and plans next_run_at
@@ -195,12 +202,14 @@ func (s *Store) nextScheduledRun(cur Rule, r Run) time.Time {
 
 // disableReason is why run r disables rule cur, which has failedRuns
 // consecutive failing runs counting r, or "" when it does not. Only a live,
-// enabled rule is disabled, and only by a run with a failure.
+// enabled rule is disabled, and only by a run with a failure. all_failed
+// needs every acted-on match to have failed: unattempted failures are left
+// out of both sides, and a run with only those never disables for it.
 func disableReason(cur Rule, failedRuns int, r Run) string {
 	switch {
 	case !cur.Enabled || !cur.DeletedAt.IsZero() || r.Failed == 0:
 		return ""
-	case r.Failed == r.Matched-r.Skipped:
+	case r.Failed > r.Unattempted && r.Failed == r.Matched-r.Skipped:
 		return ReasonAllFailed
 	case failedRuns >= autoDisableAfter:
 		return ReasonRepeatedFailures
