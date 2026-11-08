@@ -204,14 +204,16 @@ type restoreRuleIn struct {
 
 // ruleActions checks each action's kind and the shape of its arguments and
 // builds the daemon's actions. Every refusal is an invalidArg built from in
-// alone, before any daemon call. The daemon checks the rest: how many
-// actions, how they combine, and the names and addresses they hold.
+// alone, before any daemon call. An unknown kind is not repeated, since it
+// can hold an address, as forward=boss@example.com does in the CLI. The
+// daemon checks the rest: how many actions, how they combine, and the
+// names and addresses they hold.
 func ruleActions(in []ruleActionIn) ([]*chainmailv1.RuleAction, error) {
 	out := make([]*chainmailv1.RuleAction, 0, len(in))
 	for i, a := range in {
 		n := i + 1
 		if !slices.Contains(ruleActionKinds, a.Kind) {
-			return nil, invalidArg("action %d: unknown kind %q; kinds are label, unlabel, copy, flag, unflag, read, unread, link_item, forward, move, archive and trash", n, a.Kind)
+			return nil, invalidArg("action %d: unknown kind; kinds are label, unlabel, copy, flag, unflag, read, unread, link_item, forward, move, archive and trash", n)
 		}
 		given := map[string]bool{
 			"label": a.Label != "", "folder": a.Folder != "", "item_id": a.ItemID != "",
@@ -286,7 +288,8 @@ func ruleDefinition(in ruleDefinitionIn) (*chainmailv1.RuleDefinition, error) {
 // updateRuleRequest builds the UpdateRule request. The mask names every
 // field in gives and every field clear names, in ruleUpdatePaths order; a
 // list counts as given when it is not empty. Every refusal is an invalidArg
-// built from in alone, before any daemon call.
+// built from in alone, before any daemon call, and none repeats a clear
+// entry it refuses.
 func updateRuleRequest(in updateRuleIn) (*chainmailv1.UpdateRuleRequest, error) {
 	given := map[string]bool{
 		"name": in.Name != nil, "description": in.Description != nil, "accounts": len(in.Accounts) > 0,
@@ -297,7 +300,7 @@ func updateRuleRequest(in updateRuleIn) (*chainmailv1.UpdateRuleRequest, error) 
 	cleared := map[string]bool{}
 	for _, p := range in.Clear {
 		if !slices.Contains(ruleClearablePaths, p) {
-			return nil, invalidArg("clear cannot name %q; it takes description, accounts and schedule", p)
+			return nil, invalidArg("clear names a field it cannot clear; it takes description, accounts and schedule")
 		}
 		if given[p] {
 			return nil, invalidArg("%s is both given and cleared; give a value or clear it", p)

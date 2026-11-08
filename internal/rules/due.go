@@ -20,6 +20,11 @@ import (
 const dueOpenItems = "SELECT id, type, state, due_date, parent_id FROM items " +
 	"WHERE due_date IS NOT NULL AND state <> 'done' AND deleted_at IS NULL"
 
+// dueMaxWait bounds each of Run's sleeps. Run reads the wall clock after
+// every sleep, so a machine that slept through a wake, which pauses the
+// monotonic clock a timer runs on, scans within dueMaxWait of resuming.
+const dueMaxWait = 5 * time.Minute
+
 // dueChunk bounds the item IDs one Hook query binds.
 const dueChunk = 500
 
@@ -230,10 +235,12 @@ func dueStagesBefore(k watch.Kind) []watch.Kind {
 // or at the next due time when that comes first. Each wait runs from the
 // time its scan ended, so a slow scan never pushes a wake past its
 // deadline, and a scan that ends after the deadline is followed by another
-// at once.
+// at once. No sleep is longer than dueMaxWait: Run reads the wall clock
+// after each one and scans only once the wall clock has reached the wake,
+// so a resume from suspend past a wake is noticed within dueMaxWait.
 func (d *DueChecker) Run(ctx context.Context, clock watch.Clock) {
 	failures := 0
-	now := clock.Now()
+	now := wallNow(clock)
 	for ctx.Err() == nil {
 		wake := NextDueWake(now, d.settings)
 		if _, err := d.scan(ctx, now); err != nil {
@@ -249,18 +256,37 @@ func (d *DueChecker) Run(ctx context.Context, clock watch.Clock) {
 			failures = 0
 		}
 		d.setNext(wake)
-		now = clock.Now()
+		var ok bool
+		if now, ok = sleepUntil(ctx, clock, wake); !ok {
+			return
+		}
+	}
+}
+
+// sleepUntil waits on clock until the wall clock reaches wake, sleeping at
+// most dueMaxWait at a time, and returns the wall time it read at or past
+// wake. It returns false when ctx ends first.
+func sleepUntil(ctx context.Context, clock watch.Clock, wake time.Time) (time.Time, bool) {
+	wake = wake.Round(0)
+	for {
+		now := wallNow(clock)
 		wait := wake.Sub(now)
 		if wait <= 0 {
-			continue // the scan outlasted its wake; scan again now
+			return now, true
 		}
 		select {
 		case <-ctx.Done():
-			return
-		case <-clock.After(wait):
+			return time.Time{}, false
+		case <-clock.After(min(wait, dueMaxWait)):
 		}
-		now = clock.Now()
 	}
+}
+
+// wallNow is clock's time without its monotonic reading, so comparisons
+// with it follow the wall clock, which keeps running while the machine
+// sleeps.
+func wallNow(clock watch.Clock) time.Time {
+	return clock.Now().Round(0)
 }
 
 // NextWake returns when Run next scans, for the rules status. It is zero

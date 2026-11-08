@@ -270,14 +270,18 @@ func TestStartWatchStartsRuleRunners(t *testing.T) {
 }
 
 // startBackground runs the due checker on the rules clock: it scans, then
-// waits until the next due time, 08:00 the next day from noon.
+// plans its wake for the next due time, 08:00 the next day from noon, and
+// sleeps toward it five minutes at a time.
 func TestStartBackgroundRunsTheDueChecker(t *testing.T) {
 	t.Parallel()
 	s, clk := schedServer(t, time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC))
 	stop := s.startBackground(t.Context())
 	defer stop()
-	if w := nextSchedWait(t, clk); w.d != 20*time.Hour {
-		t.Errorf("the due checker waits %v, want 20h", w.d)
+	if w := nextSchedWait(t, clk); w.d != 5*time.Minute {
+		t.Errorf("the due checker waits %v, want 5m", w.d)
+	}
+	if got, want := s.dueChecker.NextWake(), time.Date(2026, 11, 8, 8, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("the due checker wakes at %v, want %v", got, want)
 	}
 }
 
