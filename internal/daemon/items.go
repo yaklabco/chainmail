@@ -212,26 +212,12 @@ func createFields(m *chainmailv1.CreateItemRequest) itemFields {
 	}
 }
 
-// itemCall runs one item call the way every handler of the service does:
-// it identifies the caller, gives the call its deadline, and runs run,
-// which sets the audit entry's targets as it validates and returns the
-// response and the action's error. It then records the entry, so refusals
-// are audited too, and returns the response or the action's Connect error.
+// itemCall runs one item call through auditedCall with callTimeout, as
+// every handler of the service does.
 func itemCall[Req, Resp any](ctx context.Context, s *Server, req *connect.Request[Req], action string,
 	run func(ctx context.Context, c caller, entry *audit.Entry) (*Resp, error),
 ) (*connect.Response[Resp], error) {
-	c, err := callerOf(ctx, req.Header())
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancel := withDeadline(ctx, callTimeout)
-	defer cancel()
-	entry := audit.Entry{Action: action}
-	resp, runErr := run(ctx, c, &entry)
-	if err := s.record(ctx, c, entry, runErr); err != nil {
-		return nil, err
-	}
-	return connect.NewResponse(resp), nil
+	return auditedCall(ctx, s, req, action, callTimeout, run)
 }
 
 // CreateItem implements chainmailv1connect.ItemsServiceHandler. It is
