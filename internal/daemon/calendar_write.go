@@ -479,6 +479,15 @@ var (
 	errTruncatedGuest = &argError{msg: "the event has more than 500 attendees, so its attendee list cannot be replaced", hint: "change the attendees in the calendar app"}
 )
 
+// errIncompleteAudience refuses a change of an event whose attendee list
+// chainmail read only in part: the change would notify attendees the
+// policy never saw.
+var errIncompleteAudience = &calendarRefusal{
+	code: connect.CodeFailedPrecondition, reason: api.ReasonInvalidArgument,
+	msg:  "the event has more attendees than chainmail reads; change it in your calendar app",
+	hint: "change it in the calendar app",
+}
+
 // UpdateEvent implements chainmailv1connect.CalendarServiceHandler. Only
 // the organizer may change an event with other attendees. The masked
 // fields are applied to the cached event, and the change is checked
@@ -510,7 +519,11 @@ func (h *calendarService) UpdateEvent(ctx context.Context, req *connect.Request[
 		if err != nil {
 			return nil, err
 		}
-		notified := s.notified(slices.Concat(res.ev.Attendees, ev.Attendees))
+		audience, err := s.audience(ctx, res)
+		if err != nil {
+			return nil, err
+		}
+		notified := s.notified(slices.Concat(audience, ev.Attendees))
 		if d := s.policy.CheckSend(ca.name, notified); len(notified) > 0 && !d.Allowed {
 			heldTargets(entry, len(d.Blocked), d.TooMany)
 			return &chainmailv1.UpdateEventResponse{Held: &chainmailv1.CalendarHeld{
@@ -552,7 +565,11 @@ func (h *calendarService) CancelEvent(ctx context.Context, req *connect.Request[
 		if err != nil {
 			return nil, err
 		}
-		notified := s.notified(res.ev.Attendees)
+		audience, err := s.audience(ctx, res)
+		if err != nil {
+			return nil, err
+		}
+		notified := s.notified(audience)
 		if d := s.policy.CheckSend(ca.name, notified); len(notified) > 0 && !d.Allowed {
 			heldTargets(entry, len(d.Blocked), d.TooMany)
 			return &chainmailv1.CancelEventResponse{Held: &chainmailv1.CalendarHeld{
@@ -577,48 +594,87 @@ func (h *calendarService) CancelEvent(ctx context.Context, req *connect.Request[
 }
 
 // editTarget resolves the event an update or cancel names and checks that
-// it may be changed: its account has a store, its calendar is writable,
-// James organizes it or it has no other attendees, and etag is its
-// current etag. When the cache holds another etag, a sync runs first, as
-// the caller can have read a newer event than the cache has.
+// it may be changed: its account has a store, James organizes it or it has
+// no other attendees, its calendar is writable, and etag is its current
+// etag. When the cache holds another etag, a sync runs and every check is
+// repeated on the version read then, as the caller can have read a newer
+// event than the cache has.
 func (s *Server) editTarget(ctx context.Context, ref, etag string, entry *audit.Entry) (resolvedEvent, *calAccount, error) {
-	res, err := s.resolveEvent(ctx, ref)
-	if err != nil {
-		return resolvedEvent{}, nil, err
+	for attempt := 0; ; attempt++ {
+		res, err := s.resolveEvent(ctx, ref)
+		if err != nil {
+			return resolvedEvent{}, nil, s.refNotFound(ctx, err)
+		}
+		if attempt == 0 {
+			entry.Account = res.row.Account
+			entry.Targets = append(entry.Targets, "calendar="+plain(res.row.CalendarID))
+		}
+		ca, err := s.editable(ctx, res)
+		if err != nil {
+			return resolvedEvent{}, nil, err
+		}
+		if res.ev.ETag == etag {
+			return res, ca, nil
+		}
+		if attempt > 0 {
+			return resolvedEvent{}, nil, calstore.ErrConflict
+		}
+		s.syncAfterWrite(ctx, ca)
 	}
-	entry.Account = res.row.Account
-	entry.Targets = append(entry.Targets, "calendar="+plain(res.row.CalendarID))
+}
+
+// editable checks that James may change res: its account has a store, he
+// organizes it or it has no attendee but him, and its calendar is
+// writable.
+func (s *Server) editable(ctx context.Context, res resolvedEvent) (*calAccount, error) {
 	ca, ok := s.calendars[res.row.Account]
 	if !ok || ca.store == nil {
-		return resolvedEvent{}, nil, errNoCalendarStore
+		return nil, errNoCalendarStore
 	}
 	if !s.mayChange(res) {
-		return resolvedEvent{}, nil, errNotOrganizer
+		return nil, errNotOrganizer
 	}
 	cal, err := s.calcache.Calendar(ctx, res.row.Account, res.row.CalendarID)
 	if err != nil {
-		return resolvedEvent{}, nil, err
+		return nil, err
 	}
 	if cal.Access != calendar.AccessWrite {
-		return resolvedEvent{}, nil, calstore.ErrReadOnly
+		return nil, calstore.ErrReadOnly
 	}
-	if res.ev.ETag != etag {
-		s.syncAfterWrite(ctx, ca)
-		if again, err := s.resolveEvent(ctx, ref); err == nil {
-			res = again
+	return ca, nil
+}
+
+// audience is every attendee a change of res notifies: the event's
+// effective attendees, or for a whole series those of its master and of
+// every override, as each instance's attendees hear of the change. A list
+// that is incomplete (cut at calendar.MaxAttendees) has attendees nobody
+// can check, so the change is refused.
+func (s *Server) audience(ctx context.Context, res resolvedEvent) ([]calendar.Attendee, error) {
+	atts, truncated := res.attendees()
+	if res.rid.IsZero() && isSeries(res.row.Event) {
+		rows, err := s.calcache.Series(ctx, res.row.Account, res.row.CalendarID, res.row.Event.ProviderID)
+		if err != nil {
+			return nil, err
 		}
-		if res.ev.ETag != etag {
-			return resolvedEvent{}, nil, calstore.ErrConflict
+		atts = slices.Clone(atts)
+		for _, r := range rows {
+			atts = append(atts, r.Event.Attendees...)
+			truncated = truncated || r.Event.AttendeesTruncated
 		}
 	}
-	return res, ca, nil
+	if truncated {
+		return nil, errIncompleteAudience
+	}
+	return atts, nil
 }
 
 // mayChange reports whether James may change an event: he organizes it,
-// or it has no attendee but him.
+// or it has no attendee but him. Both are the effective values, so a
+// sparse override is judged by its series.
 func (s *Server) mayChange(res resolvedEvent) bool {
 	_, org := res.role()
-	return org || !hasOtherAttendees(res.ev, s.ownAddress)
+	atts, _ := res.attendees()
+	return org || !slices.ContainsFunc(atts, func(a calendar.Attendee) bool { return !s.ownAddress(a.Email) })
 }
 
 // eventMaskFields checks an UpdateEvent mask's paths and returns them
@@ -662,14 +718,16 @@ func (s *Server) applyEdit(res resolvedEvent, m *chainmailv1.UpdateEventRequest,
 		return calendar.Event{}, err
 	}
 	if has("attendees") {
-		if ev.AttendeesTruncated {
+		// A sparse override's list starts from its series's.
+		old, truncated := res.attendees()
+		if truncated {
 			return calendar.Event{}, errTruncatedGuest
 		}
 		people, err := parseAttendees(m.GetAttendees())
 		if err != nil {
 			return calendar.Event{}, err
 		}
-		ev.Attendees = s.mergeAttendees(ev.Attendees, people)
+		ev.Attendees = s.mergeAttendees(old, people)
 	}
 	if has("recurrence_rule") {
 		if !res.rid.IsZero() || !ev.RecurrenceID.IsZero() {

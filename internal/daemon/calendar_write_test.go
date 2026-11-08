@@ -3,6 +3,7 @@ package daemon_test
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -433,4 +434,170 @@ func TestCancelEvent(t *testing.T) {
 		t.Errorf("Put calls = %+v, want the instance cancelled", calls)
 	}
 	noSecretInAudit(t, e.Harness)
+}
+
+// An event Google or the parser cut at 500 attendees has attendees nobody
+// checked, and any change would notify them: it is refused, not applied.
+func TestEditOfATruncatedEventIsRefused(t *testing.T) {
+	t.Parallel()
+	var p string
+	e := startCal(t, func(e *calEnv) {
+		// boss is the last attendee chainmail reads; a blocked one lies
+		// beyond the boundary.
+		ev := own("big@x", "james@mw.example", e.start, allowedAddr)
+		ev.AttendeesTruncated = true
+		p = e.mw.Add(mwCal, ev)
+	})
+	ref := calendar.EventRef("mw", mwCal, p)
+	etag := e.etagOf(t, ref)
+	_, err := e.update(t, &chainmailv1.UpdateEventRequest{Ref: ref, Etag: etag, UpdateMask: mask("title"), Title: "Renamed"})
+	wantCode(t, "update", err, connect.CodeFailedPrecondition)
+	_, err = e.cancel(t, ref, etag)
+	wantCode(t, "cancel", err, connect.CodeFailedPrecondition)
+	if !strings.Contains(err.Error(), "more attendees than chainmail reads") {
+		t.Errorf("error = %v, want the fixed text", err)
+	}
+	if n := e.mw.Count(calfake.MethodPut) + e.mw.Count(calfake.MethodDelete); n != 0 {
+		t.Errorf("store writes = %d, want none", n)
+	}
+}
+
+// wantCode fails the test unless err has code.
+func wantCode(t *testing.T, what string, err error, code connect.Code) {
+	t.Helper()
+	if connect.CodeOf(err) != code {
+		t.Fatalf("%s: err = %v, want %v", what, err, code)
+	}
+}
+
+// A change of a whole series notifies the attendees of every instance:
+// those its overrides add are checked too.
+func TestSeriesEditChecksEveryOverride(t *testing.T) {
+	t.Parallel()
+	var weekly, cut string
+	second := func(e *calEnv) time.Time { return e.start.Add(7 * 24 * time.Hour) }
+	e := startCal(t, func(e *calEnv) {
+		master := own("weekly@x", "james@mw.example", e.start, allowedAddr)
+		master.RRule = "FREQ=WEEKLY;COUNT=3"
+		weekly = e.mw.Add(mwCal, master)
+		e.mw.Change(mwCal, weekly, func(evs []calendar.Event) []calendar.Event {
+			ov := evs[0]
+			ov.RRule, ov.RecurrenceID = "", second(e)
+			ov.Start, ov.End = second(e), second(e).Add(time.Hour)
+			ov.Attendees = append(slices.Clone(ov.Attendees), person(blockedAddr, calendar.PartStatNeedsAction))
+			return append(evs, ov)
+		})
+		other := own("cut@x", "james@mw.example", e.start, allowedAddr)
+		other.RRule = "FREQ=WEEKLY;COUNT=3"
+		cut = e.mw.Add(mwCal, other)
+		e.mw.Change(mwCal, cut, func(evs []calendar.Event) []calendar.Event {
+			ov := evs[0]
+			ov.RRule, ov.RecurrenceID = "", second(e)
+			ov.Start, ov.End = second(e), second(e).Add(time.Hour)
+			ov.AttendeesTruncated = true
+			return append(evs, ov)
+		})
+	})
+	ref := calendar.EventRef("mw", mwCal, weekly)
+	etag := e.etagOf(t, ref)
+	got, err := e.cancel(t, ref, etag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GetCancelled() || got.GetHeld() == nil || len(got.GetHeld().GetBlocked()) != 1 || got.GetHeld().GetBlocked()[0].GetUntrusted() != blockedAddr {
+		t.Errorf("series cancel = %v, want held for the override's attendee", got)
+	}
+	up, err := e.update(t, &chainmailv1.UpdateEventRequest{Ref: ref, Etag: etag, UpdateMask: mask("title"), Title: "Renamed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.GetHeld() == nil || len(up.GetHeld().GetBlocked()) != 1 {
+		t.Errorf("series update = %v, want held for the override's attendee", up)
+	}
+	cref := calendar.EventRef("mw", mwCal, cut)
+	_, err = e.cancel(t, cref, e.etagOf(t, cref))
+	wantCode(t, "cancel of a series with a truncated override", err, connect.CodeFailedPrecondition)
+	if n := e.mw.Count(calfake.MethodPut) + e.mw.Count(calfake.MethodDelete); n != 0 {
+		t.Errorf("store writes = %d, want none", n)
+	}
+}
+
+// sparseOverride adds to a series an override of rid that names no
+// organizer and no attendee, so it takes its series's.
+func sparseOverride(e *calEnv, calID, p string, rid time.Time) {
+	e.mw.Change(calID, p, func(evs []calendar.Event) []calendar.Event {
+		ov := evs[0]
+		ov.RRule, ov.RecurrenceID, ov.Organizer, ov.Attendees = "", rid, nil, nil
+		ov.Start, ov.End = rid.Add(15*time.Minute), rid.Add(75*time.Minute)
+		return append(evs, ov)
+	})
+}
+
+// A sparse override is organized by its series's organizer and notifies
+// its series's attendees.
+func TestSparseOverrideTakesItsSeriesRole(t *testing.T) {
+	t.Parallel()
+	var theirs, mine string
+	e := startCal(t, func(e *calEnv) {
+		second := e.start.Add(7 * 24 * time.Hour)
+		inv := invitation("theirs@x", "james@mw.example", e.start)
+		inv.RRule = "FREQ=WEEKLY;COUNT=3"
+		theirs = e.mw.Add(mwCal, inv)
+		sparseOverride(e, mwCal, theirs, second)
+		own := own("mine@x", "james@mw.example", e.start, blockedAddr)
+		own.RRule = "FREQ=WEEKLY;COUNT=3"
+		mine = e.mw.Add(mwCal, own)
+		sparseOverride(e, mwCal, mine, second)
+	})
+	second := e.start.Add(7 * 24 * time.Hour)
+	tref := calendar.InstanceRef(calendar.EventRef("mw", mwCal, theirs), second)
+	_, err := e.update(t, &chainmailv1.UpdateEventRequest{Ref: tref, Etag: e.etagOf(t, tref), UpdateMask: mask("title"), Title: "Mine now"})
+	wantReason(t, "update of someone else's override", err, api.ReasonNotOrganizer)
+	_, err = e.cancel(t, tref, e.etagOf(t, tref))
+	wantReason(t, "cancel of someone else's override", err, api.ReasonNotOrganizer)
+
+	mref := calendar.InstanceRef(calendar.EventRef("mw", mwCal, mine), second)
+	got, err := e.update(t, &chainmailv1.UpdateEventRequest{Ref: mref, Etag: e.etagOf(t, mref), UpdateMask: mask("title"), Title: "Renamed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GetHeld() == nil || len(got.GetHeld().GetBlocked()) != 1 {
+		t.Errorf("update of an override = %v, want held for the series's blocked attendee", got)
+	}
+	c, err := e.cancel(t, mref, e.etagOf(t, mref))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.GetHeld() == nil || c.GetCancelled() {
+		t.Errorf("cancel of an override = %v, want held", c)
+	}
+	if n := e.mw.Count(calfake.MethodPut) + e.mw.Count(calfake.MethodDelete); n != 0 {
+		t.Errorf("store writes = %d, want none", n)
+	}
+}
+
+// When the caller read a newer version than the cache holds, the checks
+// run again on that version.
+func TestEditRechecksTheRefreshedEvent(t *testing.T) {
+	t.Parallel()
+	var p string
+	e := startCal(t, func(e *calEnv) {
+		p = e.mw.Add(mwCal, own("alone@x", "james@mw.example", e.start))
+	})
+	ref := calendar.EventRef("mw", mwCal, p)
+	// The event is handed to boss, who invites James; the cache has not
+	// seen it yet.
+	e.mw.Change(mwCal, p, func(evs []calendar.Event) []calendar.Event {
+		inv := invitation("alone@x", "james@mw.example", e.start)
+		inv.ProviderID = evs[0].ProviderID
+		return []calendar.Event{inv}
+	})
+	rows, _ := e.mw.Object(mwCal, p)
+	_, err := e.update(t, &chainmailv1.UpdateEventRequest{Ref: ref, Etag: rows[0].ETag, UpdateMask: mask("title"), Title: "Mine"})
+	wantReason(t, "update of a version organized by someone else", err, api.ReasonNotOrganizer)
+	_, err = e.cancel(t, ref, rows[0].ETag)
+	wantReason(t, "cancel of a version organized by someone else", err, api.ReasonNotOrganizer)
+	if n := e.mw.Count(calfake.MethodPut) + e.mw.Count(calfake.MethodDelete); n != 0 {
+		t.Errorf("store writes = %d, want none", n)
+	}
 }

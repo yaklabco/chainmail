@@ -256,3 +256,70 @@ func TestRespondRefusals(t *testing.T) {
 		t.Errorf("Respond calls = %d, want none", n)
 	}
 }
+
+// An answer is bound to the version whose organizer was checked: when the
+// organizer changed on the server, the answer is checked again against the
+// new one, here held, and nothing is written.
+func TestRespondRechecksAChangedOrganizer(t *testing.T) {
+	t.Parallel()
+	var p string
+	e := startCal(t, func(e *calEnv) {
+		p = e.mw.Add(mwCal, invitation("moved@x", "james@mw.example", e.start))
+	})
+	// The cache still has boss as the organizer.
+	e.mw.Change(mwCal, p, func(evs []calendar.Event) []calendar.Event {
+		evs[0].Organizer.Email = blockedAddr
+		return evs
+	})
+	got, err := e.respond(t, &chainmailv1.RespondRequest{Ref: calendar.EventRef("mw", mwCal, p), Response: "accept"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GetHeld() == nil || len(got.GetHeld().GetBlocked()) != 1 || got.GetHeld().GetBlocked()[0].GetUntrusted() != blockedAddr {
+		t.Fatalf("response = %v, want held for the new organizer", got)
+	}
+	rows, _ := e.mw.Object(mwCal, p)
+	for _, a := range rows[0].Attendees {
+		if a.Email == "james@mw.example" && a.PartStat != calendar.PartStatNeedsAction {
+			t.Errorf("the answer reached the store: %+v", a)
+		}
+	}
+	calls := e.mw.CallsTo(calfake.MethodRespond)
+	if len(calls) != 1 || calls[0].Response.ETag == "" {
+		t.Errorf("Respond calls = %+v, want one bound to the cached etag", calls)
+	}
+}
+
+// An answer James gave elsewhere since the caller read the event is not
+// overwritten.
+func TestRespondKeepsANewerAnswer(t *testing.T) {
+	t.Parallel()
+	var p string
+	e := startCal(t, func(e *calEnv) {
+		p = e.mw.Add(mwCal, invitation("answered@x", "james@mw.example", e.start))
+	})
+	e.mw.SetPartStat(mwCal, p, time.Time{}, "james@mw.example", calendar.PartStatDeclined)
+	_, err := e.respond(t, &chainmailv1.RespondRequest{Ref: calendar.EventRef("mw", mwCal, p), Response: "accept"})
+	wantReason(t, "answer changed elsewhere", err, api.ReasonEventConflict)
+	rows, _ := e.mw.Object(mwCal, p)
+	for _, a := range rows[0].Attendees {
+		if a.Email == "james@mw.example" && a.PartStat != calendar.PartStatDeclined {
+			t.Errorf("the newer answer was overwritten: %+v", a)
+		}
+	}
+}
+
+// An event in a calendar the account may only read is not answered
+// through the store.
+func TestRespondInAReadOnlyCalendar(t *testing.T) {
+	t.Parallel()
+	var p string
+	e := startCal(t, func(e *calEnv) {
+		p = e.mw.Add(mwShared, invitation("shared@x", "james@mw.example", e.start))
+	})
+	_, err := e.respond(t, &chainmailv1.RespondRequest{Ref: calendar.EventRef("mw", mwShared, p), Response: "accept"})
+	wantReason(t, "read-only calendar", err, api.ReasonCalendarReadOnly)
+	if n := e.mw.Count(calfake.MethodRespond); n != 0 {
+		t.Errorf("Respond calls = %d, want none", n)
+	}
+}

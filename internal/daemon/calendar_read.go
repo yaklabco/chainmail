@@ -225,6 +225,10 @@ func (h *calendarService) GetEvent(ctx context.Context, req *connect.Request[cha
 				entry.Account = inv.GetEvent().GetAccount()
 				return &chainmailv1.GetEventResponse{Event: inv.GetEvent()}, nil
 			}
+			if !errors.Is(ierr, calcache.ErrNotFound) {
+				err = ierr
+			}
+			err = s.refNotFound(ctx, err)
 		}
 		if err != nil {
 			return nil, err
@@ -436,6 +440,9 @@ func (s *Server) mailInvite(ctx context.Context, ref string) (*chainmailv1.Invit
 	if err != nil {
 		return nil, err
 	}
+	if err := s.accountReady(ctx, r.Account); err != nil {
+		return nil, err
+	}
 	ev, _, ok := s.parseMailInvite(r)
 	if !ok {
 		return nil, calcache.ErrNotFound
@@ -490,6 +497,9 @@ func (s *Server) getInvite(ctx context.Context, ref string) (*chainmailv1.Invite
 	}
 	r, err := s.calcache.MailInvite(ctx, ref)
 	if err != nil {
+		return nil, s.refNotFound(ctx, err)
+	}
+	if err := s.accountReady(ctx, r.Account); err != nil {
 		return nil, err
 	}
 	if res, ok := s.calendarEventOfUID(ctx, r.Account, r.UID); ok {

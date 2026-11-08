@@ -11,6 +11,7 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
@@ -604,4 +605,23 @@ func TestListInvitesReadsAStoredCharset(t *testing.T) {
 		}
 	}
 	t.Errorf("the latin-1 invite is not listed among %d invites", len(resp.Msg.GetInvites()))
+}
+
+// Calls that name an event by ref wait for the first sync: before it, an
+// event the cache does not hold yet may be one of the account's.
+func TestRefCallsBeforeTheFirstSync(t *testing.T) {
+	t.Parallel()
+	e := startCal(t, func(e *calEnv) { e.mwFailSync = true })
+	ctx := t.Context()
+	ref := calendar.EventRef("mw", mwCal, calfake.ObjectName("later@x"))
+	_, err := e.Client.Calendar.GetEvent(ctx, connect.NewRequest(&chainmailv1.GetEventRequest{Ref: ref}))
+	wantReason(t, "GetEvent", err, api.ReasonCacheNotReady)
+	_, err = e.Client.Calendar.GetInvite(ctx, connect.NewRequest(&chainmailv1.GetInviteRequest{Ref: ref}))
+	wantReason(t, "GetInvite", err, api.ReasonCacheNotReady)
+	_, err = e.Client.Calendar.Respond(ctx, connect.NewRequest(&chainmailv1.RespondRequest{Ref: ref, Response: "accept"}))
+	wantReason(t, "Respond", err, api.ReasonCacheNotReady)
+	_, err = e.Client.Calendar.UpdateEvent(ctx, connect.NewRequest(&chainmailv1.UpdateEventRequest{Ref: ref, Etag: "x", UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"title"}}, Title: "t"}))
+	wantReason(t, "UpdateEvent", err, api.ReasonCacheNotReady)
+	_, err = e.Client.Calendar.CancelEvent(ctx, connect.NewRequest(&chainmailv1.CancelEventRequest{Ref: ref, Etag: "x"}))
+	wantReason(t, "CancelEvent", err, api.ReasonCacheNotReady)
 }
