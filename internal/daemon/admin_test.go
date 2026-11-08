@@ -579,8 +579,8 @@ smtp = { host = "127.0.0.1", port = 465 }
 }
 
 // A public issuer client logs in with no client secret in the vault, and its
-// accounts report a login, not a secret, as what they need. Its secret may
-// still be set, for a confidential client.
+// accounts report a login, not a secret, as what they need. Its secret
+// may still be set, though chainmail never sends it.
 func TestOAuthLoginWithPublicIssuerClient(t *testing.T) {
 	t.Parallel()
 	o := oauthtest.StartWith(t, oauthtest.Options{Public: true})

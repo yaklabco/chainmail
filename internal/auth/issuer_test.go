@@ -137,17 +137,45 @@ func mustParse(t *testing.T, s string) *config.Config {
 	return cfg
 }
 
-// An issuer client with a secret in the vault is confidential and sends it.
-func TestIssuerConfidentialClientSendsItsSecret(t *testing.T) {
-	t.Parallel()
-	srv := oauthtest.Start(t)
-	m, store := issuerManager(t, srv.Issuer())
-	if err := store.Set(auth.ClientSecret("kc"), []byte(oauthtest.ClientSecret)); err != nil {
-		t.Fatal(err)
+// getCountingStore counts reads of one secret.
+type getCountingStore struct {
+	*memStore
+	name  string
+	reads atomic.Int32
+}
+
+func (s *getCountingStore) Get(name string) ([]byte, error) {
+	if name == s.name {
+		s.reads.Add(1)
 	}
+	return s.memStore.Get(name)
+}
+
+// An issuer client is public: even with a secret in the vault, chainmail
+// never reads it and no token request carries a client_secret, which the
+// public oauthtest server refuses.
+func TestIssuerClientNeverSendsAVaultSecret(t *testing.T) {
+	t.Parallel()
+	srv := oauthtest.StartWith(t, oauthtest.Options{Public: true})
+	store := &getCountingStore{
+		memStore: &memStore{m: map[string][]byte{auth.ClientSecret("kc"): []byte(oauthtest.ClientSecret)}},
+		name:     auth.ClientSecret("kc"),
+	}
+	m := auth.NewManager(mustParse(t, issuerConfig(srv.Issuer())), store)
 	login(t, m, "mw")
 	if srv.Exchanges() != 1 {
 		t.Errorf("exchanges = %d, want 1", srv.Exchanges())
+	}
+	// A new manager refreshes from the stored refresh token.
+	m2 := auth.NewManager(mustParse(t, issuerConfig(srv.Issuer())), store)
+	if _, err := m2.Credentials(t.Context(), "mw"); err != nil {
+		t.Fatalf("Credentials: %v", err)
+	}
+	if srv.Refreshes() != 1 {
+		t.Errorf("refreshes = %d, want 1", srv.Refreshes())
+	}
+	if n := store.reads.Load(); n != 0 {
+		t.Errorf("the issuer client's vault secret was read %d times, want never", n)
 	}
 }
 
@@ -175,8 +203,8 @@ func TestIssuerStateNeedsOnlyTheRefreshToken(t *testing.T) {
 	}
 }
 
-// Setting the optional secret of an issuer client resets the accounts on
-// it, as for any other client.
+// Setting the secret of an issuer client, which is never sent, resets the
+// accounts on it, as for any other client.
 func TestIssuerClientSecretChangeResetsAccount(t *testing.T) {
 	t.Parallel()
 	srv := oauthtest.StartWith(t, oauthtest.Options{Public: true})
@@ -338,7 +366,7 @@ func TestIssuerNoRefreshTokenHintIsProviderNeutral(t *testing.T) {
 	}
 }
 
-// A refused issuer client is not told to set a secret it may not have.
+// A refused issuer client is not told to set a secret it never sends.
 func TestIssuerClientRejectedHint(t *testing.T) {
 	t.Parallel()
 	var tokenURL string
@@ -358,4 +386,8 @@ func TestIssuerClientRejectedHint(t *testing.T) {
 	}
 	_, err := m.Credentials(t.Context(), "mw")
 	requireHint(t, err, "check client_id in oauth_clients.kc")
+	var re *auth.RequiredError
+	if errors.As(err, &re) && strings.Contains(re.Hint, "secret") {
+		t.Errorf("hint = %q; an issuer client sends no secret, so none is to be set", re.Hint)
+	}
 }

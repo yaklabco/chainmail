@@ -299,11 +299,12 @@ func refreshHint(acct config.ResolvedAccount, err error) (string, bool) {
 }
 
 // clientRejectedHint says what to do about an OAuth client the token
-// endpoint refused. An issuer client may be public, with no secret to set.
+// endpoint refused. An issuer client is public and sends no secret, so the
+// fix is at the issuer or in its client_id.
 func clientRejectedHint(acct config.ResolvedAccount) string {
 	if acct.OAuthIssuer != "" {
 		return "the OAuth client was rejected; check client_id in oauth_clients." + acct.OAuthClient +
-			", and if the client has a secret, run: chainmail secret set " + ClientSecret(acct.OAuthClient)
+			", which must name a public client at the issuer"
 	}
 	return "the OAuth client was rejected; run: chainmail secret set " + ClientSecret(acct.OAuthClient)
 }
@@ -562,8 +563,9 @@ func (m *Manager) tokenSource(ctx context.Context, acct config.ResolvedAccount) 
 
 // oauthConfig builds acct's OAuth2 client: the preset's endpoints, or for
 // an issuer client those its discovery gives, and the account's scopes. An
-// issuer client's secret is optional: without one it is a public client and
-// no client_secret is sent, since AuthStyleInParams leaves an empty one out.
+// issuer client is public: its vault secret, if one is set, is never read,
+// and no client_secret is sent, since AuthStyleInParams leaves an empty one
+// out.
 func (m *Manager) oauthConfig(ctx context.Context, acct config.ResolvedAccount) (*oauth2.Config, error) {
 	if acct.Auth != provider.AuthOAuth2 || (acct.Provider.OAuth2 == nil && acct.OAuthIssuer == "") {
 		return nil, fmt.Errorf("%w: %s", ErrNotOAuth, acct.Name)
@@ -597,19 +599,13 @@ func (m *Manager) oauthConfig(ctx context.Context, acct config.ResolvedAccount) 
 }
 
 // clientSecret reads acct's OAuth client secret. A missing secret is a
-// RequiredError, except for an issuer client, which may be public.
+// RequiredError. An issuer client is public, so it has none: the vault is
+// not read for it, and an empty secret is never sent.
 func (m *Manager) clientSecret(acct config.ResolvedAccount) ([]byte, error) {
-	if acct.OAuthIssuer == "" {
-		return m.secret(acct, ClientSecret(acct.OAuthClient))
-	}
-	v, err := m.store.Get(ClientSecret(acct.OAuthClient))
-	switch {
-	case errors.Is(err, vault.ErrNotFound):
+	if acct.OAuthIssuer != "" {
 		return nil, nil
-	case err != nil:
-		return nil, fmt.Errorf("reading secret %s: %w", ClientSecret(acct.OAuthClient), err)
 	}
-	return v, nil
+	return m.secret(acct, ClientSecret(acct.OAuthClient))
 }
 
 // withHTTPClient carries the HTTP client into a one-off oauth2 call.
@@ -666,7 +662,7 @@ func tokenError(err error) error {
 }
 
 // neededSecrets lists the secrets acct cannot log in without. An issuer
-// client's secret is optional, so it is not among them.
+// client is public and uses no secret, so its secret is not among them.
 func neededSecrets(acct config.ResolvedAccount) []string {
 	switch {
 	case acct.Auth == provider.AuthOAuth2 && acct.OAuthIssuer != "":
@@ -678,8 +674,9 @@ func neededSecrets(acct config.ResolvedAccount) []string {
 	}
 }
 
-// usedSecrets lists every secret acct logs in with when it is set: the
-// needed ones and an issuer client's optional secret.
+// usedSecrets lists every secret whose change resets acct: the needed ones
+// and its OAuth client's secret. An issuer client never sends its secret,
+// but setting it resets the accounts on it, as for any other client.
 func usedSecrets(acct config.ResolvedAccount) []string {
 	if acct.Auth == provider.AuthOAuth2 {
 		return []string{ClientSecret(acct.OAuthClient), RefreshTokenSecret(acct.Name)}
