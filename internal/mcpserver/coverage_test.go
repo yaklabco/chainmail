@@ -64,6 +64,16 @@ var toolRPC = map[string]string{
 	"restore_rule":        chainmailv1connect.RulesServiceRestoreRuleProcedure,
 	"dry_run_rule":        chainmailv1connect.RulesServiceDryRunRuleProcedure,
 	"run_rule":            chainmailv1connect.RulesServiceRunRuleProcedure,
+	"list_calendars":      chainmailv1connect.CalendarServiceListCalendarsProcedure,
+	"agenda":              chainmailv1connect.CalendarServiceAgendaProcedure,
+	"get_event":           chainmailv1connect.CalendarServiceGetEventProcedure,
+	"list_invites":        chainmailv1connect.CalendarServiceListInvitesProcedure,
+	"get_invite":          chainmailv1connect.CalendarServiceGetInviteProcedure,
+	"free_busy":           chainmailv1connect.CalendarServiceFreeBusyProcedure,
+	"rsvp":                chainmailv1connect.CalendarServiceRespondProcedure,
+	"create_event":        chainmailv1connect.CalendarServiceCreateEventProcedure,
+	"update_event":        chainmailv1connect.CalendarServiceUpdateEventProcedure,
+	"cancel_event":        chainmailv1connect.CalendarServiceCancelEventProcedure,
 }
 
 // leftOut lists agent-facing RPCs with no tool, and why (spec section 4).
@@ -80,18 +90,6 @@ var leftOut = map[string]string{
 	chainmailv1connect.CacheServiceEvictCacheProcedure:         "an operator action; the daemon evicts bodies on its own",
 	chainmailv1connect.RulesServiceListRuleRunsProcedure:       "run history for operators; get_rule returns a rule's last 10 runs and its counts",
 	chainmailv1connect.RulesServiceRulesStatusProcedure:        "an operator diagnostic of the rule runners and the scheduler",
-	// The calendar tools land in SP9 task 10, which replaces these entries
-	// with toolRPC rows.
-	chainmailv1connect.CalendarServiceListCalendarsProcedure: "tools land in T10",
-	chainmailv1connect.CalendarServiceAgendaProcedure:        "tools land in T10",
-	chainmailv1connect.CalendarServiceGetEventProcedure:      "tools land in T10",
-	chainmailv1connect.CalendarServiceListInvitesProcedure:   "tools land in T10",
-	chainmailv1connect.CalendarServiceGetInviteProcedure:     "tools land in T10",
-	chainmailv1connect.CalendarServiceFreeBusyProcedure:      "tools land in T10",
-	chainmailv1connect.CalendarServiceRespondProcedure:       "tools land in T10",
-	chainmailv1connect.CalendarServiceCreateEventProcedure:   "tools land in T10",
-	chainmailv1connect.CalendarServiceUpdateEventProcedure:   "tools land in T10",
-	chainmailv1connect.CalendarServiceCancelEventProcedure:   "tools land in T10",
 }
 
 // ignored lists request fields no tool sets, keyed "<procedure> <field path>", and why.
@@ -280,6 +278,27 @@ func coverageSamples(file string) map[string][]map[string]any {
 		"restore_rule":   {{"rule": "ru_a"}},
 		"dry_run_rule":   {{"rule": "r", "trigger": "new", "account": "work"}, {"definition": ruleDef}},
 		"run_rule":       {{"rule": "r", "max": 5, "account": "work"}},
+		"list_calendars": {{"accounts": []string{"work"}}},
+		"agenda": {{
+			"accounts": []string{"work"}, "calendars": []string{"primary"}, "from": "2026-11-09T00:00:00Z", "to": "2026-11-16T00:00:00Z",
+			"include_declined": true,
+		}},
+		"get_event":    {{"ref": testEventRef}},
+		"list_invites": {{"accounts": []string{"work"}}},
+		"get_invite":   {{"ref": testEventRef}},
+		"free_busy":    {{"account": "work", "people": []string{"ann@x.test"}, "from": "2026-11-09T00:00:00Z", "to": "2026-11-16T00:00:00Z"}},
+		"rsvp":         {{"ref": testEventRef, "response": "accept", "comment": "c", "idempotency_key": "k"}},
+		"create_event": {{
+			"account": "work", "calendar_id": "primary", "title": "t", "start": "2026-11-10T15:00:00Z", "end": "2026-11-10T16:00:00Z",
+			"time_zone": "Europe/London", "all_day": true, "location": "l", "description": "d", "attendees": []string{"ann@x.test"},
+			"recurrence_rule": "FREQ=WEEKLY", "idempotency_key": "k",
+		}},
+		"update_event": {{
+			"ref": testEventRef, "etag": "e1", "title": "t", "start": "2026-11-10T15:00:00Z", "end": "2026-11-10T16:00:00Z",
+			"time_zone": "Europe/London", "all_day": true, "location": "l", "description": "d", "attendees": []string{"ann@x.test"},
+			"recurrence_rule": "FREQ=WEEKLY",
+		}},
+		"cancel_event": {{"ref": testEventRef, "etag": "e1"}},
 	}
 }
 

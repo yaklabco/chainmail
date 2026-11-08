@@ -69,6 +69,12 @@ func TestToolsListGolden(t *testing.T) {
 // cache, so none of these is open world. run_rule acts on mail servers for
 // real and can trash and forward mail, and a repeat acts on mail that
 // arrived since, so it is destructive, open world and not idempotent.
+// The SP9 calendar tools reach calendar providers, through the cache or
+// directly, so all are open world. The reads change nothing. rsvp sets
+// James's answer, so a repeat leaves it as the first did. create_event is
+// not idempotent, since a call with other input or another key makes
+// another event; a repeat of update_event or cancel_event meets a new etag;
+// and cancel_event deletes or cancels an event, so it is destructive.
 func TestAnnotationsMatchTheSpec(t *testing.T) {
 	t.Parallel()
 	type h struct{ readOnly, destructive, idempotent, openWorld bool }
@@ -97,8 +103,15 @@ func TestAnnotationsMatchTheSpec(t *testing.T) {
 		"update_rule":   {false, false, true, false},
 		"get_rule":      {true, false, true, false}, "list_rules": {true, false, true, false},
 		"delete_rule": {false, false, true, false}, "restore_rule": {false, false, true, false},
-		"dry_run_rule": {true, false, true, false},
-		"run_rule":     {false, true, false, true},
+		"dry_run_rule":   {true, false, true, false},
+		"run_rule":       {false, true, false, true},
+		"list_calendars": {true, false, true, true}, "agenda": {true, false, true, true},
+		"get_event": {true, false, true, true}, "list_invites": {true, false, true, true},
+		"get_invite": {true, false, true, true}, "free_busy": {true, false, true, true},
+		"rsvp":         {false, false, true, true},
+		"create_event": {false, false, false, true},
+		"update_event": {false, false, false, true},
+		"cancel_event": {false, true, false, true},
 	}
 	for name, st := range map[string]struct {
 		policy  *gatePolicy
