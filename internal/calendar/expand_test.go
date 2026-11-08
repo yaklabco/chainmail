@@ -2,6 +2,9 @@ package calendar
 
 import (
 	"errors"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -284,4 +287,204 @@ func TestExpandAllDay(t *testing.T) {
 	if insts, _ := mustExpand(t, []Event{single}, utc(2026, 11, 10, 23, 0, 0), utc(2026, 11, 12, 0, 0, 0), MaxInstances); len(insts) != 1 {
 		t.Fatal("all-day single overlapping the range is missing")
 	}
+}
+
+// expandWithin runs Expand and fails the test if it has not returned within
+// a generous bound, so a rule that would loop forever fails instead of
+// hanging the run.
+func expandWithin(t *testing.T, series []Event, from, to time.Time) ([]Instance, error) {
+	t.Helper()
+	type result struct {
+		insts []Instance
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		insts, _, err := Expand(series, from, to, MaxInstances)
+		done <- result{insts, err}
+	}()
+	timer := time.NewTimer(20 * time.Second)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.insts, r.err
+	case <-timer.C:
+		t.Fatalf("Expand of %q did not return", series[0].RRule)
+		return nil, nil
+	}
+}
+
+func repeatList(n int, v string) string {
+	return strings.TrimSuffix(strings.Repeat(v+",", n), ",")
+}
+
+// rrule-go allocates the product of the BYHOUR, BYMINUTE and BYSECOND lists
+// without removing repeats, so repeated values are merged before it sees them.
+func TestExpandDeduplicatesRuleLists(t *testing.T) {
+	const n = 1000
+	start := utc(2026, 11, 2, 0, 0, 0)
+	rule := "FREQ=DAILY;BYHOUR=" + repeatList(n, "0") + ";BYMINUTE=" + repeatList(n, "0") + ";BYSECOND=" + repeatList(n, "0")
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	insts, err := expandWithin(t, []Event{master(rule, start, time.Hour)}, start, start.AddDate(0, 0, 3))
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	sameTimes(t, starts(insts), []time.Time{start, start.AddDate(0, 0, 1), start.AddDate(0, 0, 2)})
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 8<<20 {
+		t.Fatalf("Expand allocated %d bytes for a rule with repeated values", grew)
+	}
+}
+
+// A rule whose candidate instances (the product of its lists, times the
+// periods to iterate) are too many is not expanded, even with every value
+// distinct and in range.
+func TestExpandBoundsCandidateProduct(t *testing.T) {
+	from := utc(2026, 12, 1, 0, 0, 0)
+	full := "FREQ=DAILY;BYHOUR=" + seq(0, 23) + ";BYMINUTE=" + seq(0, 59) + ";BYSECOND=" + seq(0, 59)
+	for _, tc := range []struct {
+		name, rule string
+		start      time.Time
+	}{
+		{"every second of every day", full, from.AddDate(0, 0, -30)},
+		// No February 30 exists, so rrule-go would search to year 9999,
+		// building the minute list for every day on the way.
+		{"never matches", "FREQ=HOURLY;BYMONTH=2;BYMONTHDAY=30;BYMINUTE=" + seq(0, 59), from},
+	} {
+		_, err := expandWithin(t, []Event{master(tc.rule, tc.start, time.Second)}, from, from.AddDate(0, 0, 1))
+		if !errors.Is(err, ErrUnsafeRecurrence) {
+			t.Errorf("%s: err = %v, want ErrUnsafeRecurrence", tc.name, err)
+		}
+	}
+}
+
+func seq(lo, hi int) string {
+	var b strings.Builder
+	for i := lo; i <= hi; i++ {
+		if i > lo {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.Itoa(i))
+	}
+	return b.String()
+}
+
+// Values outside the RFC 5545 ranges are refused before rrule-go sees
+// them; some of them index past its tables and panic.
+func TestExpandRejectsOutOfRangeRuleValues(t *testing.T) {
+	start := utc(2026, 1, 5, 9, 0, 0)
+	for _, rule := range []string{
+		"FREQ=DAILY;BYHOUR=24",
+		"FREQ=DAILY;BYMINUTE=60",
+		"FREQ=MONTHLY;BYMONTHDAY=0",
+		"FREQ=MONTHLY;BYMONTHDAY=32",
+		"FREQ=YEARLY;BYYEARDAY=367",
+		"FREQ=YEARLY;BYWEEKNO=54",
+		"FREQ=YEARLY;BYMONTH=13",
+		"FREQ=MONTHLY;BYSETPOS=0;BYDAY=MO",
+		"FREQ=MONTHLY;BYDAY=-53MO",
+		"FREQ=MONTHLY;BYDAY=53MO",
+		"FREQ=MONTHLY;BYDAY=6MO",
+		"FREQ=YEARLY;BYMONTH=2;BYDAY=-6MO",
+		"FREQ=YEARLY;BYDAY=54MO",
+		"FREQ=YEARLY;BYEASTER=-200",
+		"FREQ=YEARLY;BYEASTER=1",
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s: panic %v", rule, r)
+				}
+			}()
+			_, _, err := Expand([]Event{master(rule, start, time.Hour)}, start, start.AddDate(1, 0, 0), MaxInstances)
+			if !errors.Is(err, ErrInvalidICS) {
+				t.Errorf("%s: err = %v, want ErrInvalidICS", rule, err)
+			}
+		}()
+	}
+	// The largest values in range still expand.
+	for _, rule := range []string{"FREQ=MONTHLY;BYDAY=5MO,-5MO", "FREQ=YEARLY;BYDAY=53MO,-53MO", "FREQ=YEARLY;BYMONTH=2;BYDAY=5MO"} {
+		if _, _, err := Expand([]Event{master(rule, start, time.Hour)}, start, start.AddDate(1, 0, 0), MaxInstances); err != nil {
+			t.Errorf("%s: %v", rule, err)
+		}
+	}
+}
+
+func TestExpandRulesThatRarelyOrNeverMatch(t *testing.T) {
+	start := utc(2026, 1, 5, 0, 0, 0)
+	// An HOURLY rule stepping 24 hours from midnight never reaches 01:00;
+	// rrule-go would loop forever looking for it.
+	insts, err := expandWithin(t, []Event{master("FREQ=HOURLY;INTERVAL=24;BYHOUR=1", start, time.Hour)}, start, start.AddDate(0, 0, 3))
+	if err != nil {
+		t.Fatalf("unreachable hour: %v", err)
+	}
+	sameTimes(t, starts(insts), []time.Time{start}) // DTSTART is always an instance
+	insts, err = expandWithin(t, []Event{master("FREQ=HOURLY;INTERVAL=12;BYHOUR=12", start, time.Hour)}, start, start.AddDate(0, 0, 2))
+	if err != nil {
+		t.Fatalf("reachable hour: %v", err)
+	}
+	sameTimes(t, starts(insts), []time.Time{start, start.Add(12 * time.Hour), start.Add(36 * time.Hour)})
+
+	// No February 30 exists: only DTSTART.
+	insts, err = expandWithin(t, []Event{master("FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30", start, time.Hour)}, start, start.AddDate(1, 0, 0))
+	if err != nil {
+		t.Fatalf("never matches: %v", err)
+	}
+	sameTimes(t, starts(insts), []time.Time{start})
+
+	// A fifth Monday in February comes once in 28 years.
+	insts, err = expandWithin(t, []Event{master("FREQ=MONTHLY;BYMONTH=2;BYDAY=5MO", start, time.Hour)}, utc(2030, 1, 1, 0, 0, 0), utc(2050, 1, 1, 0, 0, 0))
+	if err != nil {
+		t.Fatalf("rare: %v", err)
+	}
+	sameTimes(t, starts(insts), []time.Time{utc(2044, 2, 29, 0, 0, 0)})
+
+	// HOURLY with BYSETPOS can fail to match hour after hour, so it is not
+	// expanded.
+	if _, err := expandWithin(t, []Event{master("FREQ=HOURLY;BYSETPOS=2", start, time.Hour)}, start, start.AddDate(0, 0, 1)); !errors.Is(err, ErrUnsafeRecurrence) {
+		t.Fatalf("hourly BYSETPOS: err = %v, want ErrUnsafeRecurrence", err)
+	}
+}
+
+// INTERVAL is a positive integer, bounded so period arithmetic cannot
+// overflow.
+func TestExpandValidatesInterval(t *testing.T) {
+	start := utc(2026, 11, 2, 9, 0, 0)
+	for _, tc := range []struct {
+		rule string
+		want error
+	}{
+		{"FREQ=HOURLY;INTERVAL=2251799813685248", ErrUnsafeRecurrence},
+		{"FREQ=DAILY;INTERVAL=10001", ErrUnsafeRecurrence},
+		{"FREQ=DAILY;INTERVAL=0", ErrInvalidICS},
+		{"FREQ=DAILY;INTERVAL=-1", ErrInvalidICS},
+		{"FREQ=DAILY;COUNT=-1", ErrInvalidICS},
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%s: panic %v", tc.rule, r)
+				}
+			}()
+			_, _, err := Expand([]Event{master(tc.rule, start, time.Hour)}, start, start.AddDate(0, 0, 3), MaxInstances)
+			if !errors.Is(err, tc.want) {
+				t.Errorf("%s: err = %v, want %v", tc.rule, err, tc.want)
+			}
+		}()
+	}
+	insts, _ := mustExpand(t, []Event{master("FREQ=DAILY;INTERVAL=10000", start, time.Hour)}, start, start.AddDate(0, 0, 3), MaxInstances)
+	sameTimes(t, starts(insts), []time.Time{start})
+}
+
+// A rule's first instance can come centuries after DTSTART: every hundred
+// years from 2100, the first February 29 is in 2400.
+func TestExpandFirstInstanceCenturiesAway(t *testing.T) {
+	start := utc(2100, 1, 1, 9, 0, 0)
+	insts, err := expandWithin(t, []Event{master("FREQ=YEARLY;INTERVAL=100;BYMONTH=2;BYMONTHDAY=29", start, time.Hour)}, utc(2390, 1, 1, 0, 0, 0), utc(2410, 1, 1, 0, 0, 0))
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	sameTimes(t, starts(insts), []time.Time{utc(2400, 2, 29, 9, 0, 0)})
 }

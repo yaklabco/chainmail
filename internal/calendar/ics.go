@@ -34,10 +34,12 @@ type parsedEvent struct {
 // MaxAttendees attendees: the rest are dropped and AttendeesTruncated set.
 // Each Event.Raw is the whole input.
 //
-// TZIDs resolve to IANA zones directly, through the Windows zone names
-// Outlook writes, or through a prefixed IANA name. A zone that is none of
-// these is read from its VTIMEZONE rules and the event gets TZID "".
-// Floating times and zones with no definition read as UTC.
+// A TZID the calendar defines in a VTIMEZONE is read with those rules,
+// which RFC 5545 makes authoritative. Event.TZID is still the IANA zone
+// the TZID names (directly, through the Windows zone names Outlook writes,
+// or through a prefixed IANA name), or "" when it names none. A TZID with
+// no usable VTIMEZONE is read from that IANA zone. Floating times and
+// zones with no definition read as UTC.
 func ParseICS(data []byte) (method string, events []Event, err error) {
 	method, parsed, err := parseICS(data, MaxICSBytes)
 	if err != nil {
@@ -84,38 +86,76 @@ func parseICS(data []byte, limit int) (string, []parsedEvent, error) {
 // a longer one is refused before decoding.
 const maxParamValue = 2048
 
+// paramState is where checkParams is in a content line.
+type paramState int
+
+const (
+	inName      paramState = iota // the property name
+	inParamName                   // a parameter name, up to its '='
+	atValue                       // the first byte of a parameter value
+	inQuoted                      // a quoted parameter value
+	inUnquoted                    // an unquoted parameter value
+	afterQuote                    // just after a quoted value's closing quote
+	inValue                       // the property value
+)
+
 // checkParams refuses a content line with a parameter value longer than
-// maxParamValue. It follows the decoder's grammar: lines are unfolded,
-// parameters end at the first colon outside double quotes, and values are
-// separated by semicolons, commas and equals signs.
+// maxParamValue. It follows go-ical's decoder: lines are unfolded, the
+// property name ends at the first semicolon or colon, a parameter name at
+// the next equals sign, a quoted value at its closing quote, and an
+// unquoted value at a semicolon, comma or colon. An equals sign inside a
+// value is part of the value. A comma starts the next value of the same
+// parameter, a semicolon the next parameter, and a colon the property
+// value, which is not bounded.
 func checkParams(data []byte) error {
-	inParams, inQuote, n := true, false, 0
+	state, n := inName, 0
 	for i := 0; i < len(data); i++ {
 		c := data[i]
+		if c == '\r' && i+1 < len(data) && data[i+1] == '\n' {
+			continue // the line break is handled at its '\n'
+		}
 		if c == '\n' {
 			if i+1 < len(data) && (data[i+1] == ' ' || data[i+1] == '\t') {
 				i++ // a folded line continues the logical line
 				continue
 			}
-			inParams, inQuote, n = true, false, 0
+			state, n = inName, 0
 			continue
 		}
-		if !inParams || c == '\r' {
-			continue
-		}
-		switch {
-		case inQuote && c == '"':
-			inQuote = false
-		case inQuote:
-			n++
-		case c == '"':
-			inQuote = true
-		case c == ';' || c == ',' || c == '=':
-			n = 0
-		case c == ':':
-			inParams = false
-		default:
-			n++
+		switch state {
+		case inName:
+			switch c {
+			case ';':
+				state = inParamName
+			case ':':
+				state = inValue
+			}
+		case inParamName:
+			if c == '=' {
+				state, n = atValue, 0
+			}
+		case atValue, inUnquoted, afterQuote:
+			switch {
+			case c == ',':
+				state, n = atValue, 0
+			case c == ';':
+				state = inParamName
+			case c == ':':
+				state = inValue
+			case state == atValue && c == '"':
+				state = inQuoted
+			case state == afterQuote:
+				state = inValue // the decoder refuses the line
+			default:
+				state = inUnquoted
+				n++
+			}
+		case inQuoted:
+			if c == '"' {
+				state = afterQuote
+			} else {
+				n++
+			}
 		}
 		if n > maxParamValue {
 			return fmt.Errorf("%w: parameter value too long", ErrInvalidICS)
@@ -369,13 +409,23 @@ func cleanLine(s string) string {
 // any other timed event is written in UTC. All-day events are written as
 // DATE values. Lines are folded at 75 octets.
 //
-// DTSTAMP is Updated, or the current time when Updated is zero. Text is
-// escaped and stripped of control characters; values that cannot be
-// escaped (UID, RRULE, addresses, PARTSTAT, ROLE) are refused with
+// DTSTAMP is Updated, or the Unix epoch when Updated is zero, so the output
+// depends only on the events. iTIP orders messages of one SEQUENCE by
+// DTSTAMP, so a caller sending a REQUEST, UPDATE or CANCEL sets Updated or
+// uses EncodeICSAt with the current time.
+//
+// Text is escaped and stripped of control characters; values that cannot
+// be escaped (UID, RRULE, addresses, PARTSTAT, ROLE) are refused with
 // ErrInvalidICS when they hold a line break or control character, so no
 // field can inject a property. ProviderID, ETag, Raw and AttendeesTruncated
 // are not written.
 func EncodeICS(method string, events []Event) ([]byte, error) {
+	return EncodeICSAt(method, events, time.Unix(0, 0))
+}
+
+// EncodeICSAt is EncodeICS with now as the DTSTAMP of each event whose
+// Updated is zero.
+func EncodeICSAt(method string, events []Event, now time.Time) ([]byte, error) {
 	if len(events) == 0 {
 		return nil, fmt.Errorf("%w: no events", ErrInvalidICS)
 	}
@@ -386,7 +436,7 @@ func EncodeICS(method string, events []Event) ([]byte, error) {
 	for i := range events {
 		stamp := events[i].Updated
 		if stamp.IsZero() {
-			stamp = time.Now()
+			stamp = now
 		}
 		comp, err := encodeEvent(events[i], stamp)
 		if err != nil {
