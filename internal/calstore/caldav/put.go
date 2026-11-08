@@ -202,10 +202,11 @@ func (s *Store) silence(ctx context.Context, href, etag string) (string, error) 
 	if obj.etag != etag {
 		return "", fmt.Errorf("%w: etag differs", calstore.ErrConflict)
 	}
-	cal, err := decodeICal(obj.raw)
+	o, err := decodeObject(obj.raw)
 	if err != nil {
 		return "", err
 	}
+	cal := o.cal
 	if !hasServerScheduledAttendee(cal) {
 		return etag, nil
 	}

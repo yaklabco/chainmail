@@ -32,14 +32,15 @@ type object struct {
 	events []calendar.Event
 }
 
-// decodeObject parses data with calendar.ParseICS, which bounds it and
-// refuses malformed input, and then with go-ical for patching.
+// decodeObject parses data with calendar.ParseICS, which bounds its size
+// and parameter lengths and refuses malformed input, and then with go-ical
+// for patching. It is the only way server bytes reach go-ical.
 func decodeObject(data []byte) (*object, error) {
 	_, events, err := calendar.ParseICS(data)
 	if err != nil {
 		return nil, err
 	}
-	cal, err := decodeICal(data)
+	cal, err := decodeAccepted(data)
 	if err != nil {
 		return nil, err
 	}
@@ -55,10 +56,10 @@ func decodeObject(data []byte) (*object, error) {
 	return o, nil
 }
 
-// decodeICal runs go-ical's decoder on data calendar.ParseICS accepted. It
-// recovers from a panic anyway, since the decoder panics on some malformed
-// parameter lists.
-func decodeICal(data []byte) (cal *ical.Calendar, err error) {
+// decodeAccepted runs go-ical's decoder on data calendar.ParseICS has
+// already accepted. decodeObject is its only caller. It recovers from a
+// panic anyway, since the decoder panics on some malformed parameter lists.
+func decodeAccepted(data []byte) (cal *ical.Calendar, err error) {
 	defer func() {
 		if recover() != nil {
 			cal, err = nil, fmt.Errorf("%w: malformed content line", calendar.ErrInvalidICS)

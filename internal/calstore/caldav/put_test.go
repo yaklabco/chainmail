@@ -320,3 +320,26 @@ func TestDeleteWithoutNotifications(t *testing.T) {
 		t.Error("object still there")
 	}
 }
+
+// longParamICS is singleICS with an attendee whose CN is longer than
+// calendar.ParseICS accepts, scheduled by the client so that a silent
+// delete would otherwise go ahead.
+var longParamICS = strings.Replace(singleICS, "SUMMARY:Dentist\r\n",
+	"SUMMARY:Dentist\r\nATTENDEE;SCHEDULE-AGENT=CLIENT;CN="+strings.Repeat("x", 3000)+":mailto:bob@example.com\r\n", 1)
+
+func TestDeleteWithoutNotificationsGuardsTheParser(t *testing.T) {
+	f := newFakeServer(t)
+	href := testCal + "long.ics"
+	etag := f.backend.put(t, href, longParamICS)
+	s := f.store(t, WithClock(clock))
+	err := s.Delete(context.Background(), testCal, href, etag, calendar.NotifyNone)
+	if !errors.Is(err, calendar.ErrInvalidICS) {
+		t.Errorf("silent delete of an object with a long parameter: err = %v, want ErrInvalidICS", err)
+	}
+	if n := len(f.seen(http.MethodPut)) + len(f.seen(http.MethodDelete)); n != 0 {
+		t.Errorf("%d writes sent for an object the parser refuses", n)
+	}
+	if f.backend.raw(t, href) == "" {
+		t.Error("object deleted")
+	}
+}
