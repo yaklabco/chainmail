@@ -7,6 +7,7 @@ import (
 
 	"github.com/yaklabco/chainmail/internal/calcache"
 	"github.com/yaklabco/chainmail/internal/calendar"
+	"github.com/yaklabco/chainmail/internal/calstore/fake"
 )
 
 // describe renders a change as "kind key", with the key from After or,
@@ -184,5 +185,84 @@ func TestDiffSelfChangesPartStat(t *testing.T) {
 	}
 	if len(changes) != 1 || changes[0].Kind != calcache.ChangeUpdated || changes[0].After.MyPartStat != calendar.PartStatNeedsAction {
 		t.Errorf("Diff = %+v, want one update with MyPartStat set", describeAll(changes))
+	}
+}
+
+// TestSyncLoopWithFake runs the loop a syncer runs, Sync then Diff then
+// Apply, against calstore/fake in both replace modes, and checks the
+// changes each step reports.
+func TestSyncLoopWithFake(t *testing.T) {
+	t.Parallel()
+	for _, objectReplace := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ObjectReplace=%v", objectReplace), func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			s := setup(t)
+			store := fake.New(fake.Options{ObjectReplace: objectReplace, Now: func() time.Time { return t0 }})
+			store.AddCalendar(calendar.Calendar{ID: "work", Access: calendar.AccessWrite})
+			token := ""
+			step := func(what string, want ...string) {
+				t.Helper()
+				ch, err := store.Sync(ctx, "work", token)
+				if err != nil {
+					t.Fatal(err)
+				}
+				changes, err := s.Diff(ctx, "acme", "work", ch, self)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want == nil {
+					want = []string{}
+				}
+				same(t, what, want, describeAll(changes))
+				if err := s.Apply(ctx, "acme", "work", ch, self, t0); err != nil {
+					t.Fatal(err)
+				}
+				token = ch.Token
+			}
+
+			series := invited("series", t0, calendar.PartStatNeedsAction)
+			series.ProviderID = ""
+			series.RRule = "FREQ=DAILY"
+			p := store.Add("work", series)
+			step("first sync", "created "+p)
+			step("no change")
+
+			rid := t0.AddDate(0, 0, 1)
+			ridKey := p + "@" + rid.Format("20060102T150405Z")
+			store.SetPartStat("work", p, rid, me, calendar.PartStatDeclined)
+			// The etag of the whole object changes, so the master is updated
+			// too.
+			step("instance declined", "updated "+p, "created "+ridKey)
+			row, err := s.Event(ctx, calendar.InstanceRef(calendar.EventRef("acme", "work", p), rid))
+			if err != nil || row.MyPartStat != calendar.PartStatDeclined {
+				t.Errorf("override = %+v, %v; want DECLINED", row, err)
+			}
+
+			store.Change("work", p, func(evs []calendar.Event) []calendar.Event { return evs[:1] })
+			if objectReplace {
+				step("override dropped", "updated "+p, "deleted "+ridKey)
+			} else {
+				// Row replace cannot tell that an override went away.
+				step("override dropped", "updated "+p)
+			}
+
+			store.Cancel("work", p)
+			step("cancelled", "updated "+p)
+			store.Remove("work", p)
+			if objectReplace {
+				step("removed", "deleted "+p)
+			} else {
+				step("removed", "deleted "+p, "deleted "+ridKey)
+			}
+
+			store.InvalidateTokens()
+			if _, err := store.Sync(ctx, "work", token); err == nil {
+				t.Error("Sync with an invalidated token succeeded")
+			}
+			token = ""
+			store.Add("work", single("again", t0, t0.Add(time.Hour)))
+			step("full sync after invalidation", "created again")
+		})
 	}
 }
