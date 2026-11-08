@@ -607,6 +607,20 @@ func TestListInvitesReadsAStoredCharset(t *testing.T) {
 	t.Errorf("the latin-1 invite is not listed among %d invites", len(resp.Msg.GetInvites()))
 }
 
+// An account list with an unknown name first and an address later records
+// no unvalidated entry in the audit row.
+func TestCalendarScopeAuditsOnlyValidNames(t *testing.T) {
+	t.Parallel()
+	e := startCal(t, nil)
+	_, err := e.Client.Calendar.ListCalendars(t.Context(), connect.NewRequest(&chainmailv1.ListCalendarsRequest{Accounts: []string{"nope", blockedAddr}}))
+	if err == nil {
+		t.Fatal("ListCalendars of an address succeeded")
+	}
+	if r := auditRow(t, e.Harness, "calendar.list_calendars"); strings.Contains(r.Targets, blockedAddr) || strings.Contains(r.Targets, "blocked") {
+		t.Errorf("audit row %+v holds an unvalidated account entry", r)
+	}
+}
+
 // Calls that name an event by ref wait for the first sync: before it, an
 // event the cache does not hold yet may be one of the account's.
 func TestRefCallsBeforeTheFirstSync(t *testing.T) {

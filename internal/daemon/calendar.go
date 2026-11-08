@@ -145,21 +145,26 @@ func (s *Server) calendarScope(names []string, storeOnly bool) ([]*calAccount, s
 		}
 		return out, "accounts=*", nil
 	}
-	seen := map[string]bool{}
+	// Every name is checked before any is looked up, so the target never
+	// holds an entry that is not a valid account name.
 	for _, name := range names {
 		if _, err := accountTarget(name); err != nil {
 			return nil, "accounts=" + invalidTarget, err
 		}
+	}
+	target := "accounts=" + strings.Join(names, ",")
+	seen := map[string]bool{}
+	for _, name := range names {
 		if seen[name] {
 			continue
 		}
 		seen[name] = true
 		ca, err := s.calendarAccount(name)
 		if err != nil {
-			return nil, "accounts=" + strings.Join(names, ","), err
+			return nil, target, err
 		}
 		if storeOnly && ca.store == nil {
-			return nil, "accounts=" + strings.Join(names, ","), errNoCalendarStore
+			return nil, target, errNoCalendarStore
 		}
 		out = append(out, ca)
 	}
@@ -167,7 +172,7 @@ func (s *Server) calendarScope(names []string, storeOnly bool) ([]*calAccount, s
 	slices.SortFunc(out, func(a, b *calAccount) int {
 		return cmp.Compare(slices.Index(order, a.name), slices.Index(order, b.name))
 	})
-	return out, "accounts=" + strings.Join(names, ","), nil
+	return out, target, nil
 }
 
 // calendarsReady returns nil when calendar.db can answer reads of every
