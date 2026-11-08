@@ -38,10 +38,11 @@ Run a target with `go tool stave <target>`. With no target, stave runs `check`. 
 | `test:integration` | Runs the integration suite: Dovecot in a Docker container and the fake Gmail server, plus the daemon's held-send test against Dovecot and the MCP server run as `chainmail mcp` against Dovecot. |
 | `test:live` | Runs the smoke test against real accounts through the daemon at `$CHAINMAIL_SOCKET`. |
 | `docs:commands` | Writes the command reference pages from the CLI's help. |
-| `docs:build` | Builds the landing page and the docs into `pages-dist`, as CI deploys them. |
-| `docs:serve` | Runs the docs site locally with live reload. |
+| `docs:build` | Builds the manual into `website/build`, for serving under `/docs/`. |
+| `docs:serve` | Runs the manual locally with live reload at http://localhost:3000/docs/. |
 | `site:build` | Builds the landing page into `site/dist`. |
-| `site:serve` | Runs the landing page locally with live reload. |
+| `site:serve` | Runs the landing page locally with live reload at http://localhost:4321/. |
+| `pages` | Builds the landing page and the manual into `pages-dist`, as CI deploys them. |
 | `release` | Tags the next version and publishes it with goreleaser: the GitHub release and the Homebrew Cask. |
 | `snapshot` | Builds the release archives and the Cask into `dist/` as `release` would, without tagging, pushing or publishing anything. |
 
@@ -136,7 +137,7 @@ nix develop -c go tool stave docs:serve
 To build both as CI does, into `pages-dist/`:
 
 ```sh
-nix develop -c go tool stave docs:build
+nix develop -c go tool stave pages
 ```
 
 Each runs `bun install --frozen-lockfile` first. The manual's build copies the root `CHANGELOG.md` into `website/docs/reference/changelog.md`, which is not committed, and fails on any broken link between pages. CI also runs `scripts/check-pages-links.sh pages-dist`, which fails on any link in the assembled site that points to no file. [Contributing](./contributing.md) has the rules for writing pages.

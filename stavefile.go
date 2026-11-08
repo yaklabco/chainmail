@@ -52,7 +52,7 @@ func GenerateCheck() error {
 	return nil
 }
 
-// Docs groups the docs site's targets.
+// Docs groups the manual's targets.
 type Docs st.Namespace
 
 // commandDocsDir is where the generated command reference lives.
@@ -63,18 +63,14 @@ func (Docs) Commands() error {
 	return sh.RunV("go", "run", "./cmd/chainmail", "docs", commandDocsDir)
 }
 
-// Build builds the landing page and the docs into pages-dist, as CI deploys them.
+// Build builds the manual into website/build, for serving under /docs/.
 func (Docs) Build() error {
-	return sh.RunV("scripts/build-pages.sh")
+	return bun("website", "build")
 }
 
-// Serve runs the docs site locally with live reload.
-// It serves the manual at http://localhost:3000/docs/.
+// Serve runs the manual locally with live reload at http://localhost:3000/docs/.
 func (Docs) Serve() error {
-	if err := sh.RunWithV(nil, "website", "bun", "install", "--frozen-lockfile"); err != nil {
-		return err
-	}
-	return sh.RunWithV(nil, "website", "bun", "run", "start")
+	return bun("website", "start")
 }
 
 // Site groups the landing page's targets.
@@ -82,19 +78,25 @@ type Site st.Namespace
 
 // Build builds the landing page into site/dist.
 func (Site) Build() error {
-	if err := sh.RunWithV(nil, "site", "bun", "install", "--frozen-lockfile"); err != nil {
-		return err
-	}
-	return sh.RunWithV(nil, "site", "bun", "run", "build")
+	return bun("site", "build")
 }
 
-// Serve runs the landing page locally with live reload at
-// http://localhost:4321/.
+// Serve runs the landing page locally with live reload at http://localhost:4321/.
 func (Site) Serve() error {
-	if err := sh.RunWithV(nil, "site", "bun", "install", "--frozen-lockfile"); err != nil {
+	return bun("site", "dev")
+}
+
+// Pages builds the landing page and the manual into pages-dist, as CI deploys them.
+func Pages() error {
+	return sh.RunV("scripts/build-pages.sh")
+}
+
+// bun installs dir's locked dependencies, then runs one of its package scripts.
+func bun(dir, script string) error {
+	if err := sh.RunWithV(nil, dir, "bun", "install", "--frozen-lockfile"); err != nil {
 		return err
 	}
-	return sh.RunWithV(nil, "site", "bun", "run", "dev")
+	return sh.RunWithV(nil, dir, "bun", "run", script)
 }
 
 // Lint runs buf lint and golangci-lint.

@@ -93,7 +93,7 @@ A change to behaviour updates the docs in the same pull request. The pages are M
 - Write `<placeholder>` text in prose inside backticks, since a bare angle bracket in Markdown is HTML.
 - Use Mermaid for diagrams.
 
-`nix develop -c go tool stave docs:serve` shows the site with live reload.
+`nix develop -c go tool stave docs:serve` shows the manual with live reload, and `site:serve` shows the landing page.
 
 ## Before you open a pull request
 
