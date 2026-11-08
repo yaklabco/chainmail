@@ -39,9 +39,11 @@ func TestRunScansAtStartAndAtEachDueTime(t *testing.T) {
 	tail := r.tail(t)
 	startDueRun(t, r)
 
+	// span is how far each scan plans its wake; Run sleeps at most
+	// dueMaxWait of it at a time, and the test moves the clock to the wake.
 	steps := []struct {
 		at    time.Time
-		wait  time.Duration
+		span  time.Duration
 		stage watch.Kind
 	}{
 		{start, time.Hour, watch.KindItemDueSoon},
@@ -55,10 +57,10 @@ func TestRunScansAtStartAndAtEachDueTime(t *testing.T) {
 			w.ch <- s.at
 		}
 		w = r.clock.next(t)
-		if w.d != s.wait {
-			t.Errorf("step %d: Run slept %v, want %v", i, w.d, s.wait)
+		if want := min(s.span, dueMaxWait); w.d != want {
+			t.Errorf("step %d: Run slept %v, want %v", i, w.d, want)
 		}
-		if got, want := r.checker.NextWake(), s.at.Add(s.wait); !got.Equal(want) {
+		if got, want := r.checker.NextWake(), s.at.Add(s.span); !got.Equal(want) {
 			t.Errorf("step %d: NextWake = %v, want %v", i, got, want)
 		}
 		wantDue(t, string(s.stage), r.lines(t, tail), dueLine(s.stage, it))
@@ -99,8 +101,11 @@ func TestRunRetriesAFailedScan(t *testing.T) {
 	r.clock.set(start.Add(3 * time.Second))
 	w.ch <- start.Add(3 * time.Second)
 	w = r.clock.next(t)
-	if want := time.Hour - 3*time.Second; w.d != want {
-		t.Errorf("after recovery Run slept %v, want %v until 08:00", w.d, want)
+	if w.d != dueMaxWait {
+		t.Errorf("after recovery Run slept %v, want %v of the wait until 08:00", w.d, dueMaxWait)
+	}
+	if got, want := r.checker.NextWake(), time.Date(2026, 11, 10, 8, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("after recovery NextWake = %v, want %v", got, want)
 	}
 	wantDue(t, "events after recovery", r.lines(t, tail), dueLine(watch.KindItemDueSoon, it))
 
@@ -174,5 +179,81 @@ func TestRunScansAgainAtOnceWhenTheScanOutlastsTheWake(t *testing.T) {
 	stop()
 	if got := strings.Count(logs.String(), "checking item due dates failed"); got != 2 {
 		t.Errorf("logged %d failures before the first sleep, want 2:\n%s", got, logs.String())
+	}
+}
+
+// Run sleeps at most dueMaxWait at a time and reads the clock after each
+// sleep. A sleep that ends before the wake is followed by another for the
+// rest, with no scan in between.
+func TestRunBoundsEachSleepAndWaitsOutTheRest(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 7, 52, 0, 0, time.UTC)
+	r := newDueRig(t, start, dueSettings)
+	first := r.create(t, r.plain, items.NewItem{Title: "file taxes", DueDate: "2026-11-10"})
+	startDueRun(t, r)
+
+	w := r.clock.next(t)
+	if w.d != dueMaxWait {
+		t.Errorf("first sleep %v, want %v", w.d, dueMaxWait)
+	}
+	wake := time.Date(2026, 11, 10, 8, 0, 0, 0, time.UTC)
+	if got := r.checker.NextWake(); !got.Equal(wake) {
+		t.Errorf("NextWake = %v, want %v", got, wake)
+	}
+
+	// An item that a scan would fire for at once comes due while Run
+	// sleeps. Run must not scan for it until the wake.
+	second := r.create(t, r.plain, items.NewItem{Title: "renew passport", DueDate: "2026-11-11"})
+	tail := r.tail(t)
+	at := start.Add(dueMaxWait)
+	r.clock.set(at)
+	w.ch <- at
+	w = r.clock.next(t)
+	if want := wake.Sub(at); w.d != want {
+		t.Errorf("second sleep %v, want the %v left until 08:00", w.d, want)
+	}
+	if got := r.checker.NextWake(); !got.Equal(wake) {
+		t.Errorf("NextWake after the first sleep = %v, want %v", got, wake)
+	}
+	wantDue(t, "events before the wake", r.lines(t, tail))
+
+	r.clock.set(wake)
+	w.ch <- wake
+	w = r.clock.next(t)
+	if w.d != dueMaxWait {
+		t.Errorf("sleep after the 08:00 scan %v, want %v", w.d, dueMaxWait)
+	}
+	wantDue(t, "events at the wake", r.lines(t, tail),
+		dueLine(watch.KindItemDue, first), dueLine(watch.KindItemDueSoon, second))
+}
+
+// A laptop that sleeps through its wake pauses the monotonic clock, so a
+// timer can fire long after the wall clock passed the wake. Run reads the
+// wall clock after each bounded sleep and scans once it is past the wake.
+func TestRunScansWhenTheWallClockJumpsPastTheWake(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 7, 0, 0, 0, time.UTC)
+	r := newDueRig(t, start, dueSettings)
+	it := r.create(t, r.plain, items.NewItem{Title: "file taxes", DueDate: "2026-11-10"})
+	startDueRun(t, r)
+
+	w := r.clock.next(t)
+	if w.d != dueMaxWait {
+		t.Errorf("first sleep %v, want %v", w.d, dueMaxWait)
+	}
+	tail := r.tail(t)
+
+	// The machine resumes at 09:30, long past the 08:00 wake, and the
+	// five-minute timer fires.
+	resumed := time.Date(2026, 11, 10, 9, 30, 0, 0, time.UTC)
+	r.clock.set(resumed)
+	w.ch <- start.Add(dueMaxWait)
+	w = r.clock.next(t)
+	wantDue(t, "events after the resume", r.lines(t, tail), dueLine(watch.KindItemDue, it))
+	if w.d != dueMaxWait {
+		t.Errorf("sleep after the resume %v, want %v", w.d, dueMaxWait)
+	}
+	if got, want := r.checker.NextWake(), time.Date(2026, 11, 11, 8, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("NextWake after the resume = %v, want %v", got, want)
 	}
 }
