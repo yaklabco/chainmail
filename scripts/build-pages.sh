@@ -9,8 +9,8 @@ if [[ "${1:-}" != "--skip-build" ]]; then
   (cd "$root/site" && bun install --frozen-lockfile && bun run build)
   (cd "$root/website" && bun install --frozen-lockfile && bun run build)
 fi
-if [[ -e "$root/site/dist/docs" ]]; then
-  echo "site/dist/docs exists: the site must not publish anything under /docs/" >&2
+if [[ -e "$root/site/dist/docs" || -e "$root/site/dist/docs.html" ]]; then
+  echo "site/dist/docs or site/dist/docs.html exists: the site must not publish anything at /docs" >&2
   exit 1
 fi
 out="$root/pages-dist"

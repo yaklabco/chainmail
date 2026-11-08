@@ -187,7 +187,7 @@ import Base from '../layouts/Base.astro';
         <div class="grid">
           <article class="card card--row span-6 m-nolift">
             <h3>Picks up where it left off</h3>
-            <p>A named watcher resumes from its last event, so a restart never drops mail.</p>
+            <p>A named watcher resumes where it left off after a restart of either side.</p>
             <div class="panel panel--flush">
               <div class="stage stage--fade-b"><div class="at-corner to-edge" style="--ax:32px;--ay:36px;width:600px">
                 <div class="ui ui-panel cm-win cm-frag" aria-hidden="true">
@@ -235,15 +235,14 @@ import Base from '../layouts/Base.astro';
                 <div class="cm-audit">
                   <div class="h"><span>time</span><span>action</span><span>account</span><span>decision</span></div>
                   <div><span>10:31</span><span>reply</span><span class="m">work</span><span class="held">held</span></div>
-                  <div><span>10:31</span><span>get_thread</span><span class="m">work</span><span class="m">none</span></div>
+                  <div><span>10:31</span><span>thread</span><span class="m">work</span><span class="m">none</span></div>
                   <div><span>10:30</span><span>search</span><span class="m">all</span><span class="m">none</span></div>
                   <div><span>10:12</span><span>send</span><span class="m">work</span><span>allowed</span></div>
                   <div><span>10:02</span><span>archive</span><span class="m">personal</span><span class="m">none</span></div>
-                  <div><span>09:58</span><span>read_events</span><span class="m">all</span><span class="m">none</span></div>
-                  <div><span>09:47</span><span>set_flags</span><span class="m">work</span><span class="m">none</span></div>
+                  <div><span>09:58</span><span>watch.read</span><span class="m">all</span><span class="m">none</span></div>
+                  <div><span>09:47</span><span>flags</span><span class="m">work</span><span class="m">none</span></div>
                   <div><span>09:46</span><span>forward</span><span class="m">work</span><span class="held">held</span></div>
-                  <div><span>09:40</span><span>create_draft</span><span class="m">personal</span><span class="m">none</span></div>
-                  <div><span>09:31</span><span>cache_status</span><span class="m">all</span><span class="m">none</span></div>
+                  <div><span>09:40</span><span>draft.create</span><span class="m">personal</span><span class="m">none</span></div>
                 </div>
               </div>
             </div></div>
@@ -280,8 +279,8 @@ import Base from '../layouts/Base.astro';
   <section class="section" id="install" aria-labelledby="install-h">
     <div class="wrap">
       <div class="grid">
-        <h2 id="install-h" class="span-6">Running in three commands</h2>
-        <p class="span-6 start-7 t-lead">One Go binary for Linux and macOS. MIT licensed. <a class="link" href="/docs/getting-started/install">Read the install guide</a></p>
+        <h2 id="install-h" class="span-6">Up and running in three steps</h2>
+        <p class="span-6 start-7 t-lead">One Go binary for Linux and macOS. MIT licensed. <a class="link" href="/docs/getting-started/quick-start">Follow the quick start</a></p>
       </div>
       <div class="grid cm-steps">
         <div class="span-4">
@@ -292,10 +291,10 @@ import Base from '../layouts/Base.astro';
           </div>
         </div>
         <div class="span-4">
-          <h3 class="t-card">Start the daemon</h3>
+          <h3 class="t-card">Set up the daemon</h3>
           <div class="ui ui-panel cm-win cm-box">
-            <div class="cm-bar"><span class="ui-dots"><i></i><i></i><i></i></span><span class="cm-bar__title"><b>2</b> · dev mode</span></div>
-            <div class="cm-cmd"><div class="cm-cl"><span class="p">$ </span>age-keygen -o ~/.config/chainmail-dev/vault-key</div><div class="cm-cl"><span class="p">$ </span>chainmail daemon --dev</div><div class="cm-cl"><span class="p">$ </span>chainmail secret set accounts/site</div></div>
+            <div class="cm-bar"><span class="ui-dots"><i></i><i></i><i></i></span><span class="cm-bar__title"><b>2</b> · daemon</span></div>
+            <div class="cm-cmd"><div class="cm-cl"><span class="p">$ </span>age-keygen -o ~/.config/chainmail-dev/vault-key</div><div class="cm-cl"><span class="p"># </span>write config.toml, start the daemon</div><div class="cm-cl"><span class="p"># </span>and store a password, as the quick start shows</div></div>
           </div>
         </div>
         <div class="span-4">

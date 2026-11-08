@@ -265,3 +265,6 @@
 
 /* the nav mark beside the wordmark */
 .nav__mark { border-radius: 6px; margin-right: 10px; vertical-align: -6px; }
+
+/* Footer column headings are h3 for a correct outline; they keep the kit's small h4 look. */
+.footer__col h3 { font: 500 var(--t-small)/1.4 var(--font-text); letter-spacing: 0; color: var(--muted); margin-bottom: var(--s-4); }

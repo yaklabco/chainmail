@@ -15,4 +15,6 @@ test -f "$tmp/pages-dist/docs/guide/index.html" || fail "docs subpages missing"
 
 mkdir -p "$tmp/site/dist/docs"; echo clash > "$tmp/site/dist/docs/index.html"
 if PAGES_ROOT="$tmp" "$here/build-pages.sh" --skip-build >/dev/null 2>&1; then fail "a site/dist/docs collision passed"; fi
+rm -rf "$tmp/site/dist/docs"; echo clash > "$tmp/site/dist/docs.html"
+if PAGES_ROOT="$tmp" "$here/build-pages.sh" --skip-build >/dev/null 2>&1; then fail "a site/dist/docs.html collision passed"; fi
 echo "ok"
