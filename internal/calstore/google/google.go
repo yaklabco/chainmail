@@ -230,6 +230,10 @@ func statusError(resp *http.Response, c call) error {
 		sentinel = calstore.ErrConflict
 	case code == http.StatusTooManyRequests, code >= 500:
 		sentinel = calstore.ErrUnavailable
+	case code >= 300 && code < 400:
+		// A redirect the authenticating client refused, or another 3xx:
+		// the server did not answer the request.
+		sentinel = calstore.ErrUnavailable
 	default:
 		sentinel = ErrRequest
 	}

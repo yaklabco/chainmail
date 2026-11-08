@@ -127,6 +127,8 @@ func TestErrorMapping(t *testing.T) {
 		{"500", "freebusy", 500, secretBody, nil, calstore.ErrUnavailable},
 		{"503", "sync", 503, secretBody, nil, calstore.ErrUnavailable},
 		{"400", "create", 400, reason(400, "invalid"), nil, google.ErrRequest},
+		{"302 redirect refused", "list", 302, "", nil, calstore.ErrUnavailable},
+		{"304 on a write", "create", 304, "", nil, calstore.ErrUnavailable},
 		{"200 not JSON", "list", 200, secretBody, nil, calstore.ErrUnavailable},
 	}
 	for _, tc := range cases {

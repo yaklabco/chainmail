@@ -287,6 +287,9 @@ func statusError(op opKind, code int, body []byte) error {
 		sentinel = calstore.ErrAuth
 	case code == http.StatusTooManyRequests || code >= 500:
 		sentinel = calstore.ErrUnavailable
+	case code >= 300 && code < 400:
+		// A 3xx that do does not follow: the server did not answer.
+		sentinel = calstore.ErrUnavailable
 	case op == opSync && (code == http.StatusGone || code == http.StatusConflict ||
 		(code == http.StatusForbidden && hasElement(body, "valid-sync-token"))):
 		sentinel = calstore.ErrSyncTokenInvalid
