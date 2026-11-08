@@ -17,7 +17,9 @@ import (
 // calendarTimesHelp says how every calendar command reads a time.
 const calendarTimesHelp = `Times are RFC 3339, such as 2026-11-10T09:00:00Z, or a time without a
 zone, 2026-11-10 09:00, or a date, 2026-11-10. A time or date without a
-zone is read in this machine's local zone, or in the zone --tz names. The
+zone is read in this machine's local zone, or in the zone --tz names. A
+time the clocks skip when daylight saving time starts is refused, and a
+time they show twice when it ends means the first of the two. The
 daemon's [calendar] timezone does not apply here: the CLI never reads the
 daemon config.`
 
@@ -57,7 +59,14 @@ func parseCalTime(cmd *cobra.Command, flag, s string, loc *time.Location) (calTi
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return calTime{t: t}, nil
 	}
-	if t, err := time.ParseInLocation(localMinuteLayout, s, loc); err == nil {
+	if w, err := time.Parse(localMinuteLayout, s); err == nil {
+		t, ok := wallTime(w, loc)
+		if !ok {
+			return calTime{}, usageError{
+				err:  fmt.Errorf("--%s %q does not exist in %s: the clocks skip it when daylight saving time starts", flag, s, loc),
+				hint: helpHint(cmd),
+			}
+		}
 		return calTime{t: t}, nil
 	}
 	if t, err := time.ParseInLocation(time.DateOnly, s, loc); err == nil {
@@ -351,4 +360,24 @@ func newFreeBusyCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 // event takes, whatever zone the CLI runs in.
 func utcDate(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// wallTime is the first instant at which the clocks in loc show the wall
+// clock w holds (w is in UTC). Around a change of offset the clocks show
+// some times twice, and this takes the earlier, which time.Date does not
+// promise. It reports false when the clocks skip the time.
+func wallTime(w time.Time, loc *time.Location) (time.Time, bool) {
+	want := w.Format(localMinuteLayout)
+	var first time.Time
+	found := false
+	// Every offset in force within a day of w, which takes in both sides
+	// of any change near it.
+	for _, probe := range []time.Time{w.Add(-24 * time.Hour), w, w.Add(24 * time.Hour)} {
+		_, offset := probe.In(loc).Zone()
+		t := w.Add(-time.Duration(offset) * time.Second)
+		if t.In(loc).Format(localMinuteLayout) == want && (!found || t.Before(first)) {
+			first, found = t, true
+		}
+	}
+	return first.In(loc), found
 }

@@ -596,3 +596,46 @@ func TestEventCancel(t *testing.T) {
 		t.Errorf("requests = %v, want %v", reqs, want)
 	}
 }
+
+// A time without a zone that the clocks skip when daylight saving time
+// starts is refused. A time the clocks show twice when it ends is the
+// first of the two, whichever side of UTC the zone is on.
+func TestCalendarTimesAroundDaylightSaving(t *testing.T) {
+	t.Parallel()
+	create := func(tz, start string) (cliResult, *fakeCalendar) {
+		f := &fakeCalendar{}
+		return runCal(t, f, "event", "create", "--title", "x", "--tz", tz, "--start", start, "--duration", "30m"), f
+	}
+	for _, tt := range []struct{ tz, start string }{
+		{tz: "America/New_York", start: "2026-03-08 02:30"},
+		{tz: "Europe/London", start: "2026-03-29 01:00"},
+	} {
+		got, f := create(tt.tz, tt.start)
+		msg := "does not exist in " + tt.tz
+		if got.code != api.ExitUsage || !strings.Contains(errorMessage(t, got.stderr), msg) || len(f.requests()) != 0 {
+			t.Errorf("--start %q in %s: %+v, want exit 2 with %q and no request", tt.start, tt.tz, got, msg)
+		}
+	}
+	f := &fakeCalendar{}
+	if got := runCal(t, f, "agenda", "--tz", "America/New_York", "--from", "2026-03-08 02:00"); got.code != api.ExitUsage || len(f.requests()) != 0 {
+		t.Errorf("agenda --from in the gap: %+v, want exit 2 and no request", got)
+	}
+
+	for _, tt := range []struct {
+		tz, start string
+		want      time.Time
+	}{
+		{tz: "America/New_York", start: "2026-11-01 01:30", want: time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC)},
+		{tz: "Europe/London", start: "2026-10-25 01:30", want: time.Date(2026, 10, 25, 0, 30, 0, 0, time.UTC)},
+		{tz: "Australia/Sydney", start: "2026-04-05 02:30", want: time.Date(2026, 4, 4, 15, 30, 0, 0, time.UTC)},
+	} {
+		got, f := create(tt.tz, tt.start)
+		if got.code != 0 {
+			t.Errorf("--start %q in %s: %+v", tt.start, tt.tz, got)
+			continue
+		}
+		if start := createReq(t, f).GetStart().AsTime(); !start.Equal(tt.want) {
+			t.Errorf("--start %q in %s = %v, want the first one, %v", tt.start, tt.tz, start, tt.want)
+		}
+	}
+}
