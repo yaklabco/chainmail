@@ -322,33 +322,57 @@ func (s *Store) Prune(ctx context.Context, before time.Time) (int64, error) {
 
 // queryEvents reads event rows; clause follows "FROM cal_events e". The
 // rows are read first and their raw objects after, once per object and
-// content, since the one connection serves one query at a time.
+// content, since the one connection serves one query at a time. Both
+// reads run in one read transaction, so they see the file as of one
+// moment: an Apply that replaces the rows and deletes their old raw
+// objects lands before both reads or after both.
 func (s *Store) queryEvents(ctx context.Context, op, clause string, args ...any) ([]EventRow, error) {
-	recs, err := func() ([]storedRecord, error) {
-		rows, err := s.db.QueryContext(ctx,
-			"SELECT e.account, e.calendar_id, "+prefixed("e.", eventColumns)+" FROM cal_events e "+clause, args...)
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = rows.Close() }() // rows.Err below reports read errors
-		var out []storedRecord
-		for rows.Next() {
-			var sr storedRecord
-			if sr.r, err = scanRecord(rows, &sr.account, &sr.calID); err != nil {
+	var out []EventRow
+	err := s.readTx(ctx, func(tx *sql.Tx) error {
+		recs, err := func() ([]storedRecord, error) {
+			rows, err := tx.QueryContext(ctx,
+				"SELECT e.account, e.calendar_id, "+prefixed("e.", eventColumns)+" FROM cal_events e "+clause, args...)
+			if err != nil {
 				return nil, err
 			}
-			out = append(out, sr)
+			defer func() { _ = rows.Close() }() // rows.Err below reports read errors
+			var recs []storedRecord
+			for rows.Next() {
+				var sr storedRecord
+				if sr.r, err = scanRecord(rows, &sr.account, &sr.calID); err != nil {
+					return nil, err
+				}
+				recs = append(recs, sr)
+			}
+			return recs, rows.Err()
+		}()
+		if err != nil {
+			return err
 		}
-		return out, rows.Err()
-	}()
-	if err != nil {
-		return nil, s.fail(op, err)
-	}
-	out, err := decodeRecords(ctx, s.db, recs, nil)
+		if s.rowsRead != nil {
+			s.rowsRead()
+		}
+		out, err = decodeRecords(ctx, tx, recs, nil)
+		return err
+	})
 	if err != nil && !errors.Is(err, errStoredRow) {
 		return nil, s.fail(op, err)
 	}
 	return out, err
+}
+
+// readTx runs fn in a read transaction, which sees the file as of its
+// first read whatever other connections commit meanwhile (WAL), and holds
+// the store's one connection, so none of the store's own writes runs in
+// between. The transaction is rolled back: fn only reads. fn's error is
+// returned as it is, for the caller to classify.
+func (s *Store) readTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }() // fn only reads; nothing to commit
+	return fn(tx)
 }
 
 // storedRecord is a record with the account and calendar it belongs to.
@@ -384,7 +408,11 @@ func decodeRecords(ctx context.Context, q querier, recs []storedRecord, have map
 	for _, sr := range recs {
 		raw, ok := have[sr.r.rawSum]
 		if !ok && sr.r.rawSum != "" {
-			raw = loaded[rawKey{account: sr.account, calID: sr.calID, provider: sr.r.providerID, sum: sr.r.rawSum}]
+			if raw, ok = loaded[rawKey{account: sr.account, calID: sr.calID, provider: sr.r.providerID, sum: sr.r.rawSum}]; !ok {
+				// The row names a raw object calendar.db does not hold:
+				// decoding it without one would drop its VTIMEZONE.
+				return nil, errStoredRow
+			}
 		}
 		row, err := sr.r.decode(sr.account, sr.calID, raw)
 		if err != nil {
