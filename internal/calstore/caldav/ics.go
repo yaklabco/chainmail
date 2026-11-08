@@ -129,8 +129,9 @@ func eventComponent(ev calendar.Event) (*ical.Component, error) {
 // VEVENT old was read from. Properties chainmail does not model, and the
 // parameters of unchanged properties, are kept. A change to the start, the
 // end, the recurrence or the status raises SEQUENCE past the stored one
-// unless ev already does.
-func patch(comp *ical.Component, old, ev calendar.Event, now time.Time) error {
+// unless ev already does. Times are written in the zones zs of the object
+// comp belongs to.
+func patch(comp *ical.Component, old, ev calendar.Event, now time.Time, zs *calendar.Zones) error {
 	nc, err := eventComponent(ev)
 	if err != nil {
 		return err
@@ -146,11 +147,13 @@ func patch(comp *ical.Component, old, ev calendar.Event, now time.Time) error {
 	timeChanged := !old.Start.Equal(ev.Start) || old.TZID != ev.TZID || old.AllDay != ev.AllDay
 	if timeChanged {
 		replace(ical.PropDateTimeStart)
+		rezone(comp.Props[ical.PropDateTimeStart], []time.Time{ev.Start}, zs)
 	}
 	endChanged := !old.End.Equal(ev.End)
 	if timeChanged || endChanged {
 		comp.Props.Del(ical.PropDuration)
 		replace(ical.PropDateTimeEnd)
+		rezone(comp.Props[ical.PropDateTimeEnd], []time.Time{ev.End}, zs)
 	}
 	if old.Summary != ev.Summary {
 		replace(ical.PropSummary)
@@ -180,10 +183,12 @@ func patch(comp *ical.Component, old, ev calendar.Event, now time.Time) error {
 	if !sameTimes(old.RDates, ev.RDates) || (timeChanged && len(ev.RDates) > 0) {
 		recurChanged = true
 		replace(ical.PropRecurrenceDates)
+		rezone(comp.Props[ical.PropRecurrenceDates], ev.RDates, zs)
 	}
 	if !sameTimes(old.ExDates, ev.ExDates) || (timeChanged && len(ev.ExDates) > 0) {
 		recurChanged = true
 		replace(ical.PropExceptionDates)
+		rezone(comp.Props[ical.PropExceptionDates], ev.ExDates, zs)
 	}
 	seq := ev.Sequence
 	// Changes to DTSTART, DTEND, DURATION, the recurrence or STATUS need a
@@ -373,8 +378,9 @@ func addComment(comp *ical.Component, text string) {
 
 // overrideFrom builds the override of master for the instance at rid: a
 // copy of master without its recurrence, starting at rid with master's
-// duration, with RECURRENCE-ID and DTSTART in master's DTSTART form.
-func overrideFrom(master *ical.Component, mev calendar.Event, rid time.Time) *ical.Component {
+// duration, with RECURRENCE-ID and DTSTART in master's DTSTART form,
+// read in the object's zones zs.
+func overrideFrom(master *ical.Component, mev calendar.Event, rid time.Time, zs *calendar.Zones) *ical.Component {
 	o := ical.NewComponent(ical.CompEvent)
 	for name, props := range master.Props {
 		switch name {
@@ -392,14 +398,14 @@ func overrideFrom(master *ical.Component, mev calendar.Event, rid time.Time) *ic
 		o.Children = append(o.Children, cloneComponent(child))
 	}
 	like := master.Props.Get(ical.PropDateTimeStart)
-	o.Props.Set(timeLike(ical.PropRecurrenceID, like, rid, mev.TZID))
-	o.Props.Set(timeLike(ical.PropDateTimeStart, like, rid, mev.TZID))
+	o.Props.Set(timeLike(ical.PropRecurrenceID, like, rid, mev.TZID, zs))
+	o.Props.Set(timeLike(ical.PropDateTimeStart, like, rid, mev.TZID, zs))
 	end := rid.Add(mev.End.Sub(mev.Start))
 	endLike := master.Props.Get(ical.PropDateTimeEnd)
 	if endLike == nil {
 		endLike = like
 	}
-	o.Props.Set(timeLike(ical.PropDateTimeEnd, endLike, end, mev.TZID))
+	o.Props.Set(timeLike(ical.PropDateTimeEnd, endLike, end, mev.TZID, zs))
 	return o
 }
 
@@ -419,10 +425,12 @@ func cloneComponent(c *ical.Component) *ical.Component {
 }
 
 // timeLike writes t in the form of like: a DATE, a TZID-qualified local
-// time, UTC or floating. A TZID Go cannot load is evaluated in fallback, the
-// IANA zone calendar.ParseICS resolved it to; with neither the time is
-// written in UTC.
-func timeLike(name string, like *ical.Prop, t time.Time, fallback string) *ical.Prop {
+// time, UTC or floating. A TZID-qualified time is written under like's
+// TZID in the zone zs reads that TZID with (the object's own VTIMEZONE, or
+// the IANA zone it names), so it reads back as t. A TZID zs cannot read is
+// evaluated in fallback, the IANA zone calendar.ParseICS resolved it to;
+// with neither the time is written in UTC.
+func timeLike(name string, like *ical.Prop, t time.Time, fallback string, zs *calendar.Zones) *ical.Prop {
 	p := ical.NewProp(name)
 	if like == nil {
 		p.Value = t.UTC().Format("20060102T150405Z")
@@ -435,14 +443,17 @@ func timeLike(name string, like *ical.Prop, t time.Time, fallback string) *ical.
 		p.Value = t.UTC().Format("20060102")
 	case like.Params.Get(ical.ParamTimezoneID) != "":
 		tzid := like.Params.Get(ical.ParamTimezoneID)
-		loc, err := time.LoadLocation(tzid)
-		if err != nil || !loadable(tzid) {
-			loc = nil
-			if loadable(fallback) {
-				loc, _ = time.LoadLocation(fallback)
-			}
+		if w, ok := zs.Wall(tzid, t); ok {
+			p.Params.Set(ical.ParamTimezoneID, tzid)
+			p.Value = w.Format("20060102T150405")
+			return p
 		}
-		if loc == nil {
+		if !loadable(fallback) {
+			p.Value = t.UTC().Format("20060102T150405Z")
+			return p
+		}
+		loc, err := time.LoadLocation(fallback)
+		if err != nil {
 			p.Value = t.UTC().Format("20060102T150405Z")
 			return p
 		}
@@ -454,6 +465,34 @@ func timeLike(name string, like *ical.Prop, t time.Time, fallback string) *ical.
 		p.Value = t.UTC().Format("20060102T150405")
 	}
 	return p
+}
+
+// rezone rewrites the TZID-qualified local times of props, the values of
+// one property for the instants ts in order, in the zone zs reads their
+// TZID with. EncodeICS writes them in Go's zone data for the TZID; the
+// object may define that TZID otherwise in its own VTIMEZONE, which is
+// what the server and every reader use.
+func rezone(props []ical.Prop, ts []time.Time, zs *calendar.Zones) {
+	for i := range props {
+		p := &props[i]
+		tzid := p.Params.Get(ical.ParamTimezoneID)
+		if i >= len(ts) || tzid == "" || strings.EqualFold(p.Params.Get(ical.ParamValue), "DATE") {
+			continue
+		}
+		if w, ok := zs.Wall(tzid, ts[i]); ok {
+			p.Value = w.Format("20060102T150405")
+		}
+	}
+}
+
+// rezoneEvent rezones the date and time properties of comp, a VEVENT
+// eventComponent encoded from ev.
+func rezoneEvent(comp *ical.Component, ev calendar.Event, zs *calendar.Zones) {
+	rezone(comp.Props[ical.PropDateTimeStart], []time.Time{ev.Start}, zs)
+	rezone(comp.Props[ical.PropDateTimeEnd], []time.Time{ev.End}, zs)
+	rezone(comp.Props[ical.PropRecurrenceID], []time.Time{ev.RecurrenceID}, zs)
+	rezone(comp.Props[ical.PropRecurrenceDates], ev.RDates, zs)
+	rezone(comp.Props[ical.PropExceptionDates], ev.ExDates, zs)
 }
 
 func setRaw(props ical.Props, name, value string) {

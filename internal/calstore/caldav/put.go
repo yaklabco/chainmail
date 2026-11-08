@@ -95,11 +95,12 @@ func (s *Store) replace(ctx context.Context, href string, ev calendar.Event, eta
 		}
 	}
 	now := s.now()
+	zs := calendar.ZonesOf(o.cal)
 	if i := o.find(ev.RecurrenceID); i >= 0 {
 		if o.events[i].UID != ev.UID {
 			return calendar.Event{}, fmt.Errorf("%w: UID differs from the stored object", calendar.ErrInvalidICS)
 		}
-		if err := patch(o.comps[i], o.events[i], ev, now); err != nil {
+		if err := patch(o.comps[i], o.events[i], ev, now, zs); err != nil {
 			return calendar.Event{}, err
 		}
 	} else {
@@ -111,6 +112,7 @@ func (s *Store) replace(ctx context.Context, href string, ev calendar.Event, eta
 		if err != nil {
 			return calendar.Event{}, err
 		}
+		rezoneEvent(comp, ev, zs)
 		o.cal.Children = append(o.cal.Children, comp)
 	}
 	addTimezones(o.cal, now)
