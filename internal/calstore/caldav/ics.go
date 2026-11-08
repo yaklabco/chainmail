@@ -310,15 +310,25 @@ func scheduleAgentClient(cal *ical.Calendar) {
 	}
 }
 
-// hasServerScheduledAttendee reports whether any attendee lacks
-// SCHEDULE-AGENT=CLIENT.
-func hasServerScheduledAttendee(cal *ical.Calendar) bool {
+// serverScheduled reports whether the server may schedule any attendee of
+// cal other than the addresses in self: one whose SCHEDULE-AGENT is not
+// CLIENT or NONE. Absent means SERVER (RFC 6638 section 7.1), and an
+// unknown value is taken as SERVER too, since refusing is the safe side.
+func serverScheduled(cal *ical.Calendar, self []string) bool {
+	isSelf := func(addr string) bool {
+		return slices.ContainsFunc(self, func(s string) bool { return strings.EqualFold(strings.TrimSpace(s), addr) })
+	}
 	for _, c := range cal.Children {
 		if c.Name != ical.CompEvent {
 			continue
 		}
 		for _, a := range c.Props.Values(ical.PropAttendee) {
-			if !strings.EqualFold(a.Params.Get(paramScheduleAgent), "CLIENT") {
+			if isSelf(propEmail(&a)) {
+				continue
+			}
+			switch strings.ToUpper(strings.TrimSpace(a.Params.Get(paramScheduleAgent))) {
+			case "CLIENT", "NONE":
+			default:
 				return true
 			}
 		}

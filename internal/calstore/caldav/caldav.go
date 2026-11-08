@@ -13,9 +13,9 @@
 // input, and puts response body text into its errors. go-webdav's server is
 // used in the tests.
 //
-// Every error is a calstore sentinel, ErrRejected or ErrNotAttendee, wrapped
-// with an HTTP status or a fixed reason. No response body, event text or
-// calendar name reaches an error.
+// Every error is a calstore sentinel, ErrRejected, ErrNotAttendee or
+// ErrSilentUnsupported, wrapped with an HTTP status or a fixed reason. No
+// response body, event text or calendar name reaches an error.
 package caldav
 
 import (
@@ -58,6 +58,15 @@ var (
 	ErrRejected = errors.New("calendar server rejected the request")
 	// ErrNotAttendee means Respond found no attendee with the address.
 	ErrNotAttendee = errors.New("address is not an attendee of the event")
+	// ErrSilentUnsupported means a change without notifications
+	// (calendar.NotifyNone) was asked of an existing object whose attendees,
+	// other than the account itself, the server schedules. Moving them to
+	// SCHEDULE-AGENT=CLIENT, or deleting the object, makes the server send
+	// them a CANCEL (RFC 6638 section 3.2.1.2), so Put and Delete refuse and
+	// send nothing. Only creates, and objects whose attendees are all
+	// scheduled by the client, are changed silently. The daemon maps it to
+	// FAILED_PRECONDITION.
+	ErrSilentUnsupported = errors.New("change would notify attendees the server schedules")
 	// errBadID is a calendar or provider ID that is not a path this store
 	// made.
 	errBadID = fmt.Errorf("%w: invalid calendar object id", calstore.ErrNotFound)
