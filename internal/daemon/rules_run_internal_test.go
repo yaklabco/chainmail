@@ -1275,6 +1275,85 @@ func TestRunRuleSkipsWhatAnOwedWriteCovers(t *testing.T) {
 	}
 }
 
+// TestRunRuleDrainsOwedWritesBeforeMatching checks that a manual run makes
+// the act-once writes the runner owes before it matches. A forward rule's
+// final write fails, leaving the invoice's pending row and the write owed.
+// While state.db still refuses it, a manual move rule's run is interrupted
+// with INTERNAL and moves nothing. Once state.db takes it, the manual run
+// makes the owed write first, so its move copies the forward rule's held
+// row, not the pending one, to the moved key, and the moved invoice's own
+// new event is not forwarded again.
+func TestRunRuleDrainsOwedWritesBeforeMatching(t *testing.T) {
+	t.Parallel()
+	g := newRunnerRig(t, "host", nil)
+	g.password(t)
+	g.failDial(t, false)
+	fwd := g.newRule(t, "host", "fwd-invoices", func(d *rules.Definition) {
+		d.Query = "subject:invoice"
+		d.Actions = []rules.Action{{Kind: rules.ActForward, To: []string{"you@blocked.invalid"}}}
+	})
+	file := g.newRule(t, "host", "file-invoices", func(d *rules.Definition) {
+		d.OnNew, d.Query = false, "subject:invoice"
+		d.Actions = []rules.Action{{Kind: rules.ActMove, Folder: "Archive"}}
+	})
+	allow := refuseDone(t, g, "NEW.rule_id = '"+fwd.ID+"'")
+	invoice := g.refs["host invoice"]
+	g.publish(t, invoice)
+	if err := g.step(t.Context()); err == nil {
+		t.Fatal("step = nil, want the refused act-once write's failure")
+	}
+	if n := len(g.fk.Appended()); n != 1 {
+		t.Fatalf("drafts after the first batch = %d, want the one held forward", n)
+	}
+
+	// state.db still refuses the write: the manual run fails before it
+	// matches.
+	var wg sync.WaitGroup
+	var held rules.Run
+	var heldErr error
+	wg.Go(func() { held, heldErr = g.r.runRule(t.Context(), file, rules.TriggerManual, 0) })
+	for range owedWriteTries - 1 {
+		g.clk.next(t).fire <- g.clk.Now()
+	}
+	wg.Wait()
+	if heldErr != nil {
+		t.Fatal(heldErr)
+	}
+	if held.Outcome != rules.OutcomeInterrupted || held.Reason != api.ReasonInternal || held.Hint != owedWriteHint || held.Matched != 0 {
+		t.Errorf("manual run with the write refused = %+v, want interrupted, INTERNAL, nothing matched", held)
+	}
+	if n := g.fk.Calls("Move"); n != 0 {
+		t.Errorf("moved %d times while the write was owed", n)
+	}
+
+	allow()
+	run, err := g.r.runRule(t.Context(), file, rules.TriggerManual, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Outcome != rules.OutcomeOK || run.Applied != 1 {
+		t.Fatalf("manual run = %+v, want ok, 1 applied", run)
+	}
+	moved := g.foundIn(t, "host", "Archive", "inv42@x")
+	if row, ok := g.appliedRow(t, fwd.ID, "host", keyOf(false, moved)); !ok || row.Outcome != rules.AppliedHeld {
+		t.Errorf("the forward rule's row at the moved key = %+v, %t, want held", row, ok)
+	}
+	if err := g.f.store.DeleteRow(t.Context(), invoice); err != nil {
+		t.Fatal(err)
+	}
+	g.cacheHeader(t, moved)
+	last := g.publish(t, moved)
+	if err := g.step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(g.fk.Appended()); n != 1 {
+		t.Errorf("drafts = %d, want 1: the moved invoice was forwarded again", n)
+	}
+	if got := g.acked(t); got != last {
+		t.Errorf("acked %d, want %d", got, last)
+	}
+}
+
 // TestRuleCopyAndMoveAliasBothKeys checks amendment 6 for a rule that
 // copies and then moves: the acting row, the copy's key and the moved
 // message's key all hold the rule's row.

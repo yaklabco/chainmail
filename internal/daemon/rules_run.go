@@ -1069,7 +1069,10 @@ func relocates(rule rules.Rule) bool {
 // such as what a downtime catch-up is for, is matched in this run. What
 // the builder applied can reset a folder, which drops its rows and starts
 // its backfill under a new UIDVALIDITY, so the run scopes the rule again
-// after the wait and is cache_not_ready while that backfill runs. An
+// after the wait and is cache_not_ready while that backfill runs. Before
+// it matches, the run makes the act-once writes the runner owes (drain),
+// on the turn it holds; one that keeps failing interrupts the run with
+// INTERNAL and nothing is matched. An
 // error means the turn was not taken, or the builder not waited for,
 // before ctx ended, the rule does not cover the account (errRuleAccount),
 // or the log's tail could not be read or the run written.
@@ -1109,6 +1112,15 @@ func (r *ruleRunner) runRule(ctx context.Context, rule rules.Rule, t rules.Trigg
 		run.Outcome, run.Reason, run.Hint = rules.OutcomeCacheNotReady, reason, cacheNotReadyHintOf(reason)
 		err = r.write(ctx, &run)
 	default:
+		// What the runner owes is made first, as a step makes it before
+		// its batch: an act-once row this run copies to where it moves a
+		// message is then the saved row, never a pending one that the owed
+		// write would settle only at the original key. A write that keeps
+		// failing ends the run before it matches.
+		if derr := r.drain(ctx); derr != nil {
+			err = r.settle(ctx, &run, false, derr)
+			break
+		}
 		capped, cause := r.page(ctx, rule, sc, &run, limit)
 		err = r.settle(ctx, &run, capped, cause)
 	}
