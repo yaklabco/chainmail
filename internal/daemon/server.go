@@ -218,6 +218,10 @@ type Server struct {
 	// rulesWake wakes the rule scheduler after a rule change so it plans
 	// again. It holds at most one wakeup.
 	rulesWake chan struct{}
+	// ruleScheduler stops the rule scheduler that startBackground runs and
+	// joins it, with the scheduled run it is in. drain calls it before it
+	// closes the mail stores.
+	ruleScheduler schedulerStop
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -359,10 +363,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	// the background loops, since the rule scheduler among those reads
 	// the rule runners startWatch records.
 	s.startWatch(base)
-	// The background loops, the rule scheduler among them, stop and are
-	// joined when Serve returns, after drain and before closeCache, so
-	// none outlives the stores or state.db, which the caller closes after
-	// Serve.
+	// The background loops stop and are joined when Serve returns, after
+	// drain and before closeCache, so none outlives state.db, which the
+	// caller closes after Serve. The rule scheduler among them is stopped
+	// and joined sooner, by drain before it closes the mail stores, since
+	// its runs use them.
 	defer s.startBackground(base)()
 	s.httpSrv.BaseContext = func(net.Listener) context.Context { return base }
 	errc := make(chan error, 1)
@@ -396,13 +401,18 @@ func (s *Server) Serve(ctx context.Context) error {
 	return err
 }
 
-// drain waits for every handler to return, stops the supervisors, the
-// cache workers and the background probes, then logs out of the mail
-// servers. The supervisors and workers stop first, closing their watch
-// connections within watch.ShutdownLogout, so none holds a store closeAll
-// is closing. Each store logs out within 5 seconds, all in parallel.
+// drain waits for every handler to return, stops the rule scheduler and
+// waits for the scheduled run it is in, stops the supervisors, the cache
+// workers and the background probes, then logs out of the mail servers.
+// The scheduler, the supervisors and the workers stop first, the workers
+// closing their watch connections within watch.ShutdownLogout, so none
+// holds a store closeAll is closing or opens one after it: a scheduled
+// forward whose SMTP send is under way finishes it, and writes its Sent
+// copy, before drain goes on. Each store logs out within 5 seconds, all
+// in parallel.
 func (s *Server) drain() {
 	s.handlers.wait()
+	s.ruleScheduler.stop()
 	s.stopWatch()
 	s.lim.stop()
 	if err := s.stores.closeAll(); err != nil {
