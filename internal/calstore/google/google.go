@@ -125,6 +125,11 @@ func ObjectID(uid string) string {
 	return strings.ToLower(base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:]))[:32]
 }
 
+// ObjectID is the ProviderID a create of an event with uid gives, in any
+// calendar: ObjectID(uid). A caller that lost a create's answer reads the
+// event back with it.
+func (*Store) ObjectID(_, uid string) string { return ObjectID(uid) }
+
 // InstanceID is Google's id of the instance of series id that starts at
 // rid: id_YYYYMMDDTHHMMSSZ, or id_YYYYMMDD for an all-day series. allDay is
 // the series's kind (the instance's originalStartTime), not the kind an

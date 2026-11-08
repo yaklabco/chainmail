@@ -724,3 +724,7 @@ func cloneCall(c Call) Call {
 	c.People = slices.Clone(c.People)
 	return c
 }
+
+// ObjectID is the ProviderID a create of an event with uid gives, in any
+// calendar: ObjectName(uid).
+func (*Store) ObjectID(_, uid string) string { return ObjectName(uid) }

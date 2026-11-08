@@ -279,3 +279,13 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// TestStoreObjectID checks that the store names a create's object as the
+// package function does, whatever the calendar, so the daemon can read back
+// an event a crashed create left.
+func TestStoreObjectID(t *testing.T) {
+	st := google.New(http.DefaultClient)
+	if got, want := st.ObjectID("primary", "abc123@chainmail"), google.ObjectID("abc123@chainmail"); got != want {
+		t.Errorf("ObjectID = %q, want %q", got, want)
+	}
+}

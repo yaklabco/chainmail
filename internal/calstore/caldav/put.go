@@ -236,3 +236,19 @@ func (s *Store) checkSilent(ctx context.Context, cal *ical.Calendar) error {
 	}
 	return nil
 }
+
+// ObjectID is the ProviderID a create of an event with uid in calendar calID
+// gives: the collection path, the escaped UID and ".ics", in canonical form.
+// A caller that lost a create's answer reads the event back with it. It is ""
+// when calID is not a collection path or the UID cannot name an object.
+func (*Store) ObjectID(calID, uid string) string {
+	coll, ok := collectionPath(calID)
+	if !ok || uid == "" {
+		return ""
+	}
+	href := coll + url.PathEscape(uid) + ".ics"
+	if !childOf(coll, href) {
+		return ""
+	}
+	return href
+}
