@@ -1,11 +1,13 @@
 package calsync_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -670,4 +672,80 @@ func TestRecurringInviteOnOverride(t *testing.T) {
 	if len(evs) != 1 || evs[0].Kind != "invite" || evs[0].Ref != want {
 		t.Errorf("events = %+v, want one invite for %s", evs, want)
 	}
+}
+
+// TestStoredMasterReadFails checks that when the stored master of a new
+// sparse cancelled override cannot be read, the cycle fails before it
+// publishes or applies anything, and the next cycle reports the cancelled
+// instance.
+func TestStoredMasterReadFails(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	// Like Google, the store sends only the instance that changed, so the
+	// override's series role comes from the stored master.
+	instancesOnly := &changedInstances{Store: r.store}
+	r.syncer = calsync.New(calsync.Options{Account: account, Store: instancesOnly, Cache: r.cache, Log: r.log, Self: self, Poll: poll, WindowPast: windowPast, Clock: r.clock})
+	var failing atomic.Bool
+	calsync.SetSeriesRead(r.syncer, func(ctx context.Context, account, calID, providerID string) ([]calcache.EventRow, error) {
+		if failing.Load() {
+			return nil, errors.New("disk I/O error")
+		}
+		return r.cache.Series(ctx, account, calID, providerID)
+	})
+	master := invited("s@x", t0.Add(24*time.Hour), calendar.PartStatAccepted)
+	master.RRule = "FREQ=WEEKLY"
+	p := r.store.Add("work", master)
+	r.sync(t)
+	before, err := r.cache.Calendar(t.Context(), account, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instancesOnly.overridesOnly.Store(true)
+	rid := master.Start.AddDate(0, 0, 7)
+	r.store.Change("work", p, func(rows []calendar.Event) []calendar.Event {
+		return append(rows, calendar.Event{UID: master.UID, RecurrenceID: rid, Status: calendar.StatusCancelled})
+	})
+
+	failing.Store(true)
+	if err := r.syncer.SyncNow(t.Context()); err == nil {
+		t.Fatal("SyncNow succeeded with the stored master unreadable")
+	}
+	if evs := r.events(t); len(evs) != 0 {
+		t.Errorf("events = %+v, want none from a failed cycle", evs)
+	}
+	after, err := r.cache.Calendar(t.Context(), account, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.SyncToken != before.SyncToken || !after.LastSync.Equal(before.LastSync) {
+		t.Errorf("token %q synced %v after the failed cycle, want %q synced %v", after.SyncToken, after.LastSync, before.SyncToken, before.LastSync)
+	}
+	if st := r.syncer.Status(); st.State != calsync.StateError || strings.Contains(st.LastError, "disk") {
+		t.Errorf("Status = %+v, want error with fixed text", st)
+	}
+
+	failing.Store(false)
+	r.sync(t)
+	evs := r.events(t)
+	want := calendar.InstanceRef(calendar.EventRef(account, "work", p), rid)
+	if len(evs) != 1 || evs[0].Kind != "event_cancelled" || evs[0].Ref != want {
+		t.Errorf("events = %+v, want one event_cancelled for %s", evs, want)
+	}
+}
+
+// changedInstances is a calendar store whose incremental syncs, once
+// overridesOnly is set, send only the overrides of each changed object, as
+// Google sends only the instance that changed.
+type changedInstances struct {
+	calstore.Store
+	overridesOnly atomic.Bool
+}
+
+func (s *changedInstances) Sync(ctx context.Context, calID, token string) (calendar.Changes, error) {
+	ch, err := s.Store.Sync(ctx, calID, token)
+	if err != nil || ch.Full || !s.overridesOnly.Load() {
+		return ch, err
+	}
+	ch.Upserts = slices.DeleteFunc(ch.Upserts, func(ev calendar.Event) bool { return ev.RecurrenceID.IsZero() })
+	return ch, nil
 }

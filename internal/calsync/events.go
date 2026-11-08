@@ -32,9 +32,10 @@ type eventInput struct {
 	now            time.Time
 	windowPast     time.Duration
 	// master returns the stored row with no recurrence ID of a ProviderID
-	// (the master or single event), or nil. It is asked only about
-	// ProviderIDs whose base row is not in changes.
-	master func(providerID string) *calcache.EventRow
+	// (the master or single event), or nil when there is none. It is asked
+	// only about ProviderIDs whose base row is not in changes, at most once
+	// each. Its error fails calendarEvents.
+	master func(providerID string) (*calcache.EventRow, error)
 }
 
 // calendarEvents turns one calendar's diff into watch events:
@@ -55,10 +56,14 @@ type eventInput struct {
 //
 // Rows that ended before now - windowPast give no events, so a sync that
 // sends old rows again (after a prune or a full sync) stays quiet.
-func calendarEvents(in eventInput) []watch.Event {
+//
+// A stored master that cannot be read fails the whole diff: without it a
+// sparse override has no role, so its events would be lost.
+func calendarEvents(in eventInput) ([]watch.Event, error) {
 	b := eventBuilder{
 		in: in, past: in.now.Add(-in.windowPast),
 		base: map[string]*calcache.Change{}, overrides: map[string][]*calcache.EventRow{},
+		stored: map[string]*calcache.EventRow{},
 	}
 	for i := range in.changes {
 		c := &in.changes[i]
@@ -80,8 +85,11 @@ func calendarEvents(in eventInput) []watch.Event {
 		case calcache.ChangeDeleted:
 			b.deleted(c.Before)
 		}
+		if b.err != nil {
+			return nil, b.err
+		}
 	}
-	return b.out
+	return b.out, nil
 }
 
 type eventBuilder struct {
@@ -93,7 +101,11 @@ type eventBuilder struct {
 	// overrides holds the overrides of each ProviderID as the diff leaves
 	// them, deleted ones left out.
 	overrides map[string][]*calcache.EventRow
-	out       []watch.Event
+	// stored holds the stored masters read so far, nil for none.
+	stored map[string]*calcache.EventRow
+	// err is the first failed read of a stored master.
+	err error
+	out []watch.Event
 }
 
 func changeRow(c *calcache.Change) *calcache.EventRow {
@@ -112,10 +124,20 @@ func (b *eventBuilder) masterOf(row *calcache.EventRow) *calcache.EventRow {
 	if c, ok := b.base[row.Event.ProviderID]; ok {
 		return changeRow(c)
 	}
-	if b.in.master == nil {
+	if b.in.master == nil || b.err != nil {
 		return nil
 	}
-	return b.in.master(row.Event.ProviderID)
+	pid := row.Event.ProviderID
+	if m, ok := b.stored[pid]; ok {
+		return m
+	}
+	m, err := b.in.master(pid)
+	if err != nil {
+		b.err = err
+		return nil
+	}
+	b.stored[pid] = m
+	return m
 }
 
 // baseCreated reports whether the diff creates row's base row too.
