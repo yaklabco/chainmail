@@ -190,6 +190,56 @@ func TestApplyClearsLastError(t *testing.T) {
 	}
 }
 
+// TestApplyRollsBackAnInvalidSync covers an Apply that fails part way: the
+// token, LastSync, LastError and stored events stay as they were, so the
+// next sync repeats the same changes from the old token.
+func TestApplyRollsBackAnInvalidSync(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := setup(t)
+	apply(t, s, "work", calendar.Changes{Full: true, Token: "t1", Upserts: []calendar.Event{
+		single("a", t0, t0.Add(time.Hour)),
+		single("b", t0, t0.Add(time.Hour)),
+	}})
+	if err := s.SetError(ctx, "acme", "work", "calendar server unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.Calendar(ctx, "acme", "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRows, err := s.Range(ctx, nil, nil, t0.AddDate(-1, 0, 0), t0.AddDate(1, 0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changed := single("b", t0.Add(time.Hour), t0.Add(2*time.Hour))
+	changed.ETag = "e-b2"
+	err = s.Apply(ctx, "acme", "work", calendar.Changes{
+		Token:   "t2",
+		Upserts: []calendar.Event{single("c", t0, t0.Add(time.Hour)), changed, {UID: "no-provider@example.com", Start: t0, End: t0}},
+		Deletes: []string{"a"},
+	}, self, t0.Add(time.Hour))
+	if err == nil {
+		t.Fatal("Apply with an upsert without a ProviderID succeeded, want an error")
+	}
+
+	after, err := s.Calendar(ctx, "acme", "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	same(t, "calendar after a failed Apply", before, after)
+	if after.SyncToken != "t1" || !after.LastSync.Equal(t0) || after.LastError != "calendar server unavailable" {
+		t.Errorf("calendar after a failed Apply = token %q, last sync %v, error %q; want t1, %v and the old error",
+			after.SyncToken, after.LastSync, after.LastError, t0)
+	}
+	afterRows, err := s.Range(ctx, nil, nil, t0.AddDate(-1, 0, 0), t0.AddDate(1, 0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	same(t, "events after a failed Apply", beforeRows, afterRows)
+}
+
 func TestMyPartStatAndIsOrganizer(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
