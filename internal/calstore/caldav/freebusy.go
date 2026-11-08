@@ -19,8 +19,8 @@ const freeBusyBatch = 50
 
 // FreeBusy POSTs a VFREEBUSY REQUEST for people to the principal's
 // schedule outbox and reads the schedule-response (RFC 6638 section 5).
-// A person the server answers for with a 2.x request status is Known; the
-// rest, and everyone when the server has no outbox or the principal no
+// A person the server answers for with a 2.x request status and a complete
+// VFREEBUSY is Known. The rest, and everyone when the server has no outbox or the principal no
 // address, are Known false, never free.
 func (s *Store) FreeBusy(ctx context.Context, people []string, from, to time.Time) (map[string]calendar.FreeBusy, error) {
 	out := make(map[string]calendar.FreeBusy, len(people))
@@ -84,11 +84,8 @@ func (s *Store) freeBusyBatch(ctx context.Context, d *discovery, people []string
 		if !ok || !strings.HasPrefix(strings.TrimSpace(r.RequestStatus), "2.") {
 			continue
 		}
-		// Success with no VFREEBUSY tells nothing, so the person stays
-		// unknown rather than free.
-		if !strings.Contains(strings.ToUpper(r.CalendarData), "BEGIN:VFREEBUSY") {
-			continue
-		}
+		// Success without a whole VFREEBUSY tells nothing, so the person
+		// stays unknown rather than free.
 		busy, err := parseFreeBusy(r.CalendarData, from, to)
 		if err != nil {
 			continue
@@ -141,51 +138,103 @@ func safeAddress(s string) bool {
 	return true
 }
 
-// parseFreeBusy reads the FREEBUSY properties of a VFREEBUSY reply: busy,
-// busy-tentative and busy-unavailable periods (FREE ones are skipped),
-// clipped to [from, to) and merged. Periods are start/end or
-// start/duration, in UTC as RFC 5545 requires for FREEBUSY.
+// maxFreeBusyDepth bounds the nesting of components in a free/busy answer.
+const maxFreeBusyDepth = 8
+
+var errFreeBusyData = fmt.Errorf("%w: not a complete VFREEBUSY", calendar.ErrInvalidICS)
+
+// parseFreeBusy reads a free/busy answer, which must be exactly one
+// VCALENDAR with paired BEGIN and END lines, nested at most
+// maxFreeBusyDepth deep, holding at least one complete VFREEBUSY directly.
+// Anything else, such as truncated data or another component, is an error,
+// so the person stays unknown. The FREEBUSY properties of those VFREEBUSY
+// components are read: busy, busy-tentative and busy-unavailable periods
+// (FREE ones are skipped), clipped to [from, to) and merged. Periods are
+// start/end or start/duration, in UTC as RFC 5545 requires for FREEBUSY.
 func parseFreeBusy(data string, from, to time.Time) ([]calendar.BusyBlock, error) {
 	if len(data) > calendar.MaxICSBytes {
 		return nil, calendar.ErrTooLarge
 	}
-	var blocks []calendar.BusyBlock
+	var (
+		stack  []string
+		done   bool // END:VCALENDAR was read
+		found  bool // a VFREEBUSY of the VCALENDAR was closed
+		blocks []calendar.BusyBlock
+	)
 	for _, l := range unfold(data) {
-		name, rest, ok := strings.Cut(l, ":")
-		if !ok {
+		l = strings.TrimSuffix(l, "\r")
+		if strings.TrimSpace(l) == "" {
 			continue
+		}
+		if done {
+			return nil, errFreeBusyData
+		}
+		name, value, ok := strings.Cut(l, ":")
+		if !ok {
+			return nil, errFreeBusyData
 		}
 		params := strings.Split(name, ";")
-		if !strings.EqualFold(strings.TrimSpace(params[0]), "FREEBUSY") {
-			continue
-		}
-		fbtype := "BUSY"
-		for _, p := range params[1:] {
-			k, v, _ := strings.Cut(p, "=")
-			if strings.EqualFold(strings.TrimSpace(k), "FBTYPE") {
-				fbtype = strings.ToUpper(strings.Trim(strings.TrimSpace(v), `"`))
+		switch prop := strings.ToUpper(strings.TrimSpace(params[0])); {
+		case prop == "BEGIN":
+			comp := strings.ToUpper(strings.TrimSpace(value))
+			if (len(stack) == 0) != (comp == "VCALENDAR") || len(stack) >= maxFreeBusyDepth {
+				return nil, errFreeBusyData
 			}
-		}
-		if fbtype == "FREE" {
-			continue
-		}
-		for _, period := range strings.Split(rest, ",") {
-			b, ok := parsePeriod(strings.TrimSpace(period))
-			if !ok {
-				return nil, fmt.Errorf("%w: bad FREEBUSY period", calendar.ErrInvalidICS)
+			stack = append(stack, comp)
+		case prop == "END":
+			comp := strings.ToUpper(strings.TrimSpace(value))
+			if len(stack) == 0 || stack[len(stack)-1] != comp {
+				return nil, errFreeBusyData
 			}
-			if b.Start.Before(from) {
-				b.Start = from
+			stack = stack[:len(stack)-1]
+			found = found || (comp == "VFREEBUSY" && len(stack) == 1)
+			done = len(stack) == 0
+		case len(stack) == 0:
+			return nil, errFreeBusyData
+		case prop == "FREEBUSY" && len(stack) == 2 && stack[1] == "VFREEBUSY":
+			bs, err := busyPeriods(params[1:], value, from, to)
+			if err != nil {
+				return nil, err
 			}
-			if b.End.After(to) {
-				b.End = to
-			}
-			if b.End.After(b.Start) {
-				blocks = append(blocks, b)
-			}
+			blocks = append(blocks, bs...)
 		}
 	}
+	if !done || !found {
+		return nil, errFreeBusyData
+	}
 	return calendar.MergeBusy(blocks), nil
+}
+
+// busyPeriods reads the periods of one FREEBUSY property with the given
+// parameters, skipping FBTYPE=FREE, clipped to [from, to).
+func busyPeriods(params []string, value string, from, to time.Time) ([]calendar.BusyBlock, error) {
+	fbtype := "BUSY"
+	for _, p := range params {
+		k, v, _ := strings.Cut(p, "=")
+		if strings.EqualFold(strings.TrimSpace(k), "FBTYPE") {
+			fbtype = strings.ToUpper(strings.Trim(strings.TrimSpace(v), `"`))
+		}
+	}
+	if fbtype == "FREE" {
+		return nil, nil
+	}
+	var blocks []calendar.BusyBlock
+	for _, period := range strings.Split(value, ",") {
+		b, ok := parsePeriod(strings.TrimSpace(period))
+		if !ok {
+			return nil, fmt.Errorf("%w: bad FREEBUSY period", calendar.ErrInvalidICS)
+		}
+		if b.Start.Before(from) {
+			b.Start = from
+		}
+		if b.End.After(to) {
+			b.End = to
+		}
+		if b.End.After(b.Start) {
+			blocks = append(blocks, b)
+		}
+	}
+	return blocks, nil
 }
 
 func parsePeriod(s string) (calendar.BusyBlock, bool) {
