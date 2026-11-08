@@ -585,5 +585,5 @@ func canonicalAttendees(in []string) []string {
 	slices.SortFunc(out, func(a, b string) int {
 		return cmp.Or(cmp.Compare(strings.ToLower(a), strings.ToLower(b)), cmp.Compare(a, b))
 	})
-	return slices.CompactFunc(out, func(a, b string) bool { return strings.ToLower(a) == strings.ToLower(b) })
+	return slices.CompactFunc(out, strings.EqualFold)
 }
