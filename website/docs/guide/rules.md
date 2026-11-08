@@ -101,7 +101,7 @@ A rule matches what a search matches, with the same operators. It is matched aga
 - Without `in:`, a rule also never matches drafts or sent mail. Off Google it leaves out the Drafts and Sent folders, and on Google the messages with the `\Draft` or `\Sent` label. Name `in:sent` or `in:drafts` to match them. This keeps a rule from acting on the mail it forwards.
 - `account:` terms narrow the accounts the rule covers.
 - `item:<id>` and `item:none` work as in a search.
-- A rule sees the cache as it was when it matched. A label or flag that an earlier rule set in the same batch is not visible to a later rule.
+- Every rule matches a new-mail batch before any of them acts, so a rule sees the cache as it was when the batch was matched. A label or flag that an earlier rule set in the same batch is not visible to a later rule.
 
 Words in a query match message bodies, so a rule with words needs the bodies in the cache. On new mail, the runner waits up to 5 minutes for a matched message's body. A message whose body does not arrive in time, or failed to download for good, fails that rule with the reason `body_not_cached`. So does every message of an account whose `prefetch_bodies` window is `0d`. A query of operators only, such as `from:stripe.com subject:receipt`, never waits.
 
@@ -167,7 +167,7 @@ chainmail rule create --name morning-flags --account work --query 'is:unread fro
 
 On a daylight saving change, an `at:` time that does not exist runs at the first instant after the gap. A time that happens twice runs once, at the first. After the daemon was down, a rule whose time passed runs once when it starts, and missed runs are not repeated. The scheduler starts with the watchers, so a daemon that watches no account runs no scheduled rule.
 
-A scheduled run matches the rule against the whole cache of each account it covers, oldest first. It acts on at most `max_per_run` messages per account, not counting those it already acted on. Before it matches, the run waits up to a minute for the cache to take in every change the daemon had seen when the run began. The cache must then be able to answer the query completely. When it cannot, or the cache has not caught up within that minute (the reason `stale`), the run is recorded with outcome `cache_not_ready` and acts on nothing, and the rule tries again 5 minutes later. An account with no runner gets a `cache_not_ready` run with the reason `cache_disabled`, and the rule waits for its next scheduled time. `[rules]` is in the [configuration reference](../reference/configuration.md#rules).
+A scheduled run matches the rule against the whole cache of each account it covers, oldest first. It acts on at most `max_per_run` messages per account, not counting those it already acted on. Before it matches, the run waits up to a minute for the cache to take in every change the daemon had seen when the run began. The cache must then be able to answer the query completely in the folders the rule matches, and none of those folders may hold a message the cache could not read (the reason `unreadable_messages`). When it cannot, or the cache has not caught up within that minute (the reason `stale`), the run is recorded with outcome `cache_not_ready` and acts on nothing, and the rule tries again 5 minutes later. An account with no runner gets a `cache_not_ready` run with the reason `cache_disabled`, and the rule waits for its next scheduled time. `[rules]` is in the [configuration reference](../reference/configuration.md#rules).
 
 ### Running by hand
 
@@ -216,6 +216,7 @@ A run stops at its cap with outcome `capped`. A scheduled run or a run by hand g
 | Transient | `SERVER_UNAVAILABLE`, `TIMEOUT`, `AUTH_REQUIRED`, `CACHE_NOT_READY` | The run stops with outcome `interrupted`. A new-mail batch is not acknowledged, and the runner tries it again after a backoff. Messages already recorded are skipped, so the retry acts on none of them twice. A message whose actions only partly ran starts again at its first action, which at worst repeats a label or a flag. |
 | Permanent | `NOT_FOUND` for a folder or an item, `INVALID_ARGUMENT`, `body_not_cached` | The message counts as `failed` and is not recorded. New-mail matching does not try it again. A later scheduled run or a run by hand matches it again. |
 | Held | a forward the policy held as a draft | The message counts as `held` and is recorded as done. |
+| Gone | `STALE_REF`, or `NOT_FOUND` for the message itself | Another client moved or deleted the message after the rule matched it. The message counts as `skipped` and is not recorded. It is no failure, so it never disables the rule. |
 
 ### Forwards and copies across a crash
 
@@ -249,7 +250,7 @@ Each scheduled run and run by hand writes one run row per account, and so does e
 | `ok` | The run finished. |
 | `capped` | The run stopped at its cap. The next run goes on where it stopped. |
 | `failed` | The run finished, and at least one message failed for good, such as on a folder that does not exist. |
-| `cache_not_ready` | The cache could not answer the rule completely on the account, so the run acted on nothing. `reason` says why, such as `stale` or `cache_disabled`. |
+| `cache_not_ready` | The cache could not answer the rule completely on the account, so the run acted on nothing. `reason` says why, such as `stale`, `cache_disabled` or `unreadable_messages`. |
 | `interrupted` | The run stopped on a transient failure, or the daemon stopped during it. A new-mail batch is tried again. |
 
 `rule runs` lists runs newest first, for one rule or for all. `--account`, `--trigger` and `--outcome` keep the runs of one account, trigger or outcome, and `--limit` and `--before-id` page through them. `rule show` lists a rule's last 10 runs and its counts over the runs kept.
