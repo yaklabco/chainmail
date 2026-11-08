@@ -49,7 +49,8 @@ type discoveryDoc struct {
 }
 
 // discover fetches <issuer>/.well-known/openid-configuration. Its errors
-// name the status or the field at fault, never the response body.
+// name the numeric status or the field at fault, never the response body or
+// the reason phrase, which are the server's text.
 func (m *Manager) discover(ctx context.Context, issuer string) (oauth2.Endpoint, error) {
 	ctx, cancel := context.WithTimeout(ctx, discoveryTimeout)
 	defer cancel()
@@ -65,7 +66,7 @@ func (m *Manager) discover(ctx context.Context, issuer string) (oauth2.Endpoint,
 	}
 	defer func() { _ = resp.Body.Close() }() // the document is read or refused already
 	if resp.StatusCode != http.StatusOK {
-		return oauth2.Endpoint{}, fmt.Errorf("the issuer returned %s", resp.Status)
+		return oauth2.Endpoint{}, fmt.Errorf("the issuer returned HTTP %d", resp.StatusCode)
 	}
 	var doc discoveryDoc
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxDiscoveryBytes)).Decode(&doc); err != nil {

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -623,9 +624,28 @@ func (m *Manager) refreshContext(ctx context.Context) context.Context {
 	return m.withHTTPClient(context.WithoutCancel(ctx))
 }
 
-// tokenError describes a token endpoint failure by status and OAuth2 error
-// code only. oauth2.RetrieveError's own message quotes the response body,
-// and token endpoint bodies stay out of errors and logs.
+// oauthErrorCodes are the error codes RFC 6749 section 5.2 defines for a
+// token endpoint, plus access_denied, server_error and
+// temporarily_unavailable from section 4.1.2.1, which some servers send
+// there too. Only these are named in an error.
+var oauthErrorCodes = map[string]bool{
+	"invalid_request":         true,
+	"invalid_client":          true,
+	"invalid_grant":           true,
+	"unauthorized_client":     true,
+	"unsupported_grant_type":  true,
+	"invalid_scope":           true,
+	"access_denied":           true,
+	"server_error":            true,
+	"temporarily_unavailable": true,
+}
+
+// tokenError describes a token endpoint failure by numeric status and RFC
+// 6749 error code only. Everything else in the response is the server's
+// text, which could echo a secret back: oauth2.RetrieveError's own message
+// quotes the body, the status line carries a reason phrase of the server's
+// choosing, and an unknown error code is arbitrary text. None of it reaches
+// an error or a log.
 func tokenError(err error) error {
 	var re *oauth2.RetrieveError
 	if !errors.As(err, &re) {
@@ -633,12 +653,16 @@ func tokenError(err error) error {
 	}
 	status := "no response"
 	if re.Response != nil {
-		status = re.Response.Status
+		status = "HTTP " + strconv.Itoa(re.Response.StatusCode)
 	}
-	if re.ErrorCode == "" {
+	switch {
+	case re.ErrorCode == "":
 		return fmt.Errorf("token endpoint returned %s", status)
+	case oauthErrorCodes[re.ErrorCode]:
+		return fmt.Errorf("token endpoint returned %s: %s", status, re.ErrorCode)
+	default:
+		return fmt.Errorf("token endpoint returned %s with an error code outside RFC 6749", status)
 	}
-	return fmt.Errorf("token endpoint returned %s: %s", status, re.ErrorCode)
 }
 
 // neededSecrets lists the secrets acct cannot log in without. An issuer
