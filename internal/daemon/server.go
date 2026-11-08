@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"sync"
 	"sync/atomic"
@@ -400,7 +401,9 @@ type caller struct {
 
 // callerOf identifies who sent a request. The middleware refuses requests
 // without a peer, so a missing one here is a wiring bug, and the request
-// fails rather than being audited as uid 0.
+// fails rather than being audited as uid 0. A peer that names one of the
+// daemon's own client kinds, rule or daemon, is recorded as invalidTarget,
+// so the audit log tells the daemon's actions from a client's.
 func callerOf(ctx context.Context, h http.Header) (caller, error) {
 	p, ok := PeerFromContext(ctx)
 	if !ok {
@@ -410,7 +413,7 @@ func callerOf(ctx context.Context, h http.Header) (caller, error) {
 	switch {
 	case c.client == "":
 		c.client = "unknown"
-	case !clientKindRE.MatchString(c.client):
+	case !clientKindRE.MatchString(c.client), c.client == ruleClient, c.client == daemonClient:
 		c.client = invalidTarget
 	}
 	return c, nil
@@ -420,6 +423,16 @@ func callerOf(ctx context.Context, h http.Header) (caller, error) {
 // "cli" or "mcp". The kind is self-reported, so anything else is recorded
 // as invalidTarget. The peer's uid is the authoritative identity.
 var clientKindRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
+
+// ruleClient is the audit client of the actions rules take.
+const ruleClient = "rule"
+
+// ruleCaller is who a rule's actions run as: the daemon's own uid, as its
+// background probe records, with client kind rule. No socket peer can
+// claim the kind, so audit --client rule shows only rule actions.
+func ruleCaller() caller {
+	return caller{uid: uint32(os.Getuid()), client: ruleClient}
+}
 
 // record writes an audit entry for an action that has run, then returns the
 // action's own error as a Connect error. If e.Result is empty it is derived
