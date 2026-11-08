@@ -55,6 +55,17 @@ func TestReadFilters(t *testing.T) {
 		{name: "account and action", q: Query{Since: readerBase, Account: "work", Action: "mail.send", Limit: 10}, want: []int64{5, 1}},
 		{name: "before id", q: Query{Since: readerBase, BeforeID: 3, Limit: 10}, want: []int64{2, 1}},
 		{name: "since in another zone", q: Query{Since: readerBase.Add(90 * time.Minute).In(time.FixedZone("x", -5*60*60)), Limit: 10}, want: []int64{5, 4}},
+		{name: "client", q: Query{Since: readerBase, Client: "mcp", Limit: 10}, want: []int64{2}},
+		{name: "client with no rows", q: Query{Since: readerBase, Client: "rule", Limit: 10}, want: []int64{}},
+		{name: "client and account", q: Query{Since: readerBase, Client: "cli", Account: "home", Limit: 10}, want: []int64{4}},
+		{name: "client and action", q: Query{Since: readerBase, Client: "cli", Action: "mail.send", Limit: 10}, want: []int64{5, 4, 1}},
+		{name: "client and before id", q: Query{Since: readerBase, Client: "cli", BeforeID: 4, Limit: 10}, want: []int64{3, 1}},
+		{
+			name: "client with every other filter",
+			q:    Query{Since: readerBase.Add(time.Hour), Client: "cli", Account: "work", Action: "mail.read", Limit: 10},
+			want: []int64{3},
+		},
+		{name: "empty client is every client", q: Query{Since: readerBase, Client: "", Limit: 10}, want: []int64{5, 4, 3, 2, 1}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -169,5 +180,33 @@ func TestReadRequiresLimit(t *testing.T) {
 	t.Parallel()
 	if _, _, err := NewReader(openDB(t)).Read(t.Context(), Query{Since: readerBase}); err == nil {
 		t.Error("a zero limit was accepted")
+	}
+}
+
+// Paging under a client filter visits each of that client's rows once,
+// and a page that ends on the client's last row reports no next page.
+func TestReadPagesByClient(t *testing.T) {
+	t.Parallel()
+	r := seedReader(t)
+	q := Query{Since: readerBase, Client: "cli", Limit: 2}
+	rows, next, err := r.Read(t.Context(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(rows); !slices.Equal(got, []int64{5, 4}) || next != 4 {
+		t.Fatalf("first page = %v next %d, want [5 4] next 4", got, next)
+	}
+	q.BeforeID = next
+	rows, next, err = r.Read(t.Context(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(rows); !slices.Equal(got, []int64{3, 1}) || next != 0 {
+		t.Errorf("second page = %v next %d, want [3 1] next 0, skipping the mcp row 2", got, next)
+	}
+	for _, row := range rows {
+		if row.Client != "cli" {
+			t.Errorf("row %d has client %q, want cli", row.ID, row.Client)
+		}
 	}
 }

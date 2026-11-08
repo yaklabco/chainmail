@@ -47,6 +47,9 @@ type Config struct {
 	Watch        WatchConfig            `toml:"watch"`
 	// Cache is the [cache] table: the local cache of every account.
 	Cache CacheConfig `toml:"cache"`
+	// Rules is the [rules] table: the time zone of rule schedules and when
+	// work item due events fire.
+	Rules RulesConfig `toml:"rules"`
 }
 
 // DefaultMaxRecipients is the most recipients a send may have unless
@@ -263,7 +266,8 @@ func Load(path string) (*Config, error) {
 
 // Parse decodes config TOML, rejecting unknown keys and values of the wrong
 // type, applies defaults and validates the result. Nothing outside data is
-// read: no environment variable can set or change a key.
+// read but the time zone database that checks [rules] timezone: no
+// environment variable can set or change a key.
 //
 // go-toml's strict decoder gates the input first, refusing unknown keys and
 // values of the wrong type that viper alone would accept or change. Only
@@ -472,6 +476,7 @@ func (c *Config) applyDefaults() {
 	c.Policy = c.Policy.WithDefaults()
 	c.Watch.applyDefaults()
 	c.Cache.applyDefaults()
+	c.Rules.applyDefaults()
 	for name, a := range c.Accounts {
 		if a.Username == "" {
 			a.Username = a.Address
@@ -515,6 +520,7 @@ func (c *Config) validate() error {
 	validateSendAllow("policy.send_allow", c.Policy.SendAllow, add)
 	c.Watch.validate(add)
 	c.Cache.validate(add)
+	c.Rules.validate(add)
 	for _, name := range c.AccountNames() {
 		c.validateAccount(name, add)
 	}
