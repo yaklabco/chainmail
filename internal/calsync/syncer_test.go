@@ -16,6 +16,7 @@ import (
 	"github.com/yaklabco/chainmail/internal/calstore"
 	"github.com/yaklabco/chainmail/internal/calstore/fake"
 	"github.com/yaklabco/chainmail/internal/calsync"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 func TestNewStatusIsSyncing(t *testing.T) {
@@ -574,10 +575,25 @@ func TestStatusErrorText(t *testing.T) {
 
 // TestObjectReplaceQuietForPrunedRows checks a CalDAV-style sync, where
 // each changed object comes back whole: overrides the prune deleted come
-// back as new rows in the past and emit nothing, and an override taken out
-// of a series that stays is not a cancellation.
+// back as new rows in the past and emit nothing.
 func TestObjectReplaceQuietForPrunedRows(t *testing.T) {
 	t.Parallel()
+	r, p, _ := objectReplaceSeries(t)
+	r.store.Change("work", p, func(rows []calendar.Event) []calendar.Event {
+		return rows // sent again whole: the pruned override comes back
+	})
+	r.sync(t)
+	if evs := r.events(t); len(evs) != 0 {
+		t.Errorf("events = %+v, want none", evs)
+	}
+}
+
+// objectReplaceSeries stores, on a CalDAV-style store, a weekly series
+// James is invited to with an old moved override (pruned by the first
+// sync) and an upcoming one moved by an hour, and runs that first sync. It
+// returns the rig, the ProviderID and the upcoming override.
+func objectReplaceSeries(t *testing.T) (*rig, string, calendar.Event) {
+	t.Helper()
 	r := newRig(t)
 	r.store = fake.New(fake.Options{ObjectReplace: true, Now: r.clock.Now})
 	r.store.AddCalendar(calendar.Calendar{ID: "work", Name: "Work", Access: calendar.AccessWrite, Primary: true})
@@ -595,10 +611,112 @@ func TestObjectReplaceQuietForPrunedRows(t *testing.T) {
 	soon.End = soon.Start.Add(time.Hour)
 	p := r.store.Add("work", master, old, soon)
 	r.sync(t) // the first sync; the prune deletes the old override
+	return r, p, soon
+}
 
+// TestUpcomingOverrideRemoved checks that taking an upcoming moved
+// override out of a series that stays puts the instance back at the time
+// its master gives, which is an event_changed for that instance.
+func TestUpcomingOverrideRemoved(t *testing.T) {
+	t.Parallel()
+	r, p, soon := objectReplaceSeries(t)
 	r.store.Change("work", p, func(rows []calendar.Event) []calendar.Event {
 		return rows[:2] // drop the upcoming override; the old one is sent again
 	})
+	r.sync(t)
+	want := calendar.InstanceRef(calendar.EventRef(account, "work", p), soon.RecurrenceID)
+	evs := r.events(t)
+	if len(evs) != 1 || evs[0].Kind != watch.KindEventChanged || evs[0].Ref != want {
+		t.Fatalf("events = %+v, want one event_changed for %s", evs, want)
+	}
+	c := evs[0].Calendar
+	if strings.Join(c.Fields, ",") != "start,end" || c.Start != rfc(soon.RecurrenceID) || c.End != rfc(soon.RecurrenceID.Add(time.Hour)) {
+		t.Errorf("change = %+v, want fields start,end at the master's time", c)
+	}
+}
+
+// TestRemovedOverrideRestoresLocation checks an override that changed only
+// the place: removing it reports the location going back.
+func TestRemovedOverrideRestoresLocation(t *testing.T) {
+	t.Parallel()
+	r, p, _ := objectReplaceSeries(t)
+	r.store.Change("work", p, func(rows []calendar.Event) []calendar.Event {
+		rows[2].Start, rows[2].End = rows[2].RecurrenceID, rows[2].RecurrenceID.Add(time.Hour)
+		rows[2].Location = "Room 9"
+		return rows
+	})
+	r.sync(t)
+	n := len(r.events(t))
+	r.store.Change("work", p, func(rows []calendar.Event) []calendar.Event { return rows[:2] })
+	r.sync(t)
+	evs := r.events(t)[n:]
+	if len(evs) != 1 || evs[0].Kind != watch.KindEventChanged || strings.Join(evs[0].Calendar.Fields, ",") != "location" {
+		t.Errorf("events = %+v, want one event_changed of location", evs)
+	}
+}
+
+// TestRemovedCancelledOverrideRestoresTheInstance checks that removing a
+// cancelled override brings the instance back: an event_changed of its
+// status, or an invite when James has still to answer the series.
+func TestRemovedCancelledOverrideRestoresTheInstance(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		ps   calendar.PartStat
+		kind watch.Kind
+	}{
+		{"accepted", calendar.PartStatAccepted, watch.KindEventChanged},
+		{"unanswered", calendar.PartStatNeedsAction, watch.KindInvite},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t)
+			r.store = fake.New(fake.Options{ObjectReplace: true, Now: r.clock.Now})
+			r.store.AddCalendar(calendar.Calendar{ID: "work", Name: "Work", Access: calendar.AccessWrite, Primary: true})
+			r.syncer = calsync.New(calsync.Options{Account: account, Store: r.store, Cache: r.cache, Log: r.log, Self: self, Poll: poll, WindowPast: windowPast, Clock: r.clock})
+			master := invited("s@x", t0.Add(24*time.Hour), tc.ps)
+			master.RRule = "FREQ=WEEKLY"
+			rid := master.Start.AddDate(0, 0, 7)
+			gone := calendar.Event{UID: master.UID, RecurrenceID: rid, Status: calendar.StatusCancelled}
+			p := r.store.Add("work", master, gone)
+			r.sync(t)
+			r.store.Change("work", p, func(rows []calendar.Event) []calendar.Event { return rows[:1] })
+			r.sync(t)
+			want := calendar.InstanceRef(calendar.EventRef(account, "work", p), rid)
+			evs := r.events(t)
+			if len(evs) != 1 || evs[0].Kind != tc.kind || evs[0].Ref != want {
+				t.Fatalf("events = %+v, want one %s for %s", evs, tc.kind, want)
+			}
+			if tc.kind == watch.KindEventChanged && strings.Join(evs[0].Calendar.Fields, ",") != "status" {
+				t.Errorf("fields = %v, want status", evs[0].Calendar.Fields)
+			}
+			if evs[0].Calendar.Start != rfc(rid) {
+				t.Errorf("start = %s, want %s", evs[0].Calendar.Start, rfc(rid))
+			}
+		})
+	}
+}
+
+// TestPastOverrideRemovedQuietly checks that removing an override of an
+// instance that ended before the window stays quiet.
+func TestPastOverrideRemovedQuietly(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.store = fake.New(fake.Options{ObjectReplace: true, Now: r.clock.Now})
+	r.store.AddCalendar(calendar.Calendar{ID: "work", Name: "Work", Access: calendar.AccessWrite, Primary: true})
+	r.syncer = calsync.New(calsync.Options{Account: account, Store: r.store, Cache: r.cache, Log: r.log, Self: self, Poll: poll, WindowPast: windowPast, Clock: r.clock})
+	master := invited("s@x", t0.AddDate(0, 0, -70), calendar.PartStatAccepted)
+	master.RRule = "FREQ=WEEKLY"
+	// Moved from before the window to after it, so the prune keeps it.
+	kept := master
+	kept.RRule = ""
+	kept.RecurrenceID = master.Start.AddDate(0, 0, 7)
+	kept.Start = t0.Add(time.Hour)
+	kept.End = kept.Start.Add(time.Hour)
+	p := r.store.Add("work", master, kept)
+	r.sync(t)
+	r.clock.set(t0.Add(windowPast + 72*time.Hour)) // the moved instance is now past the window too
+	r.store.Change("work", p, func(rows []calendar.Event) []calendar.Event { return rows[:1] })
 	r.sync(t)
 	if evs := r.events(t); len(evs) != 0 {
 		t.Errorf("events = %+v, want none", evs)
