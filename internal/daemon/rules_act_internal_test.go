@@ -163,6 +163,57 @@ func TestActClassifiesFailures(t *testing.T) {
 	}
 }
 
+// TestActSkipsAGoneMessage checks that a NOT_FOUND or STALE_REF about the
+// matched message itself, which another client moved or deleted after the
+// match, ends the message as gone: no failure, and a pending row its
+// guarded action wrote is marked for clearing. A missing destination
+// folder or linked item stays a permanent failure.
+func TestActSkipsAGoneMessage(t *testing.T) {
+	t.Parallel()
+	expunge := func(t *testing.T, g *actRig) {
+		t.Helper()
+		lunch := g.refs["host lunch"]
+		if res := g.f.fakes["host"].Expunge(t.Context(), []ref.Ref{lunch}); res[0].Err != nil {
+			t.Fatal(res[0].Err)
+		}
+	}
+	renumber := func(_ *testing.T, g *actRig) { g.f.fakes["host"].SetUIDValidity("INBOX", 4242) }
+	tests := []struct {
+		name    string
+		actions []rules.Action
+		before  func(*testing.T, *actRig)
+		class   actClass
+		reason  string
+		clear   bool
+	}{
+		{name: "flag, gone", actions: []rules.Action{{Kind: rules.ActFlag}}, before: expunge, class: actGone, reason: api.ReasonStaleRef},
+		{name: "flag, folder renumbered", actions: []rules.Action{{Kind: rules.ActFlag}}, before: renumber, class: actGone, reason: api.ReasonStaleRef},
+		{name: "move, gone", actions: []rules.Action{{Kind: rules.ActMove, Folder: "Archive"}}, before: expunge, class: actGone, reason: api.ReasonStaleRef},
+		{name: "copy, gone", actions: []rules.Action{{Kind: rules.ActCopy, Folder: "Archive"}}, before: expunge, class: actGone, reason: api.ReasonStaleRef, clear: true},
+		{name: "forward, gone", actions: []rules.Action{{Kind: rules.ActForward, To: []string{"you@example.net"}}}, before: expunge, class: actGone, reason: api.ReasonStaleRef, clear: true},
+		{name: "missing folder", actions: []rules.Action{{Kind: rules.ActMove, Folder: "Nowhere"}}, class: actPermanent, reason: api.ReasonNotFound},
+		{name: "missing folder, copy", actions: []rules.Action{{Kind: rules.ActCopy, Folder: "Nowhere"}}, class: actPermanent, reason: api.ReasonNotFound, clear: true},
+		{name: "missing item", actions: []rules.Action{{Kind: rules.ActLinkItem, ItemID: "it_zqxnosuchitem"}}, class: actPermanent, reason: api.ReasonNotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			g := newActRig(t, nil)
+			g.password(t)
+			g.failDial(t, false)
+			rule := g.newRule(t, "host", "gone", func(d *rules.Definition) { d.Actions = tt.actions })
+			row := g.row(t, "host lunch")
+			if tt.before != nil {
+				tt.before(t, g)
+			}
+			res := g.f.s.act(t.Context(), rule, 7, g.acct(t, "host"), row)
+			if res.class != tt.class || res.reason != tt.reason || res.clearPending != tt.clear {
+				t.Errorf("act = %+v, want class %d, %s, clearPending %t", res, tt.class, tt.reason, tt.clear)
+			}
+		})
+	}
+}
+
 // TestActLinksTheThread files a message's thread into an item through
 // the LinkThread path, audited as item.link under client kind rule.
 func TestActLinksTheThread(t *testing.T) {

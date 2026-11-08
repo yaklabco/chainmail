@@ -13,6 +13,7 @@ import (
 	"github.com/yaklabco/chainmail/internal/api"
 	"github.com/yaklabco/chainmail/internal/cache"
 	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/ref"
 	"github.com/yaklabco/chainmail/internal/rules"
 )
@@ -45,6 +46,9 @@ const (
 	// actPermanent: an action failed for good. The message counts as
 	// failed and is not retried on this trigger.
 	actPermanent
+	// actGone: the matched message itself was gone when an action ran, as
+	// when another client moved or deleted it after the match.
+	actGone
 )
 
 // actResult is what act did to one message. It never holds server or
@@ -67,9 +71,9 @@ type actResult struct {
 	// when writing the rule's row there failed right after the copy, ""
 	// otherwise. The runner owes that row until it is saved.
 	unguardedCopy string
-	// clearPending says a permanent failure left a pending row that this
-	// call wrote before its guarded action ran. The runner drops it, so a
-	// later run does not take the action as done.
+	// clearPending says a permanent failure, or a gone message, left a
+	// pending row that this call wrote before its guarded action ran. The
+	// runner drops it, so a later run does not take the action as done.
 	clearPending bool
 }
 
@@ -80,6 +84,36 @@ type actionStep struct {
 	newRef string
 	reason string
 	hint   string
+	// err is the failure as the daemon saw it, for runAction to tell what
+	// it was about. It never leaves the daemon.
+	err error
+}
+
+// messageGone reports whether err, which ended an action of kind, says the
+// matched message itself is gone: STALE_REF always does, as it is about
+// the ref. NOT_FOUND does when nothing else the action names can be
+// missing: a missing destination or role folder is a FolderNotFoundError
+// and a missing item items.ErrNotFound, and a label, folder or role folder
+// that an action names can be missing in ways the store does not type, so
+// a plain NOT_FOUND from those actions stays a failure.
+func messageGone(kind rules.ActionKind, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, mailstore.ErrStaleRef):
+		return true
+	case !errors.Is(err, mailstore.ErrNotFound):
+		return false
+	}
+	if _, ok := errors.AsType[*mailstore.FolderNotFoundError](err); ok {
+		return false
+	}
+	switch kind {
+	case rules.ActFlag, rules.ActUnflag, rules.ActRead, rules.ActUnread, rules.ActForward, rules.ActLinkItem:
+		return true
+	default:
+		return false
+	}
 }
 
 // classifyReason is the class of an action that ended with reason, ""
@@ -162,9 +196,9 @@ func (s *Server) actOn(ctx context.Context, rule rules.Rule, runID int64, acct c
 			}
 		}
 		st := s.runAction(ctx, rule.ID, a, acct, cur, key, targets)
-		if st.class == actTransient || st.class == actPermanent {
+		if st.class == actTransient || st.class == actPermanent || st.class == actGone {
 			res.class, res.reason, res.hint = st.class, st.reason, st.hint
-			res.clearPending = st.class == actPermanent && pendingWritten && !guardDone
+			res.clearPending = st.class != actTransient && pendingWritten && !guardDone
 			return res
 		}
 		if a.Kind.Guarded() {
@@ -225,8 +259,19 @@ func replaySkip(a rules.Action, prev rules.AppliedRow, now time.Time) (string, b
 }
 
 // runAction runs one action on the message at cur through the daemon's
-// own organize, items or compose path, within ruleActionTimeout.
+// own organize, items or compose path, within ruleActionTimeout. A
+// permanent failure that says the message itself is gone (messageGone)
+// is actGone instead.
 func (s *Server) runAction(ctx context.Context, ruleID string, a rules.Action, acct config.ResolvedAccount, cur, key string, targets []string) actionStep {
+	st := s.doAction(ctx, ruleID, a, acct, cur, key, targets)
+	if st.class == actPermanent && messageGone(a.Kind, st.err) {
+		st.class = actGone
+	}
+	return st
+}
+
+// doAction is runAction before a gone message is told apart.
+func (s *Server) doAction(ctx context.Context, ruleID string, a rules.Action, acct config.ResolvedAccount, cur, key string, targets []string) actionStep {
 	ctx, cancel := context.WithTimeout(ctx, ruleActionTimeout)
 	defer cancel()
 	refs := []string{cur}
@@ -266,15 +311,15 @@ func (s *Server) runAction(ctx context.Context, ruleID string, a rules.Action, a
 // keeps its validated folder= target, as socket callers' rows do.
 func (s *Server) organizeStep(ctx context.Context, c batchCall, targets []string) actionStep {
 	c.targets = slices.Concat(c.targets, targets)
-	outs, err := (&organizeService{s: s}).batchAs(ctx, ruleCaller(), c)
+	outs, errs, err := (&organizeService{s: s}).batchErrsAs(ctx, ruleCaller(), c)
 	if err != nil {
 		return stepOf(err)
 	}
-	if len(outs) != 1 {
+	if len(outs) != 1 || len(errs) != 1 {
 		return actionStep{class: actTransient, reason: api.ReasonInternal}
 	}
 	if e := outs[0].GetError(); e != nil {
-		return actionStep{class: classifyReason(e.GetReason()), reason: e.GetReason(), hint: e.GetHint()}
+		return actionStep{class: classifyReason(e.GetReason()), reason: e.GetReason(), hint: e.GetHint(), err: errs[0]}
 	}
 	return actionStep{newRef: outs[0].GetNewRef()}
 }
@@ -311,5 +356,5 @@ func stepOf(err error) actionStep {
 		return actionStep{}
 	}
 	d := errDetail(err)
-	return actionStep{class: classifyReason(d.GetReason()), reason: d.GetReason(), hint: d.GetHint()}
+	return actionStep{class: classifyReason(d.GetReason()), reason: d.GetReason(), hint: d.GetHint(), err: err}
 }

@@ -661,17 +661,23 @@ func (r *ruleRunner) apply(ctx context.Context, rule rules.Rule, run *rules.Run,
 			return false, err
 		}
 		return relocates(rule), nil
-	case actPermanent:
+	case actPermanent, actGone:
 		r.oweCopyGuard(rule.ID, run.ID, res)
-		run.Failed++
-		if run.Reason == "" {
-			run.Reason, run.Hint = res.reason, res.hint
+		if res.class == actGone {
+			// Another client moved or deleted the message since the match:
+			// nothing failed, and the rule is not charged for it.
+			run.Skipped++
+		} else {
+			run.Failed++
+			if run.Reason == "" {
+				run.Reason, run.Hint = res.reason, res.hint
+			}
 		}
 		if res.clearPending {
 			// A pending row left behind would make a replay take the
 			// refused action as done, so a drop that fails is owed.
 			if err := rules.ClearPending(ctx, r.s.opts.StateDB, rule.ID, r.acct.Name, key); err != nil {
-				r.s.opts.Logger.WarnContext(ctx, "a rule action refused for good left a pending act-once row; the runner owes its drop",
+				r.s.opts.Logger.WarnContext(ctx, "a rule action that did not run left a pending act-once row; the runner owes its drop",
 					"rule", rule.ID, "account", r.acct.Name, "run", run.ID, "err", err)
 				r.owe(owedWrite{kind: owedClear, ruleID: rule.ID, key: key, runID: run.ID})
 			}

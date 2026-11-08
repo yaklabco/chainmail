@@ -559,6 +559,51 @@ func TestRulePermanentFailureCountsAndDisables(t *testing.T) {
 	}
 }
 
+// TestRuleSkipsAMessageGoneSinceTheMatch checks that a message another
+// client deleted after the cache matched it counts as skipped: the run
+// has no failure, the rule stays enabled, which an all_failed run would
+// not leave it, and no act-once row is written. Both triggers are checked.
+func TestRuleSkipsAMessageGoneSinceTheMatch(t *testing.T) {
+	t.Parallel()
+	for _, manual := range []bool{false, true} {
+		t.Run(map[bool]string{false: "new", true: "manual"}[manual], func(t *testing.T) {
+			t.Parallel()
+			g := newRunnerRig(t, "host", nil)
+			rule := g.newRule(t, "host", "flag-lunch", func(d *rules.Definition) { d.Query = "subject:lunch" })
+			lunch := g.refs["host lunch"]
+			if res := g.fk.Expunge(t.Context(), []ref.Ref{lunch}); res[0].Err != nil {
+				t.Fatal(res[0].Err)
+			}
+			var run rules.Run
+			if manual {
+				var err error
+				if run, err = g.r.runRule(t.Context(), rule, rules.TriggerManual, 0); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				last := g.publish(t, lunch)
+				if err := g.step(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+				if got := g.acked(t); got != last {
+					t.Errorf("acked %d, want %d", got, last)
+				}
+				run = g.lastRun(t, rule.ID)
+			}
+			if run.Outcome != rules.OutcomeOK || run.Matched != 1 || run.Skipped != 1 || run.Failed != 0 || run.Applied != 0 {
+				t.Errorf("run = %+v, want ok, 1 matched, 1 skipped", run)
+			}
+			if _, ok := g.appliedRow(t, rule.ID, "host", keyOf(false, lunch)); ok {
+				t.Error("the gone message has an act-once row")
+			}
+			now, err := g.f.s.rules.Get(t.Context(), rule.ID)
+			if err != nil || !now.Enabled || now.DisabledReason != "" {
+				t.Errorf("rule = enabled %t, reason %q, %v, want enabled", now.Enabled, now.DisabledReason, err)
+			}
+		})
+	}
+}
+
 // TestRuleHeldForwardCountsAsHeld checks spec 5.5 and amendment 9: a
 // forward the policy holds as a draft counts as held, not applied, and its
 // act-once row has outcome held.

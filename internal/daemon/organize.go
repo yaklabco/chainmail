@@ -258,11 +258,21 @@ func (o *organizeService) batch(ctx context.Context, h http.Header, c batchCall)
 // fails, fails only its own outcome. A call refused for its arguments
 // still records one row per account, unless it has too few or too many
 // refs to attribute. The caller sets the deadline. Client calls come
-// through batch; the daemon's own, such as a rule's, call it directly.
+// through batch; the daemon's own call it directly, or batchErrsAs.
 func (o *organizeService) batchAs(ctx context.Context, who caller, c batchCall) ([]*chainmailv1.RefOutcome, error) {
+	outs, _, err := o.batchErrsAs(ctx, who, c)
+	return outs, err
+}
+
+// batchErrsAs is batchAs that also returns each ref's own failure as the
+// store reported it, nil for a ref that succeeded. A rule reads it to tell
+// what a failure was about: the message, or the call's folder. The errors
+// are the daemon's to inspect and never reach a client, whose outcomes
+// carry fixed text.
+func (o *organizeService) batchErrsAs(ctx context.Context, who caller, c batchCall) ([]*chainmailv1.RefOutcome, []error, error) {
 	if err := checkRefCount(c); err != nil {
 		entry := audit.Entry{Action: c.action, Targets: append([]string{tally("refs", len(c.refs))}, c.targets...)}
-		return nil, o.s.record(ctx, who, entry, err)
+		return nil, nil, o.s.record(ctx, who, entry, err)
 	}
 	outs, errs, groups := groupRefs(c)
 	if c.check != nil {
@@ -271,16 +281,16 @@ func (o *organizeService) batchAs(ctx context.Context, who caller, c batchCall) 
 				errs[i] = cmp.Or(errs[i], err)
 			}
 			if aerr := o.recordBatch(ctx, who, c, decisionNone, groups, errs); aerr != nil {
-				return nil, aerr
+				return nil, nil, aerr
 			}
-			return nil, toConnectError(err)
+			return nil, nil, toConnectError(err)
 		}
 	}
 	o.runBatch(ctx, c, outs, errs, groups)
 	if err := o.recordBatch(ctx, who, c, decisionNone, groups, errs); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return outs, nil
+	return outs, errs, nil
 }
 
 // refuseBatch records a batch call the policy refuses, and returns the
