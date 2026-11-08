@@ -174,6 +174,42 @@ func (s *Store) FinishRun(ctx context.Context, r Run) (bool, error) {
 	return disabled, nil
 }
 
+// PlanRound settles the next run of rule ruleID after one scheduled round,
+// runs being the round's finished runs, one per account. The scheduler
+// runs a due rule on all its accounts at once, and each run's FinishRun
+// plans next_run_at from its own outcome alone, so the last run to finish
+// would decide. PlanRound lowers next_run_at to the earliest plan any run
+// of the round needs, as nextScheduledRun computes it, so a five-minute
+// retry one account needs (contract amendment 7) survives whatever order
+// the round finished in. It never moves next_run_at later, and plans
+// nothing for an unknown, deleted or disabled rule or one with no next
+// run. It changes no revision and writes no event.
+func (s *Store) PlanRound(ctx context.Context, ruleID string, runs []Run) error {
+	return s.write(ctx, func(tx *sql.Tx) ([]watch.Event, error) {
+		cur, err := findRuleByID(ctx, tx, ruleID)
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !cur.DeletedAt.IsZero() || !cur.Enabled || cur.NextRunAt.IsZero() {
+			return nil, nil
+		}
+		earliest := cur.NextRunAt
+		for _, r := range runs {
+			if next := s.nextScheduledRun(cur, r); !next.IsZero() && next.Before(earliest) {
+				earliest = next
+			}
+		}
+		if earliest.Equal(cur.NextRunAt) {
+			return nil, nil
+		}
+		cur.NextRunAt = earliest
+		return nil, saveRule(ctx, tx, cur)
+	})
+}
+
 // nextScheduledRun is the next_run_at a finished scheduled run r leaves on
 // rule cur: none for a deleted rule, FinishedAt plus cacheRetryAfter when
 // the cache could not answer for a reason other than cache_disabled, and

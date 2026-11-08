@@ -178,16 +178,19 @@ func (s *Server) ruleSchedulerPass(ctx context.Context, warned schedWarned) time
 }
 
 // runScheduled runs one due rule on each account it covers, within
-// runRuleTimeout, through each account's runner. Each run's finish sets the
-// rule's next run. Failures are logged by reason, never with rule text, at
-// the level warned gives, and a run that works forgets the rule's warning.
+// runRuleTimeout, through each account's runner. Each run's finish plans
+// the rule's next run from its own outcome, and PlanRound then keeps the
+// earliest plan of the round, so a retry one account needs survives an
+// account that finishes later. Failures are logged by reason, never with
+// rule text, at the level warned gives, and a run that works forgets the
+// rule's warning.
 func (s *Server) runScheduled(ctx context.Context, rule rules.Rule, warned schedWarned) {
-	ctx, cancel := context.WithTimeout(ctx, runRuleTimeout)
+	roundCtx, cancel := context.WithTimeout(ctx, runRuleTimeout)
 	defer cancel()
 	accts, err := s.ruleAccounts(rule.Definition)
 	switch {
 	case err != nil:
-		if ctx.Err() == nil {
+		if roundCtx.Err() == nil {
 			s.opts.Logger.Log(ctx, warned.level(rule), "a scheduled rule's accounts did not resolve", "rule", rule.ID, "reason", apiReason(err))
 		}
 		return
@@ -195,11 +198,19 @@ func (s *Server) runScheduled(ctx context.Context, rule rules.Rule, warned sched
 		s.opts.Logger.Log(ctx, warned.level(rule), "a scheduled rule covers no account it can run on", "rule", rule.ID)
 		return
 	}
-	_, err = s.runOnAccounts(ctx, rule, accts, rules.TriggerSchedule, 0)
+	runs, err := s.runOnAccounts(roundCtx, rule, accts, rules.TriggerSchedule, 0)
+	// A round of one run leaves that run's plan. Runs written before
+	// another account ran out of time still count, so their plans are
+	// kept with the scheduler's context, not the round's.
+	if len(runs) > 1 {
+		if perr := s.rules.PlanRound(ctx, rule.ID, runs); perr != nil {
+			err = cmp.Or(err, s.rulesErr(perr))
+		}
+	}
 	switch {
 	case err == nil:
 		delete(warned, rule.ID)
-	case ctx.Err() == nil:
+	case roundCtx.Err() == nil:
 		s.opts.Logger.Log(ctx, warned.level(rule), "a scheduled rule run failed", "rule", rule.ID, "reason", apiReason(err))
 	}
 }

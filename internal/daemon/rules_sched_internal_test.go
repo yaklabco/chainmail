@@ -369,3 +369,78 @@ func TestRuleSchedulerWarnsOncePerRevision(t *testing.T) {
 		t.Errorf("after a new revision: %d warnings, want 2", w)
 	}
 }
+
+// A scheduled round whose accounts end differently leaves the earliest
+// next run any of them needs, whichever finishes last: the stale account's
+// five-minute retry (contract amendment 7) beats the ready account's hour.
+// Holding one account's turn makes the other finish first.
+func TestRuleSchedulerKeepsARoundsRetry(t *testing.T) {
+	t.Parallel()
+	for _, last := range []string{"ready", "stale"} {
+		t.Run(last+" finishes last", func(t *testing.T) {
+			t.Parallel()
+			g := newRunnerRig(t, "host", nil)
+			gmail := g.f.s.newRuleRunner(g.acct(t, "gmail"), g.f.accounts["gmail"])
+			gmail.ca = newFakeProgress()
+			g.f.s.ruleRunners = map[string]*ruleRunner{"host": g.r, "gmail": gmail}
+			g.f.ageSync(t, "host", "Archive", time.Hour)
+			held := gmail // the ready account
+			if last == "stale" {
+				held = g.r
+			}
+			rule := g.newRule(t, "host", "hourly", func(d *rules.Definition) {
+				d.Accounts, d.OnNew = []string{"host", "gmail"}, false
+				d.Schedule = rules.Schedule{Kind: rules.ScheduleEvery, Every: time.Hour}
+			})
+
+			held.turn <- struct{}{}
+			var wg sync.WaitGroup
+			wg.Go(func() { g.f.s.runScheduled(t.Context(), rule, schedWarned{}) })
+			waitFinishedRuns(t, g.f.s, rule.ID, 1)
+			<-held.turn
+			wg.Wait()
+
+			runs := waitFinishedRuns(t, g.f.s, rule.ID, 2)
+			outcomes := map[string]rules.Outcome{}
+			for _, r := range runs {
+				outcomes[r.Account] = r.Outcome
+			}
+			if outcomes["host"] != rules.OutcomeCacheNotReady || outcomes["gmail"] != rules.OutcomeOK {
+				t.Fatalf("outcomes = %v, want host cache_not_ready and gmail ok", outcomes)
+			}
+			got, err := g.f.s.rules.Get(t.Context(), rule.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := routeNow.Add(5 * time.Minute); !got.NextRunAt.Equal(want) {
+				t.Errorf("next run %v, want the retry at %v", got.NextRunAt, want)
+			}
+		})
+	}
+}
+
+// waitFinishedRuns waits until rule ruleID has n finished runs, and
+// returns its runs.
+func waitFinishedRuns(t *testing.T, s *Server, ruleID string, n int) []rules.Run {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		runs, _, err := s.rules.ListRuns(t.Context(), rules.RunQuery{RuleID: ruleID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		finished := 0
+		for _, r := range runs {
+			if r.Outcome != rules.OutcomeInterrupted {
+				finished++
+			}
+		}
+		if finished >= n {
+			return runs
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of %d runs finished within 5s", finished, n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
