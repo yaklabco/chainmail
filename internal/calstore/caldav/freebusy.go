@@ -177,7 +177,10 @@ func parseFreeBusy(data string, from, to time.Time) ([]calendar.BusyBlock, error
 		switch prop := strings.ToUpper(strings.TrimSpace(params[0])); {
 		case prop == "BEGIN":
 			comp := strings.ToUpper(strings.TrimSpace(value))
-			if (len(stack) == 0) != (comp == "VCALENDAR") || len(stack) >= maxFreeBusyDepth {
+			// VFREEBUSY holds properties only (RFC 5545 3.6.4): a component
+			// inside it would hide busy periods from the depth check below.
+			inFreeBusy := len(stack) > 0 && stack[len(stack)-1] == "VFREEBUSY"
+			if (len(stack) == 0) != (comp == "VCALENDAR") || len(stack) >= maxFreeBusyDepth || inFreeBusy {
 				return nil, errFreeBusyData
 			}
 			stack = append(stack, comp)

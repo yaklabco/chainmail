@@ -128,6 +128,8 @@ func TestFreeBusyNeedsACompleteVFreeBusy(t *testing.T) {
 		"nocolon@example.com":   head + "BEGIN:VFREEBUSY\r\ngarbage\r\nEND:VFREEBUSY\r\n" + tail,
 		"twocals@example.com":   head + fb + tail + head + fb + tail,
 		"deep@example.com":      head + strings.Repeat("BEGIN:X-A\r\n", 100) + strings.Repeat("END:X-A\r\n", 100) + fb + tail,
+		"innerfb@example.com":   head + "BEGIN:VFREEBUSY\r\nBEGIN:VFREEBUSY\r\nFREEBUSY:20261110T090000Z/20261110T100000Z\r\nEND:VFREEBUSY\r\nEND:VFREEBUSY\r\n" + tail,
+		"innerx@example.com":    head + "BEGIN:VFREEBUSY\r\nBEGIN:X-WRAP\r\nFREEBUSY:20261110T090000Z/20261110T100000Z\r\nEND:X-WRAP\r\nEND:VFREEBUSY\r\n" + tail,
 	}
 	d := newDAVServer(t)
 	principalRoutes(d)

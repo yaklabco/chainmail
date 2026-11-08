@@ -369,6 +369,11 @@ func TestSyncResourceFailuresFailTheSync(t *testing.T) {
 			`<d:propstat><d:prop><d:getetag>"b2"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>` +
 			`<d:propstat><d:prop><c:calendar-data/></d:prop><d:status>HTTP/1.1 500 Internal Server Error</d:status></d:propstat></d:response>`}, calstore.ErrUnavailable},
 		{"multiget member missing", []string{okA, okB}, nil, []string{dataA}, calstore.ErrUnavailable},
+		{"multiget etag propstat 403", []string{okA, okB}, nil, []string{dataA, `<d:response><d:href>/cal/b.ics</d:href>` +
+			`<d:propstat><d:prop><c:calendar-data>` + xmlText(singleICS) + `</c:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>` +
+			`<d:propstat><d:prop><d:getetag/></d:prop><d:status>HTTP/1.1 403 Forbidden</d:status></d:propstat></d:response>`}, calstore.ErrAuth},
+		{"multiget without etag", []string{okA, okB}, nil, []string{dataA, resp("/cal/b.ics", `<c:calendar-data>`+xmlText(singleICS)+`</c:calendar-data>`)}, calstore.ErrUnavailable},
+		{"multiget empty etag", []string{okA, okB}, nil, []string{dataA, resp("/cal/b.ics", `<d:getetag></d:getetag><c:calendar-data>`+xmlText(singleICS)+`</c:calendar-data>`)}, calstore.ErrUnavailable},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

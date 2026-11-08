@@ -440,10 +440,12 @@ func (s *Store) multigetBatch(ctx context.Context, coll string, batch []string) 
 		if statusCode(r.Status)/100 != 2 || p.CalendarData == nil {
 			return nil, nil, r.failure("calendar data")
 		}
-		etag := ""
-		if p.ETag != nil {
-			etag = normalizeETag(*p.ETag)
+		// Without its etag an object cannot be replaced conditionally later,
+		// so a missing, failed or empty etag fails the sync like missing data.
+		if p.ETag == nil || normalizeETag(*p.ETag) == "" {
+			return nil, nil, r.failure("etag")
 		}
+		etag := normalizeETag(*p.ETag)
 		objs = append(objs, &storedObject{href: href, etag: etag, raw: []byte(*p.CalendarData)})
 	}
 	// Only an explicit 404 or 410 is a missing object. RFC 4791 section
