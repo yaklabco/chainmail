@@ -126,3 +126,53 @@ func TestRunRetryStopsAtTheDueTime(t *testing.T) {
 		t.Errorf("Run slept %v, want 500ms until 08:00", w.d)
 	}
 }
+
+// Run measures each sleep from the time its scan ends, not the time it
+// began, so a slow scan does not push the wake past its deadline.
+func TestRunSleepCountsTheScanTime(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 7, 59, 59, 500_000_000, time.UTC)
+	r := newDueRig(t, start, dueSettings)
+	r.create(t, r.plain, items.NewItem{Title: "file taxes", DueDate: "2026-11-10"})
+	r.checker.jitter = func() float64 { return 0.5 }
+	r.exec(t, "ALTER TABLE item_due_sent RENAME TO item_due_sent_away")
+	r.clock.setStep(400 * time.Millisecond) // the scan ends at 07:59:59.900
+	startDueRun(t, r)
+
+	if w := r.clock.next(t); w.d != 100*time.Millisecond {
+		t.Errorf("Run slept %v, want 100ms from the scan's end until 08:00", w.d)
+	}
+	if got, want := r.checker.NextWake(), time.Date(2026, 11, 10, 8, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("NextWake = %v, want %v", got, want)
+	}
+}
+
+// A scan that ends after its wake time is followed by another at once,
+// without a sleep.
+func TestRunScansAgainAtOnceWhenTheScanOutlastsTheWake(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 7, 59, 59, 500_000_000, time.UTC)
+	r := newDueRig(t, start, dueSettings)
+	r.create(t, r.plain, items.NewItem{Title: "file taxes", DueDate: "2026-11-10"})
+	var logs bytes.Buffer
+	r.checker.SetLogger(slog.New(slog.NewTextHandler(&logs, nil)))
+	r.checker.jitter = func() float64 { return 0.5 }
+	r.exec(t, "ALTER TABLE item_due_sent RENAME TO item_due_sent_away")
+	r.clock.setStep(600 * time.Millisecond) // each scan outlasts 08:00 or its retry
+	stop := startDueRun(t, r)
+
+	// The first scan fails at 07:59:59.500 and ends at 08:00:00.100, past
+	// its 08:00 wake, so the second scans at 08:00:00.100. It fails too and
+	// plans its retry 2s on, at 08:00:02.100, and ends at 08:00:00.700.
+	w := r.clock.next(t)
+	if w.d != 1400*time.Millisecond {
+		t.Errorf("Run slept %v, want 1.4s after the second scan", w.d)
+	}
+	if got, want := r.checker.NextWake(), time.Date(2026, 11, 10, 8, 0, 2, 100_000_000, time.UTC); !got.Equal(want) {
+		t.Errorf("NextWake = %v, want %v", got, want)
+	}
+	stop()
+	if got := strings.Count(logs.String(), "checking item due dates failed"); got != 2 {
+		t.Errorf("logged %d failures before the first sleep, want 2:\n%s", got, logs.String())
+	}
+}

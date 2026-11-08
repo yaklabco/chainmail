@@ -27,11 +27,13 @@ type dueWait struct {
 	ch chan time.Time
 }
 
-// dueClock is a watch.Clock whose time moves only when a test sets it. Each
-// After call is handed to the test through waits instead of a timer.
+// dueClock is a watch.Clock whose time moves only when a test sets it, or
+// by step after each Now call when step is set. Each After call is handed to
+// the test through waits instead of a timer.
 type dueClock struct {
 	mu    sync.Mutex
 	now   time.Time
+	step  time.Duration
 	waits chan dueWait
 }
 
@@ -42,7 +44,17 @@ func newDueClock(now time.Time) *dueClock {
 func (c *dueClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.now
+	now := c.now
+	c.now = c.now.Add(c.step)
+	return now
+}
+
+// setStep makes each later Now call move the clock on by step, so the time
+// passes while Run scans.
+func (c *dueClock) setStep(step time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.step = step
 }
 
 func (c *dueClock) After(d time.Duration) <-chan time.Time {

@@ -227,11 +227,14 @@ func dueStagesBefore(k watch.Kind) []watch.Kind {
 // Run scans at once, then at each NextDueWake, until ctx ends. clock gives
 // the time of every scan and every wait. A scan that fails is logged and
 // tried again after watch.Backoff, which grows with each failure in a row,
-// or at the next due time when that comes first.
+// or at the next due time when that comes first. Each wait runs from the
+// time its scan ended, so a slow scan never pushes a wake past its
+// deadline, and a scan that ends after the deadline is followed by another
+// at once.
 func (d *DueChecker) Run(ctx context.Context, clock watch.Clock) {
 	failures := 0
-	for {
-		now := clock.Now()
+	now := clock.Now()
+	for ctx.Err() == nil {
 		wake := NextDueWake(now, d.settings)
 		if _, err := d.scan(ctx, now); err != nil {
 			if ctx.Err() != nil {
@@ -246,11 +249,17 @@ func (d *DueChecker) Run(ctx context.Context, clock watch.Clock) {
 			failures = 0
 		}
 		d.setNext(wake)
+		now = clock.Now()
+		wait := wake.Sub(now)
+		if wait <= 0 {
+			continue // the scan outlasted its wake; scan again now
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-clock.After(wake.Sub(now)):
+		case <-clock.After(wait):
 		}
+		now = clock.Now()
 	}
 }
 
