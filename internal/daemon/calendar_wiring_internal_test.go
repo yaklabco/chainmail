@@ -321,3 +321,27 @@ func TestEventToProtoCalendarKinds(t *testing.T) {
 		t.Errorf("unset payload fields are set: %v", c)
 	}
 }
+
+// TestCacheWorkersFindInvitesOnceCalendarOpens checks that the cache
+// workers get the invite hook once calendar.db is open, and none before.
+func TestCacheWorkersFindInvitesOnceCalendarOpens(t *testing.T) {
+	t.Parallel()
+	newStore, _, _ := calendarStores()
+	dir := filepath.Join(t.TempDir(), "cache")
+	s, _ := newTestServerOptions(t, calendarConfig, Options{NewCalendarStore: newStore, CacheDir: dir, DisableCache: true})
+	acct, err := s.opts.Config.Account("gm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.cacheAccountOptions(acct).OnInvites != nil {
+		t.Error("OnInvites is set before calendar.db opens")
+	}
+	s.openCalendar(t.Context())
+	defer s.closeCalendar()
+	if s.cacheAccountOptions(acct).OnInvites == nil {
+		t.Error("OnInvites is nil with calendar.db open")
+	}
+	s.pokeCalendar("gm")      // a syncer: queued, never blocks
+	s.pokeCalendar("host")    // no store, no syncer: nothing to do
+	s.pokeCalendar("missing") // not configured: nothing to do
+}

@@ -276,3 +276,12 @@ func calendarError(account string, err error) error {
 	}
 	return err
 }
+
+// pokeCalendar asks account's calendar syncer for a cycle soon. An account
+// with no syncer, or no such account, is nothing to do. The calendars map is
+// built before any cache worker runs and never changes after.
+func (s *Server) pokeCalendar(account string) {
+	if ca := s.calendars[account]; ca != nil && ca.syncer != nil {
+		ca.syncer.Poke()
+	}
+}
