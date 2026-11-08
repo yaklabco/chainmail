@@ -277,8 +277,11 @@ func (s *Server) cacheAccountOptions(acct config.ResolvedAccount) cache.AccountO
 		OnError: s.noteCacheErr,
 		// Invite detection needs calendar.db, which Serve opens before the
 		// cache workers start; without it calendarInviteHook returns nil
-		// and the worker reads no calendar part.
-		OnInvites: s.calendarInviteHook(s.calcache, s.pokeCalendar),
+		// and the worker reads no calendar part. The parts its bounded
+		// step leaves unread are queued in calendar.db for the invite
+		// retry loop.
+		OnInvites:         s.calendarInviteHook(s.calcache, s.pokeCalendar),
+		OnDeferredInvites: s.calendarDeferredInvites(s.calcache, s.pokeCalendar),
 	}
 }
 

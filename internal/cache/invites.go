@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -60,49 +61,80 @@ func inviteOf(h mailstore.Header) (c inviteCandidate, ok, tooLarge bool) {
 	return inviteCandidate{}, false, tooLarge
 }
 
-// errInviteTooLarge is a part whose decoded bytes run past
+// ErrInviteTooLarge is a part whose decoded bytes run past
 // calendar.MaxICSBytes.
-var errInviteTooLarge = errors.New("invite part over the size limit")
+var ErrInviteTooLarge = errors.New("invite part over the size limit")
+
+// errInviteNotOurs is a deferred part ReadInvite was handed for a message
+// that is not one of its account's. It is not found, for this account.
+var errInviteNotOurs = fmt.Errorf("%w: the invite part is not this account's", mailstore.ErrNotFound)
+
+// InviteCandidate is a calendar part of a new message that the builder's
+// invite step did not read: past the per-segment cap, after the step's
+// deadline (a busy pool included), or after a stream failure that may pass.
+// The builder hands it to OnDeferredInvites, and ReadInvite reads it later.
+// Part's method and charset come from the message and are untrusted.
+type InviteCandidate struct {
+	Account    string
+	MessageRef string
+	Part       mailstore.CalendarPart
+}
+
+// inviteGone reports whether a part could not be read because its message
+// or folder is gone, which no later read changes.
+func inviteGone(err error) bool {
+	return errors.Is(err, mailstore.ErrNotFound) || errors.Is(err, mailstore.ErrStaleRef)
+}
 
 // readInvites reads each candidate's part and hands the invites read to
 // OnInvites, in candidate order, with no lock held and outside any cache.db
 // transaction. tooLarge counts the messages whose invite parts the header
-// fetch found over the limit. A part that cannot be read is logged by
-// reason code and skipped: invite detection never fails a build step. It
-// does nothing without OnInvites.
+// fetch found over the limit. Invite detection never fails a build step,
+// and it does nothing without OnInvites.
 //
-// Invite work is optional, so it is bounded: the reads of one segment
-// share a deadline of inviteTimeout, and at most inviteCap parts are read.
-// A part the cap or the deadline leaves unread is skipped and counted in a
-// log line; it is never read again, since the segment is acknowledged once
-// apply returns.
+// Invite work is optional, so the step is bounded: the reads of one
+// segment share a deadline of inviteTimeout, and at most inviteCap parts
+// are read. No part is lost to those bounds: every part the cap or the
+// deadline leaves unread, and every part whose read failed with an error
+// that may pass, goes to OnDeferredInvites, which queues it for a later
+// read with ReadInvite. A part over the limit, or whose message is gone,
+// is dropped and counted. Without OnDeferredInvites, the parts it would
+// get are skipped and counted in a log line.
 func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooLarge int) {
 	if a.o.OnInvites == nil {
 		return
 	}
+	var deferred []inviteCandidate
 	if over := len(cands) - a.inviteCap; over > 0 {
+		deferred = append(deferred, cands[a.inviteCap:]...)
 		cands = cands[:a.inviteCap]
-		a.logger.InfoContext(ctx, "cache skipped invite parts over the per-segment cap", "count", over, "cap", a.inviteCap)
+		a.logger.InfoContext(ctx, a.deferText("cache skipped invite parts over the per-segment cap",
+			"cache deferred invite parts over the per-segment cap"), "count", over, "cap", a.inviteCap)
 	}
 	readCtx, cancel := context.WithTimeout(ctx, a.inviteTimeout)
 	defer cancel()
 	var (
-		found    []FoundInvite
-		failed   int
-		timedOut int
+		found                  []FoundInvite
+		failed, gone, timedOut int
 	)
 	for i, c := range cands {
 		part, data, err := a.readInvite(readCtx, c)
 		switch {
 		case ctx.Err() != nil:
+			// The builder is stopping: the segment is not acknowledged, so
+			// its invites are read again on the next start.
 			return
 		case readCtx.Err() != nil && err != nil:
 			// The step's deadline passed: this part and the rest go unread.
 			timedOut = len(cands) - i
-		case errors.Is(err, errInviteTooLarge):
+			deferred = append(deferred, cands[i:]...)
+		case errors.Is(err, ErrInviteTooLarge):
 			tooLarge++
+		case inviteGone(err):
+			gone++
 		case err != nil:
 			failed++
+			deferred = append(deferred, c)
 			a.logger.InfoContext(ctx, "cache could not read an invite part", "folder", c.ref.Folder, "reason", reasonCode(err))
 		default:
 			found = append(found, FoundInvite{Account: a.name, MessageRef: c.ref.String(), Part: part, Data: data})
@@ -114,29 +146,74 @@ func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooL
 	if tooLarge > 0 {
 		a.logger.InfoContext(ctx, "cache skipped invite parts over the size limit", "count", tooLarge)
 	}
+	if gone > 0 {
+		a.logger.InfoContext(ctx, "cache skipped invite parts whose messages are gone", "count", gone)
+	}
 	if failed > 0 {
-		a.logger.WarnContext(ctx, "cache skipped invite parts it could not read", "count", failed)
+		a.logger.WarnContext(ctx, a.deferText("cache skipped invite parts it could not read",
+			"cache deferred invite parts it could not read"), "count", failed)
 	}
 	if timedOut > 0 {
-		a.logger.WarnContext(ctx, "cache ran out of time for invite parts and skipped them", "count", timedOut, "timeout", a.inviteTimeout)
+		a.logger.WarnContext(ctx, a.deferText("cache ran out of time for invite parts and skipped them",
+			"cache ran out of time for invite parts and deferred them"), "count", timedOut, "timeout", a.inviteTimeout)
 	}
 	if len(found) > 0 {
 		a.o.OnInvites(ctx, found)
 	}
+	if len(deferred) > 0 && a.o.OnDeferredInvites != nil {
+		out := make([]InviteCandidate, len(deferred))
+		for i, c := range deferred {
+			out[i] = InviteCandidate{Account: a.name, MessageRef: c.ref.String(), Part: c.part}
+		}
+		a.o.OnDeferredInvites(ctx, out)
+	}
 }
 
-// readInvite streams one candidate's part on a background context,
-// retrying while the pool is busy until ctx ends, reading at most
-// calendar.MaxICSBytes + 1 bytes, and counts the bytes read against the
-// day's budget. A store that can (mailstore.BackgroundPartStreamer) opens
-// the part as background work, which never queues beside foreground
-// requests for a connection; another store's StreamPart is used as it is.
-// A part whose decoded bytes pass the limit returns errInviteTooLarge. The
-// charset of the part's info fills in one the header lacked, in the part
-// returned.
+// deferText is skipped without OnDeferredInvites and deferred with it.
+func (a *Account) deferText(skipped, deferred string) string {
+	if a.o.OnDeferredInvites == nil {
+		return skipped
+	}
+	return deferred
+}
+
+// ReadInvite reads the part of an invite the builder deferred, once, as
+// background work: when the pool has no idle connection for it, it fails
+// at once with mailstore.ErrBusy, never waiting beside foreground
+// requests. It reads at most calendar.MaxICSBytes + 1 bytes and counts
+// them against the day's budget, as the builder's invite step does. A
+// part over the limit is ErrInviteTooLarge, and a message or folder that
+// is gone is mailstore.ErrNotFound or mailstore.ErrStaleRef; so is a part
+// of a message that is not this account's. Other errors may pass.
+func (a *Account) ReadInvite(ctx context.Context, c InviteCandidate) (FoundInvite, error) {
+	r, err := ref.Parse(c.MessageRef)
+	if err != nil || c.Account != a.name || r.Account != a.name {
+		return FoundInvite{}, errInviteNotOurs
+	}
+	part, data, err := a.readPart(ctx, inviteCandidate{ref: r, part: c.Part}, false)
+	if err != nil {
+		return FoundInvite{}, err
+	}
+	return FoundInvite{Account: a.name, MessageRef: c.MessageRef, Part: part, Data: data}, nil
+}
+
+// readInvite is readPart retrying while the pool is busy, until ctx ends.
 func (a *Account) readInvite(ctx context.Context, c inviteCandidate) (mailstore.CalendarPart, []byte, error) {
+	return a.readPart(ctx, c, true)
+}
+
+// readPart streams one candidate's part on a background context, reading
+// at most calendar.MaxICSBytes + 1 bytes, and counts the bytes read
+// against the day's budget. With retry it tries again while the pool is
+// busy, until ctx ends; without, a busy pool is mailstore.ErrBusy. A store
+// that can (mailstore.BackgroundPartStreamer) opens the part as background
+// work, which never queues beside foreground requests for a connection;
+// another store's StreamPart is used as it is. A part whose decoded bytes
+// pass the limit returns ErrInviteTooLarge. The charset of the part's info
+// fills in one the header lacked, in the part returned.
+func (a *Account) readPart(ctx context.Context, c inviteCandidate, retry bool) (mailstore.CalendarPart, []byte, error) {
 	var data []byte
-	err := a.retryBusy(ctx, func() error {
+	read := func() error {
 		return a.withMail(ctx, func(bg context.Context, st MailStore) error {
 			open := st.StreamPart
 			if bs, ok := st.(mailstore.BackgroundPartStreamer); ok {
@@ -153,20 +230,21 @@ func (a *Account) readInvite(ctx context.Context, c inviteCandidate) (mailstore.
 			data, err = io.ReadAll(io.LimitReader(rc, calendar.MaxICSBytes+1))
 			return err
 		})
-	})
+	}
+	var err error
+	if retry {
+		err = a.retryBusy(ctx, read)
+	} else {
+		err = read()
+	}
 	if len(data) > 0 {
-		// The budget is charged on the builder's own context: the bytes
-		// were read even when the step's deadline cut the read short.
-		if _, berr := a.o.Store.AddBudget(context.WithoutCancel(ctx), a.name, a.day(), int64(len(data))); berr != nil {
-			a.noteErr(berr)
-			a.logger.WarnContext(ctx, "cache could not count an invite part against the budget", "reason", reasonCode(berr))
-		}
+		a.chargeInvite(ctx, int64(len(data)))
 	}
 	if err != nil {
 		return c.part, nil, err
 	}
 	if len(data) > calendar.MaxICSBytes {
-		return c.part, nil, errInviteTooLarge
+		return c.part, nil, ErrInviteTooLarge
 	}
 	return c.part, data, nil
 }
@@ -178,3 +256,18 @@ const (
 	// maxInvitesPerSegment is how many parts the step reads at most.
 	maxInvitesPerSegment = 20
 )
+
+// chargeInvite counts n bytes of an invite part read against the day's
+// budget. The charge runs without ctx's cancellation, since the bytes were
+// read even when a deadline cut the read short, but bounded by
+// keepTimeout, as the read path's bookkeeping is: cache.db has one
+// connection, and a charge must not wait for it without end. A charge that
+// fails is logged and passed to OnError; it never fails the read.
+func (a *Account) chargeInvite(ctx context.Context, n int64) {
+	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), a.keepTimeout)
+	defer cancel()
+	if _, err := a.o.Store.AddBudget(bctx, a.name, a.day(), n); err != nil {
+		a.noteErr(err)
+		a.logger.WarnContext(ctx, "cache could not count an invite part against the budget", "reason", reasonCode(err))
+	}
+}

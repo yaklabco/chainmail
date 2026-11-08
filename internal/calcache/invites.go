@@ -27,6 +27,11 @@ type MailInviteRow struct {
 	// published. MarkInviteAnnounced sets it on every row of the UID, and
 	// PutMailInvite never clears it.
 	Announced bool
+	// Settled reports that this row needs no invite event: the daemon's
+	// invite hook found it not actionable (cancelled, organized by James,
+	// ended, or unreadable). MarkInviteSettled sets it on the one row, and
+	// PutMailInvite never clears it.
+	Settled bool
 }
 
 var (
@@ -34,7 +39,7 @@ var (
 	errInviteRef = errors.New("mail invite ref does not match its account and UID")
 )
 
-const inviteColumns = "ref, account, message_ref, uid, method, sequence, dtstamp, raw, charset, found_at, announced"
+const inviteColumns = "ref, account, message_ref, uid, method, sequence, dtstamp, raw, charset, found_at, announced, settled"
 
 // latestFirst orders one UID's invites newest first: by sequence, then
 // DTSTAMP, then when chainmail found them, then message ref so the order
@@ -42,7 +47,7 @@ const inviteColumns = "ref, account, message_ref, uid, method, sequence, dtstamp
 const latestFirst = "sequence DESC, dtstamp DESC, found_at DESC, message_ref DESC"
 
 // PutMailInvite stores r, replacing the row of the same account, message
-// ref and UID, except that a row once announced stays announced. An empty
+// ref and UID, except that a row once announced or settled stays so. An empty
 // r.Ref is filled in as MailInviteRef(account, uid); any other ref than
 // that one is refused.
 func (s *Store) PutMailInvite(ctx context.Context, r MailInviteRow) error {
@@ -58,13 +63,13 @@ func (s *Store) PutMailInvite(ctx context.Context, r MailInviteRow) error {
 		raw = []byte{}
 	}
 	if _, err := s.db.ExecContext(ctx,
-		"INSERT INTO mail_invites ("+inviteColumns+") VALUES ("+placeholders(11)+`)
+		"INSERT INTO mail_invites ("+inviteColumns+") VALUES ("+placeholders(12)+`)
 		ON CONFLICT (account, message_ref, uid) DO UPDATE SET
 			ref = excluded.ref, method = excluded.method, sequence = excluded.sequence, dtstamp = excluded.dtstamp,
 			raw = excluded.raw, charset = excluded.charset, found_at = excluded.found_at,
-			announced = max(announced, excluded.announced)`,
+			announced = max(announced, excluded.announced), settled = max(settled, excluded.settled)`,
 		ref, r.Account, r.MessageRef, r.UID, r.Method, r.Sequence, formatTime(r.DTStamp), raw, r.Charset,
-		formatTime(r.FoundAt), r.Announced); err != nil {
+		formatTime(r.FoundAt), r.Announced, r.Settled); err != nil {
 		return s.fail("storing a mail invite", err)
 	}
 	return nil
@@ -79,11 +84,13 @@ func (s *Store) MarkInviteAnnounced(ctx context.Context, ref string) error {
 	return nil
 }
 
-// PendingInvites returns the account's invites whose event may still be
-// due, sorted by UID: for each UID first found at or after since, as a
-// REQUEST, with no row announced, its latest row when that is a REQUEST.
-// The caller decides from the invite itself whether the event is due.
-func (s *Store) PendingInvites(ctx context.Context, account string, since time.Time) ([]MailInviteRow, error) {
+// PendingInvites returns at most limit of the account's invites whose event
+// may still be due: for each UID first found as a REQUEST, with no row
+// announced, its latest row when that is a REQUEST and not settled. A UID
+// whose latest row is a CANCEL is left out. The UIDs first found longest
+// ago come first, then by UID. The caller decides from the invite itself
+// whether the event is due, and settles the row when it never will be.
+func (s *Store) PendingInvites(ctx context.Context, account string, limit int) ([]MailInviteRow, error) {
 	return s.queryInvites(ctx, "reading pending mail invites", `
 		SELECT `+inviteColumns+` FROM (
 			SELECT `+inviteColumns+`,
@@ -92,8 +99,19 @@ func (s *Store) PendingInvites(ctx context.Context, account string, since time.T
 				min(found_at) OVER (PARTITION BY uid) AS first_found,
 				max(announced) OVER (PARTITION BY uid) AS any_announced
 			FROM mail_invites WHERE account = ?
-		) WHERE n = 1 AND method = ? AND first_method = ? AND any_announced = 0 AND first_found >= ?
-		ORDER BY uid`, account, calendar.MethodRequest, calendar.MethodRequest, formatTime(since))
+		) WHERE n = 1 AND method = ? AND first_method = ? AND any_announced = 0 AND settled = 0
+		ORDER BY first_found, uid LIMIT ?`, account, calendar.MethodRequest, calendar.MethodRequest, limit)
+}
+
+// MarkInviteSettled records that the row of account, messageRef and uid
+// needs no invite event, so PendingInvites leaves the UID out while that
+// row is its latest. An unknown row is no error.
+func (s *Store) MarkInviteSettled(ctx context.Context, account, messageRef, uid string) error {
+	if _, err := s.db.ExecContext(ctx, "UPDATE mail_invites SET settled = 1 WHERE account = ? AND message_ref = ? AND uid = ?",
+		account, messageRef, uid); err != nil {
+		return s.fail("settling a mail invite", err)
+	}
+	return nil
 }
 
 // MailInvites returns the account's latest invite per UID, by sequence and
@@ -132,7 +150,7 @@ func (s *Store) queryInvites(ctx context.Context, op, query string, args ...any)
 			r              MailInviteRow
 			stamp, foundAt string
 		)
-		if err := rows.Scan(&r.Ref, &r.Account, &r.MessageRef, &r.UID, &r.Method, &r.Sequence, &stamp, &r.Raw, &r.Charset, &foundAt, &r.Announced); err != nil {
+		if err := rows.Scan(&r.Ref, &r.Account, &r.MessageRef, &r.UID, &r.Method, &r.Sequence, &stamp, &r.Raw, &r.Charset, &foundAt, &r.Announced, &r.Settled); err != nil {
 			return nil, s.fail(op, err)
 		}
 		if r.DTStamp, err = parseTime(stamp); err != nil {

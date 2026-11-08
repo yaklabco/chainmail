@@ -63,6 +63,14 @@ type AccountOptions struct {
 	// outside any cache.db transaction, and waits for it to return. Nil
 	// means no part is read.
 	OnInvites func(ctx context.Context, invites []FoundInvite)
+	// OnDeferredInvites, when set with OnInvites, receives the invite
+	// parts of a segment the builder's bounded invite step did not read:
+	// past the per-segment cap, after the step's deadline (a busy pool
+	// included), or after a stream failure that may pass. The receiver
+	// queues them and reads each later with Account.ReadInvite. It is
+	// called as OnInvites is, after it, before the segment is
+	// acknowledged. Nil means those parts are skipped.
+	OnDeferredInvites func(ctx context.Context, cands []InviteCandidate)
 	// Started is when the daemon began this run, taken before any
 	// supervisor starts. A folder is fresh only once a pass at or after it
 	// has synced the folder. Zero means NewAccount's time on Clock.
@@ -89,8 +97,9 @@ type Account struct {
 	// discarded instead of written over a drop.
 	wmu   chan struct{}
 	epoch atomic.Uint64
-	// keepTimeout bounds the read path's bookkeeping after a download,
-	// keepReadTimeout unless a test shortens it.
+	// keepTimeout bounds the read path's bookkeeping after a download and
+	// the budget charge of an invite part, keepReadTimeout unless a test
+	// shortens it.
 	keepTimeout time.Duration
 	// inviteTimeout bounds the builder's invite step for one segment and
 	// inviteCap the invite parts it reads, inviteStepTimeout and

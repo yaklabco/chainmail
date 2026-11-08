@@ -20,10 +20,9 @@ const (
 	// inviteRetryInterval is how often the retry loop announces the
 	// invites whose event could not be published.
 	inviteRetryInterval = 5 * time.Minute
-	// inviteRetryWindow bounds how long after it was first found an
-	// invite's event is still tried, so invites that never get one (James
-	// organizes them, or they ended) are not read again for ever.
-	inviteRetryWindow = 7 * 24 * time.Hour
+	// inviteAnnounceBatch is how many pending invites of an account one
+	// announcing pass reads at most.
+	inviteAnnounceBatch = 100
 )
 
 // inviteHookOptions are what the invite hook works with. Only Cache is
@@ -46,6 +45,9 @@ type inviteHookOptions struct {
 	Self func(addr string) bool
 	// Now is the hook's clock. Nil means time.Now.
 	Now func() time.Time
+	// ReadPart reads a calendar part the cache builder deferred, once, as
+	// background work. Nil means queued parts are not read.
+	ReadPart func(ctx context.Context, c cache.InviteCandidate) (cache.FoundInvite, error)
 	// Logger receives counts and reason codes, never invite text. Nil
 	// discards.
 	Logger *slog.Logger
@@ -119,13 +121,16 @@ func (s *Server) serverInviteHook(cal *calcache.Store, poke func(account string)
 			Self:      s.policy.IsOwn,
 			Now:       s.opts.Now,
 			Logger:    s.opts.Logger,
+			ReadPart:  s.readInvitePart,
 		})
 	}
 	return s.invites
 }
 
 // startInviteRetries runs the invite retry loop on wg until ctx ends, when
-// calendar.db is open and some account's store is none.
+// calendar.db is open and some account has a cache worker, whose deferred
+// invite parts the loop reads, or a store of none, whose pending invites it
+// announces. startWatch has recorded the cache workers by then.
 func (s *Server) startInviteRetries(ctx context.Context, wg *sync.WaitGroup) {
 	h := s.serverInviteHook(s.calcache, s.pokeCalendar)
 	if h == nil {
@@ -137,7 +142,7 @@ func (s *Server) startInviteRetries(ctx context.Context, wg *sync.WaitGroup) {
 			accounts = append(accounts, name)
 		}
 	}
-	if len(accounts) == 0 {
+	if len(accounts) == 0 && len(s.cacheAccounts) == 0 {
 		return
 	}
 	wg.Go(func() { h.retryLoop(ctx, s.calClock, accounts) })
@@ -166,11 +171,20 @@ func (h *inviteHook) onInvites(ctx context.Context, invites []cache.FoundInvite)
 		if !slices.Contains(accounts, f.Account) {
 			accounts = append(accounts, f.Account)
 		}
-		if h.handle(ctx, f) && !slices.Contains(poke, f.Account) {
+		if h.handle(ctx, f) == inviteStored && !slices.Contains(poke, f.Account) {
 			poke = append(poke, f.Account)
 		}
 	}
+	h.finish(ctx, accounts, poke)
+}
+
+// finish announces the pending invites of each of accounts and pokes each
+// of poke, once invites of theirs were handled.
+func (h *inviteHook) finish(ctx context.Context, accounts, poke []string) {
 	for _, account := range accounts {
+		if ctx.Err() != nil {
+			return
+		}
 		h.announce(ctx, account)
 	}
 	if h.o.Poke == nil {
@@ -181,15 +195,14 @@ func (h *inviteHook) onInvites(ctx context.Context, invites []cache.FoundInvite)
 	}
 }
 
-// retryLoop announces the pending invites of accounts at once, then every
-// inviteRetryInterval on clock, until ctx ends.
+// retryLoop runs a pass at once, then every inviteRetryInterval on clock,
+// until ctx ends: each reads the queued invite parts that are due and
+// announces the pending invites of accounts.
 func (h *inviteHook) retryLoop(ctx context.Context, clock watch.Clock, accounts []string) {
 	for {
-		for _, account := range accounts {
-			if ctx.Err() != nil {
-				return
-			}
-			h.announce(ctx, account)
+		h.pass(ctx, accounts)
+		if ctx.Err() != nil {
+			return
 		}
 		select {
 		case <-ctx.Done():
@@ -199,20 +212,31 @@ func (h *inviteHook) retryLoop(ctx context.Context, clock watch.Clock, accounts 
 	}
 }
 
-// handle parses and stores one found invite. It reports whether the row
-// was stored.
+// inviteOutcome is what handle did with a found invite.
+type inviteOutcome int
+
+const (
+	// inviteStored: the invite's row is in calendar.db.
+	inviteStored inviteOutcome = iota
+	// inviteUnusable: the part is no usable invite, and never will be.
+	inviteUnusable
+	// inviteNotStored: calendar.db could not store the row.
+	inviteNotStored
+)
+
+// handle parses and stores one found invite, and reports what it did.
 //
 // The row holds the invite's UTF-8 text with no charset when that fits in
 // calendar.MaxICSBytes, and otherwise the part's own bytes with its
 // charset: a single-byte part can grow past the limit in UTF-8, and
 // calendar.ParseInvite refuses data over it. Either way the row reads back
 // with calendar.ParseInvite(Raw, Charset).
-func (h *inviteHook) handle(ctx context.Context, f cache.FoundInvite) bool {
+func (h *inviteHook) handle(ctx context.Context, f cache.FoundInvite) inviteOutcome {
 	log := h.o.Logger.With("account", f.Account)
 	inv, err := calendar.ParseInvite(f.Data, f.Part.Charset)
 	if err != nil {
 		log.InfoContext(ctx, "skipped a calendar part in mail that is not a usable invite", "reason", inviteReason(err))
-		return false
+		return inviteUnusable
 	}
 	ref := calendar.MailInviteRef(f.Account, inv.UID)
 	raw, charset := f.Data, f.Part.Charset
@@ -225,15 +249,21 @@ func (h *inviteHook) handle(ctx context.Context, f cache.FoundInvite) bool {
 	}
 	if err := h.o.Cache.PutMailInvite(ctx, row); err != nil {
 		log.WarnContext(ctx, "could not store a mail invite", "ref", ref)
-		return false
+		return inviteNotStored
 	}
-	return true
+	return inviteStored
 }
 
 // announce publishes the invite event of each of account's pending
 // invites that is due one, and marks it announced once published. It does
 // nothing unless the account's store is none and the hook has a log. A
-// publish that fails leaves the invite pending for the next call.
+// publish that fails leaves the invite pending for the next call, for as
+// long as the invite stays actionable: an invite that is not (it is
+// cancelled, James organizes it, every event of it has ended, or its data
+// does not parse) is settled, so no later pass reads it again. A UID whose
+// latest row is a CANCEL is never pending. One call reads at most
+// inviteAnnounceBatch invites, those first found longest ago first, and
+// stops between invites once ctx ends.
 func (h *inviteHook) announce(ctx context.Context, account string) {
 	if h.o.Publish == nil || h.o.StoreNone == nil || !h.o.StoreNone(account) {
 		return
@@ -242,7 +272,7 @@ func (h *inviteHook) announce(ctx context.Context, account string) {
 	defer h.mu.Unlock()
 	log := h.o.Logger.With("account", account)
 	now := h.o.Now()
-	rows, err := h.o.Cache.PendingInvites(ctx, account, now.Add(-inviteRetryWindow))
+	rows, err := h.o.Cache.PendingInvites(ctx, account, inviteAnnounceBatch)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.WarnContext(ctx, "could not read the pending mail invites")
@@ -251,12 +281,17 @@ func (h *inviteHook) announce(ctx context.Context, account string) {
 	}
 	failed := 0
 	for _, row := range rows {
+		if ctx.Err() != nil {
+			return
+		}
 		inv, err := calendar.ParseInvite(row.Raw, row.Charset)
 		if err != nil {
 			log.WarnContext(ctx, "a stored mail invite does not parse", "ref", row.Ref, "reason", inviteReason(err))
+			h.settle(ctx, log, row)
 			continue
 		}
 		if !h.due(inv, now) {
+			h.settle(ctx, log, row)
 			continue
 		}
 		if err := h.publish(ctx, row, inv, now); err != nil {
@@ -272,9 +307,18 @@ func (h *inviteHook) announce(ctx context.Context, account string) {
 	}
 }
 
+// settle marks a pending invite row that will never get an event, so
+// PendingInvites leaves it out from now on. A failure is logged; the row
+// is then looked at again on the next pass.
+func (h *inviteHook) settle(ctx context.Context, log *slog.Logger, row calcache.MailInviteRow) {
+	if err := h.o.Cache.MarkInviteSettled(ctx, row.Account, row.MessageRef, row.UID); err != nil && ctx.Err() == nil {
+		log.WarnContext(ctx, "could not settle a mail invite", "ref", row.Ref)
+	}
+}
+
 // due reports whether an invite gets an invite event: the method is
-// REQUEST, the event is not cancelled, James does not organize it, and it
-// has not ended at now (a recurring one never has).
+// REQUEST, the event is not cancelled, James does not organize it, and not
+// every event of it has ended at now (a recurring one never has).
 func (h *inviteHook) due(inv calendar.MailInvite, now time.Time) bool {
 	if inv.Method != calendar.MethodRequest {
 		return false
@@ -286,10 +330,18 @@ func (h *inviteHook) due(inv calendar.MailInvite, now time.Time) bool {
 	if ev.Organizer != nil && h.o.Self != nil && h.o.Self(ev.Organizer.Email) {
 		return false
 	}
-	if ev.RRule != "" || len(ev.RDates) > 0 {
-		return true
+	return !inviteEnded(inv, now)
+}
+
+// inviteEnded reports whether every event of inv has ended at now. A
+// recurring event never has.
+func inviteEnded(inv calendar.MailInvite, now time.Time) bool {
+	for _, ev := range inv.Events {
+		if ev.RRule != "" || len(ev.RDates) > 0 || inviteEnd(ev).After(now) {
+			return false
+		}
 	}
-	return inviteEnd(ev).After(now)
+	return true
 }
 
 // publish appends the invite event of a pending mail invite.

@@ -300,3 +300,26 @@ func TestOpenRecreatesSchemaVersion1(t *testing.T) {
 		t.Fatalf("PutMailInvite: %v", err)
 	}
 }
+
+// A version 2 file, before invite_fetches and mail_invites.settled, is
+// created again.
+func TestOpenRecreatesSchemaVersion2(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), calcache.FileName)
+	rawExec(t, path, `CREATE TABLE mail_invites (account TEXT NOT NULL, message_ref TEXT NOT NULL, uid TEXT NOT NULL,
+		ref TEXT NOT NULL, method TEXT NOT NULL, sequence INTEGER NOT NULL, dtstamp TEXT NOT NULL, raw BLOB NOT NULL,
+		charset TEXT NOT NULL DEFAULT '', found_at TEXT NOT NULL, announced INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (account, message_ref, uid))`)
+	rawExec(t, path, "PRAGMA user_version = 2")
+	s, err := calcache.Open(t.Context(), path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() }) // a close error at test end changes nothing
+	if why := s.Recreated(); why != "version" {
+		t.Errorf("Recreated = %q, want version", why)
+	}
+	if err := s.PutInviteFetches(t.Context(), []calcache.InviteFetchRow{{Account: "acme", MessageRef: "m1", Part: "2"}}); err != nil {
+		t.Fatalf("PutInviteFetches: %v", err)
+	}
+}

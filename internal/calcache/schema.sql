@@ -51,7 +51,21 @@ CREATE TABLE mail_invites (
   charset TEXT NOT NULL DEFAULT '',
   found_at TEXT NOT NULL,
   announced INTEGER NOT NULL DEFAULT 0,
+  settled INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (account, message_ref, uid)
 );
 CREATE INDEX mail_invites_by_ref ON mail_invites (ref);
 CREATE INDEX mail_invites_by_uid ON mail_invites (account, uid);
+CREATE TABLE invite_fetches (
+  account TEXT NOT NULL,
+  message_ref TEXT NOT NULL,
+  part TEXT NOT NULL,
+  method TEXT NOT NULL,
+  charset TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_at TEXT NOT NULL,
+  found_at TEXT NOT NULL,
+  PRIMARY KEY (account, message_ref, part)
+);
+CREATE INDEX invite_fetches_by_next ON invite_fetches (next_at);
