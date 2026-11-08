@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -104,6 +105,11 @@ type Manager struct {
 	httpClient *http.Client
 	endpoint   *oauth2.Endpoint
 
+	// tokenClient and discoveryClient are copies of httpClient with the
+	// redirect policies of token requests and OIDC discovery.
+	tokenClient     *http.Client
+	discoveryClient *http.Client
+
 	// discoverMu serializes OIDC discoveries, so concurrent first logins
 	// of a client fetch its document once. discovered holds each issuer
 	// client's endpoints by client name; a failed discovery is not kept.
@@ -129,8 +135,10 @@ type Option func(*Manager)
 // the oauth2 package's own clock.
 func WithClock(now func() time.Time) Option { return func(m *Manager) { m.now = now } }
 
-// WithHTTPClient sets the client used for token requests. A nil client keeps
-// the default.
+// WithHTTPClient sets the client used for token requests and OIDC discovery,
+// and whose transport HTTPClient builds on. A nil client keeps the default.
+// Its redirect policy is replaced by chainmail's own: token requests follow
+// no redirect, and discovery follows one only to the same scheme and host.
 func WithHTTPClient(c *http.Client) Option {
 	return func(m *Manager) {
 		if c != nil {
@@ -159,6 +167,8 @@ func NewManager(cfg *config.Config, store SecretStore, opts ...Option) *Manager 
 	for _, opt := range opts {
 		opt(m)
 	}
+	m.tokenClient = withRedirectPolicy(m.httpClient, nil, errTokenRedirect, refuseRedirect)
+	m.discoveryClient = withRedirectPolicy(m.httpClient, sameOrigin, errRedirectHost, sameHostRedirect)
 	return m
 }
 
@@ -289,11 +299,12 @@ func refreshHint(acct config.ResolvedAccount, err error) (string, bool) {
 }
 
 // clientRejectedHint says what to do about an OAuth client the token
-// endpoint refused. An issuer client may be public, with no secret to set.
+// endpoint refused. An issuer client is public and sends no secret, so the
+// fix is at the issuer or in its client_id.
 func clientRejectedHint(acct config.ResolvedAccount) string {
 	if acct.OAuthIssuer != "" {
 		return "the OAuth client was rejected; check client_id in oauth_clients." + acct.OAuthClient +
-			", and if the client has a secret, run: chainmail secret set " + ClientSecret(acct.OAuthClient)
+			", which must name a public client at the issuer"
 	}
 	return "the OAuth client was rejected; run: chainmail secret set " + ClientSecret(acct.OAuthClient)
 }
@@ -552,8 +563,9 @@ func (m *Manager) tokenSource(ctx context.Context, acct config.ResolvedAccount) 
 
 // oauthConfig builds acct's OAuth2 client: the preset's endpoints, or for
 // an issuer client those its discovery gives, and the account's scopes. An
-// issuer client's secret is optional: without one it is a public client and
-// no client_secret is sent, since AuthStyleInParams leaves an empty one out.
+// issuer client is public: its vault secret, if one is set, is never read,
+// and no client_secret is sent, since AuthStyleInParams leaves an empty one
+// out.
 func (m *Manager) oauthConfig(ctx context.Context, acct config.ResolvedAccount) (*oauth2.Config, error) {
 	if acct.Auth != provider.AuthOAuth2 || (acct.Provider.OAuth2 == nil && acct.OAuthIssuer == "") {
 		return nil, fmt.Errorf("%w: %s", ErrNotOAuth, acct.Name)
@@ -587,24 +599,18 @@ func (m *Manager) oauthConfig(ctx context.Context, acct config.ResolvedAccount) 
 }
 
 // clientSecret reads acct's OAuth client secret. A missing secret is a
-// RequiredError, except for an issuer client, which may be public.
+// RequiredError. An issuer client is public, so it has none: the vault is
+// not read for it, and an empty secret is never sent.
 func (m *Manager) clientSecret(acct config.ResolvedAccount) ([]byte, error) {
-	if acct.OAuthIssuer == "" {
-		return m.secret(acct, ClientSecret(acct.OAuthClient))
-	}
-	v, err := m.store.Get(ClientSecret(acct.OAuthClient))
-	switch {
-	case errors.Is(err, vault.ErrNotFound):
+	if acct.OAuthIssuer != "" {
 		return nil, nil
-	case err != nil:
-		return nil, fmt.Errorf("reading secret %s: %w", ClientSecret(acct.OAuthClient), err)
 	}
-	return v, nil
+	return m.secret(acct, ClientSecret(acct.OAuthClient))
 }
 
 // withHTTPClient carries the HTTP client into a one-off oauth2 call.
 func (m *Manager) withHTTPClient(ctx context.Context) context.Context {
-	return context.WithValue(ctx, oauth2.HTTPClient, m.httpClient)
+	return context.WithValue(ctx, oauth2.HTTPClient, m.tokenClient)
 }
 
 // refreshContext carries the HTTP client into a token source. Token sources
@@ -614,9 +620,28 @@ func (m *Manager) refreshContext(ctx context.Context) context.Context {
 	return m.withHTTPClient(context.WithoutCancel(ctx))
 }
 
-// tokenError describes a token endpoint failure by status and OAuth2 error
-// code only. oauth2.RetrieveError's own message quotes the response body,
-// and token endpoint bodies stay out of errors and logs.
+// oauthErrorCodes are the error codes RFC 6749 section 5.2 defines for a
+// token endpoint, plus access_denied, server_error and
+// temporarily_unavailable from section 4.1.2.1, which some servers send
+// there too. Only these are named in an error.
+var oauthErrorCodes = map[string]bool{
+	"invalid_request":         true,
+	"invalid_client":          true,
+	"invalid_grant":           true,
+	"unauthorized_client":     true,
+	"unsupported_grant_type":  true,
+	"invalid_scope":           true,
+	"access_denied":           true,
+	"server_error":            true,
+	"temporarily_unavailable": true,
+}
+
+// tokenError describes a token endpoint failure by numeric status and RFC
+// 6749 error code only. Everything else in the response is the server's
+// text, which could echo a secret back: oauth2.RetrieveError's own message
+// quotes the body, the status line carries a reason phrase of the server's
+// choosing, and an unknown error code is arbitrary text. None of it reaches
+// an error or a log.
 func tokenError(err error) error {
 	var re *oauth2.RetrieveError
 	if !errors.As(err, &re) {
@@ -624,16 +649,20 @@ func tokenError(err error) error {
 	}
 	status := "no response"
 	if re.Response != nil {
-		status = re.Response.Status
+		status = "HTTP " + strconv.Itoa(re.Response.StatusCode)
 	}
-	if re.ErrorCode == "" {
+	switch {
+	case re.ErrorCode == "":
 		return fmt.Errorf("token endpoint returned %s", status)
+	case oauthErrorCodes[re.ErrorCode]:
+		return fmt.Errorf("token endpoint returned %s: %s", status, re.ErrorCode)
+	default:
+		return fmt.Errorf("token endpoint returned %s with an error code outside RFC 6749", status)
 	}
-	return fmt.Errorf("token endpoint returned %s: %s", status, re.ErrorCode)
 }
 
 // neededSecrets lists the secrets acct cannot log in without. An issuer
-// client's secret is optional, so it is not among them.
+// client is public and uses no secret, so its secret is not among them.
 func neededSecrets(acct config.ResolvedAccount) []string {
 	switch {
 	case acct.Auth == provider.AuthOAuth2 && acct.OAuthIssuer != "":
@@ -645,8 +674,9 @@ func neededSecrets(acct config.ResolvedAccount) []string {
 	}
 }
 
-// usedSecrets lists every secret acct logs in with when it is set: the
-// needed ones and an issuer client's optional secret.
+// usedSecrets lists every secret whose change resets acct: the needed ones
+// and its OAuth client's secret. An issuer client never sends its secret,
+// but setting it resets the accounts on it, as for any other client.
 func usedSecrets(acct config.ResolvedAccount) []string {
 	if acct.Auth == provider.AuthOAuth2 {
 		return []string{ClientSecret(acct.OAuthClient), RefreshTokenSecret(acct.Name)}
