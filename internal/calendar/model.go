@@ -14,6 +14,10 @@ const (
 	MaxAttendees = 500
 	// MaxInstances bounds the instances one series expands to per query.
 	MaxInstances = 1000
+	// MaxObjectEvents bounds the VEVENTs of one calendar object, a series
+	// master with its overrides. A larger object is refused with
+	// ErrTooLarge.
+	MaxObjectEvents = 2000
 )
 
 // Errors. Their texts are fixed; wrapped forms add only field names.
@@ -118,10 +122,14 @@ func (e Event) IsMaster() bool { return e.RRule != "" && e.RecurrenceID.IsZero()
 // replace every stored row with that ProviderID. When false (Google), each
 // upsert replaces only the row with the same ProviderID and RecurrenceID.
 // Deletes are ProviderIDs; deleting one removes all its rows. Full means the
-// token was empty or invalid and Upserts is the whole calendar.
+// token was empty or invalid and Upserts is the whole calendar. Skipped
+// are ProviderIDs of objects the sync could not take, such as one over
+// MaxObjectEvents: their stored rows are kept as they are, even when Full,
+// and no upsert or delete applies to them.
 type Changes struct {
 	Upserts       []Event
 	Deletes       []string
+	Skipped       []string
 	Token         string
 	Full          bool
 	ObjectReplace bool

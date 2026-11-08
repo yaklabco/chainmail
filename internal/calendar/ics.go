@@ -33,7 +33,8 @@ type parsedEvent struct {
 }
 
 // ParseICS parses one VCALENDAR: its METHOD (may be "") and every VEVENT,
-// with VTIMEZONE-aware times. Over MaxICSBytes: ErrTooLarge. More than
+// with VTIMEZONE-aware times. Over MaxICSBytes, or more than
+// MaxObjectEvents VEVENTs: ErrTooLarge. More than
 // MaxAttendees attendees: the rest are dropped and AttendeesTruncated set.
 // Each Event.Raw is the whole input.
 //
@@ -66,6 +67,15 @@ func parseICS(data []byte, limit int) (string, []parsedEvent, error) {
 	var method string
 	if p := cal.Props.Get(ical.PropMethod); p != nil {
 		method = strings.ToUpper(strings.TrimSpace(p.Value))
+	}
+	n := 0
+	for _, child := range cal.Children {
+		if child.Name == ical.CompEvent {
+			n++
+		}
+	}
+	if n > MaxObjectEvents {
+		return "", nil, ErrTooLarge
 	}
 	z := newZones(cal.Component)
 	raw := bytes.Clone(data)

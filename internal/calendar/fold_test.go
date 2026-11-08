@@ -3,6 +3,7 @@ package calendar
 import (
 	"bytes"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -95,5 +96,24 @@ func TestFoldRefusesOutputOverTheLimit(t *testing.T) {
 	}
 	if _, err := Fold(in, 2000); err != nil {
 		t.Errorf("Fold under the limit: %v", err)
+	}
+}
+
+func manyEvents(n int) []byte {
+	var b strings.Builder
+	b.WriteString("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//x//EN\r\n")
+	for i := range n {
+		b.WriteString("BEGIN:VEVENT\r\nUID:u" + strconv.Itoa(i) + "\r\nDTSTART:20261120T100000Z\r\nEND:VEVENT\r\n")
+	}
+	b.WriteString("END:VCALENDAR\r\n")
+	return []byte(b.String())
+}
+
+func TestParseICSEventLimit(t *testing.T) {
+	if _, evs, err := ParseICS(manyEvents(MaxObjectEvents)); err != nil || len(evs) != MaxObjectEvents {
+		t.Fatalf("ParseICS at the limit = %d events, %v", len(evs), err)
+	}
+	if _, _, err := ParseICS(manyEvents(MaxObjectEvents + 1)); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("ParseICS over the limit: err = %v, want ErrTooLarge", err)
 	}
 }
