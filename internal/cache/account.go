@@ -58,7 +58,8 @@ type AccountOptions struct {
 	// OnInvites, when set, receives the invites the builder finds in new
 	// mail (not in backfilled mail): calendar parts with method REQUEST,
 	// UPDATE or CANCEL and at most calendar.MaxICSBytes, read once their
-	// messages are stored. The builder calls it with no lock held and
+	// messages are stored, as background work, at most 20 parts in 30
+	// seconds per segment. The builder calls it with no lock held and
 	// outside any cache.db transaction, and waits for it to return. Nil
 	// means no part is read.
 	OnInvites func(ctx context.Context, invites []FoundInvite)
@@ -91,6 +92,11 @@ type Account struct {
 	// keepTimeout bounds the read path's bookkeeping after a download,
 	// keepReadTimeout unless a test shortens it.
 	keepTimeout time.Duration
+	// inviteTimeout bounds the builder's invite step for one segment and
+	// inviteCap the invite parts it reads, inviteStepTimeout and
+	// maxInvitesPerSegment unless a test changes them.
+	inviteTimeout time.Duration
+	inviteCap     int
 	// inflight is the backfill batch being fetched with wmu released, or
 	// nil. The builder notes in it every flags or expunged change it
 	// applies to the batch's folder, and commitBatch fetches the batch
@@ -184,7 +190,9 @@ func NewAccount(o AccountOptions) *Account {
 		wmu:          make(chan struct{}, 1),
 		appliedCh:    make(chan struct{}),
 
-		keepTimeout: keepReadTimeout,
+		keepTimeout:   keepReadTimeout,
+		inviteTimeout: inviteStepTimeout,
+		inviteCap:     maxInvitesPerSegment,
 	}
 	if a.clock == nil {
 		a.clock = systemClock{}

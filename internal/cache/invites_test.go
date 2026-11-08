@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yaklabco/chainmail/internal/calendar"
 	"github.com/yaklabco/chainmail/internal/mailstore"
@@ -280,3 +282,122 @@ func (c *countingReader) Read(p []byte) (int, error) {
 }
 
 func (*countingReader) Close() error { return nil }
+
+// inviteLogs gives r's Account a logger that writes to the returned
+// buffer. Call it before start.
+func inviteLogs(r *acctRig) *keepLogs {
+	logs := &keepLogs{}
+	r.a.logger = slog.New(slog.NewTextHandler(logs, nil))
+	return logs
+}
+
+// The builder reads invite parts as background work
+// (mailstore.BackgroundPartStreamer), so a pool whose connections
+// foreground requests hold makes the read fail at once with ErrBusy
+// instead of queueing beside them.
+func TestBuilderReadsInvitesAsBackgroundWork(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r, sink := inviteRig(t, fs)
+	r.pass("INBOX")
+	r.start()
+	r.waitApplied()
+
+	fs.Add(calMsg("invite", "text/calendar; method=REQUEST", []byte(testInviteICS)))
+	r.pass("INBOX")
+	r.waitApplied()
+
+	if got := sink.invites(); len(got) != 1 {
+		t.Fatalf("found %d invites, want 1", len(got))
+	}
+	if n := fs.BackgroundCalls("StreamPart"); n != 1 {
+		t.Errorf("background StreamPart calls = %d, want 1: the invite read must be admitted as background work", n)
+	}
+}
+
+// When the pool stays busy for the whole invite step, the step gives up at
+// its deadline: the message is cached, its event acknowledged, OnInvites
+// not called, the builder records no error, and the part skipped is
+// counted in a log line and not read again.
+func TestBuilderProceedsWhenTheInviteStepTimesOut(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r, sink := inviteRig(t, fs)
+	r.a.inviteTimeout = 20 * time.Millisecond
+	logs := inviteLogs(r)
+	r.pass("INBOX")
+	r.start()
+	r.waitApplied()
+
+	fs.Fail("StreamPart", mailstore.ErrBusy)
+	rf := fs.Add(calMsg("invite", "text/calendar; method=REQUEST", []byte(testInviteICS)))
+	r.pass("INBOX")
+	r.waitApplied()
+
+	if _, ok := r.row(rf); !ok {
+		t.Error("the message was not cached")
+	}
+	if got, tail := r.acked(), r.tail(); got != tail {
+		t.Errorf("acked %d, want the tail %d", got, tail)
+	}
+	sink.mu.Lock()
+	calls := sink.calls
+	sink.mu.Unlock()
+	if calls != 0 {
+		t.Errorf("OnInvites ran %d times, want none", calls)
+	}
+	if e := r.a.lastError(); e != "" {
+		t.Errorf("last error = %q, want none", e)
+	}
+	if out := logs.String(); !strings.Contains(out, "cache ran out of time for invite parts and skipped them") || !strings.Contains(out, "count=1") {
+		t.Errorf("logs = %q, want the skipped part counted", out)
+	}
+	reads := fs.Calls("StreamPart")
+	fs.Fail("StreamPart", nil)
+	fs.Add(acctMsg("INBOX", "plain"))
+	r.pass("INBOX")
+	r.waitApplied()
+	if n := fs.Calls("StreamPart"); n != reads {
+		t.Errorf("StreamPart ran %d more times on the next segment, want the skipped part left alone", n-reads)
+	}
+}
+
+// A segment reads at most inviteCap invite parts; the rest are skipped and
+// counted in a log line, and the next segment does not read them.
+func TestBuilderCapsInvitePartsPerSegment(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r, sink := inviteRig(t, fs)
+	r.a.inviteCap = 1
+	logs := inviteLogs(r)
+	r.pass("INBOX")
+	r.start()
+	r.waitApplied()
+
+	first := fs.Add(calMsg("one", "text/calendar; method=REQUEST", []byte(testInviteICS)))
+	fs.Add(calMsg("two", "text/calendar; method=REQUEST", []byte(testInviteICS)))
+	r.pass("INBOX")
+	r.waitApplied()
+
+	got := sink.invites()
+	if len(got) != 1 || got[0].MessageRef != first.String() {
+		t.Fatalf("found %d invites, want only the first message's", len(got))
+	}
+	if n := fs.Calls("StreamPart"); n != 1 {
+		t.Errorf("StreamPart ran %d times, want 1", n)
+	}
+	if out := logs.String(); !strings.Contains(out, "cache skipped invite parts over the per-segment cap") || !strings.Contains(out, "count=1") {
+		t.Errorf("logs = %q, want the capped part counted", out)
+	}
+}
+
+// StreamPartBackground serves the lying part as StreamPart does, so the
+// builder's background read sees it too.
+func (m *lyingSizeMail) StreamPartBackground(ctx context.Context, r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error) {
+	info, rc, err := m.Store.StreamPartBackground(ctx, r, part)
+	if err != nil {
+		return info, nil, err
+	}
+	_ = rc.Close() // the fake's reader holds nothing
+	return info, &countingReader{r: strings.NewReader(strings.Repeat("x", m.size)), n: &m.read}, nil
+}
