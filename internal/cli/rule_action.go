@@ -33,7 +33,8 @@ func parseAction(s string) (*chainmailv1.RuleAction, error) {
 		return a, nil
 	case "label", "unlabel", "copy", "move", "link_item", "forward":
 	default:
-		return nil, fmt.Errorf("unknown --action %q: want %s", s, ruleActionUsage)
+		// The value may hold an address, folder or label: never echo it.
+		return nil, errors.New("unknown --action kind: want " + ruleActionUsage)
 	}
 	needsValue := fmt.Errorf("--action %s needs a value: %s", kind, ruleActionForm[kind])
 	if value == "" {

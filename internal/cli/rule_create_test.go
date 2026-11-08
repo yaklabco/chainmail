@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/api"
 	"github.com/yaklabco/chainmail/internal/rules"
 )
 
@@ -111,8 +112,8 @@ func TestParseAction(t *testing.T) {
 		{in: "unread", want: &chainmailv1.RuleAction{Kind: "unread"}},
 		{in: "archive", want: &chainmailv1.RuleAction{Kind: "archive"}},
 		{in: "trash", want: &chainmailv1.RuleAction{Kind: "trash"}},
-		{in: "bogus", err: `unknown --action "bogus": want label=NAME`},
-		{in: "", err: `unknown --action ""`},
+		{in: "bogus", err: "unknown --action kind: want label=NAME"},
+		{in: "", err: "unknown --action kind: want label=NAME"},
 		{in: "label", err: "--action label needs a value: label=NAME"},
 		{in: "label=", err: "--action label needs a value: label=NAME"},
 		{in: "move=", err: "--action move needs a value: move=FOLDER"},
@@ -333,6 +334,30 @@ func TestCompleteRuleCreate(t *testing.T) {
 			}
 			if d != tt.dir {
 				t.Errorf("directive %d, want %d", d, tt.dir)
+			}
+		})
+	}
+}
+
+// An --action the parser does not recognize may carry a forward address,
+// a folder or a label: the usage error names the grammar but never echoes
+// the value back.
+func TestRuleCreateUnknownActionKeepsItsValueOffStderr(t *testing.T) {
+	t.Parallel()
+	for _, action := range []string{"fwd=private@example.com", "mvoe=Secret Folder", "private@example.com"} {
+		t.Run(action, func(t *testing.T) {
+			t.Parallel()
+			got := runCLI(t, Env{}, "--socket", "/nonexistent.sock", "rule", "create", "--name", "x", "--query", "q", "--action", action)
+			if got.code != api.ExitUsage || errorReason(t, got.stderr) != api.ReasonUsage {
+				t.Fatalf("rule create --action %q: %+v, want a usage error", action, got)
+			}
+			if !strings.Contains(got.stderr, "unknown --action kind") {
+				t.Errorf("stderr = %s, want it to name the unknown kind", got.stderr)
+			}
+			for _, secret := range []string{"private@example.com", "Secret Folder", "fwd", "mvoe"} {
+				if strings.Contains(got.stderr, secret) {
+					t.Errorf("stderr = %s, want no %q from the --action value", got.stderr, secret)
+				}
 			}
 		})
 	}
