@@ -124,9 +124,12 @@ func (s *Store) GetEvent(ctx context.Context, calID, providerID string) ([]calen
 // objects are read with calendar-multiget. Each object's events replace
 // the stored rows of that object (ObjectReplace). An object that no longer
 // parses, or holds no VEVENT, is reported deleted; one with more than
-// calendar.MaxObjectEvents VEVENTs is reported skipped. Only a 404 or 410 for a
-// member is a deletion: a member the server answers with any other failure
-// fails the whole Sync, so the caller keeps its token.
+// calendar.MaxObjectEvents VEVENTs is reported skipped. A calendar with more
+// than calstore.MaxSyncEvents objects listed, or objects kept past
+// calstore.MaxSyncBytes or calstore.MaxSyncEvents events, gives
+// calstore.ErrSyncTooLarge. Only a 404 or 410 for a member is a deletion: a
+// member the server answers with any other failure fails the whole Sync,
+// so the caller keeps its token.
 func (s *Store) Sync(ctx context.Context, calID, token string) (calendar.Changes, error) {
 	coll, ok := collectionPath(calID)
 	if !ok {
@@ -229,6 +232,9 @@ func (s *Store) collectionSync(ctx context.Context, coll, token string, full boo
 			changed[href] = normalizeETag(*e)
 			delete(deleted, href)
 		}
+		if _, maxObjects := s.syncLimits(); len(changed)+len(deleted) > maxObjects {
+			return calendar.Changes{}, calstore.ErrSyncTooLarge
+		}
 		token = strings.TrimSpace(ms.SyncToken)
 		if !truncated {
 			ch, _, err := s.fetchChanges(ctx, coll, changed, deleted, full)
@@ -307,6 +313,10 @@ func (s *Store) etagSyncFrom(ctx context.Context, coll string, state etagState, 
 			changed[href] = etag
 		}
 	}
+	// The token keeps every member's etag.
+	if _, maxObjects := s.syncLimits(); len(state.ETags) > maxObjects {
+		return calendar.Changes{}, calstore.ErrSyncTooLarge
+	}
 	deleted := map[string]bool{}
 	for href := range prev {
 		if _, ok := state.ETags[href]; !ok {
@@ -330,9 +340,12 @@ func (s *Store) etagSyncFrom(ctx context.Context, coll string, state etagState, 
 }
 
 // fetchChanges reads the changed objects with calendar-multiget and builds
-// the Changes. Objects the multiget answers with 404 or 410, and objects
+// the Changes, parsing each batch as it arrives so no batch's bodies are
+// kept past it. Objects the multiget answers with 404 or 410, and objects
 // that no longer parse or hold no VEVENT, are deletes. Objects with more
 // than calendar.MaxObjectEvents VEVENTs are skipped (Changes.Skipped).
+// Objects kept past calstore.MaxSyncBytes of calendar data or
+// calstore.MaxSyncEvents events give calstore.ErrSyncTooLarge.
 func (s *Store) fetchChanges(ctx context.Context, coll string, changed map[string]string, deleted map[string]bool, full bool) (calendar.Changes, []string, error) {
 	ch := calendar.Changes{Full: full, ObjectReplace: true}
 	hrefs := make([]string, 0, len(changed))
@@ -340,27 +353,36 @@ func (s *Store) fetchChanges(ctx context.Context, coll string, changed map[strin
 		hrefs = append(hrefs, h)
 	}
 	sort.Strings(hrefs)
-	objs, missing, err := s.multiget(ctx, coll, hrefs)
-	if err != nil {
-		return calendar.Changes{}, nil, err
-	}
-	for _, h := range missing {
-		deleted[h] = true
-	}
-	for _, o := range objs {
+	maxBytes, maxEvents := s.syncLimits()
+	var kept, events int
+	missing, err := s.multiget(ctx, coll, hrefs, func(o *storedObject) error {
 		evs, err := o.events()
 		if errors.Is(err, calendar.ErrTooLarge) {
 			// More VEVENTs than chainmail takes from one object: its stored
 			// rows stay as they are, and its etag in the token keeps it from
 			// being read again until it changes.
 			ch.Skipped = append(ch.Skipped, o.href)
-			continue
+			return nil
 		}
-		if err != nil || len(evs) == 0 {
+		// An object that does not parse is reported deleted; that is not a
+		// failure of the sync.
+		if broken := err != nil || len(evs) == 0; broken {
 			deleted[o.href] = true
-			continue
+			return nil
+		}
+		kept += len(o.raw)
+		events += len(evs)
+		if kept > maxBytes || events > maxEvents {
+			return calstore.ErrSyncTooLarge
 		}
 		ch.Upserts = append(ch.Upserts, evs...)
+		return nil
+	})
+	if err != nil {
+		return calendar.Changes{}, nil, err
+	}
+	for _, h := range missing {
+		deleted[h] = true
 	}
 	if !full {
 		for h := range deleted {
@@ -372,20 +394,37 @@ func (s *Store) fetchChanges(ctx context.Context, coll string, changed map[strin
 }
 
 // multiget reads objects in batches, halving a batch whose answer is too
-// large. It returns the objects read and the hrefs the server reported
-// missing.
-func (s *Store) multiget(ctx context.Context, coll string, hrefs []string) ([]*storedObject, []string, error) {
-	var objs []*storedObject
+// large, and calls each for every object of a batch as the batch arrives;
+// an error from each ends the reads. It returns the hrefs the server
+// reported missing.
+func (s *Store) multiget(ctx context.Context, coll string, hrefs []string, each func(*storedObject) error) ([]string, error) {
 	var missing []string
 	for start := 0; start < len(hrefs); start += multigetBatch {
-		o, m, err := s.multigetBatch(ctx, coll, hrefs[start:min(start+multigetBatch, len(hrefs))])
+		objs, m, err := s.multigetBatch(ctx, coll, hrefs[start:min(start+multigetBatch, len(hrefs))])
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		objs = append(objs, o...)
+		for _, o := range objs {
+			if err := each(o); err != nil {
+				return nil, err
+			}
+		}
 		missing = append(missing, m...)
 	}
-	return objs, missing, nil
+	return missing, nil
+}
+
+// syncLimits returns the bytes of calendar data and the events, or objects
+// listed, one Sync may keep.
+func (s *Store) syncLimits() (bytes, events int) {
+	bytes, events = s.syncBytes, s.syncEvents
+	if bytes <= 0 {
+		bytes = calstore.MaxSyncBytes
+	}
+	if events <= 0 {
+		events = calstore.MaxSyncEvents
+	}
+	return bytes, events
 }
 
 var errMultigetTooLarge = errors.New("multiget response too large")
