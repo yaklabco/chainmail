@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"slices"
@@ -133,9 +134,10 @@ func TestRuleActionsRejectBadShapes(t *testing.T) {
 		in   []ruleActionIn
 		msg  string
 	}{
-		{name: "unknown kind", in: []ruleActionIn{{Kind: "delete"}}, msg: `action 1: unknown kind "delete"; ` + ruleKindsText},
-		{name: "kinds are lowercase", in: []ruleActionIn{{Kind: "Archive"}}, msg: `action 1: unknown kind "Archive"; ` + ruleKindsText},
-		{name: "an empty kind", in: []ruleActionIn{{}}, msg: `action 1: unknown kind ""; ` + ruleKindsText},
+		{name: "unknown kind", in: []ruleActionIn{{Kind: "delete"}}, msg: "action 1: unknown kind; " + ruleKindsText},
+		{name: "a CLI-shaped kind", in: []ruleActionIn{{Kind: "forward=boss@example.com"}}, msg: "action 1: unknown kind; " + ruleKindsText},
+		{name: "kinds are lowercase", in: []ruleActionIn{{Kind: "Archive"}}, msg: "action 1: unknown kind; " + ruleKindsText},
+		{name: "an empty kind", in: []ruleActionIn{{}}, msg: "action 1: unknown kind; " + ruleKindsText},
 		{name: "label needs a label", in: []ruleActionIn{{Kind: "label"}}, msg: "action 1 (label) needs label"},
 		{name: "unlabel needs a label", in: []ruleActionIn{{Kind: "unlabel"}}, msg: "action 1 (unlabel) needs label"},
 		{name: "copy needs a folder", in: []ruleActionIn{{Kind: "copy"}}, msg: "action 1 (copy) needs folder"},
@@ -274,7 +276,10 @@ func TestUpdateRuleRequest(t *testing.T) {
 
 func TestUpdateRuleRequestRefusals(t *testing.T) {
 	t.Parallel()
-	const nothing = "give at least one field to change, or name one in clear"
+	const (
+		nothing   = "give at least one field to change, or name one in clear"
+		clearText = "clear names a field it cannot clear; it takes description, accounts and schedule"
+	)
 	tests := []struct {
 		name string
 		in   updateRuleIn
@@ -284,8 +289,9 @@ func TestUpdateRuleRequestRefusals(t *testing.T) {
 		{name: "a revision alone changes nothing", in: updateRuleIn{Rule: "tidy", ExpectedRevision: new(int64(3))}, msg: nothing},
 		{name: "an empty action list is not a change", in: updateRuleIn{Rule: "tidy", Actions: []ruleActionIn{}}, msg: nothing},
 		{name: "an empty clear", in: updateRuleIn{Rule: "tidy", Clear: []string{}}, msg: nothing},
-		{name: "name is never cleared", in: updateRuleIn{Rule: "tidy", Clear: []string{"name"}}, msg: `clear cannot name "name"; it takes description, accounts and schedule`},
-		{name: "query is never cleared", in: updateRuleIn{Rule: "tidy", Clear: []string{"query"}}, msg: `clear cannot name "query"; it takes description, accounts and schedule`},
+		{name: "name is never cleared", in: updateRuleIn{Rule: "tidy", Clear: []string{"name"}}, msg: clearText},
+		{name: "query is never cleared", in: updateRuleIn{Rule: "tidy", Clear: []string{"query"}}, msg: clearText},
+		{name: "an address in clear", in: updateRuleIn{Rule: "tidy", Clear: []string{"boss@example.com"}}, msg: clearText},
 		{name: "schedule given and cleared", in: updateRuleIn{Rule: "tidy", Schedule: new("every:6h"), Clear: []string{"schedule"}}, msg: "schedule is both given and cleared; give a value or clear it"},
 		{name: "accounts given and cleared", in: updateRuleIn{Rule: "tidy", Accounts: []string{"work"}, Clear: []string{"accounts"}}, msg: "accounts is both given and cleared; give a value or clear it"},
 		{name: "a bad action", in: updateRuleIn{Rule: "tidy", Actions: []ruleActionIn{{Kind: "move"}}}, msg: "action 1 (move) needs folder"},
@@ -758,12 +764,12 @@ func TestRuleToolsRefuseLocally(t *testing.T) {
 		args       map[string]any
 		inMessage  string
 	}{
-		{name: "unknown action kind", tool: "create_rule", args: map[string]any{"name": "r", "query": "q", "actions": []map[string]any{{"kind": "delete"}}}, inMessage: `action 1: unknown kind "delete"`},
+		{name: "unknown action kind", tool: "create_rule", args: map[string]any{"name": "r", "query": "q", "actions": []map[string]any{{"kind": "delete"}}}, inMessage: "action 1: unknown kind; " + ruleKindsText},
 		{name: "stray argument", tool: "create_rule", args: map[string]any{"name": "r", "query": "q", "actions": []map[string]any{{"kind": "archive", "folder": "Old"}}}, inMessage: "action 1 (archive) takes no folder"},
 		{name: "priority", tool: "create_rule", args: map[string]any{"name": "r", "query": "q", "priority": 1000001, "actions": archive}, inMessage: "priority must be -1000000 to 1000000"},
 		{name: "max_per_run", tool: "create_rule", args: map[string]any{"name": "r", "query": "q", "max_per_run": 5001, "actions": archive}, inMessage: "max_per_run must be 1 to 5000"},
 		{name: "nothing to update", tool: "update_rule", args: map[string]any{"rule": "r"}, inMessage: "give at least one field to change"},
-		{name: "an unclearable field", tool: "update_rule", args: map[string]any{"rule": "r", "clear": []string{"query"}}, inMessage: `clear cannot name "query"`},
+		{name: "an unclearable field", tool: "update_rule", args: map[string]any{"rule": "r", "clear": []string{"query"}}, inMessage: "clear names a field it cannot clear"},
 		{name: "a forward with no addresses", tool: "update_rule", args: map[string]any{"rule": "r", "actions": []map[string]any{{"kind": "forward"}}}, inMessage: "action 1 (forward) needs to"},
 		{name: "a dry run of nothing", tool: "dry_run_rule", args: map[string]any{}, inMessage: "give rule"},
 		{
@@ -782,6 +788,39 @@ func TestRuleToolsRefuseLocally(t *testing.T) {
 			body := wantError(t, e.call(t, tt.tool, tt.args), api.ReasonInvalidArgument)
 			if !strings.Contains(body.Message, tt.inMessage) {
 				t.Errorf("message %q lacks %q", body.Message, tt.inMessage)
+			}
+			ruleNoCall(t, e.fake)
+		})
+	}
+}
+
+// TestRuleToolsDoNotEchoRefusedText: an unknown action kind or clear entry
+// is refused in fixed text, so an address pasted where a kind or field name
+// goes, as in the CLI's forward=boss@example.com, never comes back.
+func TestRuleToolsDoNotEchoRefusedText(t *testing.T) {
+	t.Parallel()
+	const secret = "SECRET-boss@example.com"
+	tests := []struct {
+		name, tool string
+		args       map[string]any
+	}{
+		{name: "a CLI-shaped action kind", tool: "create_rule", args: map[string]any{"name": "r", "query": "q", "actions": []map[string]any{{"kind": "forward=" + secret}}}},
+		{name: "a CLI-shaped kind in an update", tool: "update_rule", args: map[string]any{"rule": "r", "actions": []map[string]any{{"kind": "forward=" + secret}}}},
+		{name: "a dry run's definition", tool: "dry_run_rule", args: map[string]any{"definition": map[string]any{"name": "r", "query": "q", "actions": []map[string]any{{"kind": secret}}}}},
+		{name: "a clear entry", tool: "update_rule", args: map[string]any{"rule": "r", "clear": []string{secret}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newTestEnv(t, &fakeDaemon{}, latest)
+			res := e.call(t, tt.tool, tt.args)
+			wantError(t, res, api.ReasonInvalidArgument)
+			raw, err := json.Marshal(res)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if strings.Contains(string(raw), "SECRET") {
+				t.Errorf("the refusal repeats the refused text: %s", raw)
 			}
 			ruleNoCall(t, e.fake)
 		})
