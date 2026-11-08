@@ -97,7 +97,8 @@ message RuleDefinition {
   bool stop = 8;
   // 1 to 16 actions, run in order.
   repeated RuleAction actions = 9;
-  // The most messages a scheduled or manual run acts on, 1 to 5000.
+  // The most messages one run acts on per account, 1 to 5000, for new
+  // mail, scheduled and manual runs alike.
   int32 max_per_run = 10;         // 0: 500
   optional bool enabled = 11;     // unset: true on create
 }

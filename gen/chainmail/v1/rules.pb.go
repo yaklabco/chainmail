@@ -150,7 +150,8 @@ type RuleDefinition struct {
 	Stop bool `protobuf:"varint,8,opt,name=stop,proto3" json:"stop,omitempty"`
 	// 1 to 16 actions, run in order.
 	Actions []*RuleAction `protobuf:"bytes,9,rep,name=actions,proto3" json:"actions,omitempty"`
-	// The most messages a scheduled or manual run acts on, 1 to 5000.
+	// The most messages one run acts on per account, 1 to 5000, for new
+	// mail, scheduled and manual runs alike.
 	MaxPerRun     int32 `protobuf:"varint,10,opt,name=max_per_run,json=maxPerRun,proto3" json:"max_per_run,omitempty"` // 0: 500
 	Enabled       *bool `protobuf:"varint,11,opt,name=enabled,proto3,oneof" json:"enabled,omitempty"`                  // unset: true on create
 	unknownFields protoimpl.UnknownFields
