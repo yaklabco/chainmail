@@ -253,7 +253,7 @@ func (s *Server) createEvent(ctx context.Context, ca *calAccount, calID string, 
 		ref: ref, account: ca.name, calendarID: calID, ev: created, myPartStat: selfPartStat(created, s.ownAddress),
 		isOrganizer: true, rrule: created.RRule, recurring: isSeries(created),
 	}
-	if row, err := s.calcache.Event(ctx, ref); err == nil {
+	if row, err := s.calcache.Event(ctx, ref); err == nil && (created.ETag == "" || row.Event.ETag == created.ETag) {
 		v = viewOfRow(row)
 	}
 	out := &chainmailv1.CreateEventResponse{Event: eventProto(v, s.ownAddress)}
@@ -531,16 +531,12 @@ func (h *calendarService) UpdateEvent(ctx context.Context, req *connect.Request[
 			}}, nil
 		}
 		entry.Decision = decisionAllowed
-		if _, err := ca.store.Put(ctx, res.row.CalendarID, ev, m.GetEtag(), calendar.NotifySend); err != nil {
+		written, err := ca.store.Put(ctx, res.row.CalendarID, ev, m.GetEtag(), calendar.NotifySend)
+		if err != nil {
 			return nil, calendarError(ca.name, err)
 		}
 		s.syncAfterWrite(ctx, ca)
-		v := viewOfResolved(res)
-		v.ev = ev
-		if after, err := s.resolveEvent(ctx, res.ref); err == nil {
-			v = viewOfResolved(after)
-		}
-		return &chainmailv1.UpdateEventResponse{Event: eventProto(v, s.ownAddress)}, nil
+		return &chainmailv1.UpdateEventResponse{Event: eventProto(s.writtenView(ctx, res, written), s.ownAddress)}, nil
 	})
 }
 
@@ -716,6 +712,26 @@ func (s *Server) removalNotice(res resolvedEvent) []calendar.Attendee {
 		return nil
 	}
 	return []calendar.Attendee{{Person: calendar.Person{Email: o.Email}}}
+}
+
+// writtenView is the view of the event a write to res stored: written,
+// the store's answer, with the ref and role res had. calendar.db's
+// version is used only when it is the one written (the same etag), as
+// after a sync that worked; a sync that failed leaves the version from
+// before the write there. When the store gave no etag, a cached version
+// newer than res stands for the write.
+func (s *Server) writtenView(ctx context.Context, res resolvedEvent, written calendar.Event) eventView {
+	if after, err := s.resolveEvent(ctx, res.ref); err == nil {
+		if (written.ETag != "" && after.ev.ETag == written.ETag) || (written.ETag == "" && after.ev.ETag != res.ev.ETag) {
+			return viewOfResolved(after)
+		}
+	}
+	v := viewOfResolved(res)
+	v.ev = written
+	if len(written.Attendees) > 0 {
+		v.myPartStat = selfPartStat(written, s.ownAddress)
+	}
+	return v
 }
 
 // mayChange reports whether James may change an event: he organizes it,
