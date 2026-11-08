@@ -34,10 +34,11 @@ func TestFreeBusy(t *testing.T) {
 		_, _ = fmt.Fprintf(w, `<?xml version="1.0"?><c:schedule-response xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">`+
 			`<c:response><c:recipient><d:href>mailto:BOB@example.com</d:href></c:recipient><c:request-status>2.0;Success</c:request-status><c:calendar-data>%s</c:calendar-data></c:response>`+
 			`<c:response><c:recipient><d:href>mailto:stranger@elsewhere.example</d:href></c:recipient><c:request-status>3.7;Invalid calendar user</c:request-status></c:response>`+
+			`<c:response><c:recipient>mailto:nodata@example.com</c:recipient><c:request-status>2.0;Success</c:request-status></c:response>`+
 			`</c:schedule-response>`, xmlText(reply))
 	})
 	s := d.store(t, "/")
-	people := []string{"bob@example.com", "stranger@elsewhere.example", "silent@example.com"}
+	people := []string{"bob@example.com", "stranger@elsewhere.example", "silent@example.com", "nodata@example.com"}
 	got, err := s.FreeBusy(context.Background(), people, from, to)
 	if err != nil {
 		t.Fatalf("FreeBusy: %v", err)

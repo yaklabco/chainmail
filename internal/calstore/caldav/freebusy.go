@@ -84,6 +84,11 @@ func (s *Store) freeBusyBatch(ctx context.Context, d *discovery, people []string
 		if !ok || !strings.HasPrefix(strings.TrimSpace(r.RequestStatus), "2.") {
 			continue
 		}
+		// Success with no VFREEBUSY tells nothing, so the person stays
+		// unknown rather than free.
+		if !strings.Contains(strings.ToUpper(r.CalendarData), "BEGIN:VFREEBUSY") {
+			continue
+		}
 		busy, err := parseFreeBusy(r.CalendarData, from, to)
 		if err != nil {
 			continue
