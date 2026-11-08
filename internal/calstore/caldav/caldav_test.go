@@ -348,7 +348,7 @@ func TestStatusErrors(t *testing.T) {
 				t.Errorf("403 on op %d with %s: %v, want %v", op, c.header, err, c.want)
 			}
 		}
-		if c.want == calstore.ErrAuth {
+		if errors.Is(c.want, calstore.ErrAuth) {
 			if err := statusError(opSync, &response{status: http.StatusForbidden, header: h, body: syncTok}); !errors.Is(err, calstore.ErrAuth) {
 				t.Errorf("403 on sync with %s: %v, want ErrAuth", c.header, err)
 			}
