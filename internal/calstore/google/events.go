@@ -56,7 +56,11 @@ func (s *Store) Put(ctx context.Context, calID string, ev calendar.Event, etag s
 	}
 	target := ev.ProviderID
 	if !ev.RecurrenceID.IsZero() {
-		target = InstanceID(ev.ProviderID, ev.RecurrenceID, ev.AllDay)
+		id, err := s.instanceID(ctx, calID, ev.ProviderID, ev.RecurrenceID, ev.Raw)
+		if err != nil {
+			return calendar.Event{}, err
+		}
+		target = id
 	}
 	var old *calendar.Event
 	if len(ev.Raw) > 0 {
@@ -192,15 +196,11 @@ func (s *Store) Respond(ctx context.Context, calID, providerID string, r calenda
 	}
 	target := providerID
 	if !r.RecurrenceID.IsZero() {
-		data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, providerID), limit: maxEventBytes})
+		id, err := s.instanceID(ctx, calID, providerID, r.RecurrenceID, nil)
 		if err != nil {
 			return calendar.Event{}, err
 		}
-		master, _, err := decodeEvent(data)
-		if err != nil {
-			return calendar.Event{}, err
-		}
-		target = InstanceID(providerID, r.RecurrenceID, master.AllDay)
+		target = id
 	}
 	data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, target), limit: maxEventBytes})
 	if err != nil {
@@ -265,4 +265,29 @@ func (s *Store) write(ctx context.Context, c call) (calendar.Event, error) {
 
 func sendQuery(mode calendar.Notify) url.Values {
 	return url.Values{"sendUpdates": {sendUpdates(mode)}}
+}
+
+// instanceID is the id of the instance rid of the series id. Google names an
+// instance by the kind of its original start (originalStartTime), which is
+// the series's kind, not by its current one: an exception moved from timed
+// to all-day keeps its timed id. raw, the instance's JSON when the caller has
+// it, gives the id directly; otherwise the master is read for its kind.
+func (s *Store) instanceID(ctx context.Context, calID, id string, rid time.Time, raw []byte) (string, error) {
+	if len(raw) > 0 {
+		var a apiEvent
+		if json.Unmarshal(raw, &a) == nil && a.ID != "" && a.RecurringEventID == id {
+			if orig, _, _, err := parseTime(a.OriginalStartTime); err == nil && orig.Equal(rid) {
+				return a.ID, nil
+			}
+		}
+	}
+	data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, id), limit: maxEventBytes})
+	if err != nil {
+		return "", err
+	}
+	master, _, err := decodeEvent(data)
+	if err != nil {
+		return "", err
+	}
+	return InstanceID(id, rid, master.AllDay), nil
 }

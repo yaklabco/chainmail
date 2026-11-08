@@ -124,7 +124,9 @@ func ObjectID(uid string) string {
 }
 
 // InstanceID is Google's id of the instance of series id that starts at
-// rid: id_YYYYMMDDTHHMMSSZ, or id_YYYYMMDD for an all-day series.
+// rid: id_YYYYMMDDTHHMMSSZ, or id_YYYYMMDD for an all-day series. allDay is
+// the series's kind (the instance's originalStartTime), not the kind an
+// exception has now.
 func InstanceID(id string, rid time.Time, allDay bool) string {
 	if allDay {
 		return id + "_" + rid.UTC().Format("20060102")

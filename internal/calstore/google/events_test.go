@@ -591,3 +591,60 @@ func TestRespondOmittedAttendees(t *testing.T) {
 		t.Errorf("self attendee = %v", self)
 	}
 }
+
+func TestPutUpdateExceptionOfOtherKind(t *testing.T) {
+	st, srv := newStore(t)
+	// A timed series whose 17 November instance became all-day.
+	srv.AddEvent(me, seriesEvent("series1"))
+	toAllDay := exception("series1", "20261117T170000Z", "2026-11-17T09:00:00-08:00", "2026-11-17T11:00:00-08:00")
+	toAllDay["start"] = map[string]any{"date": "2026-11-17"}
+	toAllDay["end"] = map[string]any{"date": "2026-11-18"}
+	srv.AddEvent(me, toAllDay)
+	// An all-day series whose 19 November instance became timed.
+	srv.AddEvent(me, map[string]any{
+		"id": "daily1", "iCalUID": "daily1@example.org",
+		"start": map[string]any{"date": "2026-11-12"}, "end": map[string]any{"date": "2026-11-13"},
+		"recurrence": []any{"RRULE:FREQ=WEEKLY"},
+	})
+	srv.AddEvent(me, map[string]any{
+		"id": "daily1_20261119", "recurringEventId": "daily1", "iCalUID": "daily1@example.org",
+		"originalStartTime": map[string]any{"date": "2026-11-19"},
+		"start":             map[string]any{"dateTime": "2026-11-19T09:00:00-08:00", "timeZone": la},
+		"end":               map[string]any{"dateTime": "2026-11-19T10:00:00-08:00", "timeZone": la},
+	})
+
+	cases := []struct {
+		series, key, wantPath string
+		allDay                bool
+	}{
+		{"series1", "series1@20261117T170000Z", "/calendars/" + me + "/events/series1_20261117T170000Z", true},
+		{"daily1", "daily1@20261119T000000Z", "/calendars/" + me + "/events/daily1_20261119", false},
+	}
+	for _, tc := range cases {
+		evs, err := st.GetEvent(ctx(t), me, tc.series)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ov, ok := byKey(evs)[tc.key]
+		if !ok || ov.AllDay != tc.allDay {
+			t.Fatalf("%s: override %+v (found %v)", tc.key, ov, ok)
+		}
+		// With the instance JSON in Raw, and without it.
+		for _, keepRaw := range []bool{true, false} {
+			ev := ov
+			if !keepRaw {
+				ev.Raw = nil
+			}
+			ev.Location = "Room " + tc.key
+			got, err := st.Put(ctx(t), me, ev, ev.ETag, calendar.NotifyNone)
+			if err != nil {
+				t.Fatalf("%s (raw %v): %v", tc.key, keepRaw, err)
+			}
+			req, _ := srv.LastRequest("PATCH")
+			if req.Path != tc.wantPath {
+				t.Errorf("%s (raw %v): patched %s, want %s", tc.key, keepRaw, req.Path, tc.wantPath)
+			}
+			ov = got
+		}
+	}
+}
