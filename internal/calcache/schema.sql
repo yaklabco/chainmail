@@ -48,7 +48,9 @@ CREATE TABLE mail_invites (
   sequence INTEGER NOT NULL,
   dtstamp TEXT NOT NULL,
   raw BLOB NOT NULL,
+  charset TEXT NOT NULL DEFAULT '',
   found_at TEXT NOT NULL,
+  announced INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (account, message_ref, uid)
 );
 CREATE INDEX mail_invites_by_ref ON mail_invites (ref);
