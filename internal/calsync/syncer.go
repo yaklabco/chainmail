@@ -290,7 +290,9 @@ func (s *Syncer) cycle(ctx context.Context) error {
 // syncCalendar syncs one calendar from its stored token, publishes the
 // watch events of what changed, then writes the changes with the new
 // token. A calendar's first sync publishes nothing. An invalid token is
-// dropped and the calendar synced in full.
+// dropped and the calendar synced in full. Objects too large to take
+// (Changes.Skipped, calcache.Admit) keep their stored rows, are counted in
+// the log and recorded as the calendar's last error.
 func (s *Syncer) syncCalendar(ctx context.Context, calID string) error {
 	acct := s.o.Account
 	row, err := s.o.Cache.Calendar(ctx, acct, calID)
@@ -305,6 +307,8 @@ func (s *Syncer) syncCalendar(ctx context.Context, calID string) error {
 	if err != nil {
 		return err
 	}
+	// Admit now, as Diff and Apply would, to learn what they skip.
+	ch = calcache.Admit(ch)
 	if !row.LastSync.IsZero() && s.o.Log != nil {
 		changes, err := s.o.Cache.Diff(ctx, acct, calID, ch, s.o.Self)
 		if err != nil {
@@ -328,8 +332,23 @@ func (s *Syncer) syncCalendar(ctx context.Context, calID string) error {
 			}
 		}
 	}
-	return s.o.Cache.Apply(ctx, acct, calID, ch, s.o.Self, wallNow(s.clock))
+	if err := s.o.Cache.Apply(ctx, acct, calID, ch, s.o.Self, wallNow(s.clock)); err != nil {
+		return err
+	}
+	if n := len(ch.Skipped); n > 0 {
+		// Apply cleared the calendar's last error; the skip is recorded
+		// after it, until the next sync that skips nothing clears it.
+		s.o.Logger.WarnContext(ctx, skippedText, "account", acct, "calendar", calID, "skipped", n)
+		if err := s.o.Cache.SetError(ctx, acct, calID, skippedText); err != nil && ctx.Err() == nil {
+			s.o.Logger.WarnContext(ctx, "recording a calendar error failed", "account", acct, "calendar", calID)
+		}
+	}
+	return nil
 }
+
+// skippedText is the fixed text recorded on a calendar when a sync skipped
+// objects over calcache's limits (calcache.Admit) or the backend's.
+const skippedText = "calendar objects too large to sync were skipped"
 
 // storedMaster returns the stored row of providerID with no recurrence ID
 // (the master or the single event), or nil when there is none. A failed
