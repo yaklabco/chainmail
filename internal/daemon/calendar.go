@@ -145,21 +145,26 @@ func (s *Server) calendarScope(names []string, storeOnly bool) ([]*calAccount, s
 		}
 		return out, "accounts=*", nil
 	}
-	seen := map[string]bool{}
+	// Every name is checked before any is looked up, so the target never
+	// holds an entry that is not a valid account name.
 	for _, name := range names {
 		if _, err := accountTarget(name); err != nil {
 			return nil, "accounts=" + invalidTarget, err
 		}
+	}
+	target := "accounts=" + strings.Join(names, ",")
+	seen := map[string]bool{}
+	for _, name := range names {
 		if seen[name] {
 			continue
 		}
 		seen[name] = true
 		ca, err := s.calendarAccount(name)
 		if err != nil {
-			return nil, "accounts=" + strings.Join(names, ","), err
+			return nil, target, err
 		}
 		if storeOnly && ca.store == nil {
-			return nil, "accounts=" + strings.Join(names, ","), errNoCalendarStore
+			return nil, target, errNoCalendarStore
 		}
 		out = append(out, ca)
 	}
@@ -167,7 +172,7 @@ func (s *Server) calendarScope(names []string, storeOnly bool) ([]*calAccount, s
 	slices.SortFunc(out, func(a, b *calAccount) int {
 		return cmp.Compare(slices.Index(order, a.name), slices.Index(order, b.name))
 	})
-	return out, "accounts=" + strings.Join(names, ","), nil
+	return out, target, nil
 }
 
 // calendarsReady returns nil when calendar.db can answer reads of every
@@ -264,14 +269,47 @@ func (r resolvedEvent) recurring() bool {
 	return !r.rid.IsZero() || isSeries(r.row.Event)
 }
 
-// role is the event's MyPartStat and IsOrganizer: the row's, or the
-// master's for an override that names no organizer and no attendee, as a
-// sparse override takes its series' role.
-func (r resolvedEvent) role() (calendar.PartStat, bool) {
-	if r.master != nil && r.row.Event.Organizer == nil && len(r.row.Event.Attendees) == 0 {
-		return r.master.MyPartStat, r.master.IsOrganizer
+// A sparse override (one that names no organizer, or lists no attendee)
+// takes those from its series master. organizer, attendees and role give
+// the effective values, which every authorization and policy check uses.
+
+// organizer is the event's effective organizer: the row's, or the
+// master's for an override that names none. Nil when neither names one.
+func (r resolvedEvent) organizer() *calendar.Person {
+	if o := r.ev.Organizer; o != nil && o.Email != "" {
+		return o
 	}
-	return r.row.MyPartStat, r.row.IsOrganizer
+	if r.master != nil {
+		if o := r.master.Event.Organizer; o != nil && o.Email != "" {
+			return o
+		}
+	}
+	return nil
+}
+
+// attendees is the event's effective attendee list and whether it is
+// incomplete: the row's, or the master's for an override that lists none.
+func (r resolvedEvent) attendees() ([]calendar.Attendee, bool) {
+	if len(r.ev.Attendees) > 0 || r.master == nil {
+		return r.ev.Attendees, r.ev.AttendeesTruncated
+	}
+	return r.master.Event.Attendees, r.master.Event.AttendeesTruncated
+}
+
+// role is the event's effective MyPartStat and IsOrganizer: each the
+// row's, or the master's when the row is an override without the field
+// it comes from.
+func (r resolvedEvent) role() (calendar.PartStat, bool) {
+	ps, org := r.row.MyPartStat, r.row.IsOrganizer
+	if r.master != nil {
+		if o := r.row.Event.Organizer; o == nil || o.Email == "" {
+			org = r.master.IsOrganizer
+		}
+		if len(r.row.Event.Attendees) == 0 {
+			ps = r.master.MyPartStat
+		}
+	}
+	return ps, org
 }
 
 // isSeries reports whether ev is a series master: a row with no recurrence
@@ -281,8 +319,51 @@ func isSeries(ev calendar.Event) bool {
 }
 
 // resolveEvent finds the event ref names in calendar.db: a stored row, or
-// an instance of a stored series with no override of its own.
+// an instance of a stored series with no override of its own. The event's
+// account must have finished its first sync, else the result is
+// CACHE_NOT_READY (or AUTH_REQUIRED), as the cache may hold only part of
+// it. A ref nothing names is calcache.ErrNotFound; callers that look no
+// further pass it through refNotFound.
 func (s *Server) resolveEvent(ctx context.Context, ref string) (resolvedEvent, error) {
+	res, err := s.lookupEvent(ctx, ref)
+	if err != nil {
+		return resolvedEvent{}, err
+	}
+	if err := s.accountReady(ctx, res.row.Account); err != nil {
+		return resolvedEvent{}, err
+	}
+	return res, nil
+}
+
+// accountReady is calendarsReady for the one account.
+func (s *Server) accountReady(ctx context.Context, account string) error {
+	ca := s.calendars[account]
+	if ca == nil {
+		return nil
+	}
+	return s.calendarsReady(ctx, []*calAccount{ca})
+}
+
+// refNotFound is the error for a ref that names nothing in calendar.db:
+// while an account with a calendar store has not finished its first sync,
+// the ref may name one of its events still to come, so the result is that
+// account's CACHE_NOT_READY (or AUTH_REQUIRED). Any other err is kept.
+func (s *Server) refNotFound(ctx context.Context, err error) error {
+	if !errors.Is(err, calcache.ErrNotFound) {
+		return err
+	}
+	cas, _, serr := s.calendarScope(nil, true)
+	if serr != nil {
+		return serr
+	}
+	if rerr := s.calendarsReady(ctx, cas); rerr != nil {
+		return rerr
+	}
+	return err
+}
+
+// lookupEvent is resolveEvent without the readiness check.
+func (s *Server) lookupEvent(ctx context.Context, ref string) (resolvedEvent, error) {
 	base, rid, err := calendar.ParseEventRef(ref)
 	if err != nil {
 		return resolvedEvent{}, err

@@ -661,3 +661,72 @@ func TestGetEventOverrideUID(t *testing.T) {
 		t.Errorf("cancelled instance = %+v", evs[0])
 	}
 }
+
+// An RSVP is bound to the version the caller checked: a changed event is
+// refused before anything is written.
+func TestRespondBindsToTheETagRead(t *testing.T) {
+	st, srv := newStore(t)
+	old := srv.AddEvent(me, timedEvent("single1"))
+	cur := srv.ChangeEvent(me, "single1", map[string]any{"organizer": map[string]any{"email": "other@example.org"}})
+	if _, err := st.Respond(ctx(t), me, "single1", calendar.Response{Self: me, PartStat: calendar.PartStatAccepted, ETag: old}); !errors.Is(err, calstore.ErrConflict) {
+		t.Errorf("stale etag: err = %v, want ErrConflict", err)
+	}
+	if n := countMethod(srv, "PATCH"); n != 0 {
+		t.Fatalf("PATCH requests = %d, want none for a stale etag", n)
+	}
+	if _, err := st.Respond(ctx(t), me, "single1", calendar.Response{Self: me, PartStat: calendar.PartStatAccepted, ETag: cur}); err != nil {
+		t.Fatalf("current etag: %v", err)
+	}
+	if req, _ := srv.LastRequest("PATCH"); req.IfMatch != cur {
+		t.Errorf("If-Match = %q, want %q", req.IfMatch, cur)
+	}
+}
+
+// An instance with no exception of its own is known to the cache only by
+// its series's etag. Google gives the instance its own etag, so a write
+// with the master's etag checks it against the master and then writes the
+// instance with the instance's etag.
+func TestInstanceWritesWithTheMasterETag(t *testing.T) {
+	st, srv := newStore(t)
+	masterTag := srv.AddEvent(me, seriesEvent("series1"))
+	rid := utc(2026, 11, 10, 17, 0)
+	instTag := strings.TrimSuffix(masterTag, `"`) + "-20261110T170000Z" + `"`
+
+	if _, err := st.Respond(ctx(t), me, "series1", calendar.Response{Self: me, PartStat: calendar.PartStatDeclined, RecurrenceID: rid, ETag: masterTag}); err != nil {
+		t.Fatalf("Respond with the master's etag: %v", err)
+	}
+	if req, _ := srv.LastRequest("PATCH"); req.Path != "/calendars/"+me+"/events/series1_20261110T170000Z" || req.IfMatch != instTag {
+		t.Errorf("respond PATCH %s If-Match %q, want the instance's etag %q", req.Path, req.IfMatch, instTag)
+	}
+
+	series, err := st.GetEvent(ctx(t), me, "series1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	master := byKey(series)["series1"]
+	second := utc(2026, 11, 17, 17, 0)
+	inst := master
+	inst.RecurrenceID, inst.Start, inst.End = second, second, second.Add(30*time.Minute)
+	inst.Summary = "Weekly, this one moved"
+	if _, err := st.Put(ctx(t), me, inst, master.ETag, calendar.NotifySend); err != nil {
+		t.Fatalf("Put of an instance with the master's etag: %v", err)
+	}
+	if req, _ := srv.LastRequest("PATCH"); req.Path != "/calendars/"+me+"/events/series1_20261117T170000Z" ||
+		req.IfMatch != strings.TrimSuffix(master.ETag, `"`)+"-20261117T170000Z"+`"` {
+		t.Errorf("put PATCH %s If-Match %q", req.Path, req.IfMatch)
+	}
+
+	// Once the series changes, its old etag is refused.
+	srv.ChangeEvent(me, "series1", map[string]any{"summary": "Weekly, renamed"})
+	third := utc(2026, 11, 24, 17, 0)
+	inst.RecurrenceID, inst.Start, inst.End = third, third, third.Add(30*time.Minute)
+	if _, err := st.Put(ctx(t), me, inst, master.ETag, calendar.NotifySend); !errors.Is(err, calstore.ErrConflict) {
+		t.Errorf("Put with a stale master etag: err = %v, want ErrConflict", err)
+	}
+	if _, err := st.Respond(ctx(t), me, "series1", calendar.Response{Self: me, PartStat: calendar.PartStatAccepted, RecurrenceID: third, ETag: master.ETag}); !errors.Is(err, calstore.ErrConflict) {
+		t.Errorf("Respond with a stale master etag: err = %v, want ErrConflict", err)
+	}
+	if _, ok := srv.Event(me, "series1_20261124T170000Z"); ok {
+		t.Error("a write with a stale master etag changed the instance")
+	}
+}

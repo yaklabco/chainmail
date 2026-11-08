@@ -142,3 +142,27 @@ func TestRespondRefusals(t *testing.T) {
 		t.Errorf("concurrent change: err = %v, want ErrConflict", err)
 	}
 }
+
+// An RSVP is bound to the version the caller checked: a changed object is
+// refused before anything is written, and the current one is written with
+// If-Match on that etag.
+func TestRespondBindsToTheETagRead(t *testing.T) {
+	f := newFakeServer(t)
+	href := testCal + "series.ics"
+	old := f.backend.put(t, href, seriesICS)
+	cur := f.backend.put(t, href, seriesICS)
+	s := f.store(t, WithClock(clock))
+	ctx := context.Background()
+	if _, err := s.Respond(ctx, testCal, href, calendar.Response{Self: "jane@example.com", PartStat: calendar.PartStatAccepted, ETag: old}); !errors.Is(err, calstore.ErrConflict) {
+		t.Errorf("stale etag: err = %v, want ErrConflict", err)
+	}
+	if n := len(f.seen(http.MethodPut)); n != 0 {
+		t.Fatalf("PUTs = %d, want none for a stale etag", n)
+	}
+	if _, err := s.Respond(ctx, testCal, href, calendar.Response{Self: "jane@example.com", PartStat: calendar.PartStatAccepted, ETag: cur}); err != nil {
+		t.Fatalf("current etag: %v", err)
+	}
+	if puts := f.seen(http.MethodPut); len(puts) != 1 || puts[0].header.Get("If-Match") != cur {
+		t.Errorf("PUTs %+v, want one with If-Match %s", puts, cur)
+	}
+}

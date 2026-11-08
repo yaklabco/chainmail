@@ -13,7 +13,10 @@ import (
 // object's master or single event, or on the override of one instance,
 // adding the override when the object has none. It reads the object
 // first and PUTs it back with If-Match, so the server's scheduling sends
-// the organizer a REPLY. A change on the server in between is ErrConflict.
+// the organizer a REPLY. When r.ETag is set, an object whose etag differs
+// from it is ErrConflict before anything is written, so the answer goes
+// only to the version the caller checked. A change on the server in
+// between is ErrConflict too.
 func (s *Store) Respond(ctx context.Context, calID, providerID string, r calendar.Response) (calendar.Event, error) {
 	_, href, err := objectPath(calID, providerID)
 	if err != nil {
@@ -30,6 +33,9 @@ func (s *Store) Respond(ctx context.Context, calID, providerID string, r calenda
 	obj, err := s.getObject(ctx, href)
 	if err != nil {
 		return calendar.Event{}, err
+	}
+	if r.ETag != "" && obj.etag != r.ETag {
+		return calendar.Event{}, fmt.Errorf("%w: etag differs", calstore.ErrConflict)
 	}
 	o, err := decodeObject(obj.raw)
 	if err != nil {

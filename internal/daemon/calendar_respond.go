@@ -124,6 +124,9 @@ func (s *Server) rsvpTargetOf(ctx context.Context, ref string) (rsvpTarget, erro
 	default:
 		r, err := s.calcache.MailInvite(ctx, ref)
 		if err != nil {
+			return rsvpTarget{}, s.refNotFound(ctx, err)
+		}
+		if err := s.accountReady(ctx, r.Account); err != nil {
 			return rsvpTarget{}, err
 		}
 		if r.Method == calendar.MethodCancel {
@@ -150,11 +153,14 @@ func (s *Server) rsvpTargetOf(ctx context.Context, ref string) (rsvpTarget, erro
 		return rsvpTarget{}, calcache.ErrNotFound
 	}
 	t.ca = ca
+	if t.cal != nil {
+		// A sparse override answers to its series's organizer, as its
+		// series's attendee.
+		t.ev.Organizer = t.cal.organizer()
+		t.ev.Attendees, _ = t.cal.attendees()
+	}
 	if t.ev.Organizer == nil || t.ev.Organizer.Email == "" {
-		if t.cal == nil || t.cal.master == nil || t.cal.master.Event.Organizer == nil {
-			return rsvpTarget{}, errNoOrganizer
-		}
-		t.ev.Organizer = t.cal.master.Event.Organizer
+		return rsvpTarget{}, errNoOrganizer
 	}
 	t.organizer = t.ev.Organizer.Email
 	if s.ownAddress(t.organizer) {
@@ -165,9 +171,6 @@ func (s *Server) rsvpTargetOf(ctx context.Context, ref string) (rsvpTarget, erro
 		return rsvpTarget{}, err
 	}
 	t.self = s.selfAttendee(t.ev, acct.Address)
-	if t.self == "" && t.cal != nil && t.cal.master != nil && len(t.ev.Attendees) == 0 {
-		t.self = s.selfAttendee(t.cal.master.Event, acct.Address)
-	}
 	if t.self == "" {
 		return rsvpTarget{}, errNotAttendee
 	}
@@ -225,28 +228,47 @@ func (s *Server) respondInStore(ctx context.Context, m *chainmailv1.RespondReque
 	return out, err
 }
 
+// answerInStore answers through the store, bound to the version whose
+// organizer, calendar access and policy were checked: the store refuses
+// the answer when the event changed since (Response.ETag). Then the event
+// is synced and resolved again, every check is repeated on the new
+// version, and the answer is retried once when James's own answer is
+// still what the caller saw (spec 6.1 step 5); otherwise EVENT_CONFLICT.
 func (s *Server) answerInStore(ctx context.Context, m *chainmailv1.RespondRequest, t rsvpTarget, ps calendar.PartStat, entry *audit.Entry) (*chainmailv1.RespondResponse, error) {
-	if d := s.policy.CheckSend(t.ca.name, []string{t.organizer}); !d.Allowed {
-		heldTargets(entry, len(d.Blocked), d.TooMany)
-		return &chainmailv1.RespondResponse{Via: viaStore, Held: &chainmailv1.CalendarHeld{
-			Hint: rsvpStoreHeldHint, Blocked: untrustedList(d.Blocked), TooMany: d.TooMany,
-		}}, nil
-	}
-	entry.Decision = decisionAllowed
-	res := *t.cal
-	before, _ := res.role()
-	r := calendar.Response{Self: t.self, PartStat: ps, Comment: m.GetComment(), RecurrenceID: res.ev.RecurrenceID}
-	_, err := t.ca.store.Respond(ctx, res.row.CalendarID, res.row.Event.ProviderID, r)
-	if errors.Is(err, calstore.ErrConflict) {
-		s.syncAfterWrite(ctx, t.ca)
-		again, rerr := s.resolveEvent(ctx, m.GetRef())
-		if now, _ := again.role(); rerr == nil && now == before {
-			res = again
-			_, err = t.ca.store.Respond(ctx, res.row.CalendarID, res.row.Event.ProviderID, r)
+	before, _ := t.cal.role()
+	var res resolvedEvent
+	for attempt := 0; ; attempt++ {
+		res = *t.cal
+		if err := s.answerableCalendar(ctx, res); err != nil {
+			return nil, err
 		}
-	}
-	if err != nil {
-		return nil, calendarError(t.ca.name, err)
+		if d := s.policy.CheckSend(t.ca.name, []string{t.organizer}); !d.Allowed {
+			heldTargets(entry, len(d.Blocked), d.TooMany)
+			return &chainmailv1.RespondResponse{Via: viaStore, Held: &chainmailv1.CalendarHeld{
+				Hint: rsvpStoreHeldHint, Blocked: untrustedList(d.Blocked), TooMany: d.TooMany,
+			}}, nil
+		}
+		entry.Decision = decisionAllowed
+		r := calendar.Response{Self: t.self, PartStat: ps, Comment: m.GetComment(), RecurrenceID: res.ev.RecurrenceID, ETag: res.ev.ETag}
+		_, err := t.ca.store.Respond(ctx, res.row.CalendarID, res.row.Event.ProviderID, r)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, calstore.ErrConflict) || attempt > 0 {
+			return nil, calendarError(t.ca.name, err)
+		}
+		s.syncAfterWrite(ctx, t.ca)
+		again, err := s.rsvpTargetOf(ctx, m.GetRef())
+		if err != nil {
+			return nil, err
+		}
+		if again.cal == nil || again.ca != t.ca {
+			return nil, calstore.ErrConflict
+		}
+		if now, _ := again.cal.role(); now != before {
+			return nil, calstore.ErrConflict
+		}
+		t = again
 	}
 	s.syncAfterWrite(ctx, t.ca)
 	v := viewOfResolved(res)
@@ -256,6 +278,19 @@ func (s *Server) answerInStore(ctx context.Context, m *chainmailv1.RespondReques
 		v.ev, v.myPartStat = withPartStat(v.ev, t.self, ps), ps
 	}
 	return &chainmailv1.RespondResponse{Via: viaStore, Event: eventProto(v, s.ownAddress)}, nil
+}
+
+// answerableCalendar refuses an answer through the store to an event in a
+// calendar the account may only read: CALENDAR_READ_ONLY.
+func (s *Server) answerableCalendar(ctx context.Context, res resolvedEvent) error {
+	cal, err := s.calcache.Calendar(ctx, res.row.Account, res.row.CalendarID)
+	if err != nil {
+		return err
+	}
+	if cal.Access != calendar.AccessWrite {
+		return calstore.ErrReadOnly
+	}
+	return nil
 }
 
 // withPartStat returns ev with self's PARTSTAT set to ps.

@@ -525,3 +525,23 @@ func TestStoreObjectID(t *testing.T) {
 		t.Errorf("ObjectID = %q, want %q", id, got.ProviderID)
 	}
 }
+
+func TestRespondBindsToTheETagRead(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := newStore(t, false)
+	p := s.Add("work", meeting("a@x"))
+	rows, _ := s.Object("work", p)
+	old := rows[0].ETag
+	s.Change("work", p, func(evs []calendar.Event) []calendar.Event { return evs })
+	if _, err := s.Respond(ctx, "work", p, calendar.Response{Self: me, PartStat: calendar.PartStatAccepted, ETag: old}); !errors.Is(err, calstore.ErrConflict) {
+		t.Errorf("Respond with a stale etag = %v, want ErrConflict", err)
+	}
+	rows, _ = s.Object("work", p)
+	if partStat(t, rows[0], me) != calendar.PartStatNeedsAction {
+		t.Errorf("a refused answer was stored: %+v", rows[0])
+	}
+	if _, err := s.Respond(ctx, "work", p, calendar.Response{Self: me, PartStat: calendar.PartStatAccepted, ETag: rows[0].ETag}); err != nil {
+		t.Errorf("Respond with the current etag: %v", err)
+	}
+}

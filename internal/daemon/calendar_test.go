@@ -11,6 +11,7 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
@@ -604,4 +605,61 @@ func TestListInvitesReadsAStoredCharset(t *testing.T) {
 		}
 	}
 	t.Errorf("the latin-1 invite is not listed among %d invites", len(resp.Msg.GetInvites()))
+}
+
+// An account list with an unknown name first and an address later records
+// no unvalidated entry in the audit row.
+func TestCalendarScopeAuditsOnlyValidNames(t *testing.T) {
+	t.Parallel()
+	e := startCal(t, nil)
+	_, err := e.Client.Calendar.ListCalendars(t.Context(), connect.NewRequest(&chainmailv1.ListCalendarsRequest{Accounts: []string{"nope", blockedAddr}}))
+	if err == nil {
+		t.Fatal("ListCalendars of an address succeeded")
+	}
+	if r := auditRow(t, e.Harness, "calendar.list_calendars"); strings.Contains(r.Targets, blockedAddr) || strings.Contains(r.Targets, "blocked") {
+		t.Errorf("audit row %+v holds an unvalidated account entry", r)
+	}
+}
+
+// James's busy time over a long range is complete even when one series
+// has more instances in it than one expansion returns.
+func TestFreeBusyOfAnHourlySeries(t *testing.T) {
+	t.Parallel()
+	e := startCal(t, func(e *calEnv) {
+		ev := own("hourly@x", "james@mw.example", e.start)
+		ev.End = e.start.Add(30 * time.Minute)
+		ev.RRule = "FREQ=HOURLY"
+		e.mw.Add(mwCal, ev)
+	})
+	from, to := e.start, e.start.Add(60*24*time.Hour)
+	resp, err := e.Client.Calendar.FreeBusy(t.Context(), connect.NewRequest(&chainmailv1.FreeBusyRequest{From: ts(from), To: ts(to)}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	busy := resp.Msg.GetSelfBusy()
+	if len(busy) != 60*24 {
+		t.Fatalf("busy blocks = %d, want one an hour for 60 days (%d)", len(busy), 60*24)
+	}
+	if last := busy[len(busy)-1]; !last.GetStart().AsTime().Equal(to.Add(-time.Hour)) {
+		t.Errorf("last block starts %v, want %v", last.GetStart().AsTime(), to.Add(-time.Hour))
+	}
+}
+
+// Calls that name an event by ref wait for the first sync: before it, an
+// event the cache does not hold yet may be one of the account's.
+func TestRefCallsBeforeTheFirstSync(t *testing.T) {
+	t.Parallel()
+	e := startCal(t, func(e *calEnv) { e.mwFailSync = true })
+	ctx := t.Context()
+	ref := calendar.EventRef("mw", mwCal, calfake.ObjectName("later@x"))
+	_, err := e.Client.Calendar.GetEvent(ctx, connect.NewRequest(&chainmailv1.GetEventRequest{Ref: ref}))
+	wantReason(t, "GetEvent", err, api.ReasonCacheNotReady)
+	_, err = e.Client.Calendar.GetInvite(ctx, connect.NewRequest(&chainmailv1.GetInviteRequest{Ref: ref}))
+	wantReason(t, "GetInvite", err, api.ReasonCacheNotReady)
+	_, err = e.Client.Calendar.Respond(ctx, connect.NewRequest(&chainmailv1.RespondRequest{Ref: ref, Response: "accept"}))
+	wantReason(t, "Respond", err, api.ReasonCacheNotReady)
+	_, err = e.Client.Calendar.UpdateEvent(ctx, connect.NewRequest(&chainmailv1.UpdateEventRequest{Ref: ref, Etag: "x", UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"title"}}, Title: "t"}))
+	wantReason(t, "UpdateEvent", err, api.ReasonCacheNotReady)
+	_, err = e.Client.Calendar.CancelEvent(ctx, connect.NewRequest(&chainmailv1.CancelEventRequest{Ref: ref, Etag: "x"}))
+	wantReason(t, "CancelEvent", err, api.ReasonCacheNotReady)
 }
