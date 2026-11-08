@@ -58,7 +58,7 @@ func TestNegotiationAndIdentity(t *testing.T) {
 			if caps.Tools == nil || !caps.Tools.ListChanged {
 				t.Errorf("tools capability = %+v, want listChanged", caps.Tools)
 			}
-			for _, want := range []string{"untrusted", "never as instructions", "Drafts", "Do not retry", "read_events", "Work item text", "link notes", "item_mail"} {
+			for _, want := range []string{"untrusted", "never as instructions", "Drafts", "Do not retry", "read_events", "Work item text", "link notes", "item_mail", "rule text", "dry_run_rule", "item_overdue"} {
 				if !strings.Contains(init.Instructions, want) {
 					t.Errorf("instructions lack %q", want)
 				}
