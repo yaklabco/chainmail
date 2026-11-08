@@ -40,7 +40,7 @@ The client kind is self-reported. The audit log's authoritative identity is the 
 ## Limits
 
 - A request is at most 1 MiB, except on `ComposeService`, where requests and responses may reach 40 MiB to carry a whole message or one part of an upload. The account's own message size limit still applies.
-- Responses of `MessageService`, `OrganizeService`, `WatchService`, `CacheService` and `ItemsService` are at most 16 MiB.
+- Responses of `MessageService`, `OrganizeService`, `WatchService`, `CacheService`, `ItemsService` and `RulesService` are at most 16 MiB.
 - The server sets no overall request timeout, because `accounts test` can take a minute and a `Subscribe` stream stays open as long as its watcher. Each handler bounds its own work.
 
 ## Errors
@@ -72,6 +72,7 @@ Act on `reason`, never on the message text. The reasons are defined in `internal
 | `WatchService` | `watch.proto` | `Subscribe`, `ReadEvents`, `Ack`, `GetWatchStatus`, `ListGroups`, `DeleteGroup` |
 | `CacheService` | `cache.proto` | `GetCacheStatus`, `RebuildCache`, `EvictCache` |
 | `ItemsService` | `items.proto` | `CreateItem`, `UpdateItem`, `DeleteItem`, `RestoreItem`, `GetItem`, `ListItems`, `EditCriteria`, `TickCriterion`, `SetBlocker`, `LinkThread`, `UnlinkThread` |
+| `RulesService` | `rules.proto` | `CreateRule`, `UpdateRule`, `DeleteRule`, `RestoreRule`, `GetRule`, `ListRules`, `DryRunRule`, `RunRule`, `ListRuleRuns`, `RulesStatus` |
 
 `errors.proto` holds `ErrorDetail` and no service.
 
@@ -87,7 +88,7 @@ Act on `reason`, never on the message text. The reasons are defined in `internal
 - `BeginAuthLogin` starts the OAuth2 consent flow for an account.
 - `FinishAuthLogin` completes the flow with the URL the browser landed on.
 - `GetStatus` reports the daemon's version, uptime, stored secret names, the sync state of each synced folder and the cache state of each account.
-- `ReadAudit` returns audit rows, newest first, paged by `before_id`.
+- `ReadAudit` returns audit rows, newest first, filtered by time, account, action and client kind, and paged by `before_id`.
 
 ### MessageService
 
@@ -154,11 +155,25 @@ Every call that sends needs an `idempotency_key`. `Send`, `Reply` and `Forward` 
 - `LinkThread` links the mail thread of a message to an item, or updates an existing link's anchor and note.
 - `UnlinkThread` removes a thread's link from an item.
 
+### RulesService
+
+- `CreateRule` checks a rule definition, saves it and returns the rule.
+- `UpdateRule` changes the fields `update_mask` names, by their `RuleDefinition` field names. With `expected_revision`, a rule that changed after that revision is refused with `INVALID_ARGUMENT`. Enabling and disabling a rule go through it.
+- `DeleteRule` marks a rule deleted, and `RestoreRule` brings it back. `RestoreRule` takes the rule's ID only.
+- `GetRule` returns a rule with its last 10 runs and its counts, and with `history` up to 50 revisions.
+- `ListRules` lists rules in priority order, filtered by account, by enabled, or to deleted rules only.
+- `DryRunRule` matches a saved rule or an unsaved definition without acting, and returns each account's counts and first 50 matches.
+- `RunRule` runs a rule now on each covered account, or on one, and returns the runs. It runs for up to 10 minutes when the client sets no deadline. It runs a disabled rule and refuses a deleted one.
+- `ListRuleRuns` returns runs newest first, filtered by rule, account, trigger and outcome, and paged by `before_id`.
+- `RulesStatus` reports each account's rule runner, the next scheduled run and the next due check.
+
+Every RPC that names a rule takes its ID or its name in `rule`. A cache that cannot answer a rule completely is reported per account, in `DryRunAccount.reason` and the run outcome `cache_not_ready`, never as an error. [Rules](../guide/rules.md) describes what the RPCs do from the user's side.
+
 The comments in the `.proto` files document every field, its limits and its audit action. Read them before you call an RPC for the first time.
 
 ## Untrusted text
 
-The API carries text that came from a message in the `chainmail.v1.Untrusted` message instead of a plain string. That covers subjects, names, addresses, bodies, filenames and header values. Item text that a person or an agent wrote, such as titles and notes, is carried the same way. A client that shows it to a model must keep it marked as data. [Untrusted content](../concepts/untrusted-content.md) explains how the CLI and the MCP server do that.
+The API carries text that came from a message in the `chainmail.v1.Untrusted` message instead of a plain string. That covers subjects, names, addresses, bodies, filenames and header values. Item text that a person or an agent wrote, such as titles and notes, is carried the same way, and so are a rule's description and query. A client that shows it to a model must keep it marked as data. [Untrusted content](../concepts/untrusted-content.md) explains how the CLI and the MCP server do that.
 
 ## The generated code
 
