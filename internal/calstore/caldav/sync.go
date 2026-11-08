@@ -123,7 +123,8 @@ func (s *Store) GetEvent(ctx context.Context, calID, providerID string) ([]calen
 // when the collection supports it and etag comparison otherwise. Changed
 // objects are read with calendar-multiget. Each object's events replace
 // the stored rows of that object (ObjectReplace). An object that no longer
-// parses, or holds no VEVENT, is reported deleted. Only a 404 or 410 for a
+// parses, or holds no VEVENT, is reported deleted; one with more than
+// calendar.MaxObjectEvents VEVENTs is reported skipped. Only a 404 or 410 for a
 // member is a deletion: a member the server answers with any other failure
 // fails the whole Sync, so the caller keeps its token.
 func (s *Store) Sync(ctx context.Context, calID, token string) (calendar.Changes, error) {
@@ -330,7 +331,8 @@ func (s *Store) etagSyncFrom(ctx context.Context, coll string, state etagState, 
 
 // fetchChanges reads the changed objects with calendar-multiget and builds
 // the Changes. Objects the multiget answers with 404 or 410, and objects
-// that no longer parse or hold no VEVENT, are deletes.
+// that no longer parse or hold no VEVENT, are deletes. Objects with more
+// than calendar.MaxObjectEvents VEVENTs are skipped (Changes.Skipped).
 func (s *Store) fetchChanges(ctx context.Context, coll string, changed map[string]string, deleted map[string]bool, full bool) (calendar.Changes, []string, error) {
 	ch := calendar.Changes{Full: full, ObjectReplace: true}
 	hrefs := make([]string, 0, len(changed))
@@ -347,6 +349,13 @@ func (s *Store) fetchChanges(ctx context.Context, coll string, changed map[strin
 	}
 	for _, o := range objs {
 		evs, err := o.events()
+		if errors.Is(err, calendar.ErrTooLarge) {
+			// More VEVENTs than chainmail takes from one object: its stored
+			// rows stay as they are, and its etag in the token keeps it from
+			// being read again until it changes.
+			ch.Skipped = append(ch.Skipped, o.href)
+			continue
+		}
 		if err != nil || len(evs) == 0 {
 			deleted[o.href] = true
 			continue
