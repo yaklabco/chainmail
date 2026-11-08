@@ -315,6 +315,121 @@ func TestFinishRunRetriesAScheduleTheCacheCouldNotAnswer(t *testing.T) {
 	}
 }
 
+// TestPlanRoundKeepsTheEarliestNextRun checks that a scheduled round, one
+// run per account, leaves the earliest next run any of its runs needs
+// whatever order they finish in: a five-minute retry survives an ok run
+// that finishes later, and an ok run that finishes first gives way to the
+// retry. FinishRun alone leaves the last finisher's plan, which PlanRound
+// then lowers. PlanRound never moves next_run_at later, changes no
+// revision and writes no event.
+func TestPlanRoundKeepsTheEarliestNextRun(t *testing.T) {
+	t.Parallel()
+	started := storeStart.Add(2 * time.Hour)
+	first, second := started.Add(time.Minute), started.Add(2*time.Minute)
+	tests := []struct {
+		name          string
+		first, second Run
+		want          time.Time
+	}{
+		{
+			"retry finishes first",
+			Run{Account: "stale", FinishedAt: first, Outcome: OutcomeCacheNotReady, Reason: "stale"},
+			Run{Account: "ready", FinishedAt: second, Outcome: OutcomeOK},
+			first.Add(5 * time.Minute),
+		},
+		{
+			"ok finishes first",
+			Run{Account: "ready", FinishedAt: first, Outcome: OutcomeOK},
+			Run{Account: "stale", FinishedAt: second, Outcome: OutcomeCacheNotReady, Reason: "stale"},
+			second.Add(5 * time.Minute),
+		},
+		{
+			"both ok",
+			Run{Account: "ready", FinishedAt: first, Outcome: OutcomeOK},
+			Run{Account: "other", FinishedAt: second, Outcome: OutcomeOK},
+			first.Add(6 * time.Hour),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newStoreRig(t)
+			ctx := t.Context()
+			d := storeDef("six-hourly")
+			d.Schedule = Schedule{Kind: ScheduleEvery, Every: 6 * time.Hour}
+			rule := r.create(t, d)
+			tail := r.tail(t)
+			round := []Run{tc.first, tc.second}
+			for i := range round {
+				round[i].ID = r.begin(t, rule.ID, round[i].Account, TriggerSchedule, started)
+				round[i].RuleID, round[i].Trigger = rule.ID, TriggerSchedule
+			}
+			for _, run := range round {
+				r.finish(t, run)
+			}
+			if err := r.store.PlanRound(ctx, rule.ID, round); err != nil {
+				t.Fatalf("PlanRound: %v", err)
+			}
+			got := r.get(t, rule.ID)
+			if !got.NextRunAt.Equal(tc.want) || !got.LastRunAt.Equal(second) || got.Revision != 1 {
+				t.Errorf("after the round next %v last %v revision %d, want next %v last %v revision 1",
+					got.NextRunAt, got.LastRunAt, got.Revision, tc.want, second)
+			}
+			if next, ok, err := r.store.NextScheduled(ctx); err != nil || !ok || !next.Equal(tc.want) {
+				t.Errorf("NextScheduled = %v, %v, %v, want %v", next, ok, err, tc.want)
+			}
+
+			// A plan later than the stored one changes nothing.
+			late := Run{ID: round[0].ID, RuleID: rule.ID, Trigger: TriggerSchedule, FinishedAt: second.Add(time.Hour), Outcome: OutcomeOK}
+			if err := r.store.PlanRound(ctx, rule.ID, []Run{late}); err != nil {
+				t.Fatalf("PlanRound: %v", err)
+			}
+			if again := r.get(t, rule.ID); !again.NextRunAt.Equal(tc.want) {
+				t.Errorf("a later plan moved next_run_at to %v, want %v", again.NextRunAt, tc.want)
+			}
+			wantRuleChanges(t, r.ruleChanges(t, tail))
+		})
+	}
+}
+
+// TestPlanRoundLeavesARuleWithNoNextRun checks that PlanRound plans
+// nothing for a disabled or deleted rule, or an unknown one.
+func TestPlanRoundLeavesARuleWithNoNextRun(t *testing.T) {
+	t.Parallel()
+	r := newStoreRig(t)
+	ctx := t.Context()
+	d := storeDef("six-hourly")
+	d.Schedule = Schedule{Kind: ScheduleEvery, Every: 6 * time.Hour}
+	d.Enabled = false
+	disabled := r.create(t, d)
+	retry := Run{
+		RuleID: disabled.ID, Trigger: TriggerSchedule, FinishedAt: storeStart.Add(time.Hour),
+		Outcome: OutcomeCacheNotReady, Reason: "stale",
+	}
+	if err := r.store.PlanRound(ctx, disabled.ID, []Run{retry}); err != nil {
+		t.Fatalf("PlanRound: %v", err)
+	}
+	if got := r.get(t, disabled.ID); !got.NextRunAt.IsZero() {
+		t.Errorf("a disabled rule has next run %v, want none", got.NextRunAt)
+	}
+
+	d.Name, d.Enabled = "deleted", true
+	live := r.create(t, d)
+	if _, err := r.store.Delete(ctx, storeActor, live.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	retry.RuleID = live.ID
+	if err := r.store.PlanRound(ctx, live.ID, []Run{retry}); err != nil {
+		t.Fatalf("PlanRound: %v", err)
+	}
+	if got := r.get(t, live.ID); !got.NextRunAt.IsZero() {
+		t.Errorf("a deleted rule has next run %v, want none", got.NextRunAt)
+	}
+	if err := r.store.PlanRound(ctx, "r_unknown", []Run{retry}); err != nil {
+		t.Errorf("PlanRound of an unknown rule = %v, want nil", err)
+	}
+}
+
 // TestFinishRunOnADeletedRulePlansNothing checks that a scheduled run that
 // finishes after its rule was deleted records the run but plans no next
 // run, so the deleted rule keeps next_run_at NULL.

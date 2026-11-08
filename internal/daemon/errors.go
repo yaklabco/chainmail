@@ -14,6 +14,7 @@ import (
 	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/query"
 	"github.com/yaklabco/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/rules"
 	"github.com/yaklabco/chainmail/internal/vault"
 )
 
@@ -35,6 +36,7 @@ func toConnectError(err error) *connect.Error {
 		syntaxErr   *query.SyntaxError
 		noFolder    *mailstore.FolderNotFoundError
 		invalidItem *items.InvalidError
+		invalidRule *rules.InvalidError
 	)
 	switch {
 	case errors.As(err, &required):
@@ -54,6 +56,8 @@ func toConnectError(err error) *connect.Error {
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, badArg.hint, err)
 	case errors.As(err, &invalidItem):
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, invalidItem.Hint, err)
+	case errors.As(err, &invalidRule):
+		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, invalidRule.Hint, err)
 	case errors.Is(err, items.ErrKeyMismatch):
 		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, "use a new idempotency_key for a different item", err)
 	case errors.As(err, &denied):
@@ -88,6 +92,8 @@ func toConnectError(err error) *connect.Error {
 		return api.New(connect.CodeFailedPrecondition, api.ReasonCacheNotReady, notReadyHint(err), err)
 	case errors.Is(err, items.ErrNotFound):
 		return api.New(connect.CodeNotFound, api.ReasonNotFound, itemListHint, err)
+	case errors.Is(err, rules.ErrNotFound):
+		return api.New(connect.CodeNotFound, api.ReasonNotFound, ruleListHint, err)
 	case errors.Is(err, mailstore.ErrNotFound):
 		return api.New(connect.CodeNotFound, api.ReasonNotFound, "", err)
 	case errors.Is(err, context.DeadlineExceeded):

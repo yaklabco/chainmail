@@ -47,9 +47,10 @@ func (s *Server) watchedAccounts() []config.ResolvedAccount {
 	return out
 }
 
-// startWatch starts a supervisor for each watched account, and a cache
-// worker for each of them with the cache enabled. They run until ctx ends
-// or stopWatch runs. It does no IO: each supervisor and worker opens its
+// startWatch starts a supervisor for each watched account, a cache worker
+// for each of them with the cache enabled, a rule runner for each with a
+// cache worker, and the rule scheduler. They run until ctx ends or
+// stopWatch runs. It does no IO: each supervisor and worker opens its
 // account's store from its own goroutine, and the store's first use only
 // builds it and hands any connection probe to the background
 // (probeIfStale), so a slow or unreachable mail server never holds up
@@ -75,6 +76,8 @@ func (s *Server) startWatch(ctx context.Context) {
 	}
 	s.opts.Logger.Info("watching accounts", "accounts", set.accounts)
 	s.startCacheAccounts(ctx, accts, &set.wg, runStart)
+	s.startRuleRunners(ctx, accts, &set.wg)
+	set.wg.Go(func() { s.runRuleScheduler(ctx) })
 }
 
 // stopWatch cancels the supervisors and the cache workers and waits for

@@ -12,7 +12,8 @@ import (
 // from the message is wrapped as untrusted and cleaned, and the row carries
 // the event's ref, account and folder. The snippet was rendered by the sync
 // engine with snippetOf, so it is only wrapped. A status detail is the
-// daemon's own text, never the server's.
+// daemon's own text, never the server's. A rule event carries its change
+// and a due event its item, neither ever holding rule or item text.
 func eventToProto(e watch.Event) *chainmailv1.WatchEvent {
 	out := &chainmailv1.WatchEvent{
 		Id: e.ID, At: timestamp(e.At), Kind: string(e.Kind),
@@ -34,6 +35,12 @@ func eventToProto(e watch.Event) *chainmailv1.WatchEvent {
 	}
 	if c := e.Item; c != nil {
 		out.Item = &chainmailv1.WorkItemChange{ItemId: c.ItemID, Type: c.Type, Revision: c.Revision, Op: c.Op, Fields: c.Fields}
+	}
+	if r := e.Rule; r != nil {
+		out.Rule = &chainmailv1.RuleChange{RuleId: r.RuleID, Name: r.Name, Change: r.Change, Revision: r.Revision, Actor: r.Actor, Reason: r.Reason}
+	}
+	if d := e.Due; d != nil {
+		out.Due = &chainmailv1.WorkItemDue{ItemId: d.ItemID, Type: d.Type, DueDate: d.DueDate, State: d.State, ParentId: d.ParentID}
 	}
 	out.ItemId, out.FromSelf = e.ItemID, e.FromSelf
 	return out
