@@ -159,6 +159,36 @@ func attachmentsOf(bs imap.BodyStructure) []mailstore.Attachment {
 	return out
 }
 
+// isCalendar reports whether sp holds iCalendar data, as text/calendar or
+// application/ics.
+func isCalendar(sp *imap.BodyStructureSinglePart) bool {
+	mt := sp.MediaType()
+	return mt == "text/calendar" || mt == "application/ics"
+}
+
+// calendarPartsOf lists the calendar leaves in a body structure, inline or
+// attached, with the method and charset parameters of each.
+func calendarPartsOf(bs imap.BodyStructure) []mailstore.CalendarPart {
+	var out []mailstore.CalendarPart
+	if bs == nil {
+		return nil
+	}
+	bs.Walk(func(path []int, part imap.BodyStructure) bool {
+		sp, ok := part.(*imap.BodyStructureSinglePart)
+		if !ok || !isCalendar(sp) {
+			return true
+		}
+		out = append(out, mailstore.CalendarPart{
+			Part:    partString(path),
+			Method:  strings.ToUpper(strings.TrimSpace(param(sp.Params, "method"))),
+			Charset: strings.ToLower(strings.TrimSpace(param(sp.Params, "charset"))),
+			Size:    int64(sp.Size),
+		})
+		return true
+	})
+	return out
+}
+
 // textLeaf returns the part a snippet is taken from: the first text/plain
 // leaf, else the first text/html one.
 func textLeaf(bs imap.BodyStructure) ([]int, *imap.BodyStructureSinglePart) {

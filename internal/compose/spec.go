@@ -77,6 +77,22 @@ type Spec struct {
 	// MessageID is without angle brackets.
 	MessageID string
 	UserAgent string
+	// Calendar, when set, is an iCalendar object sent as an alternative to
+	// the body, as RFC 6047 sends an iTIP message such as a REPLY: the body
+	// becomes multipart/alternative with the text part, the HTML part when
+	// there is one, and then a text/calendar part with its method and no
+	// disposition.
+	Calendar *CalendarAlternative
+}
+
+// CalendarAlternative is the iCalendar part of an iMIP message (RFC 6047).
+type CalendarAlternative struct {
+	// Method is the iTIP method, such as REPLY, written upper-cased as the
+	// part's method parameter. It must match the METHOD property in Data,
+	// which Build does not read.
+	Method string
+	// Data is the VCALENDAR object, in UTF-8.
+	Data []byte
 }
 
 // Message is a built message and its SMTP envelope.

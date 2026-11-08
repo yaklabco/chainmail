@@ -538,7 +538,9 @@ func (s *Store) FetchMessages(ctx context.Context, refs []ref.Ref) []mailstore.M
 	return out
 }
 
-// StreamPart implements mailstore.Store.
+// StreamPart implements mailstore.Store. A seeded message's parts are its
+// Attachments, by Part, and an appended message's the leaves of its MIME
+// tree, numbered and described as imapstore does.
 func (s *Store) StreamPart(_ context.Context, r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -551,10 +553,17 @@ func (s *Store) StreamPart(_ context.Context, r ref.Ref, part string) (mailstore
 	}
 	var info mailstore.PartInfo
 	var data []byte
-	if part == "" {
+	switch {
+	case part == "":
 		data = rawMessage(m, true)
 		info = mailstore.PartInfo{ContentType: "message/rfc822", Size: int64(len(data))}
-	} else {
+	case m.raw != nil:
+		// An appended message has its parts in its MIME tree.
+		var ok bool
+		if info, data, ok = rawPart(m.raw, part); !ok {
+			return mailstore.PartInfo{}, nil, fmt.Errorf("%w: part %s", mailstore.ErrNotFound, part)
+		}
+	default:
 		i := slices.IndexFunc(m.Attachments, func(a Attachment) bool { return a.Part == part })
 		if i < 0 {
 			return mailstore.PartInfo{}, nil, fmt.Errorf("%w: part %s", mailstore.ErrNotFound, part)

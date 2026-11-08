@@ -16,10 +16,10 @@ var (
 // FetchHeaders implements mailstore.HeaderFetcher: the summaries
 // FetchSummaries gives, with Cc, Bcc, the Message-ID without angle
 // brackets, In-Reply-To, References and attachments as FetchMessages gives
-// them, in the order of uids and leaving out UIDs the folder lacks. No
-// UIDs gives nil, nil without checking src, as imapstore does. Malform and
-// SetMalformedBatch make it answer as imapstore does for messages it cannot
-// parse.
+// them, and the calendar parts calendarParts lists, in the order of uids
+// and leaving out UIDs the folder lacks. No UIDs gives nil, nil without
+// checking src, as imapstore does. Malform and SetMalformedBatch make it
+// answer as imapstore does for messages it cannot parse.
 func (s *Store) FetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32) ([]mailstore.Header, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -53,7 +53,7 @@ func (s *Store) FetchHeaders(ctx context.Context, src mailstore.Source, uids []u
 			continue
 		}
 		if !h.Summary.AttachmentsUnknown {
-			h.Attachments = attachments(m)
+			h.Attachments, h.CalendarParts = attachments(m), calendarParts(m)
 		}
 		out = append(out, h)
 	}
