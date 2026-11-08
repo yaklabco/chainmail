@@ -96,13 +96,15 @@ func (s *Server) newCalendarStore(acct config.ResolvedAccount) calstore.Store {
 }
 
 // openCalendar opens calendar.db in the cache directory and gives each
-// account with a store its syncer. It opens nothing with DisableCalendar,
-// without a CacheDir, or when no account has a store; a failure is logged
-// and calendar reads then answer CACHE_NOT_READY. calcache.Open replaces a
+// account with a store its syncer. It opens nothing with DisableCalendar or
+// without a CacheDir; a failure is logged and calendar reads then answer
+// CACHE_NOT_READY. It opens even when every account's store is none, since
+// the invite hook keeps the invites found in mail there (Amendment 6), and
+// such accounts get no syncer. calcache.Open replaces a
 // file that is corrupt or of another schema itself. It does no network IO:
 // the syncers start in startBackground.
 func (s *Server) openCalendar(ctx context.Context) {
-	if s.opts.DisableCalendar || s.opts.CacheDir == "" || !s.anyCalendarStore() {
+	if s.opts.DisableCalendar || s.opts.CacheDir == "" {
 		return
 	}
 	if err := os.MkdirAll(s.opts.CacheDir, 0o700); err != nil {
@@ -143,16 +145,6 @@ func (s *Server) openCalendar(ctx context.Context) {
 			Logger:     s.opts.Logger,
 		})
 	}
-}
-
-// anyCalendarStore reports whether any account has a calendar store.
-func (s *Server) anyCalendarStore() bool {
-	for _, ca := range s.calendars {
-		if ca.store != nil {
-			return true
-		}
-	}
-	return false
 }
 
 // closeCalendar closes calendar.db, once nothing uses it any more.
