@@ -2,6 +2,7 @@ package mailstore
 
 import (
 	"context"
+	"io"
 
 	"github.com/yaklabco/chainmail/internal/ref"
 )
@@ -80,6 +81,18 @@ type Scoper interface {
 	// with Bounds nil, in the order Search reports them, and the same
 	// errors.
 	SearchFolders(ctx context.Context, in string) ([]string, error)
+}
+
+// BackgroundPartStreamer is implemented by stores that can open a part for
+// background work, as the cache builder reads invite parts.
+type BackgroundPartStreamer interface {
+	// StreamPartBackground is StreamPart admitted as background work,
+	// whatever ctx says: it takes an idle connection only when no
+	// foreground call waits for one, and otherwise fails at once with
+	// ErrBusy instead of waiting. The reader holds its connection until it
+	// is closed, so the caller reads it under a deadline and closes it
+	// promptly.
+	StreamPartBackground(ctx context.Context, r ref.Ref, part string) (PartInfo, io.ReadCloser, error)
 }
 
 // ThreadFinder is implemented by stores that can find a thread's messages

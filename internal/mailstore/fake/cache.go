@@ -9,8 +9,9 @@ import (
 )
 
 var (
-	_ mailstore.HeaderFetcher = (*Store)(nil)
-	_ mailstore.Scoper        = (*Store)(nil)
+	_ mailstore.HeaderFetcher          = (*Store)(nil)
+	_ mailstore.Scoper                 = (*Store)(nil)
+	_ mailstore.BackgroundPartStreamer = (*Store)(nil)
 )
 
 // FetchHeaders implements mailstore.HeaderFetcher: the summaries
