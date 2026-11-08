@@ -327,9 +327,15 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y fish
       - run: scripts/check-doc-shell_test.sh
       - run: git ls-files -z 'website/docs/*.md' 'website/docs/*.mdx' | xargs -0 scripts/check-doc-shell.sh README.md
+      - run: scripts/check-pages-links_test.sh
+      - run: scripts/build-pages_test.sh
+      - run: bun install --frozen-lockfile
+        working-directory: site
+      - run: bun run check
+        working-directory: site
       - run: bun install --frozen-lockfile
         working-directory: website
       - run: bun run typecheck
         working-directory: website
-      - run: bun run build
-        working-directory: website
+      - run: scripts/build-pages.sh
+      - run: scripts/check-pages-links.sh pages-dist
