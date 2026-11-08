@@ -4,8 +4,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -197,12 +199,13 @@ func TestHTTPClientRefusesRedirectToAnotherHost(t *testing.T) {
 	}))
 	t.Cleanup(redirector.Close)
 	get(t, c, redirector.URL+"/here") // same host: followed
-	err = getErr(c, redirector.URL+"/away")
-	if err == nil || !strings.Contains(err.Error(), "redirect to another host") {
-		t.Errorf("err = %v, want a refused redirect", err)
+	resp, err := c.Get(redirector.URL + "/away")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
 	}
-	if err != nil && strings.Contains(err.Error(), "stolen") {
-		t.Errorf("err = %v, quotes the server's Location", err)
+	_ = resp.Body.Close() // nothing to read
+	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "" {
+		t.Errorf("status %d, Location %q; want the 302 itself without its Location", resp.StatusCode, resp.Header.Get("Location"))
 	}
 	if n := len(other.seen()); n != 0 {
 		t.Errorf("other host saw %d requests, want none", n)
@@ -229,5 +232,37 @@ func TestHTTPClientPassesNotModified(t *testing.T) {
 	_ = resp.Body.Close() // nothing to read
 	if resp.StatusCode != http.StatusNotModified {
 		t.Errorf("status = %d, want 304", resp.StatusCode)
+	}
+}
+
+// A same-host redirect loop stops at the limit with the last 3xx response,
+// and nothing the server put in a Location reaches an error.
+func TestHTTPClientRedirectLoopStopsWithoutServerText(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.set(t, auth.PasswordSecret("host"), "pw")
+	c, err := f.m.HTTPClient("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Redirect(w, r, "/calendar?secret-marker-"+strconv.Itoa(int(hits.Load())), http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	resp, err := c.Get(srv.URL + "/start")
+	if err != nil {
+		if strings.Contains(err.Error(), "secret-marker") {
+			t.Fatalf("err = %v, quotes the server's Location", err)
+		}
+		t.Fatalf("Get: %v", err)
+	}
+	_ = resp.Body.Close() // nothing to read
+	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "" {
+		t.Errorf("status %d, Location %q; want the last 302 without its Location", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	if n := hits.Load(); n > 11 {
+		t.Errorf("server saw %d requests, want at most 11", n)
 	}
 }

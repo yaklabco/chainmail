@@ -35,7 +35,10 @@ var errTokenRedirect = errors.New("the token endpoint redirected, which chainmai
 // refreshes and parks as for mail, or Basic with the username and password
 // for password accounts. A parked account fails each request with a
 // *RequiredError before anything is sent. The client refuses plain http to
-// any host but 127.0.0.1 and localhost, and redirects to another host. It
+// any host but 127.0.0.1 and localhost. It follows a redirect only to the
+// same scheme and host, at most maxRedirects deep; any other redirect comes
+// back as the 3xx response itself, without its Location, so no error ever
+// carries a URL the server chose. It
 // never calls Rejected: a refusal by a calendar server says nothing about
 // mail, so the caller decides what it means. Each request is bounded by 30
 // seconds. The transport under it is that of the client WithHTTPClient set,
@@ -49,8 +52,11 @@ func (m *Manager) HTTPClient(account string) (*http.Client, error) {
 		base = http.DefaultTransport
 	}
 	return &http.Client{
-		Timeout:       httpTimeout,
-		Transport:     redirectGuard{base: &authTransport{m: m, account: account, base: base}, allow: sameOrigin, refused: errRedirectHost},
+		Timeout: httpTimeout,
+		Transport: redirectGuard{
+			base: &authTransport{m: m, account: account, base: base}, allow: sameOrigin, refused: errRedirectHost,
+			answer: true, limit: maxRedirects,
+		},
 		CheckRedirect: sameHostRedirect,
 	}, nil
 }
@@ -128,6 +134,14 @@ type redirectGuard struct {
 	base    http.RoundTripper
 	allow   func(from, to *url.URL) bool
 	refused error
+	// answer, when set, returns a refused redirect to the caller as the
+	// response itself, without its Location, in place of refused. net/http
+	// then stops there, and no error carries a URL the server chose: on a
+	// followed redirect, net/http names the hop's URL, which came from an
+	// earlier Location. limit, when positive, refuses the redirect that
+	// would make limit hops.
+	answer bool
+	limit  int
 }
 
 // RoundTrip sends req and passes on its response, unless it is a redirect
@@ -137,13 +151,26 @@ func (g redirectGuard) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil || !isRedirect(resp.StatusCode) {
 		return resp, err
 	}
-	if g.allow != nil {
+	if g.allow != nil && (g.limit <= 0 || hops(req)+1 < g.limit) {
 		if to, err := req.URL.Parse(resp.Header.Get("Location")); err == nil && g.allow(req.URL, to) {
 			return resp, nil
 		}
 	}
+	if g.answer {
+		resp.Header.Del("Location")
+		return resp, nil
+	}
 	_ = resp.Body.Close() // the redirect is refused unread
 	return nil, g.refused
+}
+
+// hops counts the redirects that led to req.
+func hops(req *http.Request) int {
+	n := 0
+	for r := req; r.Response != nil && r.Response.Request != nil; r = r.Response.Request {
+		n++
+	}
+	return n
 }
 
 // sameOrigin accepts a redirect to the scheme and host it came from.
