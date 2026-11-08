@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -260,15 +261,37 @@ func lateBatch(t *testing.T, g *runnerRig) (ref.Ref, int64) {
 }
 
 // startRunRule runs rule once for trigger in the background and returns
-// the channel its run and error arrive on.
+// the channel its run and error arrive on. The run has its own context: at
+// cleanup, which runs before the rig's own cleanups, the context is
+// cancelled and the run joined, so a test that fails while it waits never
+// closes the rig under a run still going.
 func startRunRule(t *testing.T, g *runnerRig, rule rules.Rule, trigger rules.Trigger) <-chan runRuleResult {
 	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
 	done := make(chan runRuleResult, 1)
-	go func() {
-		run, err := g.r.runRule(t.Context(), rule, trigger, 10)
+	wg.Go(func() {
+		run, err := g.r.runRule(ctx, rule, trigger, 10)
 		done <- runRuleResult{run, err}
-	}()
+	})
 	return done
+}
+
+// awaitRunRule waits for the run startRunRule started, failing the test
+// after workerBound so a run that never returns fails fast.
+func awaitRunRule(t *testing.T, done <-chan runRuleResult) runRuleResult {
+	t.Helper()
+	select {
+	case res := <-done:
+		return res
+	case <-time.After(workerBound):
+		t.Fatalf("runRule did not return within %v", workerBound)
+		return runRuleResult{}
+	}
 }
 
 // runRuleResult is what one runRule call returned.
@@ -289,7 +312,7 @@ func awaitCacheWait(t *testing.T, g *runnerRig, done <-chan runRuleResult, tail 
 			t.Fatalf("runner waited %v, want %v for the builder", w.d, ruleCacheWait)
 		}
 		return w
-	case <-time.After(10 * time.Second):
+	case <-time.After(workerBound):
 		t.Fatal("runRule neither returned nor waited for the builder")
 	}
 	return ruleWait{}
@@ -317,7 +340,7 @@ func TestRunRuleWaitsForTheBuilder(t *testing.T) {
 			// then its position moves.
 			g.cacheHeader(t, late)
 			g.sig.set(tail)
-			res := <-done
+			res := awaitRunRule(t, done)
 			if res.err != nil {
 				t.Fatal(res.err)
 			}
@@ -342,7 +365,7 @@ func TestRunRuleGivesUpOnAStuckBuilder(t *testing.T) {
 	done := startRunRule(t, g, rule, rules.TriggerSchedule)
 	w := awaitCacheWait(t, g, done, tail)
 	w.fire <- routeNow
-	res := <-done
+	res := awaitRunRule(t, done)
 	if res.err != nil {
 		t.Fatal(res.err)
 	}
@@ -381,7 +404,7 @@ func TestRunRuleRescopesAfterTheBuilderWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.sig.set(tail)
-	res := <-done
+	res := awaitRunRule(t, done)
 	if res.err != nil {
 		t.Fatal(res.err)
 	}
