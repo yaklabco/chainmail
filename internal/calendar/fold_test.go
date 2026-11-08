@@ -117,3 +117,35 @@ func TestParseICSEventLimit(t *testing.T) {
 		t.Fatalf("ParseICS over the limit: err = %v, want ErrTooLarge", err)
 	}
 }
+
+func TestZonesWall(t *testing.T) {
+	data := []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:x\r\n" +
+		"BEGIN:VTIMEZONE\r\nTZID:Europe/Berlin\r\nBEGIN:STANDARD\r\nDTSTART:19700101T000000\r\n" +
+		"TZOFFSETFROM:+0300\r\nTZOFFSETTO:+0300\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\n" +
+		"BEGIN:VEVENT\r\nUID:u\r\nDTSTART;TZID=Europe/Berlin:20261110T090000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+	cal, err := decodeCalendar(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	z := ZonesOf(cal)
+	at := utc(2026, 11, 10, 6, 0, 0)
+	for _, tc := range []struct {
+		tzid string
+		want time.Time
+		ok   bool
+	}{
+		{"Europe/Berlin", utc(2026, 11, 10, 9, 0, 0), true},           // the object's +03:00
+		{"Europe/Paris", utc(2026, 11, 10, 7, 0, 0), true},            // tzdata
+		{"W. Europe Standard Time", utc(2026, 11, 10, 7, 0, 0), true}, // a Windows name
+		{"Nowhere/Special", time.Time{}, false},
+	} {
+		got, ok := z.Wall(tc.tzid, at)
+		if ok != tc.ok || !got.Equal(tc.want) {
+			t.Errorf("Wall(%q) = %v, %v; want %v, %v", tc.tzid, got, ok, tc.want, tc.ok)
+		}
+	}
+	_, evs, err := ParseICS(data)
+	if err != nil || !evs[0].Start.Equal(at) {
+		t.Fatalf("ParseICS start %v, %v; want %v", evs[0].Start, err, at)
+	}
+}
