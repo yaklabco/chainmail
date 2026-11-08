@@ -972,11 +972,35 @@ func checkItSchedule(t *testing.T, dove *dovecot.Server) {
 		runs = itWaitRuns(t, h2, rule.GetId(), "dove", "schedule", 3, itRunWithin)
 		catchUp = runs[0]
 	}
-	if catchUp.GetOutcome() != "ok" || catchUp.GetMatched() != 3 || catchUp.GetSkipped() != 2 || catchUp.GetApplied() != 1 || catchUp.GetFailed() != 0 {
-		t.Errorf("catch-up run = %v, want outcome ok, 3 matched, 2 skipped by the act-once table, 1 applied", catchUp)
+	// The catch-up skips the two digests the first run flagged. The cache
+	// counts as complete while its builder lags the log by less than
+	// [cache] fresh_lag, so a run at start-up can miss the digest the first
+	// pass has just found: it then applies nothing, and the next run takes
+	// the digest.
+	if catchUp.GetOutcome() != "ok" || catchUp.GetSkipped() != 2 || catchUp.GetApplied() > 1 || catchUp.GetFailed() != 0 ||
+		catchUp.GetMatched() != catchUp.GetSkipped()+catchUp.GetApplied() {
+		t.Errorf("catch-up run = %v, want outcome ok, 2 skipped by the act-once table, at most the new digest applied", catchUp)
 	}
 	itQuietRuns(t, h2, rule.GetId(), "dove", "schedule", len(runs), itQuiet)
 	if next := itGetRule(t, h2, rule.GetId()).GetNextRunAt().AsTime(); !itNear(next, catchUp.GetFinishedAt().AsTime().Add(time.Hour)) {
 		t.Errorf("next run after the catch-up = %v, want an hour after it, %v", next, catchUp.GetFinishedAt().AsTime().Add(time.Hour))
+	}
+	if catchUp.GetApplied() == 0 {
+		t.Logf("the catch-up run matched before the cache held the new digest (run %d); the next run takes it", catchUp.GetId())
+		itWaitCacheComplete(t, h2, "dove", "in:inbox")
+		clock.Advance(time.Hour + time.Second)
+		itWaitCacheComplete(t, h2, "dove", "in:inbox")
+		itUpdateRule(t, h2, poke.GetId(), &chainmailv1.RuleDefinition{Description: "Wakes the scheduler for the next run"}, "description")
+		next := itWaitRuns(t, h2, rule.GetId(), "dove", "schedule", len(runs)+1, itRunWithin)[0]
+		if next.GetOutcome() != "ok" || next.GetMatched() != 3 || next.GetSkipped() != 2 || next.GetApplied() != 1 || next.GetFailed() != 0 {
+			t.Errorf("run after the catch-up = %v, want outcome ok, 3 matched, 2 skipped, 1 applied", next)
+		}
+	}
+	// Each digest is flagged, once, and nothing else.
+	starred = itServerRows(t, h2, "dove", "in:inbox is:starred")
+	if len(starred) != 3 || slices.ContainsFunc(starred, func(r *chainmailv1.MessageRow) bool {
+		return !strings.HasPrefix(r.GetSubject().GetUntrusted(), "Weekly digest")
+	}) {
+		t.Errorf("starred in INBOX after the catch-up: %v, want the three digests", starred)
 	}
 }
