@@ -270,6 +270,9 @@ func TestCalendarErrorMapping(t *testing.T) {
 		{"google request", fmt.Errorf("%w: status 400", google.ErrRequest), connect.CodeInvalidArgument, api.ReasonInvalidArgument, ""},
 		{"caldav rejected", fmt.Errorf("%w: status 403", caldav.ErrRejected), connect.CodeFailedPrecondition, api.ReasonInvalidArgument, ""},
 		{"not attendee", caldav.ErrNotAttendee, connect.CodeFailedPrecondition, api.ReasonInvalidArgument, ""},
+		{"silent unsupported", caldav.ErrSilentUnsupported, connect.CodeFailedPrecondition, api.ReasonInvalidArgument, ""},
+		{"not organizer", errNotOrganizer, connect.CodeFailedPrecondition, api.ReasonNotOrganizer, ""},
+		{"no store", errNoCalendarStore, connect.CodeFailedPrecondition, api.ReasonNoCalendarStore, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -290,7 +293,7 @@ func TestCalendarErrorMapping(t *testing.T) {
 // fixed text, whatever the wrapped error says.
 func TestCalendarErrorTextFixed(t *testing.T) {
 	t.Parallel()
-	for _, sentinel := range []error{google.ErrRequest, caldav.ErrRejected, caldav.ErrNotAttendee} {
+	for _, sentinel := range []error{google.ErrRequest, caldav.ErrRejected, caldav.ErrNotAttendee, caldav.ErrSilentUnsupported} {
 		cerr := toConnectError(fmt.Errorf("%w: %s", sentinel, "SECRET-EVENT-TEXT"))
 		if strings.Contains(cerr.Message(), "SECRET") {
 			t.Errorf("%v reaches the client as %q", sentinel, cerr.Message())

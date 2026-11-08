@@ -119,6 +119,10 @@ func toConnectError(err error) *connect.Error {
 	case errors.Is(err, caldav.ErrNotAttendee):
 		return api.New(connect.CodeFailedPrecondition, api.ReasonInvalidArgument, "",
 			&fixedTextError{msg: "none of the account's addresses is an attendee of the event", err: err})
+	case errors.Is(err, caldav.ErrSilentUnsupported):
+		// The daemon never applies a held change, so it never asks for one.
+		return api.New(connect.CodeFailedPrecondition, api.ReasonInvalidArgument, "make the change in the calendar app",
+			&fixedTextError{msg: "the calendar server would notify attendees of this change", err: err})
 	case errors.Is(err, caldav.ErrRejected):
 		return api.New(connect.CodeFailedPrecondition, api.ReasonInvalidArgument, "check the event's times, attendees and recurrence rule",
 			&fixedTextError{msg: "the calendar server rejected the change", err: err})
