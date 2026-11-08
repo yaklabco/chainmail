@@ -50,7 +50,7 @@ func inviteFetchDone(err error) bool {
 }
 
 // deferredFunc is h's OnDeferredInvites, nil when h is.
-func (h *inviteHook) deferredFunc() func(context.Context, []cache.InviteCandidate) {
+func (h *inviteHook) deferredFunc() func(context.Context, []cache.InviteCandidate) error {
 	if h == nil {
 		return nil
 	}
@@ -58,10 +58,12 @@ func (h *inviteHook) deferredFunc() func(context.Context, []cache.InviteCandidat
 }
 
 // onDeferred queues the invite parts the cache builder could not read in
-// its bounded step, due at once, for the retry loop to read. A part
-// queued already keeps its attempts and backoff. A failure is logged with
-// a count: the builder acknowledges the segment whatever happens here.
-func (h *inviteHook) onDeferred(ctx context.Context, cands []cache.InviteCandidate) {
+// its bounded step, due at once, for the retry loop to read. A part queued
+// already keeps its attempts and backoff. A failed write is returned: the
+// builder then does not acknowledge the segment, and applies it again
+// after its backoff, so no deferred part is lost to a calendar.db failure
+// that passes.
+func (h *inviteHook) onDeferred(ctx context.Context, cands []cache.InviteCandidate) error {
 	now := h.o.Now()
 	rows := make([]calcache.InviteFetchRow, 0, len(cands))
 	for _, c := range cands {
@@ -71,8 +73,10 @@ func (h *inviteHook) onDeferred(ctx context.Context, cands []cache.InviteCandida
 		})
 	}
 	if err := h.o.Cache.PutInviteFetches(ctx, rows); err != nil {
-		h.o.Logger.WarnContext(ctx, "could not queue invite parts to read later; they are lost", "count", len(rows))
+		h.o.Logger.WarnContext(ctx, "could not queue invite parts to read later; the cache applies their mail again", "count", len(rows))
+		return err
 	}
+	return nil
 }
 
 // pass is one run of the retry loop: it reads the queued invite parts that
@@ -187,6 +191,6 @@ func (s *Server) readInvitePart(ctx context.Context, c cache.InviteCandidate) (c
 // calendarDeferredInvites returns the OnDeferredInvites hook of the cache
 // workers over the calendar cache cal, or nil when cal is nil. It shares
 // the server's invite hook.
-func (s *Server) calendarDeferredInvites(cal *calcache.Store, poke func(account string)) func(context.Context, []cache.InviteCandidate) {
+func (s *Server) calendarDeferredInvites(cal *calcache.Store, poke func(account string)) func(context.Context, []cache.InviteCandidate) error {
 	return s.serverInviteHook(cal, poke).deferredFunc()
 }

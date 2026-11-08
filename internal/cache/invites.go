@@ -89,8 +89,7 @@ func inviteGone(err error) bool {
 // readInvites reads each candidate's part and hands the invites read to
 // OnInvites, in candidate order, with no lock held and outside any cache.db
 // transaction. tooLarge counts the messages whose invite parts the header
-// fetch found over the limit. Invite detection never fails a build step,
-// and it does nothing without OnInvites.
+// fetch found over the limit. It does nothing without OnInvites.
 //
 // Invite work is optional, so the step is bounded: the reads of one
 // segment share a deadline of inviteTimeout, and at most inviteCap parts
@@ -100,9 +99,14 @@ func inviteGone(err error) bool {
 // read with ReadInvite. A part over the limit, or whose message is gone,
 // is dropped and counted. Without OnDeferredInvites, the parts it would
 // get are skipped and counted in a log line.
-func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooLarge int) {
+//
+// A read never fails the step. It fails, so the segment is not
+// acknowledged and is applied again, only when OnDeferredInvites could not
+// queue the parts, or when ctx ends: a stopping builder hands nothing on,
+// and the next start reads the segment's invites again.
+func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooLarge int) error {
 	if a.o.OnInvites == nil {
-		return
+		return nil
 	}
 	var deferred []inviteCandidate
 	if over := len(cands) - a.inviteCap; over > 0 {
@@ -121,9 +125,7 @@ func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooL
 		part, data, err := a.readInvite(readCtx, c)
 		switch {
 		case ctx.Err() != nil:
-			// The builder is stopping: the segment is not acknowledged, so
-			// its invites are read again on the next start.
-			return
+			return ctx.Err()
 		case readCtx.Err() != nil && err != nil:
 			// The step's deadline passed: this part and the rest go unread.
 			timedOut = len(cands) - i
@@ -160,13 +162,17 @@ func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooL
 	if len(found) > 0 {
 		a.o.OnInvites(ctx, found)
 	}
-	if len(deferred) > 0 && a.o.OnDeferredInvites != nil {
-		out := make([]InviteCandidate, len(deferred))
-		for i, c := range deferred {
-			out[i] = InviteCandidate{Account: a.name, MessageRef: c.ref.String(), Part: c.part}
-		}
-		a.o.OnDeferredInvites(ctx, out)
+	if len(deferred) == 0 || a.o.OnDeferredInvites == nil {
+		return nil
 	}
+	out := make([]InviteCandidate, len(deferred))
+	for i, c := range deferred {
+		out[i] = InviteCandidate{Account: a.name, MessageRef: c.ref.String(), Part: c.part}
+	}
+	if err := a.o.OnDeferredInvites(ctx, out); err != nil {
+		return fmt.Errorf("queueing %d deferred invite parts: %w", len(out), err)
+	}
+	return nil
 }
 
 // deferText is skipped without OnDeferredInvites and deferred with it.

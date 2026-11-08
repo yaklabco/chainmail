@@ -69,8 +69,11 @@ type AccountOptions struct {
 	// included), or after a stream failure that may pass. The receiver
 	// queues them and reads each later with Account.ReadInvite. It is
 	// called as OnInvites is, after it, before the segment is
-	// acknowledged. Nil means those parts are skipped.
-	OnDeferredInvites func(ctx context.Context, cands []InviteCandidate)
+	// acknowledged. An error means the parts were not queued: the step
+	// fails, the segment is not acknowledged, and after the step's backoff
+	// the same segment is applied again, OnInvites included, so both must
+	// be idempotent. Nil means those parts are skipped.
+	OnDeferredInvites func(ctx context.Context, cands []InviteCandidate) error
 	// Started is when the daemon began this run, taken before any
 	// supervisor starts. A folder is fresh only once a pass at or after it
 	// has synced the folder. Zero means NewAccount's time on Clock.

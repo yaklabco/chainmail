@@ -49,12 +49,15 @@ func found(account, msg string, method string, data []byte) cache.FoundInvite {
 // inviteRig is the invite hook over a real calendar.db and state.db, with
 // the accounts "none" (store none) and "cal" (a calendar store).
 type inviteRig struct {
-	t     *testing.T
-	cal   *calcache.Store
-	log   *watch.Log
-	mu    sync.Mutex
-	pokes []string
-	hook  func(ctx context.Context, invites []cache.FoundInvite)
+	t   *testing.T
+	cal *calcache.Store
+	// calPath is calendar.db's file, for a test to open a second
+	// connection to it.
+	calPath string
+	log     *watch.Log
+	mu      sync.Mutex
+	pokes   []string
+	hook    func(ctx context.Context, invites []cache.FoundInvite)
 	// h is the hook behind hook. failing counts the publishes still to
 	// fail, and publishes every publish tried.
 	h         *inviteHook
@@ -81,7 +84,7 @@ func newInviteRig(t *testing.T) *inviteRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cal.Close() }) // a close error at test end changes nothing
-	r := &inviteRig{t: t, cal: cal, log: watch.NewLog(stateDB, func() time.Time { return inviteNow }, nil)}
+	r := &inviteRig{t: t, cal: cal, calPath: filepath.Join(dir, calcache.FileName), log: watch.NewLog(stateDB, func() time.Time { return inviteNow }, nil)}
 	r.nowNS.Store(inviteNow.UnixNano())
 	r.h = newInviteHook(inviteHookOptions{
 		Cache:     cal,

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -470,10 +471,11 @@ type deferSink struct {
 	got []InviteCandidate
 }
 
-func (s *deferSink) on(_ context.Context, cands []InviteCandidate) {
+func (s *deferSink) on(_ context.Context, cands []InviteCandidate) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.got = append(s.got, cands...)
+	return nil
 }
 
 func (s *deferSink) candidates() []InviteCandidate {
@@ -681,5 +683,84 @@ func TestReadInvite(t *testing.T) {
 	}
 	if _, err := r.a.ReadInvite(t.Context(), c); !errors.Is(err, mailstore.ErrNotFound) && !errors.Is(err, mailstore.ErrStaleRef) {
 		t.Errorf("ReadInvite of an expunged message = %v, want ErrNotFound or ErrStaleRef", err)
+	}
+}
+
+// errQueueDown is a queue write that fails.
+var errQueueDown = errors.New("the invite queue is down")
+
+// failingDeferSink records each OnDeferredInvites call, and fails the
+// first fail of them with errQueueDown.
+type failingDeferSink struct {
+	mu    sync.Mutex
+	fail  int
+	calls [][]InviteCandidate
+}
+
+func (s *failingDeferSink) on(_ context.Context, cands []InviteCandidate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, slices.Clone(cands))
+	if s.fail > 0 {
+		s.fail--
+		return errQueueDown
+	}
+	return nil
+}
+
+func (s *failingDeferSink) snapshot() [][]InviteCandidate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.calls)
+}
+
+// When OnDeferredInvites fails, the deferred parts are not queued, so the
+// segment is not acknowledged: the step fails and backs off, and the same
+// segment is applied again, which reads the immediate invites again (an
+// idempotent upsert for the hook) and hands the deferred part over again.
+func TestBuilderReplaysASegmentWhoseDeferredPartsWereNotQueued(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r, sink := inviteRig(t, fs)
+	queue := &failingDeferSink{fail: 1}
+	r.onDeferred = queue.on
+	r.renew()
+	r.a.inviteCap = 1
+	r.pass("INBOX")
+	r.start()
+	r.waitApplied()
+
+	data := []byte(testInviteICS)
+	first := fs.Add(calMsg("invite-1", "text/calendar; method=REQUEST; charset=UTF-8", data))
+	second := fs.Add(calMsg("invite-2", "text/calendar; method=REQUEST; charset=UTF-8", data))
+	r.pass("INBOX")
+	r.clock.expectAfter(t, workRetryBase) // the builder's backoff after the failed queue write
+	if got, tail := r.acked(), r.tail(); got >= tail {
+		t.Fatalf("acked %d with the deferred part not queued, want below the tail %d", got, tail)
+	}
+	if calls := queue.snapshot(); len(calls) != 1 {
+		t.Fatalf("OnDeferredInvites ran %d times before the backoff, want 1", len(calls))
+	}
+	r.clock.Advance(workRetryBase)
+	r.waitApplied()
+
+	calls := queue.snapshot()
+	if len(calls) != 2 || len(calls[1]) != 1 || calls[1][0].MessageRef != second.String() {
+		t.Fatalf("OnDeferredInvites calls = %+v, want the part of %s handed over again", calls, second)
+	}
+	if got, tail := r.acked(), r.tail(); got != tail {
+		t.Errorf("acked %d after the replay, want the tail %d", got, tail)
+	}
+	if e := r.a.lastError(); e != "" {
+		t.Errorf("last error = %q after the replay, want none", e)
+	}
+	found := sink.invites()
+	if len(found) != 2 {
+		t.Fatalf("OnInvites got %d invites, want the first message's twice", len(found))
+	}
+	for i, f := range found {
+		if f.MessageRef != first.String() {
+			t.Errorf("invite %d = %s, want %s", i, f.MessageRef, first)
+		}
 	}
 }
