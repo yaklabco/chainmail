@@ -13,7 +13,7 @@ interface Props {
 }
 
 const { title, description } = Astro.props;
-const canonical = 'https://chainmail.sh/';
+const canonical = new URL(Astro.url.pathname.replace(/(index)?(\.html)?$/, ''), 'https://chainmail.sh').href;
 const card = 'https://chainmail.sh/img/social-card.png';
 const cardAlt = 'chainmail: let AI agents handle your email';
 // The nav and footer link to the home page's sections: same-page anchors on
@@ -82,9 +82,9 @@ const home = ['/', '/index', '/index.html'].includes(Astro.url.pathname) ? '' : 
             </div>
             <div class="menu-col span-3">
               <p class="t-label">Mail</p>
-              <a href={`${home}#search`}>Search<span>One query, every account</span></a>
-              <a href={`${home}#features`}>Watch<span>Events a watcher resumes</span></a>
-              <a href={`${home}#features`}>Work items<span>Mail filed against tasks</span></a>
+              <a href="/search">Search<span>One query, every account</span></a>
+              <a href={`${home}#stories`}>Morning brief<span>The night's mail, sorted</span></a>
+              <a href={`${home}#stories`}>Work items<span>Mail filed against tasks</span></a>
             </div>
             <a class="menu-card span-3 start-10" href="https://github.com/yaklabco/chainmail/releases/tag/v0.1.0">
               <div class="panel">
@@ -101,7 +101,7 @@ const home = ['/', '/index', '/index.html'].includes(Astro.url.pathname) ? '' : 
         </div>
       </div>
       <div class="nav__item"><a class="nav__link" href={`${home}#policy`}>Policy</a></div>
-      <div class="nav__item"><a class="nav__link" href={`${home}#search`}>Search</a></div>
+      <div class="nav__item"><a class="nav__link" href="/search">Search</a></div>
       <div class="nav__item"><a class="nav__link" href={`${home}#install`}>Install</a></div>
       <div class="nav__item"><a class="nav__link" href="/docs/">Docs</a></div>
     </nav>
@@ -131,9 +131,9 @@ const home = ['/', '/index', '/index.html'].includes(Astro.url.pathname) ? '' : 
     <div class="closing__links">
       <div class="grid">
         <div class="span-6 stack-4">
-          <p class="footer__lede">Email for AI agents, without your passwords.</p>
+          <p class="footer__lede">Hand your inbox to your agent, and keep your passwords.</p>
         </div>
-        <div class="span-2 footer__col"><h3>Product</h3><ul><li><a href={`${home}#agents`}>Agents</a></li><li><a href={`${home}#policy`}>Policy</a></li><li><a href={`${home}#search`}>Search</a></li><li><a href={`${home}#install`}>Install</a></li></ul></div>
+        <div class="span-2 footer__col"><h3>Product</h3><ul><li><a href={`${home}#agents`}>Agents</a></li><li><a href={`${home}#policy`}>Policy</a></li><li><a href="/search">Search</a></li><li><a href={`${home}#install`}>Install</a></li></ul></div>
         <div class="span-2 footer__col"><h3>Docs</h3><ul><li><a href="/docs/getting-started/quick-start">Quick start</a></li><li><a href="/docs/concepts/policy">Send policy</a></li><li><a href="/docs/reference/mcp-tools">MCP tools</a></li><li><a href="/docs/reference/commands/chainmail">Commands</a></li></ul></div>
         <div class="span-2 footer__col"><h3>Project</h3><ul><li><a href="https://github.com/yaklabco/chainmail">GitHub</a></li><li><a href="https://github.com/yaklabco/chainmail/releases">Releases</a></li><li><a href="/docs/reference/changelog">Changelog</a></li><li><a href="https://github.com/yaklabco/chainmail/blob/main/LICENSE">Licence</a></li></ul></div>
       </div>

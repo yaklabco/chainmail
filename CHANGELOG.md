@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The upgrade applies `state.db` migration 6, and an older binary refuses the database afterwards. Take a snapshot before you upgrade.
 - The manual has the landing page's look.
 - The manual's tables and diagrams are restyled to match, and a diagram too wide for the page opens at full size.
+- The landing page leads with what an agent does with your mail: a morning brief, threads filed under tasks, follow-ups before a due date, rules that file receipts, held replies and search across accounts. The two stories that need unreleased features say so.
+- https://chainmail.sh/search is a new page on search speed, with the benchmark figures for the local index against the mail servers. It replaces the redirect from `/search` to the manual's search page.
 - The logo is now a wordmark: two linked gold rings, the name in DM Mono, typed in on load, and a blinking underscore cursor. The favicons and the link preview image use it too, and the gopher mascot is retired.
 
 ### Fixed
