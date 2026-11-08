@@ -63,6 +63,14 @@ type AccountOptions struct {
 	// outside any cache.db transaction, and waits for it to return. Nil
 	// means no part is read.
 	OnInvites func(ctx context.Context, invites []FoundInvite)
+	// OnDeferredInvites, when set with OnInvites, receives the invite
+	// parts of a segment the builder's bounded invite step did not read:
+	// past the per-segment cap, after the step's deadline (a busy pool
+	// included), or after a stream failure that may pass. The receiver
+	// queues them and reads each later with Account.ReadInvite. It is
+	// called as OnInvites is, after it, before the segment is
+	// acknowledged. Nil means those parts are skipped.
+	OnDeferredInvites func(ctx context.Context, cands []InviteCandidate)
 	// Started is when the daemon began this run, taken before any
 	// supervisor starts. A folder is fresh only once a pass at or after it
 	// has synced the folder. Zero means NewAccount's time on Clock.

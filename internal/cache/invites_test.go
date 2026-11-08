@@ -2,9 +2,11 @@ package cache
 
 import (
 	"bytes"
-	"database/sql"
 	"context"
+	"database/sql"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -459,5 +461,225 @@ func TestReadInviteBoundsABlockedBudgetCharge(t *testing.T) {
 	}
 	if out := logs.String(); !strings.Contains(out, "cache could not count an invite part against the budget") {
 		t.Errorf("logs = %q, want the failed charge logged", out)
+	}
+}
+
+// deferSink records what OnDeferredInvites receives.
+type deferSink struct {
+	mu  sync.Mutex
+	got []InviteCandidate
+}
+
+func (s *deferSink) on(_ context.Context, cands []InviteCandidate) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.got = append(s.got, cands...)
+}
+
+func (s *deferSink) candidates() []InviteCandidate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]InviteCandidate(nil), s.got...)
+}
+
+// deferRig is inviteRig whose Accounts also hand deferred invite parts to
+// the returned sink.
+func deferRig(t *testing.T, fs *fake.Store) (*acctRig, *inviteSink, *deferSink) {
+	t.Helper()
+	r, sink := inviteRig(t, fs)
+	deferred := &deferSink{}
+	r.onDeferred = deferred.on
+	r.renew()
+	return r, sink, deferred
+}
+
+// readDeferred reads each deferred part with ReadInvite and returns the
+// invites read.
+func readDeferred(t *testing.T, a *Account, cands []InviteCandidate) []FoundInvite {
+	t.Helper()
+	var out []FoundInvite
+	for _, c := range cands {
+		f, err := a.ReadInvite(t.Context(), c)
+		if err != nil {
+			t.Fatalf("ReadInvite(%s): %v", c.MessageRef, err)
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// No invite part is lost to the per-segment cap: of 21 invites in one
+// segment the step reads 20 and hands the 21st to OnDeferredInvites, with
+// the account, message ref, part, method, charset and size, and
+// ReadInvite reads it later. The step logs the deferral with a count.
+func TestBuilderDefersInvitePartsOverTheCap(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r, sink, deferred := deferRig(t, fs)
+	logs := inviteLogs(r)
+	r.pass("INBOX")
+	r.start()
+	r.waitApplied()
+
+	data := []byte(testInviteICS)
+	var refs []ref.Ref
+	for i := range maxInvitesPerSegment + 1 {
+		refs = append(refs, fs.Add(calMsg(fmt.Sprintf("invite-%02d", i), "text/calendar; method=REQUEST; charset=UTF-8", data)))
+	}
+	r.pass("INBOX")
+	r.waitApplied()
+
+	if got := sink.invites(); len(got) != maxInvitesPerSegment {
+		t.Fatalf("found %d invites in the step, want %d", len(got), maxInvitesPerSegment)
+	}
+	cands := deferred.candidates()
+	last := refs[len(refs)-1]
+	want := InviteCandidate{
+		Account: "acme", MessageRef: last.String(),
+		Part: mailstore.CalendarPart{Part: "2", Method: "REQUEST", Charset: "utf-8"},
+	}
+	if len(cands) == 1 && cands[0].Part.Size > 0 {
+		want.Part.Size = cands[0].Part.Size // the encoded size the header reported
+	}
+	if len(cands) != 1 || cands[0] != want {
+		t.Fatalf("deferred = %+v, want [%+v]", cands, want)
+	}
+	if out := logs.String(); !strings.Contains(out, "cache deferred invite parts over the per-segment cap") || !strings.Contains(out, "count=1") {
+		t.Errorf("logs = %q, want the deferred part counted", out)
+	}
+	later := readDeferred(t, r.a, cands)
+	if len(later) != 1 || later[0].MessageRef != last.String() || later[0].Account != "acme" ||
+		later[0].Part != want.Part || !bytes.Equal(later[0].Data, data) {
+		t.Errorf("ReadInvite = %+v, want the 21st invite", later)
+	}
+	all := make(map[string]bool)
+	for _, f := range append(sink.invites(), later...) {
+		all[f.MessageRef] = true
+	}
+	if len(all) != len(refs) {
+		t.Errorf("%d distinct invites read in all, want %d", len(all), len(refs))
+	}
+}
+
+// A pool busy for the whole step defers the part rather than dropping it;
+// ReadInvite fails at once with ErrBusy while the pool stays busy, and
+// reads the part once a connection is idle.
+func TestBuilderDefersInvitesWhenThePoolIsBusy(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r, sink, deferred := deferRig(t, fs)
+	r.a.inviteTimeout = 20 * time.Millisecond
+	logs := inviteLogs(r)
+	r.pass("INBOX")
+	r.start()
+	r.waitApplied()
+
+	fs.Fail("StreamPart", mailstore.ErrBusy)
+	rf := fs.Add(calMsg("invite", "text/calendar; method=REQUEST", []byte(testInviteICS)))
+	r.pass("INBOX")
+	r.waitApplied()
+
+	if got := sink.invites(); len(got) != 0 {
+		t.Fatalf("found %d invites with a busy pool, want none", len(got))
+	}
+	cands := deferred.candidates()
+	if len(cands) != 1 || cands[0].MessageRef != rf.String() {
+		t.Fatalf("deferred = %+v, want the invite of %s", cands, rf)
+	}
+	if out := logs.String(); !strings.Contains(out, "cache ran out of time for invite parts and deferred them") {
+		t.Errorf("logs = %q, want the deferral logged", out)
+	}
+	before := fs.Calls("StreamPart")
+	if _, err := r.a.ReadInvite(t.Context(), cands[0]); !errors.Is(err, mailstore.ErrBusy) {
+		t.Errorf("ReadInvite on a busy pool = %v, want ErrBusy", err)
+	}
+	if n := fs.Calls("StreamPart") - before; n != 1 {
+		t.Errorf("ReadInvite tried %d times on a busy pool, want once", n)
+	}
+	fs.Fail("StreamPart", nil)
+	if got := readDeferred(t, r.a, cands); len(got) != 1 || !bytes.Equal(got[0].Data, []byte(testInviteICS)) {
+		t.Errorf("ReadInvite = %+v, want the invite", got)
+	}
+}
+
+// A transient stream failure defers the part; a message that is gone is
+// dropped, not deferred.
+func TestBuilderDefersInvitesAfterAStreamError(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		err     error
+		deferIt bool
+	}{
+		{"unavailable", mailstore.ErrUnavailable, true},
+		{"gone", mailstore.ErrNotFound, false},
+		{"stale", mailstore.ErrStaleRef, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fs := fake.New("acme", false)
+			r, sink, deferred := deferRig(t, fs)
+			r.pass("INBOX")
+			r.start()
+			r.waitApplied()
+
+			fs.Fail("StreamPart", tt.err)
+			rf := fs.Add(calMsg("invite", "text/calendar; method=REQUEST", []byte(testInviteICS)))
+			r.pass("INBOX")
+			r.waitApplied()
+			if _, ok := r.row(rf); !ok {
+				t.Error("the message was not cached")
+			}
+			if got := sink.invites(); len(got) != 0 {
+				t.Errorf("found %d invites, want none", len(got))
+			}
+			if n := len(deferred.candidates()); (n == 1) != tt.deferIt || n > 1 {
+				t.Errorf("deferred %d parts, want deferred = %t", n, tt.deferIt)
+			}
+			if e := r.a.lastError(); e != "" {
+				t.Errorf("last error = %q, want none", e)
+			}
+		})
+	}
+}
+
+// ReadInvite reports a message that is gone as mailstore.ErrNotFound or
+// mailstore.ErrStaleRef, a
+// part over the limit as ErrInviteTooLarge, and refuses a part of another
+// account's message as not found. It counts what it reads against the
+// budget.
+func TestReadInvite(t *testing.T) {
+	t.Parallel()
+	fs := fake.New("acme", false)
+	r, _ := inviteRig(t, fs)
+	data := []byte(testInviteICS)
+	rf := fs.Add(calMsg("invite", "text/calendar; method=REQUEST", data))
+	c := InviteCandidate{Account: "acme", MessageRef: rf.String(), Part: mailstore.CalendarPart{Part: "2", Method: "REQUEST", Size: int64(len(data))}}
+
+	got, err := r.a.ReadInvite(t.Context(), c)
+	if err != nil || !bytes.Equal(got.Data, data) {
+		t.Fatalf("ReadInvite = %+v, %v; want the part", got, err)
+	}
+	if b := r.budget(r.a.day()); b != int64(len(data)) {
+		t.Errorf("budget = %d, want %d", b, len(data))
+	}
+
+	other := c
+	other.Account = "beta"
+	if _, err := r.a.ReadInvite(t.Context(), other); !errors.Is(err, mailstore.ErrNotFound) {
+		t.Errorf("ReadInvite of another account's part = %v, want ErrNotFound", err)
+	}
+
+	r.mail = &lyingSizeMail{Store: fs, size: calendar.MaxICSBytes + 100}
+	if _, err := r.a.ReadInvite(t.Context(), c); !errors.Is(err, ErrInviteTooLarge) {
+		t.Errorf("ReadInvite of a part past the limit = %v, want ErrInviteTooLarge", err)
+	}
+	r.mail = fs
+
+	if res := fs.Expunge(t.Context(), []ref.Ref{rf}); res[0].Err != nil {
+		t.Fatal(res[0].Err)
+	}
+	if _, err := r.a.ReadInvite(t.Context(), c); !errors.Is(err, mailstore.ErrNotFound) && !errors.Is(err, mailstore.ErrStaleRef) {
+		t.Errorf("ReadInvite of an expunged message = %v, want ErrNotFound or ErrStaleRef", err)
 	}
 }
