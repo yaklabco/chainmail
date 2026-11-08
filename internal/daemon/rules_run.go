@@ -114,7 +114,9 @@ type ruleRunner struct {
 	jobs int
 	// owed are the act-once writes that failed and that the runner still
 	// owes, whatever rule they belong to and whether that rule still runs.
-	// step makes them before it reads a batch and never acknowledges one
+	// They are read, made and added to only on the runner's turn. step
+	// makes them before it matches a batch and again before it acknowledges
+	// one, on the same hold of the turn, so it never acknowledges a batch
 	// while any is owed. They live in memory: a daemon that stops forgets
 	// them, the at-most-once window of spec amendment 5.
 	owed []owedWrite
@@ -256,16 +258,16 @@ func (r *ruleRunner) open(ctx context.Context) (int64, error) {
 	return acked, nil
 }
 
-// step makes the act-once writes the runner owes, then reads the next
-// batch after pos, runs the on_new rules over its new messages once the
-// cache holds them, makes any write the batch left owed, and acknowledges
-// it. Caught up, it waits for the log to grow and returns pos. A failure,
-// including an owed write that keeps failing, returns pos and acknowledges
-// nothing, so the batch is read again.
+// step reads the next batch after pos and, once the cache holds its
+// messages, does the rest on one hold of the runner's turn: it makes the
+// act-once writes the runner owes, runs the on_new rules over the batch's
+// new messages, makes any write that left owed, and acknowledges the
+// batch. No other job pays or adds to the queue meanwhile, so the batch is
+// acknowledged only on the turn that found the queue empty. Caught up, it
+// makes what is owed and waits for the log to grow, returning pos. A
+// failure, including an owed write that keeps failing, returns pos and
+// acknowledges nothing, so the batch is read again.
 func (r *ruleRunner) step(ctx context.Context, pos int64) (int64, error) {
-	if err := r.payOwed(ctx); err != nil {
-		return pos, err
-	}
 	page, err := r.s.watchLog.Read(ctx, watch.Query{
 		After:  pos,
 		Filter: watch.Filter{Accounts: []string{r.acct.Name}, Kinds: []watch.Kind{watch.KindNew}},
@@ -275,18 +277,32 @@ func (r *ruleRunner) step(ctx context.Context, pos int64) (int64, error) {
 		return pos, err
 	}
 	if len(page.Events) == 0 && page.Next == pos {
+		if err := r.payOwed(ctx); err != nil {
+			return pos, err
+		}
 		r.setState(runnerIdle, "")
 		return pos, r.s.watchLog.Wait(ctx, pos)
 	}
-	if b := r.batchOf(page.Events); len(b.refs) > 0 {
+	b := r.batchOf(page.Events)
+	if len(b.refs) > 0 {
 		if err := r.waitForCache(ctx, b.last); err != nil {
 			return pos, err
 		}
+	}
+	if err := r.take(ctx); err != nil {
+		return pos, err
+	}
+	defer r.release()
+	r.setState(runnerRunning, "")
+	if err := r.drain(ctx); err != nil {
+		return pos, err
+	}
+	if len(b.refs) > 0 {
 		if err := r.runBatch(ctx, b); err != nil {
 			return pos, err
 		}
 	}
-	if err := r.payOwed(ctx); err != nil {
+	if err := r.drain(ctx); err != nil {
 		return pos, err
 	}
 	if err := r.s.watchLog.Ack(ctx, r.group, page.Next); err != nil {
@@ -371,15 +387,10 @@ func (r *ruleRunner) waitForCache(ctx context.Context, last int64) error {
 }
 
 // runBatch runs every enabled on_new rule covering the account over b, in
-// priority order, on the runner's turn. A message a stop rule matched, or
-// a relocating rule moved, is left alone by the rules after it. The first
-// transient failure ends the batch.
+// priority order. The caller holds the runner's turn. A message a stop
+// rule matched, or a relocating rule moved, is left alone by the rules
+// after it. The first transient failure ends the batch.
 func (r *ruleRunner) runBatch(ctx context.Context, b *newBatch) error {
-	if err := r.take(ctx); err != nil {
-		return err
-	}
-	defer r.release()
-	r.setState(runnerRunning, "")
 	list, err := r.s.rules.EnabledOnNew(ctx, r.acct.Name)
 	if err != nil {
 		return err
@@ -736,27 +747,45 @@ func (r *ruleRunner) applied(ctx context.Context, ruleID string, keys []string) 
 	return applied, nil
 }
 
-// payOwed makes every act-once write the runner owes, on its turn, so no
-// job acts between a write and the decision that made it owed. It returns
-// nil at once when nothing is owed, and the first write's failure
-// otherwise.
+// payOwed makes every act-once write the runner owes on a turn of its own,
+// for a step with no batch to read. It returns nil at once when nothing
+// is owed, and the first write's failure otherwise.
 func (r *ruleRunner) payOwed(ctx context.Context) error {
-	r.mu.Lock()
-	owed := slices.Clone(r.owed)
-	r.mu.Unlock()
-	if len(owed) == 0 {
+	if _, ok := r.nextOwed(); !ok {
 		return nil
 	}
 	if err := r.take(ctx); err != nil {
 		return err
 	}
 	defer r.release()
-	for _, w := range owed {
+	return r.drain(ctx)
+}
+
+// drain makes every act-once write the runner owes, oldest first, and
+// returns the first failure. The caller holds the runner's turn, which
+// every job that pays or adds to the queue holds too, so each write it
+// makes is one the queue still holds when it reads it: a write a job paid
+// while this one waited for the turn is not made again.
+func (r *ruleRunner) drain(ctx context.Context) error {
+	for {
+		w, ok := r.nextOwed()
+		if !ok {
+			return nil
+		}
 		if err := r.pay(ctx, w); err != nil {
 			return err
 		}
 	}
-	return nil
+}
+
+// nextOwed is the oldest act-once write the runner owes, if any.
+func (r *ruleRunner) nextOwed() (owedWrite, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.owed) == 0 {
+		return owedWrite{}, false
+	}
+	return r.owed[0], true
 }
 
 // pay makes the owed write w, on the runner's turn, trying owedWriteTries
