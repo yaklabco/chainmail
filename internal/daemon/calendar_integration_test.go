@@ -5,6 +5,7 @@ package daemon_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/yaklabco/chainmail/internal/api"
 	"github.com/yaklabco/chainmail/internal/calendar"
 	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/mailstore/imapstore"
 	"github.com/yaklabco/chainmail/internal/provider"
 	"github.com/yaklabco/chainmail/internal/ref"
@@ -186,6 +188,13 @@ func calItDeliver(t *testing.T, h *daemontest.Harness, dove *dovecot.Server, use
 func calItCheckReply(t *testing.T, raw []byte, uid, self string) {
 	t.Helper()
 	ctype, body := calendarPart(t, raw)
+	calItCheckReplyPart(t, ctype, body, uid, self)
+}
+
+// calItCheckReplyPart checks one text/calendar part, given its Content-Type
+// and decoded body, is the REPLY calItCheckReply wants.
+func calItCheckReplyPart(t *testing.T, ctype string, body []byte, uid, self string) {
+	t.Helper()
 	if !strings.Contains(strings.ToLower(ctype), "method=reply") {
 		t.Errorf("calendar part Content-Type = %q, want method=REPLY", ctype)
 	}
@@ -309,7 +318,23 @@ func checkCalItHeld(t *testing.T, dove *dovecot.Server) {
 	if to, err := header(t, draft.Raw).AddressList("To"); err != nil || len(to) != 1 || to[0].Address != calItBlocked {
 		t.Errorf("draft To = %v, %v, want %s", to, err, calItBlocked)
 	}
-	calItCheckReply(t, draft.Raw, uid, user)
+	// Message.Raw keeps only the text parts, so the calendar part is read
+	// from the draft itself: its header lists it, and StreamPart opens it.
+	hs, err := st.FetchHeaders(t.Context(), mailstore.Source{Folder: draftRef.Folder, UIDValidity: draftRef.UIDValidity}, []uint32{draftRef.UID})
+	if err != nil || len(hs) != 1 || len(hs[0].CalendarParts) != 1 {
+		t.Fatalf("draft headers = %+v, %v; want one calendar part", hs, err)
+	}
+	part := hs[0].CalendarParts[0]
+	_, rc, err := st.StreamPart(t.Context(), draftRef, part.Part)
+	if err != nil {
+		t.Fatalf("StreamPart(%s): %v", part.Part, err)
+	}
+	body, err := io.ReadAll(rc)
+	_ = rc.Close() // read in full
+	if err != nil {
+		t.Fatal(err)
+	}
+	calItCheckReplyPart(t, "text/calendar; method="+part.Method, body, uid, user)
 
 	env := sendEnv{Harness: h}
 	if d := env.decisions(t, "rsvp"); !slices.Equal(d, []string{"held"}) {
