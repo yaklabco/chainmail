@@ -254,8 +254,12 @@ func TestMailwrightCalDAV(t *testing.T) {
 		t.Errorf("REPLY does not carry the acceptance:\n%s", reply)
 	}
 
-	// Free/busy: john is busy at the meeting; a stranger is unknown.
-	fb, err := jane.store.FreeBusy(ctx, []string{john.Email, "stranger@elsewhere.invalid"},
+	// Free/busy: john is busy at the meeting he accepted. Mailwright grants
+	// no schedule-query-freebusy implicitly (RFC 6638 section 6.1.4), so a
+	// principal may query only itself: jane, whom john was granted nothing
+	// on, comes back 3.8 No authority and stays unknown, never free, as a
+	// stranger does.
+	fb, err := john.store.FreeBusy(ctx, []string{john.Email, jane.Email, "stranger@elsewhere.invalid"},
 		created.Start.Add(-time.Hour), created.End.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("FreeBusy: %v", err)
@@ -267,6 +271,9 @@ func TestMailwrightCalDAV(t *testing.T) {
 	}
 	if !jf.Known || !busy {
 		t.Errorf("john's free/busy = %+v, want known and busy during the meeting", jf)
+	}
+	if fb[jane.Email].Known {
+		t.Errorf("jane's free/busy is known without a grant: %+v", fb[jane.Email])
 	}
 	if fb["stranger@elsewhere.invalid"].Known {
 		t.Error("a stranger's free/busy is known")
@@ -288,8 +295,26 @@ func TestMailwrightCalDAV(t *testing.T) {
 		t.Errorf("a held create delivered %d invitations", n)
 	}
 
+	// Jane's copy as it is now: the server may have updated it with
+	// john's REPLY.
+	current, err := jane.store.GetEvent(ctx, janeCal.ID, updated.ProviderID)
+	if err != nil {
+		t.Fatalf("reading the organizer's copy: %v", err)
+	}
+
+	// A silent update or delete of the invitation would CANCEL john, so
+	// both are refused.
+	quiet := current[0]
+	quiet.Location = "Room 9"
+	if _, err := jane.store.Put(ctx, janeCal.ID, quiet, quiet.ETag, calendar.NotifyNone); !errors.Is(err, ErrSilentUnsupported) {
+		t.Errorf("silent update of a scheduled event: err = %v, want ErrSilentUnsupported", err)
+	}
+	if err := jane.store.Delete(ctx, janeCal.ID, quiet.ProviderID, quiet.ETag, calendar.NotifyNone); !errors.Is(err, ErrSilentUnsupported) {
+		t.Errorf("silent delete of a scheduled event: err = %v, want ErrSilentUnsupported", err)
+	}
+
 	// Deleting the organizer's event cancels it for john.
-	if err := jane.store.Delete(ctx, janeCal.ID, updated.ProviderID, updated.ETag, calendar.NotifySend); err != nil {
+	if err := jane.store.Delete(ctx, janeCal.ID, updated.ProviderID, current[0].ETag, calendar.NotifySend); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	awaitInbox(t, john, "CANCEL", func(item string) bool {

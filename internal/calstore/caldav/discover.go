@@ -143,7 +143,7 @@ func (s *Store) propfind(ctx context.Context, path, depth string, props ...strin
 		if resp.status/100 == 2 {
 			return nil, fmt.Errorf("%w: status %d", calstore.ErrUnavailable, resp.status)
 		}
-		return nil, statusError(opRead, resp.status, resp.body)
+		return nil, statusError(opRead, resp)
 	}
 	return parseMultistatus(resp.body)
 }

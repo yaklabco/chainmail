@@ -361,3 +361,14 @@ func TestCheckReleaseEnv(t *testing.T) {
 		})
 	}
 }
+
+// TestCalDAVTestArgsCapParallelism: the CalDAV suite runs with the same
+// -p and -parallel caps as the integration suite.
+func TestCalDAVTestArgsCapParallelism(t *testing.T) {
+	args := strings.Join(calDAVTestArgs(), " ")
+	for _, want := range []string{"-p " + parallelism(), "-parallel " + parallelism(), "-tags caldav", "-timeout 15m"} {
+		if !strings.Contains(" "+args+" ", " "+want+" ") {
+			t.Errorf("go %s lacks %q", args, want)
+		}
+	}
+}

@@ -60,6 +60,10 @@ func TestVTimezoneMatchesGoZoneData(t *testing.T) {
 		{"America/Sao_Paulo", 2018, 2018, true, false},
 		{"America/Chicago", 2005, 2005, true, true},
 		{"Pacific/Auckland", 2026, 2026, true, true},
+		// Zones whose offset changed after 1970 and never since: the fixed
+		// observance must carry today's offset, not the 1970 one.
+		{"Asia/Kathmandu", 2026, 2026, true, false},
+		{"Asia/Singapore", 2026, 2027, false, false},
 	}
 	for _, tc := range tests {
 		t.Run(fmt.Sprintf("%s %d-%d open=%v", tc.zone, tc.first, tc.last, tc.open), func(t *testing.T) {
@@ -126,10 +130,11 @@ func TestVTimezoneFixedZoneAndBounds(t *testing.T) {
 func TestAddTimezonesKeepsDefinedZones(t *testing.T) {
 	raw := strings.Replace(seriesICS, "BEGIN:VEVENT", "BEGIN:VTIMEZONE\r\nTZID:America/New_York\r\nX-ORIGINAL:1\r\n"+
 		"BEGIN:STANDARD\r\nDTSTART:19700101T000000\r\nTZOFFSETFROM:-0500\r\nTZOFFSETTO:-0500\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT", 1)
-	cal, err := decodeICal([]byte(raw))
+	o, err := decodeObject([]byte(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
+	cal := o.cal
 	addTimezones(cal, fixedNow)
 	n := 0
 	for _, c := range cal.Children {
@@ -144,10 +149,11 @@ func TestAddTimezonesKeepsDefinedZones(t *testing.T) {
 		t.Errorf("%d VTIMEZONEs, want the stored one only", n)
 	}
 
-	cal, err = decodeICal([]byte(seriesICS))
+	o, err = decodeObject([]byte(seriesICS))
 	if err != nil {
 		t.Fatal(err)
 	}
+	cal = o.cal
 	addTimezones(cal, fixedNow)
 	if cal.Children[0].Name != ical.CompTimezone {
 		t.Fatalf("no VTIMEZONE added first: %s", cal.Children[0].Name)

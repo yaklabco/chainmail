@@ -32,14 +32,15 @@ type object struct {
 	events []calendar.Event
 }
 
-// decodeObject parses data with calendar.ParseICS, which bounds it and
-// refuses malformed input, and then with go-ical for patching.
+// decodeObject parses data with calendar.ParseICS, which bounds its size
+// and parameter lengths and refuses malformed input, and then with go-ical
+// for patching. It is the only way server bytes reach go-ical.
 func decodeObject(data []byte) (*object, error) {
 	_, events, err := calendar.ParseICS(data)
 	if err != nil {
 		return nil, err
 	}
-	cal, err := decodeICal(data)
+	cal, err := decodeAccepted(data)
 	if err != nil {
 		return nil, err
 	}
@@ -55,10 +56,10 @@ func decodeObject(data []byte) (*object, error) {
 	return o, nil
 }
 
-// decodeICal runs go-ical's decoder on data calendar.ParseICS accepted. It
-// recovers from a panic anyway, since the decoder panics on some malformed
-// parameter lists.
-func decodeICal(data []byte) (cal *ical.Calendar, err error) {
+// decodeAccepted runs go-ical's decoder on data calendar.ParseICS has
+// already accepted. decodeObject is its only caller. It recovers from a
+// panic anyway, since the decoder panics on some malformed parameter lists.
+func decodeAccepted(data []byte) (cal *ical.Calendar, err error) {
 	defer func() {
 		if recover() != nil {
 			cal, err = nil, fmt.Errorf("%w: malformed content line", calendar.ErrInvalidICS)
@@ -125,9 +126,9 @@ func eventComponent(ev calendar.Event) (*ical.Component, error) {
 
 // patch applies the fields of ev that differ from old to comp, the stored
 // VEVENT old was read from. Properties chainmail does not model, and the
-// parameters of unchanged properties, are kept. A change to the time, the
-// recurrence or the status raises SEQUENCE past the stored one unless ev
-// already does.
+// parameters of unchanged properties, are kept. A change to the start, the
+// end, the recurrence or the status raises SEQUENCE past the stored one
+// unless ev already does.
 func patch(comp *ical.Component, old, ev calendar.Event, now time.Time) error {
 	nc, err := eventComponent(ev)
 	if err != nil {
@@ -145,7 +146,8 @@ func patch(comp *ical.Component, old, ev calendar.Event, now time.Time) error {
 	if timeChanged {
 		replace(ical.PropDateTimeStart)
 	}
-	if timeChanged || !old.End.Equal(ev.End) {
+	endChanged := !old.End.Equal(ev.End)
+	if timeChanged || endChanged {
 		comp.Props.Del(ical.PropDuration)
 		replace(ical.PropDateTimeEnd)
 	}
@@ -183,7 +185,10 @@ func patch(comp *ical.Component, old, ev calendar.Event, now time.Time) error {
 		replace(ical.PropExceptionDates)
 	}
 	seq := ev.Sequence
-	if (timeChanged || recurChanged || old.Status != ev.Status) && seq <= old.Sequence {
+	// Changes to DTSTART, DTEND, DURATION, the recurrence or STATUS need a
+	// new SEQUENCE for attendees to accept them (RFC 5546 section 2.1.4,
+	// RFC 5545 section 3.8.7.4).
+	if (timeChanged || endChanged || recurChanged || old.Status != ev.Status) && seq <= old.Sequence {
 		seq = old.Sequence + 1
 	}
 	if seq != old.Sequence || comp.Props.Get(ical.PropSequence) == nil {
@@ -309,15 +314,25 @@ func scheduleAgentClient(cal *ical.Calendar) {
 	}
 }
 
-// hasServerScheduledAttendee reports whether any attendee lacks
-// SCHEDULE-AGENT=CLIENT.
-func hasServerScheduledAttendee(cal *ical.Calendar) bool {
+// serverScheduled reports whether the server may schedule any attendee of
+// cal other than the addresses in self: one whose SCHEDULE-AGENT is not
+// CLIENT or NONE. Absent means SERVER (RFC 6638 section 7.1), and an
+// unknown value is taken as SERVER too, since refusing is the safe side.
+func serverScheduled(cal *ical.Calendar, self []string) bool {
+	isSelf := func(addr string) bool {
+		return slices.ContainsFunc(self, func(s string) bool { return strings.EqualFold(strings.TrimSpace(s), addr) })
+	}
 	for _, c := range cal.Children {
 		if c.Name != ical.CompEvent {
 			continue
 		}
 		for _, a := range c.Props.Values(ical.PropAttendee) {
-			if !strings.EqualFold(a.Params.Get(paramScheduleAgent), "CLIENT") {
+			if isSelf(propEmail(&a)) {
+				continue
+			}
+			switch strings.ToUpper(strings.TrimSpace(a.Params.Get(paramScheduleAgent))) {
+			case "CLIENT", "NONE":
+			default:
 				return true
 			}
 		}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -154,6 +155,40 @@ func (r *msResponse) href() string {
 		return ""
 	}
 	return p
+}
+
+// gone reports whether a response says its resource no longer exists: a
+// response-level 404 or 410, as RFC 6578 section 3.5.2 reports a removed
+// member and RFC 4791 section 7.9 a missing multiget href.
+func (r *msResponse) gone() bool {
+	code := statusCode(r.Status)
+	return code == http.StatusNotFound || code == http.StatusGone
+}
+
+// failure returns the error for a response that lacks a property it was
+// asked for: its failed response-level status, else the status of its
+// first failed propstat, else ErrUnavailable naming the missing property.
+func (r *msResponse) failure(missing string) error {
+	if code := statusCode(r.Status); code/100 != 2 {
+		return resourceError(code)
+	}
+	for _, ps := range r.Propstats {
+		if code := statusCode(ps.Status); code/100 != 2 {
+			return resourceError(code)
+		}
+	}
+	return fmt.Errorf("%w: no %s", calstore.ErrUnavailable, missing)
+}
+
+// resourceError maps the failure of one resource inside a multistatus:
+// 401 and 403 to ErrAuth, anything else to ErrUnavailable. A failed
+// resource is never taken for a deleted one.
+func resourceError(code int) error {
+	sentinel := calstore.ErrUnavailable
+	if code == http.StatusUnauthorized || code == http.StatusForbidden {
+		sentinel = calstore.ErrAuth
+	}
+	return fmt.Errorf("%w: resource status %d", sentinel, code)
 }
 
 // props merges the properties of every 2xx propstat.

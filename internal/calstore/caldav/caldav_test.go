@@ -319,12 +319,42 @@ func TestStatusErrors(t *testing.T) {
 		{opSync, 305, nil, calstore.ErrUnavailable},
 	}
 	for _, tc := range tests {
-		err := statusError(tc.op, tc.code, tc.body)
+		err := statusError(tc.op, &response{status: tc.code, body: tc.body})
 		if !errors.Is(err, tc.want) {
 			t.Errorf("statusError(%d, %d) = %v, want %v", tc.op, tc.code, err, tc.want)
 		}
 		if !strings.Contains(err.Error(), fmt.Sprintf("status %d", tc.code)) {
 			t.Errorf("statusError(%d, %d) = %q, want the status", tc.op, tc.code, err)
+		}
+	}
+
+	// A 403 is an authorization failure, whatever the operation, when its
+	// Bearer challenge says the token is the problem (RFC 6750 section 3.1).
+	challenges := []struct {
+		header string
+		want   error
+	}{
+		{`Bearer realm="mail", error="insufficient_scope", scope="calendar"`, calstore.ErrAuth},
+		{`Bearer error="invalid_token"`, calstore.ErrAuth},
+		{`Bearer error = "INVALID_TOKEN"`, calstore.ErrAuth},
+		{`Basic realm="a, error=insufficient_scope", Bearer error=insufficient_scope`, calstore.ErrAuth},
+		{`Basic realm="mail", error="insufficient_scope"`, calstore.ErrReadOnly},
+		{`Bearer realm="error=insufficient_scope"`, calstore.ErrReadOnly},
+		{`Bearer error="invalid_request"`, calstore.ErrReadOnly},
+		{`Bearer`, calstore.ErrReadOnly},
+	}
+	for _, c := range challenges {
+		h := http.Header{}
+		h.Set("WWW-Authenticate", c.header)
+		for _, op := range []opKind{opWrite, opCreate} {
+			if err := statusError(op, &response{status: http.StatusForbidden, header: h}); !errors.Is(err, c.want) {
+				t.Errorf("403 on op %d with %s: %v, want %v", op, c.header, err, c.want)
+			}
+		}
+		if errors.Is(c.want, calstore.ErrAuth) {
+			if err := statusError(opSync, &response{status: http.StatusForbidden, header: h, body: syncTok}); !errors.Is(err, calstore.ErrAuth) {
+				t.Errorf("403 on sync with %s: %v, want ErrAuth", c.header, err)
+			}
 		}
 	}
 }

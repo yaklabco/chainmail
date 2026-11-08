@@ -94,8 +94,16 @@ func (Test) Integration() error {
 // which only incus can reach, so CI does not run this suite. Without the
 // variable the container tests skip.
 func (Test) CalDAV() error {
-	return sh.RunV("go", "test", "-race", "-tags", "caldav", "-count=1", "-timeout", "15m",
-		"./internal/calstore/caldav/", "./internal/testutil/mailwright/")
+	return sh.RunV("go", calDAVTestArgs()...)
+}
+
+// calDAVTestArgs is the go command line of Test.CalDAV.
+func calDAVTestArgs() []string {
+	return []string{
+		"test", "-race", "-tags", "caldav", "-count=1", "-timeout", "15m",
+		"-p", parallelism(), "-parallel", parallelism(),
+		"./internal/calstore/caldav/", "./internal/testutil/mailwright/",
+	}
 }
 
 // Build compiles bin/chainmail without cgo.

@@ -24,7 +24,10 @@ var errNoETag = fmt.Errorf("%w: etag required", calstore.ErrConflict)
 // when Raw is empty): only the properties of ev's VEVENT that changed are
 // rewritten, and other components and properties are kept. A VEVENT for a
 // recurrence ID the object lacks is added as an override. NotifyNone sets
-// SCHEDULE-AGENT=CLIENT on every attendee, so the server sends nothing.
+// SCHEDULE-AGENT=CLIENT on every attendee, so the server sends nothing. A
+// replace with NotifyNone of an object whose attendees the server
+// schedules is refused with ErrSilentUnsupported before anything is sent,
+// since moving them to CLIENT would itself CANCEL them.
 // A VTIMEZONE is added for every IANA TZID the object uses without one.
 // It returns the stored event, read back from the server.
 func (s *Store) Put(ctx context.Context, calID string, ev calendar.Event, etag string, mode calendar.Notify) (calendar.Event, error) {
@@ -86,6 +89,11 @@ func (s *Store) replace(ctx context.Context, href string, ev calendar.Event, eta
 	if err != nil {
 		return calendar.Event{}, err
 	}
+	if mode == calendar.NotifyNone {
+		if err := s.checkSilent(ctx, o.cal); err != nil {
+			return calendar.Event{}, err
+		}
+	}
 	now := s.now()
 	if i := o.find(ev.RecurrenceID); i >= 0 {
 		if o.events[i].UID != ev.UID {
@@ -134,7 +142,7 @@ func (s *Store) putObject(ctx context.Context, href string, body []byte, cond ma
 		return "", err
 	}
 	if resp.status/100 != 2 {
-		return "", statusError(op, resp.status, resp.body)
+		return "", statusError(op, resp)
 	}
 	return normalizeETag(resp.header.Get("ETag")), nil
 }
@@ -164,9 +172,11 @@ func (s *Store) stored(ctx context.Context, href, etag string, sent []byte, rid 
 }
 
 // Delete removes an object with If-Match etag. With NotifyNone it first
-// rewrites the object with SCHEDULE-AGENT=CLIENT on every attendee, when
-// any lacks it, and sends Schedule-Reply: F, so the server sends neither a
-// CANCEL nor a REPLY (RFC 6638 sections 7.1 and 8.1).
+// reads the object: when the server schedules any attendee other than the
+// account, deleting it would CANCEL them, so it returns
+// ErrSilentUnsupported and sends nothing. Otherwise the DELETE carries
+// Schedule-Reply: F, so the server sends no REPLY either (RFC 6638 section
+// 8.1).
 func (s *Store) Delete(ctx context.Context, calID, providerID, etag string, mode calendar.Notify) error {
 	_, href, err := objectPath(calID, providerID)
 	if err != nil {
@@ -177,57 +187,52 @@ func (s *Store) Delete(ctx context.Context, calID, providerID, etag string, mode
 	}
 	header := map[string]string{"If-Match": etag}
 	if mode == calendar.NotifyNone {
-		if etag, err = s.silence(ctx, href, etag); err != nil {
+		if err := s.checkSilentDelete(ctx, href, etag); err != nil {
 			return err
 		}
-		header = map[string]string{"If-Match": etag, "Schedule-Reply": "F"}
+		header["Schedule-Reply"] = "F"
 	}
 	resp, err := s.do(ctx, request{method: http.MethodDelete, path: href, header: header})
 	if err != nil {
 		return err
 	}
 	if resp.status/100 != 2 {
-		return statusError(opWrite, resp.status, resp.body)
+		return statusError(opWrite, resp)
 	}
 	return nil
 }
 
-// silence rewrites an object so that no attendee is scheduled by the
-// server, and returns its new etag. An object already so is left alone.
-func (s *Store) silence(ctx context.Context, href, etag string) (string, error) {
+// checkSilentDelete reads the object a NotifyNone delete would remove and
+// refuses it when the read etag differs or the server schedules its
+// attendees.
+func (s *Store) checkSilentDelete(ctx context.Context, href, etag string) error {
 	obj, err := s.getObject(ctx, href)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if obj.etag != etag {
-		return "", fmt.Errorf("%w: etag differs", calstore.ErrConflict)
+		return fmt.Errorf("%w: etag differs", calstore.ErrConflict)
 	}
-	cal, err := decodeICal(obj.raw)
+	o, err := decodeObject(obj.raw)
 	if err != nil {
-		return "", err
+		return err
 	}
-	if !hasServerScheduledAttendee(cal) {
-		return etag, nil
+	return s.checkSilent(ctx, o.cal)
+}
+
+// checkSilent returns ErrSilentUnsupported when the server schedules an
+// attendee of cal other than the account's own addresses. Discovery, for
+// those addresses, runs only when some attendee is server-scheduled.
+func (s *Store) checkSilent(ctx context.Context, cal *ical.Calendar) error {
+	if !serverScheduled(cal, nil) {
+		return nil
 	}
-	scheduleAgentClient(cal)
-	for _, c := range cal.Children {
-		if c.Name == ical.CompEvent {
-			stamp(c, s.now())
-		}
-	}
-	body, err := encodeObject(cal)
+	d, err := s.discover(ctx)
 	if err != nil {
-		return "", err
+		return err
 	}
-	newTag, err := s.putObject(ctx, href, body, map[string]string{"If-Match": etag}, opWrite)
-	if err != nil {
-		return "", err
+	if serverScheduled(cal, d.addresses) {
+		return ErrSilentUnsupported
 	}
-	if newTag == "" {
-		newTag, err = s.etagOf(ctx, href)
-		if err != nil {
-			return "", err
-		}
-	}
-	return newTag, nil
+	return nil
 }
