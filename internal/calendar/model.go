@@ -153,6 +153,13 @@ type Response struct {
 	PartStat     PartStat
 	Comment      string // untrusted once stored
 	RecurrenceID time.Time
+	// ETag, when set, is the etag of the version the caller checked (its
+	// organizer, its access and the policy), sent as If-Match: a store
+	// whose current version has another etag answers
+	// calstore.ErrConflict and writes nothing. For an instance with no
+	// override of its own it may be the series master's etag, which the
+	// store checks against the master before writing the instance.
+	ETag string
 }
 
 // Instance is one occurrence. Event is the master or the override it comes from.

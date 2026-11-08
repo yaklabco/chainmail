@@ -498,7 +498,9 @@ func (s *Store) Put(ctx context.Context, calID string, ev calendar.Event, etag s
 // instance at r.RecurrenceID, adding an override from the master when
 // there is none. Self not among the attendees gives calstore.ErrNotFound.
 // It works on a read-only calendar too, as answering an invite does.
-// The comment is logged but not stored.
+// When r.ETag is set and differs from the object's etag, it answers
+// calstore.ErrConflict and changes nothing. The comment is logged but not
+// stored.
 func (s *Store) Respond(ctx context.Context, calID, providerID string, r calendar.Response) (calendar.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -508,6 +510,9 @@ func (s *Store) Respond(ctx context.Context, calID, providerID string, r calenda
 	c, o, err := s.objectLocked(calID, providerID)
 	if err != nil {
 		return calendar.Event{}, err
+	}
+	if r.ETag != "" && o.rows[0].ETag != r.ETag {
+		return calendar.Event{}, calstore.ErrConflict
 	}
 	return s.setPartStatLocked(c, o, r.RecurrenceID, r.Self, r.PartStat)
 }

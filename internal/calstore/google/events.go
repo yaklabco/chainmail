@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yaklabco/chainmail/internal/calendar"
+	"github.com/yaklabco/chainmail/internal/calstore"
 )
 
 // GetEvent returns one event: a single event, or a series master followed
@@ -55,7 +56,9 @@ func (s *Store) GetEvent(ctx context.Context, calID, providerID string) ([]calen
 
 // Put creates ev when etag is "", with the id ObjectID(ev.UID), or patches
 // the event ev.ProviderID (the instance ev.RecurrenceID names, when set)
-// with If-Match etag. A patch sends only the fields that differ from ev.Raw,
+// with If-Match etag. For an instance, etag may be the series master's
+// current etag, as an instance with no exception of its own is known by
+// it: the instance is then written with its own etag. A patch sends only the fields that differ from ev.Raw,
 // or every field chainmail models when there is no Raw. It returns the event
 // as Google stored it.
 func (s *Store) Put(ctx context.Context, calID string, ev calendar.Event, etag string, mode calendar.Notify) (calendar.Event, error) {
@@ -65,13 +68,20 @@ func (s *Store) Put(ctx context.Context, calID string, ev calendar.Event, etag s
 	if ev.ProviderID == "" {
 		return calendar.Event{}, fmt.Errorf("%w: event has no provider id", ErrRequest)
 	}
-	target := ev.ProviderID
+	target, ifMatch := ev.ProviderID, etag
 	if !ev.RecurrenceID.IsZero() {
-		id, err := s.instanceID(ctx, calID, ev.ProviderID, ev.RecurrenceID, ev.Raw)
+		id, masterETag, err := s.instanceID(ctx, calID, ev.ProviderID, ev.RecurrenceID, ev.Raw)
 		if err != nil {
 			return calendar.Event{}, err
 		}
 		target = id
+		if masterETag != "" && etag == masterETag {
+			// The caller knows the instance only by its series's etag,
+			// which still matches: write the instance with its own.
+			if ifMatch, err = s.etagOf(ctx, calID, id); err != nil {
+				return calendar.Event{}, err
+			}
+		}
 	}
 	var old *calendar.Event
 	if len(ev.Raw) > 0 {
@@ -84,7 +94,7 @@ func (s *Store) Put(ctx context.Context, calID string, ev calendar.Event, etag s
 		return calendar.Event{}, err
 	}
 	return s.write(ctx, call{
-		method: "PATCH", path: eventPath(calID, target), body: body, ifMatch: etag,
+		method: "PATCH", path: eventPath(calID, target), body: body, ifMatch: ifMatch,
 		query: sendQuery(mode), write: true,
 	})
 }
@@ -196,7 +206,10 @@ func sameRecurrence(a, b calendar.Event) bool {
 // update (attendeesOmitted true with only the self attendee), so attendees
 // Google left out of the event it read are kept. It reads the event first
 // and patches with If-Match on the etag it read, so a change in between
-// gives calstore.ErrConflict.
+// gives calstore.ErrConflict. When r.ETag is set, an event whose etag
+// differs from it is calstore.ErrConflict before anything is written; for
+// an instance, r.ETag may instead be the series master's current etag,
+// as an instance with no exception of its own is known by that etag.
 func (s *Store) Respond(ctx context.Context, calID, providerID string, r calendar.Response) (calendar.Event, error) {
 	status := responseStatus(r.PartStat)
 	if status == "" || r.PartStat == calendar.PartStatNeedsAction {
@@ -205,13 +218,13 @@ func (s *Store) Respond(ctx context.Context, calID, providerID string, r calenda
 	if r.Self == "" {
 		return calendar.Event{}, fmt.Errorf("%w: no attendee address", ErrRequest)
 	}
-	target := providerID
+	target, masterETag := providerID, ""
 	if !r.RecurrenceID.IsZero() {
-		id, err := s.instanceID(ctx, calID, providerID, r.RecurrenceID, nil)
+		id, mtag, err := s.instanceID(ctx, calID, providerID, r.RecurrenceID, nil)
 		if err != nil {
 			return calendar.Event{}, err
 		}
-		target = id
+		target, masterETag = id, mtag
 	}
 	data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, target), limit: maxEventBytes})
 	if err != nil {
@@ -224,6 +237,11 @@ func (s *Store) Respond(ctx context.Context, calID, providerID string, r calenda
 	}
 	if err := json.Unmarshal(data, &cur); err != nil {
 		return calendar.Event{}, errBadResponse
+	}
+	if r.ETag != "" && cur.ETag != r.ETag && (masterETag == "" || r.ETag != masterETag) {
+		// Not the version the caller checked, nor an instance of the
+		// series version it checked.
+		return calendar.Event{}, fmt.Errorf("%w: etag differs", calstore.ErrConflict)
 	}
 	idx := slices.IndexFunc(cur.Attendees, func(a map[string]any) bool {
 		email, _ := a["email"].(string)
@@ -282,23 +300,39 @@ func sendQuery(mode calendar.Notify) url.Values {
 // instance by the kind of its original start (originalStartTime), which is
 // the series's kind, not by its current one: an exception moved from timed
 // to all-day keeps its timed id. raw, the instance's JSON when the caller has
-// it, gives the id directly; otherwise the master is read for its kind.
-func (s *Store) instanceID(ctx context.Context, calID, id string, rid time.Time, raw []byte) (string, error) {
+// it, gives the id directly; otherwise the master is read for its kind, and
+// masterETag is its current etag (else "").
+func (s *Store) instanceID(ctx context.Context, calID, id string, rid time.Time, raw []byte) (instID, masterETag string, err error) {
 	if len(raw) > 0 {
 		var a apiEvent
 		if json.Unmarshal(raw, &a) == nil && a.ID != "" && a.RecurringEventID == id {
 			if orig, _, _, err := parseTime(a.OriginalStartTime); err == nil && orig.Equal(rid) {
-				return a.ID, nil
+				return a.ID, "", nil
 			}
 		}
 	}
 	data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, id), limit: maxEventBytes})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	master, _, err := decodeEvent(data)
 	if err != nil {
+		return "", "", err
+	}
+	return InstanceID(id, rid, master.AllDay), master.ETag, nil
+}
+
+// etagOf reads the current etag of the event or instance id.
+func (s *Store) etagOf(ctx context.Context, calID, id string) (string, error) {
+	data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, id), limit: maxEventBytes})
+	if err != nil {
 		return "", err
 	}
-	return InstanceID(id, rid, master.AllDay), nil
+	var cur struct {
+		ETag string `json:"etag"`
+	}
+	if err := json.Unmarshal(data, &cur); err != nil || cur.ETag == "" {
+		return "", errBadResponse
+	}
+	return cur.ETag, nil
 }
