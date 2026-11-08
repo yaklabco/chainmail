@@ -730,3 +730,105 @@ func TestInstanceWritesWithTheMasterETag(t *testing.T) {
 		t.Error("a write with a stale master etag changed the instance")
 	}
 }
+
+// A write to an instance with the series's etag is checked against the
+// occurrence the series makes, as that is what the caller checked. When
+// someone else turned the instance into an exception (the series keeping
+// its etag), the write is refused with ErrConflict and nothing is
+// written, so no one the caller never checked is notified and no newer
+// answer is overwritten.
+func TestInstanceExceptionMadeElsewhereConflicts(t *testing.T) {
+	second := utc(2026, 11, 17, 17, 0)
+	const instID = "series1_20261117T170000Z"
+	selfAnd := func(extra ...any) []any {
+		return append([]any{
+			map[string]any{"email": "boss@example.org", "organizer": true, "responseStatus": "accepted"},
+			map[string]any{"email": me, "self": true, "responseStatus": "needsAction"},
+		}, extra...)
+	}
+	cases := map[string]map[string]any{
+		"gained an attendee": {"attendees": selfAnd(map[string]any{"email": "blocked@elsewhere.example", "responseStatus": "needsAction"})},
+		"lost an attendee":   {"attendees": []any{map[string]any{"email": me, "self": true, "responseStatus": "needsAction"}}},
+		"answered":           {"attendees": []any{map[string]any{"email": "boss@example.org", "organizer": true, "responseStatus": "accepted"}, map[string]any{"email": me, "self": true, "responseStatus": "accepted"}}},
+		"other answered":     {"attendees": []any{map[string]any{"email": "boss@example.org", "organizer": true, "responseStatus": "declined"}, map[string]any{"email": me, "self": true, "responseStatus": "needsAction"}}},
+		"new organizer":      {"organizer": map[string]any{"email": "other@example.org"}},
+		"moved": {
+			"start": map[string]any{"dateTime": "2026-11-17T10:00:00-08:00", "timeZone": la},
+			"end":   map[string]any{"dateTime": "2026-11-17T10:30:00-08:00", "timeZone": la},
+		},
+		"longer":    {"end": map[string]any{"dateTime": "2026-11-17T10:00:00-08:00", "timeZone": la}},
+		"tentative": {"status": "tentative"},
+		"cancelled": {"status": "cancelled"},
+		"relocated": {"location": "Elsewhere"},
+		"renamed":   {"summary": "Weekly, just this one"},
+	}
+	for name, patch := range cases {
+		t.Run(name, func(t *testing.T) {
+			st, srv := newStore(t)
+			masterTag := srv.AddEvent(me, seriesEvent("series1"))
+			series, err := st.GetEvent(ctx(t), me, "series1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			master := byKey(series)["series1"]
+			if instTag := srv.ChangeInstance(me, instID, patch); instTag == masterTag {
+				t.Fatalf("exception etag %q is the series's", instTag)
+			}
+			if m, _ := srv.Event(me, "series1"); m["etag"] != masterTag {
+				t.Fatalf("series etag changed to %v; the case needs it unchanged", m["etag"])
+			}
+			before, _ := srv.Event(me, instID)
+
+			inst := master
+			inst.RecurrenceID, inst.Start, inst.End = second, second, second.Add(30*time.Minute)
+			inst.Description = "edited by chainmail"
+			if _, err := st.Put(ctx(t), me, inst, masterTag, calendar.NotifySend); !errors.Is(err, calstore.ErrConflict) {
+				t.Errorf("Put: err = %v, want ErrConflict", err)
+			}
+			if _, err := st.Respond(ctx(t), me, "series1", calendar.Response{Self: me, PartStat: calendar.PartStatDeclined, RecurrenceID: second, ETag: masterTag}); !errors.Is(err, calstore.ErrConflict) {
+				t.Errorf("Respond: err = %v, want ErrConflict", err)
+			}
+			if n := countMethod(srv, "PATCH"); n != 0 {
+				t.Errorf("PATCH requests = %d, want none", n)
+			}
+			if after, _ := srv.Event(me, instID); after["etag"] != before["etag"] {
+				t.Error("the exception was changed")
+			}
+		})
+	}
+}
+
+// An instance that is still what the series makes is written, with its own
+// etag, even when it is stored as an exception that changed nothing.
+func TestInstanceUnchangedExceptionIsWritten(t *testing.T) {
+	st, srv := newStore(t)
+	masterTag := srv.AddEvent(me, seriesEvent("series1"))
+	series, err := st.GetEvent(ctx(t), me, "series1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	master := byKey(series)["series1"]
+
+	second := utc(2026, 11, 17, 17, 0)
+	instTag := srv.ChangeInstance(me, "series1_20261117T170000Z", map[string]any{})
+	inst := master
+	inst.RecurrenceID, inst.Start, inst.End = second, second, second.Add(30*time.Minute)
+	inst.Location = "Room 9"
+	if _, err := st.Put(ctx(t), me, inst, masterTag, calendar.NotifySend); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	req, _ := srv.LastRequest("PATCH")
+	if req.Path != "/calendars/"+me+"/events/series1_20261117T170000Z" || req.IfMatch != instTag || req.Query.Get("sendUpdates") != "all" {
+		t.Errorf("put PATCH %s If-Match %q query %v, want the instance's etag %q", req.Path, req.IfMatch, req.Query, instTag)
+	}
+
+	third := utc(2026, 11, 24, 17, 0)
+	instTag = srv.ChangeInstance(me, "series1_20261124T170000Z", map[string]any{})
+	if _, err := st.Respond(ctx(t), me, "series1", calendar.Response{Self: me, PartStat: calendar.PartStatAccepted, RecurrenceID: third, ETag: masterTag}); err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
+	req, _ = srv.LastRequest("PATCH")
+	if req.Path != "/calendars/"+me+"/events/series1_20261124T170000Z" || req.IfMatch != instTag || req.Query.Get("sendUpdates") != "all" {
+		t.Errorf("respond PATCH %s If-Match %q query %v, want the instance's etag %q", req.Path, req.IfMatch, req.Query, instTag)
+	}
+}

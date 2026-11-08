@@ -533,7 +533,7 @@ func (h *calendarService) UpdateEvent(ctx context.Context, req *connect.Request[
 		entry.Decision = decisionAllowed
 		written, err := ca.store.Put(ctx, res.row.CalendarID, ev, m.GetEtag(), calendar.NotifySend)
 		if err != nil {
-			return nil, calendarError(ca.name, err)
+			return nil, s.editError(ctx, ca, err)
 		}
 		s.syncAfterWrite(ctx, ca)
 		return &chainmailv1.UpdateEventResponse{Event: eventProto(s.writtenView(ctx, res, written), s.ownAddress)}, nil
@@ -583,11 +583,23 @@ func (h *calendarService) CancelEvent(ctx context.Context, req *connect.Request[
 			_, err = ca.store.Put(ctx, res.row.CalendarID, ev, m.GetEtag(), calendar.NotifySend)
 		}
 		if err != nil {
-			return nil, calendarError(ca.name, err)
+			return nil, s.editError(ctx, ca, err)
 		}
 		s.syncAfterWrite(ctx, ca)
 		return &chainmailv1.CancelEventResponse{Cancelled: true}, nil
 	})
+}
+
+// editError is the error of a store write of an update or cancel. When the
+// store found the event changed since the cache read it, a sync runs
+// first, so reading the event again gives the version the store has (an
+// exception someone made of an instance among them) and a retry is
+// checked against it.
+func (s *Server) editError(ctx context.Context, ca *calAccount, err error) error {
+	if errors.Is(err, calstore.ErrConflict) {
+		s.syncAfterWrite(ctx, ca)
+	}
+	return calendarError(ca.name, err)
 }
 
 // editTarget resolves the event an update or cancel names and checks that

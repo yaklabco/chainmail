@@ -58,9 +58,12 @@ func (s *Store) GetEvent(ctx context.Context, calID, providerID string) ([]calen
 // the event ev.ProviderID (the instance ev.RecurrenceID names, when set)
 // with If-Match etag. For an instance, etag may be the series master's
 // current etag, as an instance with no exception of its own is known by
-// it: the instance is then written with its own etag. A patch sends only the fields that differ from ev.Raw,
-// or every field chainmail models when there is no Raw. It returns the event
-// as Google stored it.
+// it: the instance is then read, and written with its own etag only when
+// it is still the occurrence the master makes (unmodifiedOccurrence);
+// otherwise someone made it an exception the caller never checked, and Put
+// returns calstore.ErrConflict and writes nothing. A patch sends only the
+// fields that differ from ev.Raw, or every field chainmail models when
+// there is no Raw. It returns the event as Google stored it.
 func (s *Store) Put(ctx context.Context, calID string, ev calendar.Event, etag string, mode calendar.Notify) (calendar.Event, error) {
 	if etag == "" {
 		return s.create(ctx, calID, ev, mode)
@@ -70,17 +73,30 @@ func (s *Store) Put(ctx context.Context, calID string, ev calendar.Event, etag s
 	}
 	target, ifMatch := ev.ProviderID, etag
 	if !ev.RecurrenceID.IsZero() {
-		id, masterETag, err := s.instanceID(ctx, calID, ev.ProviderID, ev.RecurrenceID, ev.Raw)
+		id, master, err := s.instanceID(ctx, calID, ev.ProviderID, ev.RecurrenceID, ev.Raw)
 		if err != nil {
 			return calendar.Event{}, err
 		}
 		target = id
-		if masterETag != "" && etag == masterETag {
+		if master != nil && etag == master.ETag {
 			// The caller knows the instance only by its series's etag,
-			// which still matches: write the instance with its own.
-			if ifMatch, err = s.etagOf(ctx, calID, id); err != nil {
+			// which still matches: write the instance with its own, if
+			// it is still the occurrence the caller checked.
+			data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, id), limit: maxEventBytes})
+			if err != nil {
 				return calendar.Event{}, err
 			}
+			inst, _, err := decodeEvent(data)
+			if err != nil {
+				return calendar.Event{}, err
+			}
+			if !unmodifiedOccurrence(inst, *master, ev.RecurrenceID) {
+				return calendar.Event{}, fmt.Errorf("%w: the instance is an exception", calstore.ErrConflict)
+			}
+			if inst.ETag == "" {
+				return calendar.Event{}, errBadResponse
+			}
+			ifMatch = inst.ETag
 		}
 	}
 	var old *calendar.Event
@@ -209,7 +225,10 @@ func sameRecurrence(a, b calendar.Event) bool {
 // gives calstore.ErrConflict. When r.ETag is set, an event whose etag
 // differs from it is calstore.ErrConflict before anything is written; for
 // an instance, r.ETag may instead be the series master's current etag,
-// as an instance with no exception of its own is known by that etag.
+// as an instance with no exception of its own is known by that etag, and
+// then the instance must still be the occurrence the master makes
+// (unmodifiedOccurrence), or Respond returns calstore.ErrConflict and
+// writes nothing.
 func (s *Store) Respond(ctx context.Context, calID, providerID string, r calendar.Response) (calendar.Event, error) {
 	status := responseStatus(r.PartStat)
 	if status == "" || r.PartStat == calendar.PartStatNeedsAction {
@@ -218,13 +237,14 @@ func (s *Store) Respond(ctx context.Context, calID, providerID string, r calenda
 	if r.Self == "" {
 		return calendar.Event{}, fmt.Errorf("%w: no attendee address", ErrRequest)
 	}
-	target, masterETag := providerID, ""
+	target := providerID
+	var master *calendar.Event
 	if !r.RecurrenceID.IsZero() {
-		id, mtag, err := s.instanceID(ctx, calID, providerID, r.RecurrenceID, nil)
+		id, m, err := s.instanceID(ctx, calID, providerID, r.RecurrenceID, nil)
 		if err != nil {
 			return calendar.Event{}, err
 		}
-		target, masterETag = id, mtag
+		target, master = id, m
 	}
 	data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, target), limit: maxEventBytes})
 	if err != nil {
@@ -238,10 +258,21 @@ func (s *Store) Respond(ctx context.Context, calID, providerID string, r calenda
 	if err := json.Unmarshal(data, &cur); err != nil {
 		return calendar.Event{}, errBadResponse
 	}
-	if r.ETag != "" && cur.ETag != r.ETag && (masterETag == "" || r.ETag != masterETag) {
-		// Not the version the caller checked, nor an instance of the
-		// series version it checked.
-		return calendar.Event{}, fmt.Errorf("%w: etag differs", calstore.ErrConflict)
+	if r.ETag != "" && cur.ETag != r.ETag {
+		if master == nil || r.ETag != master.ETag {
+			// Not the version the caller checked, nor an instance of the
+			// series version it checked.
+			return calendar.Event{}, fmt.Errorf("%w: etag differs", calstore.ErrConflict)
+		}
+		// The caller checked the series: the instance must still be the
+		// occurrence it makes.
+		inst, _, err := decodeEvent(data)
+		if err != nil {
+			return calendar.Event{}, err
+		}
+		if !unmodifiedOccurrence(inst, *master, r.RecurrenceID) {
+			return calendar.Event{}, fmt.Errorf("%w: the instance is an exception", calstore.ErrConflict)
+		}
 	}
 	idx := slices.IndexFunc(cur.Attendees, func(a map[string]any) bool {
 		email, _ := a["email"].(string)
@@ -300,39 +331,68 @@ func sendQuery(mode calendar.Notify) url.Values {
 // instance by the kind of its original start (originalStartTime), which is
 // the series's kind, not by its current one: an exception moved from timed
 // to all-day keeps its timed id. raw, the instance's JSON when the caller has
-// it, gives the id directly; otherwise the master is read for its kind, and
-// masterETag is its current etag (else "").
-func (s *Store) instanceID(ctx context.Context, calID, id string, rid time.Time, raw []byte) (instID, masterETag string, err error) {
+// it, gives the id directly; otherwise the master is read for its kind and
+// returned as master (else nil).
+func (s *Store) instanceID(ctx context.Context, calID, id string, rid time.Time, raw []byte) (string, *calendar.Event, error) {
 	if len(raw) > 0 {
 		var a apiEvent
 		if json.Unmarshal(raw, &a) == nil && a.ID != "" && a.RecurringEventID == id {
 			if orig, _, _, err := parseTime(a.OriginalStartTime); err == nil && orig.Equal(rid) {
-				return a.ID, "", nil
+				return a.ID, nil, nil
 			}
 		}
 	}
 	data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, id), limit: maxEventBytes})
 	if err != nil {
-		return "", "", err
+		return "", nil, err
 	}
 	master, _, err := decodeEvent(data)
 	if err != nil {
-		return "", "", err
+		return "", nil, err
 	}
-	return InstanceID(id, rid, master.AllDay), master.ETag, nil
+	return InstanceID(id, rid, master.AllDay), &master, nil
 }
 
-// etagOf reads the current etag of the event or instance id.
-func (s *Store) etagOf(ctx context.Context, calID, id string) (string, error) {
-	data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, id), limit: maxEventBytes})
-	if err != nil {
-		return "", err
+// unmodifiedOccurrence reports whether inst, the instance rid of the series
+// master as Google shows it now, is still the occurrence master makes, as
+// Google shows an instance with no exception of its own: not cancelled or
+// otherwise of another status, starting at its original start rid with the
+// master's kind and length, with the master's organizer, summary and
+// location, and the master's attendees with their answers. Anything else
+// is an exception someone made, which the caller, knowing only the
+// master, never checked.
+func unmodifiedOccurrence(inst, master calendar.Event, rid time.Time) bool {
+	return inst.Status == master.Status &&
+		inst.RecurrenceID.Equal(rid) && inst.Start.Equal(rid) &&
+		inst.AllDay == master.AllDay &&
+		inst.End.Sub(inst.Start) == master.End.Sub(master.Start) &&
+		sameOrganizer(inst.Organizer, master.Organizer) &&
+		inst.Summary == master.Summary && inst.Location == master.Location &&
+		inst.AttendeesTruncated == master.AttendeesTruncated &&
+		sameAudience(inst.Attendees, master.Attendees)
+}
+
+func sameOrganizer(a, b *calendar.Person) bool {
+	var x, y string
+	if a != nil {
+		x = a.Email
 	}
-	var cur struct {
-		ETag string `json:"etag"`
+	if b != nil {
+		y = b.Email
 	}
-	if err := json.Unmarshal(data, &cur); err != nil || cur.ETag == "" {
-		return "", errBadResponse
+	return strings.EqualFold(x, y)
+}
+
+// sameAudience reports whether a and b list the same addresses, in any
+// order and case, each with the same answer.
+func sameAudience(a, b []calendar.Attendee) bool {
+	key := func(list []calendar.Attendee) []string {
+		out := make([]string, len(list))
+		for i, at := range list {
+			out[i] = strings.ToLower(at.Email) + "\x00" + string(at.PartStat)
+		}
+		slices.Sort(out)
+		return out
 	}
-	return cur.ETag, nil
+	return len(a) == len(b) && slices.Equal(key(a), key(b))
 }

@@ -601,3 +601,42 @@ func TestEditRechecksTheRefreshedEvent(t *testing.T) {
 		t.Errorf("store writes = %d, want none", n)
 	}
 }
+
+// A store that finds the event changed since the cache read it (Google's
+// instance check finding an exception, or any newer version) refuses the
+// write with EVENT_CONFLICT. The daemon then syncs, so reading the event
+// again, as the conflict's hint says, gives the new version and its etag,
+// and a retry is checked against that.
+func TestEditConflictRefreshesTheCache(t *testing.T) {
+	t.Parallel()
+	var weekly, single string
+	e := startCal(t, func(e *calEnv) {
+		master := own("weekly@x", "james@mw.example", e.start, allowedAddr)
+		master.RRule = "FREQ=WEEKLY;COUNT=3"
+		weekly = e.mw.Add(mwCal, master)
+		single = e.mw.Add(mwCal, own("single@x", "james@mw.example", e.start, allowedAddr))
+	})
+	second := e.start.Add(7 * 24 * time.Hour)
+	iref := calendar.InstanceRef(calendar.EventRef("mw", mwCal, weekly), second)
+	sref := calendar.EventRef("mw", mwCal, single)
+	addGuest := func(evs []calendar.Event) []calendar.Event {
+		evs[0].Attendees = append(evs[0].Attendees, person(blockedAddr, calendar.PartStatNeedsAction))
+		return evs
+	}
+
+	stale := e.etagOf(t, iref)
+	e.mw.Change(mwCal, weekly, addGuest) // the cache has not seen it
+	_, err := e.update(t, &chainmailv1.UpdateEventRequest{Ref: iref, Etag: stale, UpdateMask: mask("title"), Title: "t"})
+	wantReason(t, "update of a changed instance", err, api.ReasonEventConflict)
+	if now := e.etagOf(t, iref); now == stale {
+		t.Errorf("after an update conflict the event still reads with the old etag %q", now)
+	}
+
+	stale = e.etagOf(t, sref)
+	e.mw.Change(mwCal, single, addGuest)
+	_, err = e.cancel(t, sref, stale)
+	wantReason(t, "cancel of a changed event", err, api.ReasonEventConflict)
+	if now := e.etagOf(t, sref); now == stale {
+		t.Errorf("after a cancel conflict the event still reads with the old etag %q", now)
+	}
+}

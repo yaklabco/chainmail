@@ -302,6 +302,28 @@ func (s *Server) ChangeEvent(calID, id string, patch map[string]any) string {
 	return obj["etag"].(string)
 }
 
+// ChangeInstance merges patch into the occurrence instanceID names (an
+// exception already stored, or the instance made up from its master) and
+// stores it as an exception, as another client's edit of that occurrence
+// alone does. The master keeps its etag; the exception gets its own, which
+// it returns.
+func (s *Server) ChangeInstance(calID, instanceID string, patch map[string]any) string {
+	s.t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.mustCalendar(calID)
+	obj, ok := s.lookup(c, instanceID)
+	if !ok {
+		s.t.Fatalf("fakegcal: no instance %q", instanceID)
+	}
+	if _, isInstance := obj["recurringEventId"]; !isInstance {
+		s.t.Fatalf("fakegcal: %q is not an instance of a series", instanceID)
+	}
+	mergePatch(obj, deepCopy(patch))
+	s.store(c, instanceID, obj)
+	return obj["etag"].(string)
+}
+
 // CancelEvent marks a stored event cancelled, as deleting it in Google
 // Calendar does.
 func (s *Server) CancelEvent(calID, id string) {
