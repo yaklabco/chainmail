@@ -5,7 +5,9 @@
 //
 //   - GET users/me/calendarList, paged.
 //   - GET calendars/{id}/events with syncToken, pageToken, maxResults,
-//     showDeleted, singleEvents=false and iCalUID. A sync token from before
+//     showDeleted, singleEvents=false and iCalUID, which matches a series's
+//     master and every exception of it, cancelled ones included, even when
+//     an exception carries no iCalUID of its own. A sync token from before
 //     InvalidateSyncTokens, or one the fake did not issue, answers 410.
 //     Cancelled instances of a series are listed even without showDeleted,
 //     as Google does with singleEvents=false; deleted events need
@@ -88,6 +90,9 @@ type Request struct {
 type Fault struct {
 	Method string // "" matches every method
 	Path   string // a suffix of Request.Path; "" matches every path
+	// Query names a query parameter the request must carry; "" matches
+	// every request.
+	Query  string
 	Status int
 	Body   string
 	Header http.Header
@@ -230,7 +235,8 @@ func (s *Server) AddCalendar(c Calendar) {
 }
 
 // AddEvent stores ev in calendar calID as someone else's client would, and
-// returns its etag. It fills etag, updated, status and iCalUID when absent.
+// returns its etag. It fills etag, updated and status when absent, and
+// iCalUID when absent on an event that is not an instance of a series.
 func (s *Server) AddEvent(calID string, ev map[string]any) string {
 	s.t.Helper()
 	s.mu.Lock()
@@ -244,7 +250,8 @@ func (s *Server) AddEvent(calID string, ev map[string]any) string {
 	if _, ok := obj["status"]; !ok {
 		obj["status"] = "confirmed"
 	}
-	if _, ok := obj["iCalUID"]; !ok {
+	_, instance := obj["recurringEventId"]
+	if _, ok := obj["iCalUID"]; !ok && !instance {
 		obj["iCalUID"] = id + "@google.com"
 	}
 	obj["kind"] = "calendar#event"
@@ -367,7 +374,8 @@ func (s *Server) front(next http.Handler) http.Handler {
 // its times. s.mu is held.
 func (s *Server) takeFault(req Request) (Fault, bool) {
 	for i, f := range s.faults {
-		if (f.Method == "" || f.Method == req.Method) && strings.HasSuffix(req.Path, f.Path) {
+		if (f.Method == "" || f.Method == req.Method) && strings.HasSuffix(req.Path, f.Path) &&
+			(f.Query == "" || req.Query.Has(f.Query)) {
 			s.faults[i].Times--
 			if s.faults[i].Times <= 0 {
 				s.faults = slices.Delete(s.faults, i, i+1)
@@ -495,7 +503,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		if se.seq > cur.snapshot || se.seq <= cur.since {
 			continue
 		}
-		if cur.uid != "" && se.obj["iCalUID"] != cur.uid {
+		if cur.uid != "" && c.uidOf(se.obj) != cur.uid {
 			continue
 		}
 		if !cur.showDeleted && isDeleted(se.obj) {
@@ -870,4 +878,18 @@ func writeError(w http.ResponseWriter, status int, reason, message string) {
 		"message": message,
 		"errors":  []map[string]any{{"domain": "global", "reason": reason, "message": message}},
 	}})
+}
+
+// uidOf is obj's iCalUID, or that of its series's master when obj is an
+// exception without one. s.mu is held.
+func (c *fakeCalendar) uidOf(obj map[string]any) any {
+	if uid, ok := obj["iCalUID"]; ok {
+		return uid
+	}
+	if master, ok := obj["recurringEventId"].(string); ok {
+		if m, ok := c.events[master]; ok {
+			return m.obj["iCalUID"]
+		}
+	}
+	return nil
 }
