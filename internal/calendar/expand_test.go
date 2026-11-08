@@ -496,10 +496,72 @@ func TestExpandFirstInstanceCenturiesAway(t *testing.T) {
 // rules.
 func dstZones(t *testing.T, body string) map[string][]Event {
 	t.Helper()
-	iana := "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:x\n" + strings.ReplaceAll(body, "TZ:", "America/Los_Angeles:") + "END:VCALENDAR\n"
-	_, custom := mustParse(t, zoneCalendar("Office Time", pacificRules, body))
-	_, tzdata := mustParse(t, []byte(iana))
+	return zonesOf(t, pacificRules, "America/Los_Angeles", body)
+}
+
+// zonesOf is dstZones for the VTIMEZONE observances rules and the IANA
+// zone iana.
+func zonesOf(t *testing.T, rules, iana, body string) map[string][]Event {
+	t.Helper()
+	cal := "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:x\n" + strings.ReplaceAll(body, "TZ:", iana+":") + "END:VCALENDAR\n"
+	_, custom := mustParse(t, zoneCalendar("Office Time", rules, body))
+	_, tzdata := mustParse(t, []byte(cal))
 	return map[string][]Event{"vtimezone": custom, "iana": tzdata}
+}
+
+// East of Greenwich too, a daily instance in the repeated autumn hour is
+// its first pass. time.Date gives the second pass there.
+func TestExpandRepeatedHourEast(t *testing.T) {
+	const ev = "BEGIN:VEVENT\nUID:s\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20261024T023000\nDURATION:PT30M\nRRULE:FREQ=DAILY;COUNT=3\nEND:VEVENT\n"
+	for zone, events := range zonesOf(t, berlinRules, "Europe/Berlin", ev) {
+		t.Run(zone, func(t *testing.T) {
+			insts, _ := mustExpand(t, events, utc(2026, 10, 1, 0, 0, 0), utc(2026, 11, 1, 0, 0, 0), MaxInstances)
+			sameTimes(t, starts(insts), []time.Time{
+				utc(2026, 10, 24, 0, 30, 0), // CEST
+				utc(2026, 10, 25, 0, 30, 0), // the first 02:30, CEST
+				utc(2026, 10, 26, 1, 30, 0), // CET
+			})
+		})
+	}
+}
+
+// Expanding with a limit gives the first instances of the full expansion,
+// and says it truncated them, when instances moved past a gap and RDATEs
+// come out of the rule's order.
+func TestExpandLimitIsPrefix(t *testing.T) {
+	bodies := map[string]string{
+		"hourly": "BEGIN:VEVENT\nUID:s\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20260307T220000\nDURATION:PT10M\nRRULE:FREQ=HOURLY;COUNT=30\n" +
+			"RDATE;TZID=TZ:20260308T031500,20260308T023000,20260308T014500\nEND:VEVENT\n",
+		"daily": "BEGIN:VEVENT\nUID:s\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20260305T023000\nDURATION:PT10M\nRRULE:FREQ=DAILY;COUNT=8\n" +
+			"RDATE;TZID=TZ:20260308T030000,20260308T040000,20260308T021500\nEXDATE;TZID=TZ:20260306T023000\nEND:VEVENT\n",
+	}
+	from, to := utc(2026, 3, 1, 0, 0, 0), utc(2026, 4, 1, 0, 0, 0)
+	series := map[string][]Event{}
+	for name, body := range bodies {
+		for zone, events := range dstZones(t, body) {
+			series[name+"/"+zone] = events
+		}
+	}
+	// A hostile zone that jumps from -47:30 to +48:00 skips 95.5 hours of
+	// wall time, so four days' 09:00 move past the gap, to after the 09:00
+	// of the days that follow it.
+	jump := "BEGIN:STANDARD\nDTSTART:19700101T000000\nTZOFFSETFROM:-4730\nTZOFFSETTO:-4730\nEND:STANDARD\n" +
+		"BEGIN:DAYLIGHT\nDTSTART:20260310T000000\nTZOFFSETFROM:-4730\nTZOFFSETTO:+4800\nEND:DAYLIGHT\n"
+	_, series["days-long gap"] = mustParse(t, zoneCalendar("Jump", jump,
+		"BEGIN:VEVENT\nUID:s\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20260308T090000\nDURATION:PT10M\nRRULE:FREQ=DAILY;COUNT=10\nEND:VEVENT\n"))
+	for name, events := range series {
+		t.Run(name, func(t *testing.T) {
+			all, _ := mustExpand(t, events, from, to, MaxInstances)
+			uniqueInstances(t, all)
+			for l := 1; l <= len(all); l++ {
+				insts, truncated := mustExpand(t, events, from, to, l)
+				sameTimes(t, starts(insts), starts(all[:l]))
+				if truncated != (l < len(all)) {
+					t.Fatalf("limit %d of %d: truncated %v", l, len(all), truncated)
+				}
+			}
+		})
+	}
 }
 
 // A UTC UNTIL is an instant, even when it falls in the hour the autumn

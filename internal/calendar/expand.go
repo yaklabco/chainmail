@@ -21,7 +21,9 @@ import (
 // the end of the range are instants, so a repeated hour does not move
 // them. An instance at a local time a DST change skips moves past the gap
 // when the rule recurs once a day or less often, and is dropped, not
-// counted toward COUNT, when it recurs more often (see seriesRule).
+// counted toward COUNT, when it recurs more often (see seriesRule). Rules
+// step in wall time, so the second pass of a repeated hour has no HOURLY
+// instance of its own.
 //
 // SECONDLY and MINUTELY rules return ErrUnsafeRecurrence, as do an INTERVAL
 // over 10000, HOURLY with BYSETPOS, and a rule whose estimated work (the
@@ -129,13 +131,14 @@ func occurrences(ev Event, from, to time.Time, limit int, overridden map[int64]b
 	// rule itself ends past to (seriesRule bounds it), the dates are sorted.
 	w, t, more := rule()
 	seen := map[int64]bool{}
-	var latest time.Time // the latest start kept, once limit are kept
+	// Once limit instances are kept, latest is the latest start among them,
+	// and no rule wall time after stop has an instant before it.
+	var latest, stop time.Time
 	for more || len(dates) > 0 {
 		if !more && !dates[0].Before(to) {
 			break
 		}
-		if len(out) >= limit && (!more || !w.Add(-fr.maxOffset(w)).Before(latest)) &&
-			(len(dates) == 0 || !dates[0].Before(latest)) {
+		if len(out) >= limit && (!more || !w.Before(stop)) && (len(dates) == 0 || !dates[0].Before(latest)) {
 			break // nothing left starts before the instances kept
 		}
 		var at time.Time
@@ -158,6 +161,7 @@ func occurrences(ev Event, from, to time.Time, limit int, overridden map[int64]b
 					latest = in.Start
 				}
 			}
+			stop = fr.latestWall(latest)
 		}
 	}
 	if len(out) > limit {
@@ -226,7 +230,11 @@ func seriesRule(value string, fr frame, start, to time.Time) (next func() (w, t 
 	skipGaps := opt.Freq > rrule.DAILY || len(opt.Byhour) > 1 || len(opt.Byminute) > 1 || len(opt.Bysecond) > 1
 	it := r.Iterator()
 	n := 0
-	var last time.Time
+	// moved holds the instants of instances moved past a gap. Wall times
+	// that exist have instants of their own, so only a moved instance can
+	// fall on another (a day moved past a gap of a day or more falls on the
+	// next one). They are the same instance, counted once.
+	moved := map[int64]bool{}
 	return func() (time.Time, time.Time, bool) {
 		for count == 0 || n < count {
 			w, ok := it()
@@ -237,12 +245,13 @@ func seriesRule(value string, fr frame, start, to time.Time) (next func() (w, t 
 			if w.Equal(startWall) {
 				t, exists = start, true
 			}
-			// A day moved past a gap of a day or more lands on the next
-			// one, which is then the same instance, counted once.
-			if (!exists && skipGaps) || (n > 0 && t.Equal(last)) {
+			if (!exists && skipGaps) || moved[t.Unix()] {
 				continue
 			}
-			n, last = n+1, t
+			if !exists {
+				moved[t.Unix()] = true
+			}
+			n++
 			if !until.IsZero() && t.After(until) {
 				continue
 			}

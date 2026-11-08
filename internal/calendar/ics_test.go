@@ -763,12 +763,14 @@ func TestExpandSharedZoneConcurrently(t *testing.T) {
 	}
 }
 
+// berlinRules are Central European rules, the same as Europe/Berlin's.
+const berlinRules = "BEGIN:STANDARD\nDTSTART:19701025T030000\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\nTZOFFSETFROM:+0200\nTZOFFSETTO:+0100\nEND:STANDARD\n" +
+	"BEGIN:DAYLIGHT\nDTSTART:19700329T020000\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0200\nEND:DAYLIGHT\n"
+
 // A local time a DST change repeats is its first occurrence, and one a
 // change skips is read with the offset before the gap (RFC 5545 3.3.5),
 // in a VTIMEZONE and in an IANA zone, west and east of Greenwich.
 func TestParseICSRepeatedAndSkippedLocalTimes(t *testing.T) {
-	berlinRules := "BEGIN:STANDARD\nDTSTART:19701025T030000\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\nTZOFFSETFROM:+0200\nTZOFFSETTO:+0100\nEND:STANDARD\n" +
-		"BEGIN:DAYLIGHT\nDTSTART:19700329T020000\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0200\nEND:DAYLIGHT\n"
 	cases := []struct {
 		name, iana, rules, local string
 		want                     time.Time
