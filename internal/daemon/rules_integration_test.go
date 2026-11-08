@@ -825,9 +825,10 @@ func checkItRestart(t *testing.T, dove *dovecot.Server) {
 	hold := newItSMTPHold()
 	sink := smtptest.StartWith(t, dove.CA, provider.SecurityStartTLS, smtptest.Options{OnMessage: hold.onMessage},
 		smtptest.User{Username: user, Password: dovecot.Password})
-	// Registered after the sink, so it runs first: a held reply is let go
-	// before the sink closes.
-	t.Cleanup(hold.free)
+	// A deferred call runs before every cleanup, a failed assertion's
+	// included: a held reply is let go before the daemons' harness
+	// cleanups wait for the detached send, and before the sink closes.
+	defer hold.free()
 	cfg := fmt.Sprintf(itDoveConfig, user, dove.Endpoint.Port, sink.Endpoint().Port)
 	opts := itDoveOptions(dove, nil, nil)
 	h1 := daemontest.Start(t, cfg, opts)
