@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="website/static/img/mascot.png" alt="The chainmail gopher: a Go gopher in mail armour with an envelope shield" width="400" />
+  <img src="website/static/img/mascot.png" alt="The chainmail gopher: a Go gopher in a chainmail coif and hauberk, holding a shield with a gold envelope" width="400" />
 </p>
 
 <p align="center">
