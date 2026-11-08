@@ -1,0 +1,4 @@
+ACCOUNT  ID                              ACCESS  FLAGS            ZONE              NAME
+work     primary                         write   default,primary  America/New_York  me@example.com
+work     team@group.calendar.google.com  read    -                -                 Team[31m
+home     /dav/calendars/me/personal/     write   default          -                 Personal

@@ -1331,7 +1331,9 @@ func TestWatchHelpSaysItemKindsAreOptIn(t *testing.T) {
 		"come when --kind names them or --item is given",
 		"rule, a change to a rule, comes only when --kind names it",
 		"--item string",
-		"(default: all but the opt-in kinds item, item_mail, rule and the item_due kinds; with --item: the item kinds, status and gap)",
+		"(default: all but the opt-in kinds item, item_mail, rule, the item_due kinds and the calendar kinds; with --item: the item kinds, status and gap)",
+		"Calendar events come only when --kind names them",
+		"leaves out new, flags, expunged, rule and calendar events",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("watch help lacks %q:\n%s", want, got.stdout)

@@ -40,8 +40,14 @@ are item, a change to a work item; item_mail, new mail on a thread linked
 to one; and item_due_soon, item_due and item_overdue, an open item
 reaching a stage of its due date. They come when --kind names them or
 --item is given. rule, a change to a rule, comes only when --kind names it.
+Calendar events come only when --kind names them: invite, an invite that
+waits for a reply; event_changed, a change to the time, place, recurrence
+or attendees of an event; event_cancelled; and invite_reply, an
+attendee's answer on an event James organizes. Their lines show refs,
+times in UTC, field names and PARTSTATs, never event text; --output json
+adds the organizer and attendee addresses.
 --item ID limits the item kinds to that item and every item below it, and
-leaves out new, flags, expunged and rule events.
+leaves out new, flags, expunged, rule and calendar events.
 
 The watch reconnects by itself when the daemon goes away, or sends nothing
 for 75 seconds, resuming from its group or from the last event or
@@ -72,7 +78,10 @@ const (
 )
 
 // watchKinds are the event kinds --kind takes.
-var watchKinds = []string{"new", "flags", "expunged", "status", "gap", "item", "item_mail", "rule", "item_due_soon", "item_due", "item_overdue"}
+var watchKinds = []string{
+	"new", "flags", "expunged", "status", "gap", "item", "item_mail", "rule", "item_due_soon", "item_due", "item_overdue",
+	"invite", "event_changed", "event_cancelled", "invite_reply",
+}
 
 // newWatchCmd builds chainmail watch and its status and groups subcommands.
 func newWatchCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
@@ -115,7 +124,7 @@ func newWatchCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	cmd.Flags().StringVar(&group, "group", "", "resume after this group's acknowledged event, and acknowledge each line once written")
 	cmd.Flags().Int64Var(&since, "since", 0, "resume after this event ID")
 	cmd.Flags().StringArrayVar(&accounts, "account", nil, "only this account; repeat for more (default: all)")
-	cmd.Flags().StringSliceVar(&kinds, "kind", nil, "only these kinds, comma separated: new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due, item_overdue (default: all but the opt-in kinds item, item_mail, rule and the item_due kinds; with --item: the item kinds, status and gap)")
+	cmd.Flags().StringSliceVar(&kinds, "kind", nil, "only these kinds, comma separated: new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due, item_overdue, invite, event_changed, event_cancelled, invite_reply (default: all but the opt-in kinds item, item_mail, rule, the item_due kinds and the calendar kinds; with --item: the item kinds, status and gap)")
 	cmd.Flags().StringVar(&in, "in", "", "only this folder or Gmail label, such as inbox (default: all)")
 	cmd.Flags().StringVar(&item, "item", "", "only item, item_mail and item_due events of this item and every item below it")
 	cmd.Flags().BoolVar(&once, "once", false, "exit at the first heartbeat, once every event already in the log is printed")
@@ -130,7 +139,7 @@ func parseKinds(raw []string) ([]string, error) {
 	for _, k := range raw {
 		k = strings.TrimSpace(k)
 		if !slices.Contains(watchKinds, k) {
-			return nil, fmt.Errorf("unknown --kind %q: want new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due or item_overdue", k)
+			return nil, fmt.Errorf("unknown --kind %q: want new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due, item_overdue, invite, event_changed, event_cancelled or invite_reply", k)
 		}
 		kinds = append(kinds, k)
 	}
@@ -537,6 +546,8 @@ func eventLine(clock string, e *chainmailv1.WatchEvent) string {
 		what = ruleChangeText(e.GetRule())
 	case "item_due_soon", "item_due", "item_overdue":
 		what = itemDueText(e.GetDue())
+	case "invite", "event_changed", "event_cancelled", "invite_reply":
+		what = calendarChangeText(e.GetKind(), e.GetRef(), e.GetCalendar())
 	default:
 		what = e.GetRef()
 	}
@@ -645,4 +656,44 @@ func ruleChangeText(ch *chainmailv1.RuleChange) string {
 // date and its state. The kind names the stage.
 func itemDueText(d *chainmailv1.WorkItemDue) string {
 	return fmt.Sprintf("%s %s due %s %s", d.GetItemId(), d.GetType(), d.GetDueDate(), d.GetState())
+}
+
+// calendarChangeText is what a calendar event's watch line says: the ref,
+// then times in UTC, changed field names or the new PARTSTAT. It never
+// holds event text or addresses.
+func calendarChangeText(kind, ref string, ch *chainmailv1.CalendarChange) string {
+	if r := ch.GetRef(); r != "" {
+		ref = r
+	}
+	utc := func(ts *timestamppb.Timestamp) string { return ts.AsTime().UTC().Format(time.RFC3339) }
+	span := func() string {
+		if ch.GetStart() == nil {
+			return ""
+		}
+		s := utc(ch.GetStart())
+		if ch.GetEnd() != nil {
+			s += " to " + utc(ch.GetEnd())
+		}
+		return s
+	}
+	parts := []string{ref}
+	switch kind {
+	case "invite":
+		parts = append(parts, span())
+		if m := ch.GetMessageRef(); m != "" {
+			parts = append(parts, "mail "+m)
+		}
+	case "event_changed":
+		parts = append(parts, strings.Join(ch.GetFields(), ","))
+		if s := span(); s != "" {
+			parts = append(parts, "now "+s)
+		}
+	case "event_cancelled":
+		if ch.GetStart() != nil {
+			parts = append(parts, utc(ch.GetStart()))
+		}
+	case "invite_reply":
+		parts = append(parts, ch.GetPartstat())
+	}
+	return strings.Join(strings.Fields(strings.Join(parts, " ")), " ")
 }
