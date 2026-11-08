@@ -175,6 +175,7 @@ func (s *Server) actOn(ctx context.Context, rule rules.Rule, runID int64, acct c
 		switch {
 		case a.Kind == rules.ActCopy:
 			res.copyRef = st.newRef
+			s.guardCopy(ctx, rule.ID, runID, acct, key, st.newRef)
 		case a.Kind.Relocates():
 			res.newRef = st.newRef
 		}
@@ -183,6 +184,24 @@ func (s *Server) actOn(ctx context.Context, rule rules.Rule, runID int64, acct c
 		res.note = rules.NoteReplayed
 	}
 	return res
+}
+
+// guardCopy writes rule's act-once row at the key of the copy a copy
+// action just made, in its own transaction, before the next action runs.
+// A later action that fails, or a crash, then cannot leave the copy
+// unguarded: the replay skips the copy (amendment 5) without learning its
+// ref, so without this row the copy's own new event would be copied again.
+// A failed write is logged, and the runner's markApplied writes the row
+// again with the message's own.
+func (s *Server) guardCopy(ctx context.Context, ruleID string, runID int64, acct config.ResolvedAccount, key, copyRef string) {
+	alias := aliasOf(acct, copyRef, key)
+	if alias == "" {
+		return
+	}
+	if err := s.rules.MarkApplied(ctx, ruleID, acct.Name, alias, runID, rules.AppliedDone, ""); err != nil {
+		s.opts.Logger.WarnContext(ctx, "a rule could not guard the copy it made yet",
+			"rule", ruleID, "account", acct.Name, "run", runID, "err", err)
+	}
 }
 
 // replaySkip reports whether a replay of the pending row prev skips the

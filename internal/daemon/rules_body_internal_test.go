@@ -137,3 +137,70 @@ func TestRuleBatchBodyFailsAtOnce(t *testing.T) {
 		})
 	}
 }
+
+// TestRuleBodyFailuresNeverDisableTheRule checks that a message whose body
+// the cache does not hold counts as a body_not_cached failure without
+// disabling the rule: no action was attempted on it, so it is not an
+// acted-on match for all_failed.
+func TestRuleBodyFailuresNeverDisableTheRule(t *testing.T) {
+	t.Parallel()
+	g := newRunnerRig(t, "host", nil)
+	plan := g.uncached("host", fake.Message{
+		Folder: "INBOX", Date: routeNow, Subject: "invoice plan", MessageID: "invplan@x", Body: "the plan to pay",
+	})
+	g.cacheHeader(t, plan)
+	rule := g.newRule(t, "host", "flag-invoice-plans", func(d *rules.Definition) { d.Query = "subject:invoice plan" })
+	g.sig.setPrefetch(false)
+	g.publish(t, plan)
+	if err := g.step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	g.wantBodyFailure(t, rule, plan)
+	if now, err := g.f.s.rules.Get(t.Context(), rule.ID); err != nil || !now.Enabled {
+		t.Errorf("rule = enabled %t, reason %q, %v, want enabled", now.Enabled, now.DisabledReason, err)
+	}
+}
+
+// TestRuleBodyGateSkipsDefiniteNonmatches checks that a text rule drops,
+// before it waits for bodies, the batch messages its query rules out
+// whatever their bodies say: a header the query's other terms refuse, and
+// a Google message with a label the rule excludes. They are neither
+// matched nor failed, so the rule writes no run and stays enabled.
+func TestRuleBodyGateSkipsDefiniteNonmatches(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, account, query string
+		msg                  fake.Message
+	}{
+		{name: "header nonmatch", account: "host", query: "subject:invoice plan", msg: fake.Message{
+			Folder: "INBOX", Date: routeNow, Subject: "weekly notes", MessageID: "notes@x", Body: "the plan for the week",
+		}},
+		{name: "excluded label", account: "gmail", query: "plan", msg: fake.Message{
+			Folder: "[Gmail]/All Mail", Date: routeNow, Subject: "my plan", MessageID: "sentplan@x", Body: "the plan", Labels: []string{`\Sent`},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			g := newRunnerRig(t, tt.account, nil)
+			m := g.uncached(tt.account, tt.msg)
+			g.cacheHeader(t, m)
+			rule := g.newRule(t, tt.account, "flag-plans", func(d *rules.Definition) { d.Query = tt.query })
+			g.sig.setPrefetch(false)
+			last := g.publish(t, m)
+			if err := g.step(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			g.noWait(t)
+			if runs := g.runsOf(t, rule.ID); len(runs) != 0 {
+				t.Errorf("runs = %+v, want none", runs)
+			}
+			if now, err := g.f.s.rules.Get(t.Context(), rule.ID); err != nil || !now.Enabled {
+				t.Errorf("rule = enabled %t, reason %q, %v, want enabled", now.Enabled, now.DisabledReason, err)
+			}
+			if got := g.acked(t); got != last {
+				t.Errorf("acked %d, want %d", got, last)
+			}
+		})
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yaklabco/chainmail/internal/api"
 	"github.com/yaklabco/chainmail/internal/cache"
 	"github.com/yaklabco/chainmail/internal/config"
 	"github.com/yaklabco/chainmail/internal/mailstore"
@@ -39,6 +40,14 @@ const (
 	// matchPageSize is how many matches a scheduled or manual run reads
 	// at once.
 	matchPageSize = 200
+	// clearPendingTries is how many times a runner tries to drop the pending
+	// row of a guarded action refused for good, waiting watch.Backoff
+	// between tries, before it fails the batch.
+	clearPendingTries = 3
+	// clearPendingHint is the fixed hint of a batch held for a pending row
+	// the runner could not drop.
+	clearPendingHint = "the daemon could not drop the act-once row of a rule action refused for good; " +
+		"it tries again with the batch, and the daemon log says why"
 	// ruleCacheNotReadyHint is the fixed hint of a cache_not_ready run.
 	// search_items.go's cacheNotReadyHint answers a refused search.
 	ruleCacheNotReadyHint = "the cache cannot answer this rule completely yet; " +
@@ -97,13 +106,18 @@ type ruleRunner struct {
 	// backoff.
 	clock  watch.Clock
 	jitter func() float64
-	// mu guards st and jobs.
+	// mu guards st, jobs and uncleared.
 	mu sync.Mutex
 	// st is the runner's state, as RulesStatus reports it.
 	st runnerStatus
 	// jobs counts the scheduled and manual runs holding the turn, which
 	// show the runner as running whatever its loop last said.
 	jobs int
+	// uncleared are the pending act-once rows of guarded actions refused
+	// for good that the runner could not drop, which apply drops before it
+	// acts on their messages again, so no replay takes a refused action as
+	// done.
+	uncleared map[pendingKey]bool
 }
 
 // runnerStatus is a runner's state for RulesStatus: one of the runner
@@ -371,10 +385,16 @@ func (r *ruleRunner) runBatch(ctx context.Context, b *newBatch) error {
 	return nil
 }
 
-// newRun runs one on_new rule over the batch. A text rule first waits for
-// the bodies it needs, and a message whose body does not come counts as a
-// failed match (amendment 10). A rule that matched nothing writes no run
-// (spec 3.3). It returns a transient failure, after recording the run as
+// newRun runs one on_new rule over the batch. A text rule first drops the
+// messages its query rules out on their headers and labels alone, then
+// waits for the bodies the rest need, and a message whose body does not
+// come counts as a failed match (amendment 10) that no action was
+// attempted on, so it never counts toward all_failed. A rule that matched
+// nothing writes no run (spec 3.3). It acts on at most rule.MaxPerRun
+// messages after the act-once filter, oldest first, and records outcome
+// capped when an eligible match remains. The new trigger never comes back
+// for those: the batch is acknowledged, and a scheduled or manual run
+// covers them. It returns a transient failure, after recording the run as
 // interrupted. While the account's cache is off it returns a
 // cache_disabled failure and writes no run, so the batch stays unread.
 func (r *ruleRunner) newRun(ctx context.Context, rule rules.Rule, b *newBatch, stopped map[string]bool) error {
@@ -397,6 +417,9 @@ func (r *ruleRunner) newRun(ctx context.Context, rule rules.Rule, b *newBatch, s
 	uids := b.scoped(sc.sources)
 	var bodyFailed []ref.Ref
 	if sc.needsBodies {
+		if uids, err = r.s.headerCandidates(ctx, sc, uids); err != nil {
+			return err
+		}
 		if uids, bodyFailed, err = r.bodyGate(ctx, sc, b, uids); err != nil {
 			return err
 		}
@@ -423,8 +446,19 @@ func (r *ruleRunner) newRun(ctx context.Context, rule rules.Rule, b *newBatch, s
 	if err != nil {
 		return err
 	}
-	var cause error
+	var (
+		cause  error
+		capped bool
+		acted  int
+	)
 	for i, row := range rows {
+		if !stopped[keys[i]] && !doneBefore(applied, keys[i]) {
+			if acted == rule.MaxPerRun {
+				capped = true
+				break
+			}
+			acted++
+		}
 		run.Matched++
 		if stopped[keys[i]] {
 			run.Skipped++
@@ -442,20 +476,28 @@ func (r *ruleRunner) newRun(ctx context.Context, rule rules.Rule, b *newBatch, s
 	if cause == nil {
 		for _, key := range keys[len(rows):] {
 			run.Matched++
-			if prev, ok := applied[key]; stopped[key] || (ok && prev.Outcome != rules.AppliedPending) {
+			if stopped[key] || doneBefore(applied, key) {
 				run.Skipped++
 				continue
 			}
 			run.Failed++
+			run.Unattempted++
 			if run.Reason == "" {
 				run.Reason, run.Hint = reasonBodyNotCached, bodyNotCachedHint
 			}
 		}
 	}
-	if err := r.settle(ctx, &run, false, cause); err != nil {
+	if err := r.settle(ctx, &run, capped, cause); err != nil {
 		return err
 	}
 	return cause
+}
+
+// doneBefore reports whether applied holds key as applied or held, which
+// the act-once filter skips. A pending row is replayed instead.
+func doneBefore(applied map[string]rules.AppliedRow, key string) bool {
+	prev, ok := applied[key]
+	return ok && prev.Outcome != rules.AppliedPending
 }
 
 // bodyGate splits a text rule's batch messages, uids, into those whose
@@ -554,9 +596,10 @@ func (r *ruleRunner) scopeFailed(ctx context.Context, rule rules.Rule, t rules.T
 
 // apply runs rule on one matched row and counts it in run. A row the
 // act-once table holds as applied or held is skipped; a pending one is
-// replayed. It returns whether later rules must leave the message alone
-// because this rule moves messages, and a transient failure, which ends
-// the run.
+// replayed, unless it is the row of an action refused for good that the
+// runner could not drop, which it drops first and then acts afresh. It
+// returns whether later rules must leave the message alone because this
+// rule moves messages, and a transient failure, which ends the run.
 func (r *ruleRunner) apply(ctx context.Context, rule rules.Rule, run *rules.Run, row cache.Row, key string, applied map[string]rules.AppliedRow) (bool, error) {
 	var replay *rules.AppliedRow
 	if prev, ok := applied[key]; ok {
@@ -565,6 +608,12 @@ func (r *ruleRunner) apply(ctx context.Context, rule rules.Rule, run *rules.Run,
 			return relocates(rule), nil
 		}
 		replay = &prev
+	}
+	if r.isUncleared(rule.ID, key) {
+		if err := r.dropPending(ctx, rule.ID, run.ID, key); err != nil {
+			return false, err
+		}
+		replay = nil
 	}
 	res := r.s.actOn(ctx, rule, run.ID, r.acct, row, replay)
 	switch res.class {
@@ -583,12 +632,11 @@ func (r *ruleRunner) apply(ctx context.Context, rule rules.Rule, run *rules.Run,
 			run.Reason, run.Hint = res.reason, res.hint
 		}
 		if res.clearPending {
-			// A pending row left behind would make a replay of this batch
-			// take the copy as made, so failing the batch here is worse
-			// than keeping the failure counted and going on.
-			if err := rules.ClearPending(ctx, r.s.opts.StateDB, rule.ID, r.acct.Name, key); err != nil {
-				r.s.opts.Logger.WarnContext(ctx, "a failed rule action left a pending act-once row",
-					"rule", rule.ID, "account", r.acct.Name, "run", run.ID, "err", err)
+			// A pending row left behind would make a replay take the
+			// refused action as done, so the batch is not acknowledged
+			// while the row stays.
+			if err := r.dropPending(ctx, rule.ID, run.ID, key); err != nil {
+				return false, err
 			}
 		}
 		return false, nil
@@ -597,18 +645,68 @@ func (r *ruleRunner) apply(ctx context.Context, rule rules.Rule, run *rules.Run,
 	}
 }
 
-// markApplied records a message the rule acted on, then copies every
-// rule's row of its key to the keys of its new ref and of the copy it
-// made, so no rule acts on it again where it landed (amendment 6).
+// pendingKey names one rule's act-once row of one message on the
+// runner's account.
+type pendingKey struct {
+	ruleID, key string
+}
+
+// isUncleared reports whether the runner failed to drop ruleID's pending
+// row of key.
+func (r *ruleRunner) isUncleared(ruleID, key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.uncleared[pendingKey{ruleID, key}]
+}
+
+// dropPending drops ruleID's pending row of key, left by a guarded action
+// refused for good, trying clearPendingTries times with watch.Backoff
+// between tries. Until it succeeds the runner remembers the row, and
+// apply drops it before acting on the message again. A failure returns an
+// INTERNAL failure, which fails the batch so it is not acknowledged. A
+// context that ends, as at shutdown, leaves the row: a daemon that stops
+// then forgets it, the at-most-once window of spec amendment 5.
+func (r *ruleRunner) dropPending(ctx context.Context, ruleID string, runID int64, key string) error {
+	pk := pendingKey{ruleID, key}
+	var err error
+	for try := range clearPendingTries {
+		if try > 0 {
+			select {
+			case <-r.clock.After(watch.Backoff(try-1, r.jitter())):
+			case <-ctx.Done():
+			}
+			if err = ctx.Err(); err != nil {
+				break
+			}
+		}
+		if err = rules.ClearPending(ctx, r.s.opts.StateDB, ruleID, r.acct.Name, key); err == nil {
+			r.mu.Lock()
+			delete(r.uncleared, pk)
+			r.mu.Unlock()
+			return nil
+		}
+	}
+	r.mu.Lock()
+	if r.uncleared == nil {
+		r.uncleared = map[pendingKey]bool{}
+	}
+	r.uncleared[pk] = true
+	r.mu.Unlock()
+	r.s.opts.Logger.WarnContext(ctx, "a rule action refused for good left a pending act-once row; the batch waits for it",
+		"rule", ruleID, "account", r.acct.Name, "run", runID, "err", err)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return &actionUnavailable{reason: api.ReasonInternal, hint: clearPendingHint}
+}
+
+// markApplied records a message the rule acted on, with every rule's row
+// of its key copied to the keys of its new ref and of the copy it made, in
+// one transaction, so no rule acts on it again where it landed (amendment
+// 6).
 func (r *ruleRunner) markApplied(ctx context.Context, ruleID string, runID int64, key string, o rules.AppliedOutcome, res actResult) error {
-	alias := aliasOf(r.acct, res.newRef, key)
-	if err := r.s.rules.MarkApplied(ctx, ruleID, r.acct.Name, key, runID, o, res.note, alias); err != nil {
-		return err
-	}
-	if copied := aliasOf(r.acct, res.copyRef, key); copied != "" && copied != alias {
-		return r.s.rules.MarkApplied(ctx, ruleID, r.acct.Name, key, runID, o, res.note, copied)
-	}
-	return nil
+	return r.s.rules.MarkApplied(ctx, ruleID, r.acct.Name, key, runID, o, res.note,
+		aliasOf(r.acct, res.newRef, key), aliasOf(r.acct, res.copyRef, key))
 }
 
 // aliasOf is the act-once key of newRef when it names another message

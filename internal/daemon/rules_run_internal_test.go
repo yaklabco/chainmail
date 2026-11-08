@@ -817,11 +817,12 @@ func TestRuleBatchLeavesTheGroupUnreadWhileTheCacheIsDown(t *testing.T) {
 	}
 }
 
-// TestRuleCopyClearFailureStillCountsTheFailure checks that a failed copy
-// whose pending row cannot be dropped still counts as failed and lets the
-// batch be acknowledged: failing the batch would replay it, and the replay
-// would take the pending row as a copy made.
-func TestRuleCopyClearFailureStillCountsTheFailure(t *testing.T) {
+// TestRuleCopyClearFailureHoldsTheBatch checks that a failed copy whose
+// pending row cannot be dropped is never acknowledged: the runner retries
+// the drop on watch.Backoff, then fails the batch with the failure counted,
+// and the replay drops the row before it acts, so it tries the copy again
+// instead of taking the pending row as a copy made.
+func TestRuleCopyClearFailureHoldsTheBatch(t *testing.T) {
 	t.Parallel()
 	g := newRunnerRig(t, "host", nil)
 	rule := g.newRule(t, "host", "copy-nowhere", func(d *rules.Definition) {
@@ -831,15 +832,139 @@ func TestRuleCopyClearFailureStillCountsTheFailure(t *testing.T) {
 		`CREATE TRIGGER keep_applied BEFORE DELETE ON rule_applied BEGIN SELECT RAISE(ABORT, 'kept'); END`); err != nil {
 		t.Fatal(err)
 	}
+	start := g.pos
 	last := g.publish(t, g.refs["host lunch"])
-	if err := g.step(t.Context()); err != nil {
-		t.Fatalf("step = %v, want the failure counted", err)
+	var wg sync.WaitGroup
+	var err error
+	wg.Go(func() { err = g.step(t.Context()) })
+	for i := range clearPendingTries - 1 {
+		w := g.clk.next(t)
+		if want := watch.Backoff(i, 0.5); w.d != want {
+			t.Errorf("retry %d waited %v, want %v", i+1, w.d, want)
+		}
+		w.fire <- g.clk.Now()
 	}
-	if run := g.lastRun(t, rule.ID); run.Outcome != rules.OutcomeFailed || run.Failed != 1 || run.Reason != api.ReasonNotFound {
-		t.Errorf("run = %+v, want failed, 1 failed, NOT_FOUND", run)
+	wg.Wait()
+	if reason, _ := failureOf(err); reason != api.ReasonInternal {
+		t.Fatalf("step = %v, want an INTERNAL failure", err)
+	}
+	if g.pos != start || g.acked(t) != start {
+		t.Errorf("position %d, acked %d, want both %d", g.pos, g.acked(t), start)
+	}
+	if run := g.lastRun(t, rule.ID); run.Outcome != rules.OutcomeInterrupted || run.Failed != 1 || run.Applied != 0 {
+		t.Errorf("run = %+v, want interrupted with 1 failed", run)
+	}
+	if _, err := g.f.stateDB.ExecContext(t.Context(), `DROP TRIGGER keep_applied`); err != nil {
+		t.Fatal(err)
+	}
+	// The failed run disabled the rule (all_failed): turn it on again, so
+	// the replay runs it.
+	on := true
+	if _, err := g.f.s.rules.Update(t.Context(), ruleActor, rule.ID, rules.Patch{Enabled: &on}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if n := g.fk.Calls("Copy"); n != 2 {
+		t.Errorf("copies tried %d times, want 2", n)
+	}
+	if row, ok := g.appliedRow(t, rule.ID, "host", keyOf(false, g.refs["host lunch"])); ok {
+		t.Errorf("act-once row = %+v, want none after the refused copy", row)
+	}
+	if run := g.lastRun(t, rule.ID); run.Failed != 1 || run.Applied != 0 || run.Outcome != rules.OutcomeFailed {
+		t.Errorf("replay run = %+v, want failed, 1 failed", run)
+	}
+	// The disable and the enable logged rule events after the batch, which
+	// the step reads past too.
+	if got := g.acked(t); got < last || got != g.pos {
+		t.Errorf("acked %d at position %d, want both at %d or past it", got, g.pos, last)
+	}
+}
+
+// TestRuleBatchKeepsTheCap checks spec 5.6: a new-mail run acts on at most
+// the rule's max_per_run messages after the act-once filter, oldest first,
+// and records outcome capped when matches remain. The batch is still
+// acknowledged: a scheduled or manual run picks up the rest.
+func TestRuleBatchKeepsTheCap(t *testing.T) {
+	t.Parallel()
+	g := newRunnerRig(t, "host", nil)
+	rule := g.newRule(t, "host", "flag-new", func(d *rules.Definition) { d.MaxPerRun = 1 })
+	refs := []ref.Ref{g.refs["host invoice"], g.refs["host lunch"]}
+	last := g.publish(t, refs...)
+	if err := g.step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.flagged(refs); !slices.Equal(got, []bool{true, false}) {
+		t.Errorf("flagged = %v, want the oldest only", got)
+	}
+	if run := g.lastRun(t, rule.ID); run.Outcome != rules.OutcomeCapped || run.Applied != 1 || run.Matched != 1 || run.Failed != 0 {
+		t.Errorf("run = %+v, want capped with 1 applied", run)
 	}
 	if got := g.acked(t); got != last {
 		t.Errorf("acked %d, want %d", got, last)
+	}
+}
+
+// TestRuleCopyGuardSurvivesALaterFailure checks amendments 5 and 6 for a
+// copy followed by an action that fails for now: the copy's act-once row is
+// written as soon as the copy is made, so when the replay skips the copy
+// and the copy's own new event arrives, the copy is not copied again.
+func TestRuleCopyGuardSurvivesALaterFailure(t *testing.T) {
+	t.Parallel()
+	g := newRunnerRig(t, "host", nil)
+	rule := g.newRule(t, "host", "copy-then-flag", func(d *rules.Definition) {
+		d.Query, d.Actions = "subject:lunch", []rules.Action{{Kind: rules.ActCopy, Folder: "Archive"}, {Kind: rules.ActFlag}}
+	})
+	g.publish(t, g.refs["host lunch"])
+	g.fk.FailWrite("StoreFlags", mailstore.ErrUnavailable)
+	err := g.step(t.Context())
+	if reason, _ := failureOf(err); reason != api.ReasonServerUnavailable {
+		t.Fatalf("step = %v, want a SERVER_UNAVAILABLE failure", err)
+	}
+	copied := g.foundIn(t, "host", "Archive", "lunch@x")
+	if row, ok := g.appliedRow(t, rule.ID, "host", keyOf(false, copied)); !ok || row.Outcome != rules.AppliedDone {
+		t.Errorf("copy's row after the failed flag = %+v, %t, want applied", row, ok)
+	}
+	g.cacheHeader(t, copied)
+	g.publish(t, copied)
+	if err := g.step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if n := g.fk.Calls("Copy"); n != 1 {
+		t.Errorf("copied %d times, want 1", n)
+	}
+	if !g.flagged([]ref.Ref{g.refs["host lunch"]})[0] {
+		t.Error("the original is not flagged after the replay")
+	}
+}
+
+// TestRuleCopyAndMoveAliasBothKeys checks amendment 6 for a rule that
+// copies and then moves: the acting row, the copy's key and the moved
+// message's key all hold the rule's row.
+func TestRuleCopyAndMoveAliasBothKeys(t *testing.T) {
+	t.Parallel()
+	g := newRunnerRig(t, "host", nil)
+	rule := g.newRule(t, "host", "copy-and-file", func(d *rules.Definition) {
+		d.Query = "subject:lunch"
+		d.Actions = []rules.Action{{Kind: rules.ActCopy, Folder: "Archive"}, {Kind: rules.ActMove, Folder: "Trash"}}
+	})
+	g.publish(t, g.refs["host lunch"])
+	if err := g.step(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	run := g.lastRun(t, rule.ID)
+	if run.Applied != 1 {
+		t.Fatalf("run = %+v, want 1 applied", run)
+	}
+	for name, key := range map[string]string{
+		"original": keyOf(false, g.refs["host lunch"]),
+		"copy":     keyOf(false, g.foundIn(t, "host", "Archive", "lunch@x")),
+		"moved":    keyOf(false, g.foundIn(t, "host", "Trash", "lunch@x")),
+	} {
+		if row, ok := g.appliedRow(t, rule.ID, "host", key); !ok || row.Outcome != rules.AppliedDone || row.RunID != run.ID {
+			t.Errorf("%s's row = %+v, %t, want applied by run %d", name, row, ok, run.ID)
+		}
 	}
 }
 
