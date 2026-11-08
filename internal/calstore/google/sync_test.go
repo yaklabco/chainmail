@@ -341,3 +341,48 @@ func TestSyncDeletedSeriesDropsItsOverrides(t *testing.T) {
 		}
 	}
 }
+
+func TestSyncOffsetlessTimes(t *testing.T) {
+	st, srv := newStore(t)
+	// Google takes a dateTime without an offset when timeZone names the
+	// zone, and may send one back that way.
+	srv.AddEvent(me, map[string]any{
+		"id": "local1", "iCalUID": "local1@example.org",
+		"start": map[string]any{"dateTime": "2026-11-10T09:00:00", "timeZone": la},
+		"end":   map[string]any{"dateTime": "2026-11-10T18:30:00.000", "timeZone": "Europe/London"},
+	})
+	srv.AddEvent(me, seriesEvent("series1"))
+	srv.AddEvent(me, map[string]any{
+		"id": "series1_20261117T170000Z", "recurringEventId": "series1", "iCalUID": "series1@example.org",
+		"originalStartTime": map[string]any{"dateTime": "2026-11-17T09:00:00", "timeZone": la},
+		"start":             map[string]any{"dateTime": "2026-11-17T12:00:00", "timeZone": "America/New_York"},
+		"end":               map[string]any{"dateTime": "2026-11-17T12:30:00", "timeZone": "America/New_York"},
+	})
+	srv.AddEvent(me, map[string]any{
+		"id": "utc1", "iCalUID": "utc1@example.org",
+		"start": map[string]any{"dateTime": "2026-11-10T09:00:00", "timeZone": "UTC"},
+		"end":   map[string]any{"dateTime": "2026-11-10T10:00:00", "timeZone": "UTC"},
+	})
+	ch, err := st.Sync(ctx(t), me, "")
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	got := byKey(ch.Upserts)
+	if l := got["local1"]; !l.Start.Equal(utc(2026, 11, 10, 17, 0)) || !l.End.Equal(utc(2026, 11, 10, 18, 30)) || l.TZID != la || l.Start.Location() != time.UTC {
+		t.Errorf("offsetless event = %v to %v in %q", l.Start, l.End, l.TZID)
+	}
+	if ov, ok := got["series1@20261117T170000Z"]; !ok || !ov.Start.Equal(utc(2026, 11, 17, 17, 0)) {
+		t.Errorf("offsetless override = %+v (found %v)", ov, ok)
+	}
+	if u := got["utc1"]; !u.Start.Equal(utc(2026, 11, 10, 9, 0)) || u.TZID != "" {
+		t.Errorf("offsetless UTC event = %v in %q", u.Start, u.TZID)
+	}
+
+	// Without a zone an offsetless time cannot be read.
+	srv.AddEvent(me, map[string]any{
+		"id": "nozone1", "start": map[string]any{"dateTime": "2026-11-10T09:00:00"}, "end": map[string]any{"dateTime": "2026-11-10T10:00:00"},
+	})
+	if _, err := st.Sync(ctx(t), me, ""); !errors.Is(err, calstore.ErrUnavailable) {
+		t.Errorf("offsetless time without a zone: err = %v, want ErrUnavailable", err)
+	}
+}

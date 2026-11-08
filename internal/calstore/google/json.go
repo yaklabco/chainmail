@@ -203,7 +203,8 @@ func responseStatus(p calendar.PartStat) string {
 }
 
 // parseTime reads an event time as UTC. An all-day date is 00:00 UTC of the
-// date. tzid is the event's IANA zone, "" for UTC or a zone Go cannot load.
+// date. A dateTime without an offset is a local time in timeZone. tzid is
+// the event's IANA zone, "" for UTC or a zone Go cannot load.
 func parseTime(t *apiTime) (at time.Time, allDay bool, tzid string, err error) {
 	if t == nil {
 		return time.Time{}, false, "", errBadResponse
@@ -214,9 +215,26 @@ func parseTime(t *apiTime) (at time.Time, allDay bool, tzid string, err error) {
 	}
 	d, err := time.Parse(time.RFC3339, t.DateTime)
 	if err != nil {
-		return time.Time{}, false, "", err
+		// Google takes, and may send, a dateTime without an offset when
+		// timeZone names the zone it is in.
+		loc, lerr := loadZone(t.TimeZone)
+		if lerr != nil {
+			return time.Time{}, false, "", err
+		}
+		if d, err = time.ParseInLocation("2006-01-02T15:04:05", t.DateTime, loc); err != nil {
+			return time.Time{}, false, "", err
+		}
 	}
 	return d.UTC(), false, zoneName(t.TimeZone), nil
+}
+
+// loadZone loads the IANA zone tz. "" and "Local" are refused: the host's
+// zone says nothing about the event's.
+func loadZone(tz string) (*time.Location, error) {
+	if tz == "" || strings.EqualFold(tz, "local") {
+		return nil, errBadResponse
+	}
+	return time.LoadLocation(tz)
 }
 
 // zoneName returns tz when it is an IANA zone other than UTC that Go can
