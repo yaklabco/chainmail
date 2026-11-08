@@ -447,6 +447,8 @@ func errorText(err error) string {
 	switch {
 	case errors.Is(err, calstore.ErrAuth):
 		return "calendar access not authorized"
+	case errors.Is(err, calstore.ErrSyncTooLarge):
+		return "calendar too large to sync"
 	case errors.Is(err, calstore.ErrUnavailable):
 		return "calendar server unavailable"
 	case errors.Is(err, calstore.ErrSyncTokenInvalid):

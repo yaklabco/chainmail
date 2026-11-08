@@ -3,6 +3,7 @@ package calsync_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/yaklabco/chainmail/internal/calendar"
 	"github.com/yaklabco/chainmail/internal/calstore"
+	"github.com/yaklabco/chainmail/internal/calstore/fake"
 	"github.com/yaklabco/chainmail/internal/calsync"
 )
 
@@ -83,5 +85,27 @@ func TestOversizedObjectsSkipped(t *testing.T) {
 	}
 	if len(r.events(t)) != 0 {
 		t.Errorf("events = %+v, want none", r.events(t))
+	}
+}
+
+// TestCalendarTooLargeToSync covers a store refusing a sync as too large:
+// the calendar is in error with that fixed text, and Run backs off.
+func TestCalendarTooLargeToSync(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.store.Fail(fake.MethodSync, calstore.ErrSyncTooLarge)
+	if err := r.syncer.SyncNow(t.Context()); !errors.Is(err, calstore.ErrSyncTooLarge) {
+		t.Fatalf("SyncNow = %v, want ErrSyncTooLarge", err)
+	}
+	st := r.syncer.Status()
+	if st.State != calsync.StateError || st.LastError != "calendar too large to sync" {
+		t.Errorf("Status = %+v, want error with \"calendar too large to sync\"", st)
+	}
+	row, err := r.cache.Calendar(t.Context(), account, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.LastError != "calendar too large to sync" {
+		t.Errorf("work LastError = %q", row.LastError)
 	}
 }
