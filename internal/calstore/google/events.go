@@ -15,6 +15,8 @@ import (
 // GetEvent returns one event: a single event, or a series master followed
 // by its exceptions (cancelled instances among them). Google keeps a
 // deleted event for a while; GetEvent returns it with Status CANCELLED.
+// Every override carries its series's UID, which Google leaves out of
+// cancelled instances.
 func (s *Store) GetEvent(ctx context.Context, calID, providerID string) ([]calendar.Event, error) {
 	data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, providerID), limit: maxEventBytes})
 	if err != nil {
@@ -23,6 +25,12 @@ func (s *Store) GetEvent(ctx context.Context, calID, providerID string) ([]calen
 	ev, a, err := decodeEvent(data)
 	if err != nil {
 		return nil, err
+	}
+	if ev.UID == "" && !ev.RecurrenceID.IsZero() {
+		// One instance, asked for by its instance id.
+		if ev.UID, err = s.seriesUID(ctx, calID, ev.ProviderID); err != nil {
+			return nil, err
+		}
 	}
 	out := []calendar.Event{ev}
 	if !ev.IsMaster() || a.ICalUID == "" {
@@ -33,6 +41,9 @@ func (s *Store) GetEvent(ctx context.Context, calID, providerID string) ([]calen
 	q.Set("iCalUID", a.ICalUID)
 	err = s.listEvents(ctx, calID, q, false, func(ex calendar.Event, xa apiEvent) {
 		if xa.RecurringEventID == providerID {
+			if ex.UID == "" {
+				ex.UID = a.ICalUID
+			}
 			out = append(out, ex)
 		}
 	}, func(string) {})

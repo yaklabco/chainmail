@@ -10,9 +10,11 @@
 //   - Events are listed with singleEvents=false, so a series comes as its
 //     master and its exceptions. An exception becomes an override: the
 //     master's ProviderID with RecurrenceID from originalStartTime. A
-//     cancelled instance is a CANCELLED override. A cancelled event that is
-//     not an instance was deleted and becomes a Delete, and the cancelled
-//     instances listed with a deleted series are dropped.
+//     cancelled instance is a CANCELLED override. Every override carries
+//     its master's UID, read from the master when Google leaves it out. A
+//     cancelled event that is not an instance was deleted and becomes a
+//     Delete, and the cancelled instances listed with a deleted series are
+//     dropped.
 //   - Raw is the event JSON. Updates PATCH only the fields that differ from
 //     Raw, and keep what Google knows of each attendee (comments, guests,
 //     flags) that chainmail does not model.

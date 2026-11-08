@@ -3,6 +3,7 @@ package google
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"slices"
@@ -71,18 +72,41 @@ type eventsPage struct {
 	NextSyncToken string            `json:"nextSyncToken"`
 }
 
+// maxSeriesLookups bounds the series one Sync reads to learn the UID of
+// cancelled instances listed without their master. An incremental Sync
+// with more such series syncs in full instead, since a full listing carries
+// every master.
+const maxSeriesLookups = 50
+
+// errTooManySeries is a Sync with more series to read than maxSeriesLookups.
+var errTooManySeries = fmt.Errorf("%w: too many series without a UID", calstore.ErrUnavailable)
+
 // Sync lists the calendar's events changed since token, or all of them when
 // token is "". Each upsert replaces the row with its ProviderID and
 // RecurrenceID (Changes.ObjectReplace is false). A token Google no longer
 // accepts gives calstore.ErrSyncTokenInvalid; the caller syncs again from
-// "".
+// "". Every override carries its series's UID, which Google leaves out of
+// cancelled instances: Sync takes it from the master in the same listing,
+// or reads the master.
 func (s *Store) Sync(ctx context.Context, calID, token string) (calendar.Changes, error) {
+	ch, err := s.sync(ctx, calID, token)
+	if errors.Is(err, errTooManySeries) && token != "" {
+		return s.sync(ctx, calID, "")
+	}
+	return ch, err
+}
+
+func (s *Store) sync(ctx context.Context, calID, token string) (calendar.Changes, error) {
 	ch := calendar.Changes{Full: token == ""}
 	q := listQuery()
 	if token != "" {
 		q.Set("syncToken", token)
 	}
+	uids := map[string]string{} // series id to iCalUID, from the masters listed
 	err := s.listEvents(ctx, calID, q, true, func(ev calendar.Event, a apiEvent) {
+		if a.RecurringEventID == "" && a.ICalUID != "" {
+			uids[a.ID] = a.ICalUID
+		}
 		if a.deleted() {
 			ch.Deletes = append(ch.Deletes, a.ID)
 			return
@@ -95,16 +119,70 @@ func (s *Store) Sync(ctx context.Context, calID, token string) (calendar.Changes
 	if ch.Token == "" {
 		return calendar.Changes{}, fmt.Errorf("%w: no sync token", errBadResponse)
 	}
-	// A deleted series has no rows: drop the cancelled instances Google
-	// lists with it, so they do not outlive their master in the cache.
-	if len(ch.Deletes) > 0 {
-		gone := make(map[string]bool, len(ch.Deletes))
-		for _, id := range ch.Deletes {
-			gone[id] = true
-		}
-		ch.Upserts = slices.DeleteFunc(ch.Upserts, func(ev calendar.Event) bool { return gone[ev.ProviderID] })
+	if err := s.resolveUIDs(ctx, calID, &ch, uids); err != nil {
+		return calendar.Changes{}, err
 	}
 	return ch, nil
+}
+
+// resolveUIDs drops the upserts of deleted series and gives every override
+// without a UID its series's UID: from uids, or from the master, read once
+// per series. A series that is gone joins ch.Deletes, so its cancelled
+// instances do not outlive it in the cache.
+func (s *Store) resolveUIDs(ctx context.Context, calID string, ch *calendar.Changes, uids map[string]string) error {
+	gone := make(map[string]bool, len(ch.Deletes))
+	for _, id := range ch.Deletes {
+		gone[id] = true
+	}
+	ch.Upserts = slices.DeleteFunc(ch.Upserts, func(ev calendar.Event) bool { return gone[ev.ProviderID] })
+	var missing []string
+	for _, ev := range ch.Upserts {
+		if ev.UID == "" && !ev.RecurrenceID.IsZero() && uids[ev.ProviderID] == "" && !slices.Contains(missing, ev.ProviderID) {
+			missing = append(missing, ev.ProviderID)
+		}
+	}
+	if len(missing) > maxSeriesLookups {
+		return errTooManySeries
+	}
+	for _, id := range missing {
+		uid, err := s.seriesUID(ctx, calID, id)
+		switch {
+		case errors.Is(err, calstore.ErrNotFound):
+			ch.Deletes = append(ch.Deletes, id)
+			gone[id] = true
+		case err != nil:
+			return err
+		default:
+			uids[id] = uid
+		}
+	}
+	ch.Upserts = slices.DeleteFunc(ch.Upserts, func(ev calendar.Event) bool { return gone[ev.ProviderID] })
+	for i := range ch.Upserts {
+		if ev := &ch.Upserts[i]; ev.UID == "" && !ev.RecurrenceID.IsZero() {
+			ev.UID = uids[ev.ProviderID]
+		}
+	}
+	return nil
+}
+
+// seriesUID reads the master id for its iCalUID. A master that is gone or
+// deleted gives calstore.ErrNotFound.
+func (s *Store) seriesUID(ctx context.Context, calID, id string) (string, error) {
+	data, err := s.do(ctx, call{method: "GET", path: eventPath(calID, id), limit: maxEventBytes})
+	if err != nil {
+		return "", err
+	}
+	var a apiEvent
+	if err := json.Unmarshal(data, &a); err != nil {
+		return "", errBadResponse
+	}
+	if a.deleted() {
+		return "", fmt.Errorf("%w: series %s deleted", calstore.ErrNotFound, id)
+	}
+	if a.ICalUID == "" {
+		return "", fmt.Errorf("%w: series %s has no UID", errBadResponse, id)
+	}
+	return a.ICalUID, nil
 }
 
 // listQuery is the query of every events.list: every change, including

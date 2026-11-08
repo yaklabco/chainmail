@@ -82,7 +82,7 @@ func TestGetEvent(t *testing.T) {
 	if _, ok := got["series1@20261117T170000Z"]; !ok {
 		t.Errorf("moved override missing: %v", slices.Collect(maps.Keys(got)))
 	}
-	if c := got["series1@20261124T170000Z"]; c.Status != calendar.StatusCancelled {
+	if c := got["series1@20261124T170000Z"]; c.Status != calendar.StatusCancelled || c.UID != "series1@example.org" {
 		t.Errorf("cancelled override = %+v", c)
 	}
 	for _, ev := range series {
@@ -646,5 +646,18 @@ func TestPutUpdateExceptionOfOtherKind(t *testing.T) {
 			}
 			ov = got
 		}
+	}
+}
+
+func TestGetEventOverrideUID(t *testing.T) {
+	st, srv := newStore(t)
+	srv.AddEvent(me, seriesEvent("series1"))
+	srv.AddEvent(me, cancelledInstance("series1", "20261124T170000Z", "2026-11-24T09:00:00-08:00"))
+	evs, err := st.GetEvent(ctx(t), me, "series1_20261124T170000Z")
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("GetEvent of a cancelled instance: %+v, %v", evs, err)
+	}
+	if evs[0].UID != "series1@example.org" || evs[0].ProviderID != "series1" {
+		t.Errorf("cancelled instance = %+v", evs[0])
 	}
 }
