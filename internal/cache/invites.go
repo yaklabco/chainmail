@@ -13,6 +13,7 @@ import (
 	"github.com/yaklabco/chainmail/internal/calendar"
 	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // FoundInvite is an iCalendar invite the builder found in a new message:
@@ -26,12 +27,19 @@ type FoundInvite struct {
 	// Data is the part with its transfer encoding decoded, still in
 	// Part.Charset, at most calendar.MaxICSBytes.
 	Data []byte
+	// FoundAt is when chainmail found the message: the time of its new
+	// event in the log, so a segment applied again, or a part read later
+	// through ReadInvite, keeps it. It is the builder's clock when the
+	// event has no time.
+	FoundAt time.Time
 }
 
 // inviteCandidate is a new message's calendar part to read for an invite.
 type inviteCandidate struct {
 	ref  ref.Ref
 	part mailstore.CalendarPart
+	// foundAt is FoundInvite.FoundAt, set by readInvites.
+	foundAt time.Time
 }
 
 // inviteMethod reports whether a calendar part's method marks an invite
@@ -86,6 +94,9 @@ type InviteCandidate struct {
 	Account    string
 	MessageRef string
 	Part       mailstore.CalendarPart
+	// FoundAt is when chainmail found the message, as FoundInvite.FoundAt;
+	// ReadInvite hands it on.
+	FoundAt time.Time
 }
 
 // inviteGone reports whether a part could not be read because its message
@@ -94,10 +105,44 @@ func inviteGone(err error) bool {
 	return errors.Is(err, mailstore.ErrNotFound) || errors.Is(err, mailstore.ErrStaleRef)
 }
 
+// messageKey names a message by folder, UIDVALIDITY and UID, the part of a
+// ref that a new event and the header fetched for it share.
+type messageKey struct {
+	folder           string
+	uidValidity, uid uint32
+}
+
+// keyOf is r's messageKey.
+func keyOf(r ref.Ref) messageKey {
+	return messageKey{folder: r.Folder, uidValidity: r.UIDValidity, uid: r.UID}
+}
+
+// newMailTimes returns the time of each new event of seg, by message: when
+// the watcher found the message. An event with an unreadable ref or no
+// time is left out.
+func newMailTimes(seg []watch.Event) map[messageKey]time.Time {
+	out := make(map[messageKey]time.Time)
+	for _, e := range seg {
+		if e.Kind != watch.KindNew || e.At.IsZero() {
+			continue
+		}
+		r, err := ref.Parse(e.Ref)
+		if err != nil {
+			continue
+		}
+		if _, ok := out[keyOf(r)]; !ok {
+			out[keyOf(r)] = e.At
+		}
+	}
+	return out
+}
+
 // readInvites reads each candidate's part and hands the invites read to
 // OnInvites, in candidate order, with no lock held and outside any cache.db
 // transaction. tooLarge counts the messages whose invite parts the header
-// fetch found over the limit. It does nothing without OnInvites.
+// fetch found over the limit, and found has the time each message was
+// found (newMailTimes); a message it lacks takes the builder's clock. It
+// does nothing without OnInvites.
 //
 // Invite work is optional, so the step is bounded: the reads of one
 // segment share a deadline of inviteTimeout, and at most inviteCap parts
@@ -112,9 +157,17 @@ func inviteGone(err error) bool {
 // acknowledged and is applied again, only when OnDeferredInvites could not
 // queue the parts, or when ctx ends: a stopping builder hands nothing on,
 // and the next start reads the segment's invites again.
-func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooLarge int) error {
+func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooLarge int, found map[messageKey]time.Time) error {
 	if a.o.OnInvites == nil {
 		return nil
+	}
+	now := a.clock.Now()
+	for i := range cands {
+		at, ok := found[keyOf(cands[i].ref)]
+		if !ok {
+			at = now
+		}
+		cands[i].foundAt = at
 	}
 	var deferred []inviteCandidate
 	if over := len(cands) - a.inviteCap; over > 0 {
@@ -126,7 +179,7 @@ func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooL
 	readCtx, cancel := context.WithTimeout(ctx, a.inviteTimeout)
 	defer cancel()
 	var (
-		found                          []FoundInvite
+		invites                        []FoundInvite
 		failed, gone, broken, timedOut int
 	)
 	for i, c := range cands {
@@ -149,7 +202,7 @@ func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooL
 			deferred = append(deferred, c)
 			a.logger.InfoContext(ctx, "cache could not read an invite part", "folder", c.ref.Folder, "reason", reasonCode(err))
 		default:
-			found = append(found, FoundInvite{Account: a.name, MessageRef: c.ref.String(), Part: part, Data: data})
+			invites = append(invites, FoundInvite{Account: a.name, MessageRef: c.ref.String(), Part: part, Data: data, FoundAt: c.foundAt})
 		}
 		if timedOut > 0 {
 			break
@@ -172,15 +225,15 @@ func (a *Account) readInvites(ctx context.Context, cands []inviteCandidate, tooL
 		a.logger.WarnContext(ctx, a.deferText("cache ran out of time for invite parts and skipped them",
 			"cache ran out of time for invite parts and deferred them"), "count", timedOut, "timeout", a.inviteTimeout)
 	}
-	if len(found) > 0 {
-		a.o.OnInvites(ctx, found)
+	if len(invites) > 0 {
+		a.o.OnInvites(ctx, invites)
 	}
 	if len(deferred) == 0 || a.o.OnDeferredInvites == nil {
 		return nil
 	}
 	out := make([]InviteCandidate, len(deferred))
 	for i, c := range deferred {
-		out[i] = InviteCandidate{Account: a.name, MessageRef: c.ref.String(), Part: c.part}
+		out[i] = InviteCandidate{Account: a.name, MessageRef: c.ref.String(), Part: c.part, FoundAt: c.foundAt}
 	}
 	if err := a.o.OnDeferredInvites(ctx, out); err != nil {
 		return fmt.Errorf("queueing %d deferred invite parts: %w", len(out), err)
@@ -204,7 +257,8 @@ func (a *Account) deferText(skipped, deferred string) string {
 // part over the limit is ErrInviteTooLarge, and a message or folder that
 // is gone is mailstore.ErrNotFound or mailstore.ErrStaleRef; so is a part
 // of a message that is not this account's. A part that does not decode
-// is ErrInviteUndecodable. Those never pass; other errors may.
+// is ErrInviteUndecodable. Those never pass; other errors may. The invite
+// carries c.FoundAt.
 func (a *Account) ReadInvite(ctx context.Context, c InviteCandidate) (FoundInvite, error) {
 	r, err := ref.Parse(c.MessageRef)
 	if err != nil || c.Account != a.name || r.Account != a.name {
@@ -214,7 +268,7 @@ func (a *Account) ReadInvite(ctx context.Context, c InviteCandidate) (FoundInvit
 	if err != nil {
 		return FoundInvite{}, err
 	}
-	return FoundInvite{Account: a.name, MessageRef: c.MessageRef, Part: part, Data: data}, nil
+	return FoundInvite{Account: a.name, MessageRef: c.MessageRef, Part: part, Data: data, FoundAt: c.FoundAt}, nil
 }
 
 // readInvite is readPart retrying while the pool is busy, until ctx ends.

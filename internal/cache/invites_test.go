@@ -21,6 +21,7 @@ import (
 	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/mailstore/fake"
 	"github.com/yaklabco/chainmail/internal/ref"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // testInviteICS is a small iTIP REQUEST.
@@ -544,6 +545,7 @@ func TestBuilderDefersInvitePartsOverTheCap(t *testing.T) {
 	if len(cands) == 1 && cands[0].Part.Size > 0 {
 		want.Part.Size = cands[0].Part.Size // the encoded size the header reported
 	}
+	want.FoundAt = r.newEventAt(last)
 	if len(cands) != 1 || cands[0] != want {
 		t.Fatalf("deferred = %+v, want [%+v]", cands, want)
 	}
@@ -687,6 +689,23 @@ func TestReadInvite(t *testing.T) {
 	}
 }
 
+// newEventAt returns the time of the new event of rf in the rig's log:
+// when the watcher found the message.
+func (r *acctRig) newEventAt(rf ref.Ref) time.Time {
+	r.t.Helper()
+	page, err := r.log.Read(r.t.Context(), watch.Query{Filter: watch.Filter{Kinds: []watch.Kind{watch.KindNew}}, Limit: 1000})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	for _, e := range page.Events {
+		if e.Ref == rf.String() {
+			return e.At
+		}
+	}
+	r.t.Fatalf("no new event of %s", rf)
+	return time.Time{}
+}
+
 // errQueueDown is a queue write that fails.
 var errQueueDown = errors.New("the invite queue is down")
 
@@ -719,6 +738,8 @@ func (s *failingDeferSink) snapshot() [][]InviteCandidate {
 // segment is not acknowledged: the step fails and backs off, and the same
 // segment is applied again, which reads the immediate invites again (an
 // idempotent upsert for the hook) and hands the deferred part over again.
+// Every invite carries the time the watcher found its message, the same
+// on the replay, though the builder's clock has moved.
 func TestBuilderReplaysASegmentWhoseDeferredPartsWereNotQueued(t *testing.T) {
 	t.Parallel()
 	fs := fake.New("acme", false)
@@ -755,14 +776,25 @@ func TestBuilderReplaysASegmentWhoseDeferredPartsWereNotQueued(t *testing.T) {
 	if e := r.a.lastError(); e != "" {
 		t.Errorf("last error = %q after the replay, want none", e)
 	}
+	secondAt := r.newEventAt(second)
+	for i, c := range calls {
+		if !c[0].FoundAt.Equal(secondAt) {
+			t.Errorf("deferred call %d found at %v, want the new event's %v", i, c[0].FoundAt, secondAt)
+		}
+	}
 	found := sink.invites()
 	if len(found) != 2 {
 		t.Fatalf("OnInvites got %d invites, want the first message's twice", len(found))
 	}
+	firstAt := r.newEventAt(first)
 	for i, f := range found {
-		if f.MessageRef != first.String() {
-			t.Errorf("invite %d = %s, want %s", i, f.MessageRef, first)
+		if f.MessageRef != first.String() || !f.FoundAt.Equal(firstAt) {
+			t.Errorf("invite %d = %s found at %v, want %s found at %v", i, f.MessageRef, f.FoundAt, first, firstAt)
 		}
+	}
+	later, err := r.a.ReadInvite(t.Context(), calls[1][0])
+	if err != nil || !later.FoundAt.Equal(secondAt) {
+		t.Errorf("ReadInvite = found at %v, %v; want the candidate's %v", later.FoundAt, err, secondAt)
 	}
 }
 

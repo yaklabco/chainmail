@@ -231,6 +231,11 @@ const (
 // charset: a single-byte part can grow past the limit in UTF-8, and
 // calendar.ParseInvite refuses data over it. Either way the row reads back
 // with calendar.ParseInvite(Raw, Charset).
+//
+// The row is found at f.FoundAt, when the cache found the message (the
+// hook's clock when that is unset), so a part the builder deferred and the
+// retry loop read later keeps its place in its UID's history, and a
+// segment applied again keeps the earliest time (PutMailInvite).
 func (h *inviteHook) handle(ctx context.Context, f cache.FoundInvite) inviteOutcome {
 	log := h.o.Logger.With("account", f.Account)
 	inv, err := calendar.ParseInvite(f.Data, f.Part.Charset)
@@ -243,9 +248,13 @@ func (h *inviteHook) handle(ctx context.Context, f cache.FoundInvite) inviteOutc
 	if len(inv.Events) > 0 && inv.Events[0].Raw != nil && len(inv.Events[0].Raw) <= calendar.MaxICSBytes {
 		raw, charset = inv.Events[0].Raw, ""
 	}
+	foundAt := f.FoundAt
+	if foundAt.IsZero() {
+		foundAt = h.o.Now()
+	}
 	row := calcache.MailInviteRow{
 		Ref: ref, Account: f.Account, MessageRef: f.MessageRef, UID: inv.UID, Method: inv.Method,
-		Sequence: inv.Sequence, DTStamp: inv.DTStamp, Raw: raw, Charset: charset, FoundAt: h.o.Now(),
+		Sequence: inv.Sequence, DTStamp: inv.DTStamp, Raw: raw, Charset: charset, FoundAt: foundAt,
 	}
 	if err := h.o.Cache.PutMailInvite(ctx, row); err != nil {
 		log.WarnContext(ctx, "could not store a mail invite", "ref", ref)

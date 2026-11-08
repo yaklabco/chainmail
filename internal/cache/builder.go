@@ -211,10 +211,11 @@ func (a *Account) planSegment(ctx context.Context, seg []watch.Event, progress m
 // fetches new headers with no lock held, then writes under wmu. A drop
 // that ran during the fetch makes it plan and fetch again. Once the rows
 // are written, it reads the new messages' invite parts, with wmu
-// released, and hands them to OnInvites (readInvites). A segment applied
-// again after a failure reads them again: OnInvites must be idempotent. A
-// failure to queue the deferred parts (OnDeferredInvites) fails the
-// segment, which is then applied again.
+// released, and hands them to OnInvites (readInvites), each with the time
+// of its message's new event. A segment applied again after a failure
+// reads them again: OnInvites must be idempotent. A failure to queue the
+// deferred parts (OnDeferredInvites) fails the segment, which is then
+// applied again.
 func (a *Account) apply(ctx context.Context, seg []watch.Event) error {
 	if len(seg) == 0 {
 		return nil
@@ -241,7 +242,7 @@ func (a *Account) apply(ctx context.Context, seg []watch.Event) error {
 			return err
 		}
 		if done {
-			return a.readInvites(ctx, got.invites, got.tooLarge)
+			return a.readInvites(ctx, got.invites, got.tooLarge, newMailTimes(seg))
 		}
 	}
 }

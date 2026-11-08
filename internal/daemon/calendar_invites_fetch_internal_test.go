@@ -16,6 +16,7 @@ import (
 	"github.com/yaklabco/chainmail/internal/config"
 	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/mailstore/fake"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // readPart is the rig's ReadPart: it counts the read and runs readFn.
@@ -388,5 +389,74 @@ func TestInviteFetchQueueWriteFailureIsReturned(t *testing.T) {
 	}
 	if n := len(r.events()); n != 2 {
 		t.Errorf("published %d invite events, want u1's and u2's", n)
+	}
+}
+
+// foundAtOf returns the found_at stored for account's message msg and
+// uid, read through a second connection to calendar.db, since the store
+// reads only each UID's latest row.
+func (r *inviteRig) foundAtOf(account, msg, uid string) time.Time {
+	r.t.Helper()
+	conn, err := sql.Open("sqlite", "file:"+r.calPath+"?mode=ro")
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }() // a read-only connection: nothing to flush
+	var s string
+	if err := conn.QueryRowContext(r.t.Context(), "SELECT found_at FROM mail_invites WHERE account = ? AND message_ref = ? AND uid = ?",
+		account, msg, uid).Scan(&s); err != nil {
+		r.t.Fatal(err)
+	}
+	at, err := watch.ParseTime(s)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return at
+}
+
+// A deferred part keeps the time its message was found, the cache's, from
+// the queue row through to the stored invite, not the time the retry pass
+// read it. So an original REQUEST that the builder deferred still began
+// its UID when a CANCEL of the UID was stored at once, and a later REQUEST
+// with a higher SEQUENCE is announced.
+func TestInviteDeferredRequestKeepsItsDiscoveryTime(t *testing.T) {
+	t.Parallel()
+	r := newInviteRig(t)
+	ctx := t.Context()
+	segmentAt := inviteNow.Add(-time.Minute)
+	original := candidate("none", "msg-1")
+	original.FoundAt = segmentAt
+	r.queue([]cache.InviteCandidate{original})
+	if rows := r.fetches(); len(rows) != 1 || !rows[0].FoundAt.Equal(segmentAt) || !rows[0].NextAt.Equal(inviteNow) {
+		t.Fatalf("queued = %+v, want msg-1 found at %v, due at %v", rows, segmentAt, inviteNow)
+	}
+
+	cancelled := found("none", "msg-2", "CANCEL", inviteICS("CANCEL", "u1", 1, "ann@example.com", "20261110T170000Z", "20261110T173000Z"))
+	cancelled.FoundAt = segmentAt.Add(time.Second)
+	r.advance(time.Minute)
+	r.hook(ctx, []cache.FoundInvite{cancelled})
+
+	r.advance(5 * time.Minute)
+	r.readFn = readsRequest("u1")
+	r.h.pass(ctx, []string{"none"})
+	if at := r.foundAtOf("none", "msg-1", "u1"); !at.Equal(segmentAt) {
+		t.Errorf("msg-1 found at %v, want the queue row's %v", at, segmentAt)
+	}
+	if at := r.foundAtOf("none", "msg-2", "u1"); !at.Equal(cancelled.FoundAt) {
+		t.Errorf("msg-2 found at %v, want the invite's %v", at, cancelled.FoundAt)
+	}
+	if n := len(r.events()); n != 0 {
+		t.Fatalf("published %d invite events for a cancelled UID, want none", n)
+	}
+
+	r.advance(time.Hour)
+	again := found("none", "msg-3", "REQUEST", inviteICS("REQUEST", "u1", 2, "ann@example.com", "20261110T170000Z", "20261110T173000Z"))
+	r.hook(ctx, []cache.FoundInvite{again})
+	evs := r.events()
+	if len(evs) != 1 || evs[0].Calendar == nil || evs[0].Calendar.MessageRef != "msg-3" {
+		t.Fatalf("events = %+v, want one invite event from msg-3", evs)
+	}
+	if at := r.foundAtOf("none", "msg-3", "u1"); !at.Equal(r.now()) {
+		t.Errorf("msg-3 found at %v, want the hook's clock %v for an invite without a time", at, r.now())
 	}
 }
