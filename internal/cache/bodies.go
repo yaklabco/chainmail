@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -22,6 +23,72 @@ type Body struct {
 // at most 3 attempts over 24 hours. Stats counts final failures with it, and
 // the prefetcher passes it to BodylessSince as maxAttempts.
 const finalAttempts = 3
+
+// BodyState is whether a cached message's body is held, still to come, or
+// given up on.
+type BodyState int
+
+const (
+	// BodyPending is a message with no body yet whose fetch has not
+	// failed finalAttempts times. The prefetcher may still fetch it, or,
+	// outside the body window, never will.
+	BodyPending BodyState = iota
+	// BodyHeld is a message whose body the cache holds.
+	BodyHeld
+	// BodyFailed is a message with no body whose fetch has failed
+	// finalAttempts times: a final failure, retried by no prefetch.
+	BodyFailed
+)
+
+// bodyState classifies a message from whether its body is held and its
+// failed fetch count.
+func bodyState(held bool, attempts int64) BodyState {
+	switch {
+	case held:
+		return BodyHeld
+	case attempts >= finalAttempts:
+		return BodyFailed
+	default:
+		return BodyPending
+	}
+}
+
+// BodyStates returns the body state of each of uids that has a row in src
+// of account. UIDs without one are left out, so a caller can tell a
+// message the cache never stored from a body still to come.
+func (s *Store) BodyStates(ctx context.Context, account string, src mailstore.Source, uids []uint32) (map[uint32]BodyState, error) {
+	if len(uids) == 0 {
+		return nil, nil
+	}
+	list, err := json.Marshal(uids)
+	if err != nil {
+		return nil, fmt.Errorf("reading body states: encoding the UIDs: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT m.uid, b.msg IS NOT NULL, coalesce(f.attempts, 0)
+		 FROM messages m
+		 LEFT JOIN bodies b ON b.msg = m.id
+		 LEFT JOIN body_failures f ON f.msg = m.id
+		 WHERE m.account = ? AND m.folder = ? AND m.uidvalidity = ?
+		   AND m.uid IN (SELECT value FROM json_each(?))`,
+		account, src.Folder, int64(src.UIDValidity), string(list))
+	if err != nil {
+		return nil, s.fail("reading body states", err)
+	}
+	defer func() { _ = rows.Close() }() // read-only; rows.Err reports any read failure
+	out := make(map[uint32]BodyState, len(uids))
+	for rows.Next() {
+		var uid, held, attempts int64
+		if err := rows.Scan(&uid, &held, &attempts); err != nil {
+			return nil, s.fail("reading body states", err)
+		}
+		out[uint32(uid)] = bodyState(held == 1, attempts)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, s.fail("reading body states", err)
+	}
+	return out, nil
+}
 
 // FullRead is what a full read of a message found of its attachments.
 type FullRead struct {
