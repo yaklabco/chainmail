@@ -350,3 +350,34 @@ func TestFakeStreamPartOfAppendedMessage(t *testing.T) {
 		}
 	}
 }
+
+// forwardedInvite carries its own calendar part and, attached, a message
+// with another invite. Only its own part is listed.
+const forwardedInvite = "From: olive@example.net\r\nTo: me@example.test\r\nSubject: Fwd: invite\r\n" +
+	"Date: Wed, 28 Oct 2026 09:00:00 +0000\r\nMIME-Version: 1.0\r\n" +
+	"Content-Type: multipart/mixed; boundary=outer\r\n\r\n" +
+	"--outer\r\nContent-Type: text/plain\r\n\r\nsee below\r\n" +
+	"--outer\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n" +
+	"--outer\r\nContent-Type: message/rfc822\r\n\r\n" +
+	"From: amy@example.org\r\nSubject: invite\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=inner\r\n\r\n" +
+	"--inner\r\nContent-Type: text/plain\r\n\r\nhi\r\n" +
+	"--inner\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n" +
+	"--inner--\r\n" +
+	"--outer--\r\n"
+
+func TestFakeCalendarPartsSkipAttachedMessages(t *testing.T) {
+	t.Parallel()
+	s := New("acct", false)
+	r, err := s.Append(t.Context(), "INBOX", nil, cacheDay(1), []byte(forwardedInvite))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs, err := s.FetchHeaders(t.Context(), mailstore.Source{Folder: "INBOX", UIDValidity: r.UIDValidity}, []uint32{r.UID})
+	if err != nil || len(hs) != 1 {
+		t.Fatalf("FetchHeaders = %+v, %v", hs, err)
+	}
+	want := []mailstore.CalendarPart{{Part: "2", Method: "REQUEST", Size: int64(len("BEGIN:VCALENDAR\r\nEND:VCALENDAR"))}}
+	if !reflect.DeepEqual(hs[0].CalendarParts, want) {
+		t.Errorf("calendar parts = %+v, want %+v", hs[0].CalendarParts, want)
+	}
+}
