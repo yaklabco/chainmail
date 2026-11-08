@@ -162,7 +162,9 @@ type ruleScope struct {
 // synced All Mail; others: SearchFolders(in) minus Sent and Drafts when in
 // is empty), and sets excludeLabels (Google, in empty: \Sent and \Draft).
 // complete reports whether the cache can answer the rule completely on this
-// account (cacheCanAnswer); when it cannot, reason is the verdict's reason.
+// account, with cacheCanAnswer's checks over the rule's own folders; when
+// it cannot, reason is the verdict's reason, or unreadable_messages when a
+// folder holds messages the cache could not read.
 //
 // Scheduled and manual runs, and their dry-runs, pass complete true. A
 // new-mail batch passes false, since it waits for the cache to apply the
@@ -218,11 +220,19 @@ func (s *Server) scopeRule(ctx context.Context, ruleID string, d rules.Definitio
 	if !complete {
 		return sc, "", nil
 	}
-	p := &searchPlan{tree: rest, in: scope.In, itemThreads: map[string]map[string][]string{acct.Name: threads}}
-	if v := (&messageService{s: s}).cacheCanAnswer(ctx, ca, server, acct, p); !v.ok {
+	// Readiness covers the folders the rule matches, not the search's own
+	// default scope, which holds Sent and Drafts off Google.
+	v := (&messageService{s: s}).cacheCovers(ctx, ca, acct, plan, folders)
+	switch {
+	case !v.ok:
 		// Every verdict without ok has a reason once the query compiles
 		// and is supported; stale stands in should that ever change.
 		return sc, cmp.Or(v.reason, cache.ReasonStale), nil
+	case v.unreadable:
+		// A search answers without the messages the cache could not read
+		// and says so; a whole-cache run would act on part of its matches
+		// and finish ok, so it is not ready.
+		return sc, cache.ReasonUnreadableMessages, nil
 	}
 	return sc, "", nil
 }

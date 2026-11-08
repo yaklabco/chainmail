@@ -274,6 +274,29 @@ func ruleDropGmail(_ *testing.T, f *routeFixture) { delete(f.s.cacheAccounts, "g
 // ruleCacheDown turns the daemon's cache off, as a full disk does.
 func ruleCacheDown(_ *testing.T, f *routeFixture) { f.s.cacheDown.Store(true) }
 
+// ruleStaleSentDrafts makes host's Sent and Drafts folders stale, folders
+// a rule with no in: term never matches (spec amendment 6).
+func ruleStaleSentDrafts(t *testing.T, f *routeFixture) {
+	f.ageSync(t, "host", "Sent", time.Hour)
+	f.ageSync(t, "host", "Drafts", time.Hour)
+}
+
+// ruleUnsyncedSentDrafts drops host's Sent and Drafts folders from the
+// cache, so neither has been synced into it.
+func ruleUnsyncedSentDrafts(t *testing.T, f *routeFixture) {
+	for _, folder := range []string{"Sent", "Drafts"} {
+		if err := f.store.DropFolder(t.Context(), "host", folder, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// ruleUnreadableArchive records a message of host's Archive as unreadable.
+func ruleUnreadableArchive(t *testing.T, f *routeFixture) { f.markUnreadable(t, "host", "Archive") }
+
+// ruleUnreadableSent records a message of host's Sent as unreadable.
+func ruleUnreadableSent(t *testing.T, f *routeFixture) { f.markUnreadable(t, "host", "Sent") }
+
 // TestScopeRuleFolders checks spec amendments 6 and 13: off Google a rule
 // with no in: covers every searched folder but Sent and Drafts, and in:
 // names the folders; on Google it covers All Mail and, with no in:, skips
@@ -351,6 +374,16 @@ func TestScopeRuleReasons(t *testing.T) {
 		{name: "no cache worker", account: "gmail", spoil: ruleDropGmail, reason: reasonCacheDisabled},
 		{name: "no cache worker, complete", account: "gmail", complete: true, spoil: ruleDropGmail, reason: reasonCacheDisabled},
 		{name: "cache down", account: "host", complete: true, spoil: ruleCacheDown, reason: reasonCacheDisabled},
+		// The cache answers for the folders the rule matches, so Sent and
+		// Drafts, which a rule with no in: leaves out, do not hold it up.
+		{name: "stale sent and drafts", account: "host", query: "from:acme", complete: true, spoil: ruleStaleSentDrafts},
+		{name: "unsynced sent and drafts", account: "host", query: "from:acme", complete: true, spoil: ruleUnsyncedSentDrafts},
+		{name: "stale sent, in:sent", account: "host", query: "in:sent", complete: true, spoil: ruleStaleSentDrafts, reason: cache.ReasonStale},
+		// A whole-cache run would miss the unreadable messages, so it is not
+		// ready; a new-mail batch matches the rows it has (amendment 11).
+		{name: "unreadable", account: "host", query: "from:acme", complete: true, spoil: ruleUnreadableArchive, reason: cache.ReasonUnreadableMessages},
+		{name: "unreadable, new mail", account: "host", query: "from:acme", spoil: ruleUnreadableArchive},
+		{name: "unreadable in sent", account: "host", query: "from:acme", complete: true, spoil: ruleUnreadableSent},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

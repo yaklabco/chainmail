@@ -237,23 +237,44 @@ func (m *messageService) cacheCanAnswer(ctx context.Context, ca *cache.Account, 
 	if plan.Unsupported {
 		return cacheVerdict{miss: missUnsupported}
 	}
-	needsBound := plan.Reason == cache.ReasonTextOutsideWindow || (plan.NeedsBodies && !ca.InWindow(plan.Since))
-	miss := func(transient cacheMiss) cacheMiss {
-		if needsBound {
-			return missBound
-		}
-		return transient
-	}
 	scoper, ok := server.(mailstore.Scoper)
 	if !ok {
 		log.Debug("the account's mail store cannot list a search's folders; the cache cannot answer it", "account", acct.Name)
-		return cacheVerdict{reason: cache.ReasonFolderNotSynced, miss: miss(missWait)}
+		return cacheVerdict{reason: cache.ReasonFolderNotSynced, miss: boundMiss(ca, plan, missWait)}
 	}
 	folders, err := scoper.SearchFolders(ctx, p.in)
 	if err != nil {
 		log.Warn("listing a search's folders for the cache failed", "account", acct.Name, "reason", apiReason(err))
-		return cacheVerdict{reason: cache.ReasonFolderNotSynced, miss: miss(missWait)}
+		return cacheVerdict{reason: cache.ReasonFolderNotSynced, miss: boundMiss(ca, plan, missWait)}
 	}
+	return m.cacheCovers(ctx, ca, acct, plan, folders)
+}
+
+// needsBound reports whether plan has text the cache's body window can
+// never cover, which waiting does not help.
+func needsBound(ca *cache.Account, plan cache.Plan) bool {
+	return plan.Reason == cache.ReasonTextOutsideWindow || (plan.NeedsBodies && !ca.InWindow(plan.Since))
+}
+
+// boundMiss is transient, or missBound when plan needs a bound the window
+// can never give.
+func boundMiss(ca *cache.Account, plan cache.Plan, transient cacheMiss) cacheMiss {
+	if needsBound(ca, plan) {
+		return missBound
+	}
+	return transient
+}
+
+// cacheCovers runs cacheCanAnswer's checks after the query compiled and the
+// folders are known: every folder is fresh, the cache holds what plan
+// needs in them, and whether any holds messages the cache could not read.
+// A rule passes the folders it matches, which leave Sent and Drafts out
+// when it has no in: term, so its readiness and its matching cover the
+// same folders.
+func (m *messageService) cacheCovers(ctx context.Context, ca *cache.Account, acct config.ResolvedAccount, plan cache.Plan, folders []string) cacheVerdict {
+	log := m.s.opts.Logger
+	needsBound := needsBound(ca, plan)
+	miss := func(transient cacheMiss) cacheMiss { return boundMiss(ca, plan, transient) }
 	fresh, reason, syncedAt, err := ca.Freshness(ctx, folders)
 	switch {
 	case err != nil:

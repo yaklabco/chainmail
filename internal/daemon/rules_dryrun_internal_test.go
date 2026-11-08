@@ -14,6 +14,7 @@ import (
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/cache"
 	"github.com/yaklabco/chainmail/internal/config"
 	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/mailstore/fake"
@@ -216,6 +217,10 @@ func TestRuleDryRunNotReady(t *testing.T) {
 		{name: "no cache worker", spoil: ruleDropGmail, trigger: rules.TriggerManual, want: []ruleDryRunSummary{gmailOff, ruleHostAcme}},
 		{name: "no cache worker, trigger new", spoil: ruleDropGmail, trigger: rules.TriggerNew, want: []ruleDryRunSummary{gmailOff, ruleHostAcme}},
 		{name: "cache down", spoil: ruleCacheDown, trigger: rules.TriggerManual, want: []ruleDryRunSummary{gmailOff, {Account: "host", Reason: reasonCacheDisabled}}},
+		{name: "unreadable", spoil: ruleUnreadableArchive, trigger: rules.TriggerManual, want: []ruleDryRunSummary{ruleGmailAcme, {Account: "host", Reason: cache.ReasonUnreadableMessages}}},
+		{name: "unreadable, scheduled", spoil: ruleUnreadableArchive, trigger: rules.TriggerSchedule, want: []ruleDryRunSummary{ruleGmailAcme, {Account: "host", Reason: cache.ReasonUnreadableMessages}}},
+		{name: "unreadable, trigger new", spoil: ruleUnreadableArchive, trigger: rules.TriggerNew, want: []ruleDryRunSummary{ruleGmailAcme, ruleHostAcme}},
+		{name: "stale sent and drafts", spoil: ruleStaleSentDrafts, trigger: rules.TriggerManual, want: []ruleDryRunSummary{ruleGmailAcme, ruleHostAcme}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

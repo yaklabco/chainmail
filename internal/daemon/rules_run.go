@@ -56,6 +56,11 @@ const (
 	// search_items.go's cacheNotReadyHint answers a refused search.
 	ruleCacheNotReadyHint = "the cache cannot answer this rule completely yet; " +
 		"run it again once chainmail cache status shows the account up to date"
+	// ruleUnreadableHint is the fixed hint of a cache_not_ready run whose
+	// folders hold messages the cache could not read. Waiting for the cache
+	// does not help with those.
+	ruleUnreadableHint = "the rule's folders hold messages the cache could not read, so a run would miss them; " +
+		"chainmail cache status counts them under UNREADABLE, and the daemon reads them again at each start"
 	// ruleCacheDisabledHint is the fixed hint of a runner that leaves new
 	// mail unread while the account's cache is off.
 	ruleCacheDisabledHint = "the cache is off, as it turns off when the disk holding cache.db is full; " +
@@ -960,13 +965,22 @@ func (r *ruleRunner) runRule(ctx context.Context, rule rules.Rule, t rules.Trigg
 	case transient != nil:
 		err = r.settle(ctx, &run, false, transient)
 	case reason != "":
-		run.Outcome, run.Reason, run.Hint = rules.OutcomeCacheNotReady, reason, ruleCacheNotReadyHint
+		run.Outcome, run.Reason, run.Hint = rules.OutcomeCacheNotReady, reason, cacheNotReadyHintOf(reason)
 		err = r.write(ctx, &run)
 	default:
 		capped, cause := r.page(ctx, rule, sc, &run, limit)
 		err = r.settle(ctx, &run, capped, cause)
 	}
 	return run, err
+}
+
+// cacheNotReadyHintOf is the fixed hint of a cache_not_ready run with
+// reason.
+func cacheNotReadyHintOf(reason string) string {
+	if reason == cache.ReasonUnreadableMessages {
+		return ruleUnreadableHint
+	}
+	return ruleCacheNotReadyHint
 }
 
 // scopeRun scopes rule for a scheduled or manual run on the account. It

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/cache"
 	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/mailstore/fake"
 	"github.com/yaklabco/chainmail/internal/ref"
@@ -111,6 +112,31 @@ func TestRunRuleNeedsACompleteCache(t *testing.T) {
 	}
 	if last := g.lastRun(t, rule.ID); last.ID != run.ID || last.Outcome != rules.OutcomeCacheNotReady {
 		t.Errorf("stored run = %+v, want the cache_not_ready run", last)
+	}
+}
+
+// TestRunRuleRefusesUnreadableMessages checks that a scheduled or manual
+// run over folders holding messages the cache could not read is recorded
+// cache_not_ready with reason unreadable_messages and acts on nothing: the
+// cache would answer without those messages.
+func TestRunRuleRefusesUnreadableMessages(t *testing.T) {
+	t.Parallel()
+	for _, trigger := range []rules.Trigger{rules.TriggerSchedule, rules.TriggerManual} {
+		t.Run(string(trigger), func(t *testing.T) {
+			t.Parallel()
+			g, _, rule := newBatchRig(t)
+			g.f.markUnreadable(t, "host", "Archive")
+			run, err := g.r.runRule(t.Context(), rule, trigger, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.Outcome != rules.OutcomeCacheNotReady || run.Reason != cache.ReasonUnreadableMessages || run.Hint != ruleUnreadableHint || run.Matched != 0 {
+				t.Errorf("run = %+v, want cache_not_ready, unreadable_messages, with a hint", run)
+			}
+			if n := g.fk.Calls("StoreFlags"); n != 0 {
+				t.Errorf("flagged %d times", n)
+			}
+		})
 	}
 }
 
