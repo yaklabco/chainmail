@@ -73,10 +73,13 @@ const runColumns = "id, rule_id, account, trigger_kind, started_at, finished_at,
 
 // BeginRun inserts a run of ruleID on account, started and finished at at
 // with outcome interrupted, so a crash before FinishRun leaves an honest
-// row, and returns its ID.
+// row, and returns its ID. A zero at means now.
 func (s *Store) BeginRun(ctx context.Context, ruleID, account string, t Trigger, at time.Time) (int64, error) {
 	if !knownTrigger(t) {
 		return 0, errRunTrigger
+	}
+	if at.IsZero() {
+		at = s.now().UTC()
 	}
 	var id int64
 	err := s.write(ctx, func(tx *sql.Tx) ([]watch.Event, error) {

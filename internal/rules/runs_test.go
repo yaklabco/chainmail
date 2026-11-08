@@ -56,6 +56,24 @@ func TestBeginAndFinishRun(t *testing.T) {
 	wantRuleChanges(t, r.ruleChanges(t, tail))
 }
 
+// TestBeginRunAtZeroMeansNow checks that a zero start time is stored as
+// the clock's now, as FinishRun does with a zero finish time.
+func TestBeginRunAtZeroMeansNow(t *testing.T) {
+	t.Parallel()
+	r := newStoreRig(t)
+	rule := r.create(t, storeDef("receipts"))
+	id := r.begin(t, rule.ID, "work", TriggerManual, time.Time{})
+	now := r.clock.Last()
+	runs, _, err := r.store.ListRuns(t.Context(), RunQuery{RuleID: rule.ID})
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	sameRuns(t, runs, Run{
+		ID: id, RuleID: rule.ID, Account: "work", Trigger: TriggerManual,
+		StartedAt: now, FinishedAt: now, Outcome: OutcomeInterrupted,
+	})
+}
+
 // TestRunRefusals checks an unknown trigger, outcome and run.
 func TestRunRefusals(t *testing.T) {
 	t.Parallel()
