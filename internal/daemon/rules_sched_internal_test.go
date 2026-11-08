@@ -394,8 +394,13 @@ func TestRuleSchedulerKeepsARoundsRetry(t *testing.T) {
 			})
 
 			held.turn <- struct{}{}
+			// The round runs on its own context, cancelled and joined at
+			// cleanup, so a failing wait below never leaves it running
+			// while the fixture closes.
+			ctx, cancel := context.WithCancel(t.Context())
 			var wg sync.WaitGroup
-			wg.Go(func() { g.f.s.runScheduled(t.Context(), rule, schedWarned{}) })
+			t.Cleanup(func() { cancel(); wg.Wait() })
+			wg.Go(func() { g.f.s.runScheduled(ctx, rule, schedWarned{}) })
 			waitFinishedRuns(t, g.f.s, rule.ID, 1)
 			<-held.turn
 			wg.Wait()
