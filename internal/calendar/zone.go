@@ -199,7 +199,9 @@ const (
 // parseTime reads one DATE or DATE-TIME value with its TZID and VALUE
 // parameters. It returns the instant in UTC, the IANA zone name for a
 // TZID-qualified time ("" otherwise) and whether the value is a DATE.
-// Floating times and unknown zones read as UTC.
+// Floating times and unknown zones read as UTC. A local time a DST change
+// repeats is its first occurrence, and one a change skips is read with the
+// offset before the gap (RFC 5545 3.3.5).
 func (z *zones) parseTime(value string, params ical.Params) (t time.Time, tzid string, date bool, ok bool) {
 	value = strings.TrimSpace(value)
 	vt := strings.ToUpper(params.Get(ical.ParamValue))
@@ -225,10 +227,11 @@ func (z *zones) parseTime(value string, params ical.Params) (t time.Time, tzid s
 	r := z.resolve(id)
 	switch {
 	case r.vtz != nil:
-		return naive.Add(-r.vtz.offset(naive)), r.name, false, true
+		u, _ := r.vtz.instant(naive)
+		return u, r.name, false, true
 	case r.loc != nil:
-		local := time.Date(naive.Year(), naive.Month(), naive.Day(), naive.Hour(), naive.Minute(), naive.Second(), 0, r.loc)
-		return local.UTC(), r.name, false, true
+		u, _ := localInstant(naive, r.loc)
+		return u, r.name, false, true
 	default:
 		return naive, "", false, true
 	}
@@ -475,6 +478,55 @@ func (v *vtimezone) wallOf(u time.Time) time.Time {
 		}
 	}
 	return u.Add(v.offset(u))
+}
+
+// instant returns the UTC instant of a local wall time, and whether the
+// wall time exists. As RFC 5545 3.3.5 reads a DATE-TIME, a wall time a DST
+// change repeats is its first occurrence (offset reads it with the earlier
+// offset), and one a change skips is read with the offset before the gap,
+// which puts it as much past the gap as it was into it.
+func (v *vtimezone) instant(w time.Time) (time.Time, bool) {
+	u := w.Add(-v.offset(w))
+	// In a gap, offset gives the offset after it, so u is before the
+	// change, and an earlier wall time holds it.
+	if prev := v.wallOf(u); !prev.Equal(w) {
+		return w.Add(-v.offset(prev)), false
+	}
+	return u, true
+}
+
+// localInstant returns the UTC instant of a wall time w, held as a UTC
+// value, in the IANA zone loc, and whether the wall time exists. It reads
+// w as vtimezone.instant does, after RFC 5545 3.3.5: the first occurrence
+// of a repeated wall time, and a skipped one with the offset before the
+// gap. time.Date picks either, depending on the zone.
+func localInstant(w time.Time, loc *time.Location) (time.Time, bool) {
+	t := time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), w.Second(), w.Nanosecond(), loc)
+	start, _ := t.ZoneBounds()
+	if got := naiveOf(t.In(loc)); !got.Equal(w) {
+		// t is on one side of the gap. Before it, its own offset is the
+		// one wanted; after it, the offset in force just before its zone
+		// period began.
+		before := t
+		if got.After(w) && !start.IsZero() {
+			before = start.Add(-time.Nanosecond)
+		}
+		_, off := before.In(loc).Zone()
+		return w.Add(-time.Duration(off) * time.Second), false
+	}
+	if !start.IsZero() {
+		// The same wall time in the zone period before t's is earlier.
+		_, off := start.Add(-time.Nanosecond).In(loc).Zone()
+		if e := w.Add(-time.Duration(off) * time.Second); e.Before(start) && naiveOf(e.In(loc)).Equal(w) {
+			return e, true
+		}
+	}
+	return t.UTC(), true
+}
+
+// naiveOf returns the wall time of t as a UTC value.
+func naiveOf(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
 }
 
 // lastOnset returns the observance's last onset at or before local, and
