@@ -255,13 +255,12 @@
   #faq .faq--more { display: flex; flex-direction: column; justify-content: space-between; }
 }
 .footer--statement .btn--primary { --action: var(--p-action); --action-ink: var(--p-action-ink); }
-/* the close: the mascot's one cameo, beside the button; sized to the old badge's height (122px, 78px on a phone) */
+/* the close: the heading, then the button */
 .section-head--split > .close__cta-end { display: flex; align-items: center; gap: var(--s-6); }
 .closing__cta.close--word { min-width: 0; gap: var(--s-5); }
 .close--word h2 { max-width: none; }
 .close--word .close__word { font-size: calc(min(100vw - 2 * var(--gut), 1280px) / 4.3); line-height: .96; overflow: visible; margin-top: auto; }
-.close__mascot { width: 102px; height: auto; flex: none; }
-@media (max-width: 639px) { .close__mascot { width: 65px; } .section-head--split > .close__cta-end { gap: var(--s-4); width: 100%; } .close__cta-end > .btn { flex: 1; } }
+@media (max-width: 639px) { .section-head--split > .close__cta-end { gap: var(--s-4); width: 100%; } .close__cta-end > .btn { flex: 1; } }
 
 /* the wordmark in the nav: rings, the name in DM Mono, a blinking cursor */
 .nav__logo .nav__wordmark { display: block; height: 22px; width: auto; }

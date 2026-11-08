@@ -4,9 +4,6 @@ import { themes as prismThemes } from 'prism-react-renderer';
 import rehypeTables from './plugins/rehype-tables.mjs';
 import { mermaidOptions } from './plugins/mermaid-theme.mjs';
 
-const gopherCredit =
-  'The Go gopher was designed by Renée French and is licensed under CC BY 4.0. The chainmail gopher is a derivative work under the same license.';
-
 const config: Config = {
   title: 'chainmail',
   tagline: 'Email for AI agents, behind a policy daemon',
@@ -111,7 +108,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © 2026 James Ainslie. MIT license. ${gopherCredit}`,
+      copyright: `Copyright © 2026 James Ainslie. MIT license.`,
     },
     prism: {
       theme: prismThemes.github,

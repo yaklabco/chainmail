@@ -5,7 +5,8 @@ import { join } from 'node:path';
 /*
  * The wordmark and the favicon are drawn SVG files. These checks keep them
  * independent of fonts, keep the cursor still for visitors who ask for less
- * motion, and keep the old gopher tile from coming back.
+ * motion, and keep the old gopher tile and the retired mascot from coming
+ * back.
  */
 
 const repo = join(import.meta.dir, '..', '..');
@@ -61,5 +62,13 @@ describe('old logo', () => {
     const sources = [...files('site/src'), ...files('website/src'), 'website/docusaurus.config.ts'];
     const hits = sources.filter((path) => read(path).includes('logo-tile'));
     expect(hits).toEqual([]);
+  });
+
+  test('the gopher mascot is retired from both sites and the README', () => {
+    const sources = [...files('site/src'), ...files('website/src'), 'website/docusaurus.config.ts', 'README.md'];
+    const hits = sources.filter((path) => /mascot|gopher/i.test(read(path)));
+    expect(hits).toEqual([]);
+    const images = [...files('site/public/img'), ...files('website/static/img')];
+    expect(images.filter((path) => /mascot/.test(path))).toEqual([]);
   });
 });

@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="website/static/img/mascot.png" alt="The chainmail gopher: a Go gopher in a chainmail coif and hauberk, holding a shield with a gold envelope" width="400" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="website/static/img/wordmark-dark.svg" />
+    <img src="website/static/img/wordmark-light.svg" alt="chainmail" width="360" />
+  </picture>
 </p>
 
 <p align="center">
@@ -110,5 +113,3 @@ chainmail is in active development. Releases are published on [GitHub](https://g
 ## License
 
 chainmail is released under the MIT license. See [LICENSE](LICENSE).
-
-The Go gopher was designed by Renée French and is licensed under CC BY 4.0. The chainmail gopher is a derivative work under the same license.
