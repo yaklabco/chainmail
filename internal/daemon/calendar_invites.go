@@ -65,6 +65,11 @@ type inviteHook struct {
 	// mu serializes announcing, so the hook calls of several cache workers
 	// and the retry loop never publish one invite twice.
 	mu sync.Mutex
+	// backlogMu guards backlog: deferred parts whose queue write failed,
+	// kept in memory for the retry loop to queue, at most
+	// inviteBacklogCap of them.
+	backlogMu sync.Mutex
+	backlog   []calcache.InviteFetchRow
 }
 
 // newInviteHook returns the invite hook over o, or nil when o has no

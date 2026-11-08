@@ -343,11 +343,10 @@ func TestInviteFetchQueueKeepsWhatMayPass(t *testing.T) {
 	}
 }
 
-// A queue write that fails is returned to the cache builder, which then
-// applies the segment again: the immediate invites a second time (one
-// event, however often) and the deferred part, now queued, which the retry
-// pass stores and announces.
-func TestInviteFetchQueueWriteFailureIsReturned(t *testing.T) {
+// A queue write that fails never fails the cache builder (a calendar.db
+// fault must not stall mail): the deferred part is kept in memory, and
+// the next retry pass queues it, then stores and announces it.
+func TestInviteFetchQueueWriteFailureKeepsThePartInMemory(t *testing.T) {
 	t.Parallel()
 	r := newInviteRig(t)
 	ctx := t.Context()
@@ -363,23 +362,22 @@ func TestInviteFetchQueueWriteFailureIsReturned(t *testing.T) {
 		r.hook(ctx, []cache.FoundInvite{found("none", "msg-1", "REQUEST", request("u1"))})
 		return r.h.onDeferred(ctx, []cache.InviteCandidate{candidate("none", "msg-2")})
 	}
-	if err := segment(); err == nil {
-		t.Fatal("onDeferred = nil with calendar.db refusing the queue write, want the error")
+	if err := segment(); err != nil {
+		t.Fatalf("onDeferred = %v with calendar.db refusing the queue write, want nil", err)
 	}
 	if rows := r.fetches(); len(rows) != 0 {
 		t.Fatalf("queued = %+v after a failed write, want none", rows)
 	}
+	// A pass while calendar.db still refuses keeps the part.
+	r.h.pass(ctx, []string{"none"})
+	if rows := r.fetches(); len(rows) != 0 {
+		t.Fatalf("queued = %+v while the queue still refuses, want none", rows)
+	}
 	if _, err := conn.ExecContext(ctx, "DROP TRIGGER queue_down"); err != nil {
 		t.Fatal(err)
 	}
-	if err := segment(); err != nil {
-		t.Fatalf("onDeferred on the replay = %v, want nil", err)
-	}
-	if rows := r.fetches(); len(rows) != 1 || rows[0].MessageRef != "msg-2" {
-		t.Fatalf("queued = %+v after the replay, want msg-2", rows)
-	}
 	if n := len(r.events()); n != 1 {
-		t.Fatalf("published %d invite events after the replay, want u1's once", n)
+		t.Fatalf("published %d invite events, want u1's once", n)
 	}
 
 	r.readFn = readsRequest("u2")

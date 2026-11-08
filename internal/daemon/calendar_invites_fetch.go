@@ -77,9 +77,9 @@ func (h *inviteHook) deferredFunc() func(context.Context, []cache.InviteCandidat
 // keeps the time the candidate's message was found (now when it has
 // none), which the stored invite takes once the part is read. A part
 // queued already keeps its attempts, backoff and found time. A failed
-// write is returned: the builder then does not acknowledge the segment,
-// and applies it again after its backoff, so no deferred part is lost to
-// a calendar.db failure that passes.
+// write keeps the rows in memory for the retry loop to queue (lost only
+// if the daemon stops first) and returns nil: a calendar.db fault must
+// never stall the mail cache.
 func (h *inviteHook) onDeferred(ctx context.Context, cands []cache.InviteCandidate) error {
 	now := h.o.Now()
 	rows := make([]calcache.InviteFetchRow, 0, len(cands))
@@ -94,16 +94,47 @@ func (h *inviteHook) onDeferred(ctx context.Context, cands []cache.InviteCandida
 		})
 	}
 	if err := h.o.Cache.PutInviteFetches(ctx, rows); err != nil {
-		h.o.Logger.WarnContext(ctx, "could not queue invite parts to read later; the cache applies their mail again", "count", len(rows))
-		return err
+		h.o.Logger.WarnContext(ctx, "could not queue invite parts to read later; keeping them in memory for the retry loop", "count", len(rows))
+		h.keepBacklog(ctx, rows)
 	}
 	return nil
+}
+
+// inviteBacklogCap bounds the deferred parts kept in memory while
+// calendar.db refuses the queue.
+const inviteBacklogCap = 2000
+
+// keepBacklog adds rows to the in-memory backlog, dropping the oldest
+// beyond inviteBacklogCap with a counted log line.
+func (h *inviteHook) keepBacklog(ctx context.Context, rows []calcache.InviteFetchRow) {
+	h.backlogMu.Lock()
+	defer h.backlogMu.Unlock()
+	h.backlog = append(h.backlog, rows...)
+	if over := len(h.backlog) - inviteBacklogCap; over > 0 {
+		h.backlog = append([]calcache.InviteFetchRow(nil), h.backlog[over:]...)
+		h.o.Logger.WarnContext(ctx, "dropped deferred invite parts: the in-memory backlog is full", "count", over)
+	}
+}
+
+// flushBacklog queues the in-memory backlog, keeping it when calendar.db
+// still refuses.
+func (h *inviteHook) flushBacklog(ctx context.Context) {
+	h.backlogMu.Lock()
+	defer h.backlogMu.Unlock()
+	if len(h.backlog) == 0 {
+		return
+	}
+	if err := h.o.Cache.PutInviteFetches(ctx, h.backlog); err != nil {
+		return // kept for the next pass
+	}
+	h.backlog = nil
 }
 
 // pass is one run of the retry loop: it reads the queued invite parts that
 // are due, then announces the pending invites of accounts. It stops once
 // ctx ends.
 func (h *inviteHook) pass(ctx context.Context, accounts []string) {
+	h.flushBacklog(ctx)
 	h.drainFetches(ctx)
 	for _, account := range accounts {
 		if ctx.Err() != nil {
