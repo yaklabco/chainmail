@@ -519,7 +519,7 @@ func (h *calendarService) UpdateEvent(ctx context.Context, req *connect.Request[
 		if err != nil {
 			return nil, err
 		}
-		audience, err := s.audience(ctx, res)
+		audience, err := s.audience(ctx, ca, res)
 		if err != nil {
 			return nil, err
 		}
@@ -566,7 +566,7 @@ func (h *calendarService) CancelEvent(ctx context.Context, req *connect.Request[
 		if err != nil {
 			return nil, err
 		}
-		audience, err := s.audience(ctx, res)
+		audience, err := s.audience(ctx, ca, res)
 		if err != nil {
 			return nil, err
 		}
@@ -645,15 +645,27 @@ func (s *Server) editable(ctx context.Context, res resolvedEvent) (*calAccount, 
 	return ca, nil
 }
 
+// errSeriesUnread refuses a change of a whole series that could not be
+// read from the store: calendar.db prunes old overrides, so it alone
+// cannot say whom the change notifies.
+var errSeriesUnread = fmt.Errorf("%w: the series could not be read to check whom the change notifies", calstore.ErrUnavailable)
+
 // audience is every attendee a change of res notifies: the event's
 // effective attendees, or for a whole series those of its master and of
-// every override, as each instance's attendees hear of the change. A list
+// every override, as each instance's attendees hear of the change. The
+// overrides of a series come from calendar.db and from the store, read
+// now, since calendar.db prunes old overrides the store still notifies
+// (Amendment 18); a store read that fails refuses the change. A list
 // that is incomplete (cut at calendar.MaxAttendees) has attendees nobody
 // can check, so the change is refused.
-func (s *Server) audience(ctx context.Context, res resolvedEvent) ([]calendar.Attendee, error) {
+func (s *Server) audience(ctx context.Context, ca *calAccount, res resolvedEvent) ([]calendar.Attendee, error) {
 	atts, truncated := res.attendees()
 	if res.rid.IsZero() && isSeries(res.row.Event) {
 		rows, err := s.calcache.Series(ctx, res.row.Account, res.row.CalendarID, res.row.Event.ProviderID)
+		if err != nil {
+			return nil, err
+		}
+		fresh, err := s.freshSeries(ctx, ca, res)
 		if err != nil {
 			return nil, err
 		}
@@ -662,11 +674,32 @@ func (s *Server) audience(ctx context.Context, res resolvedEvent) ([]calendar.At
 			atts = append(atts, r.Event.Attendees...)
 			truncated = truncated || r.Event.AttendeesTruncated
 		}
+		for _, ev := range fresh {
+			atts = append(atts, ev.Attendees...)
+			truncated = truncated || ev.AttendeesTruncated
+		}
 	}
 	if truncated {
 		return nil, errIncompleteAudience
 	}
 	return atts, nil
+}
+
+// freshSeries reads res's series, its master and every override, from
+// the store. A refused login stays AUTH_REQUIRED and a series that is
+// gone NOT_FOUND; any other failure is errSeriesUnread, and the store's
+// error never reaches the client.
+func (s *Server) freshSeries(ctx context.Context, ca *calAccount, res resolvedEvent) ([]calendar.Event, error) {
+	evs, err := ca.store.GetEvent(ctx, res.row.CalendarID, res.row.Event.ProviderID)
+	switch {
+	case err == nil:
+		return evs, nil
+	case ctx.Err() != nil:
+		return nil, ctx.Err()
+	case errors.Is(err, calstore.ErrAuth), errors.Is(err, calstore.ErrNotFound):
+		return nil, calendarError(ca.name, err)
+	}
+	return nil, errSeriesUnread
 }
 
 // removalNotice is who a cancel of res tells besides its attendees: the

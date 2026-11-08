@@ -1,11 +1,17 @@
 package daemon_test
 
 import (
+	"errors"
+	"slices"
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
+
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 	"github.com/yaklabco/chainmail/internal/api"
 	"github.com/yaklabco/chainmail/internal/calendar"
+	"github.com/yaklabco/chainmail/internal/calstore"
 	calfake "github.com/yaklabco/chainmail/internal/calstore/fake"
 )
 
@@ -72,4 +78,87 @@ func TestAttendeeSideCancelChecksTheOrganizer(t *testing.T) {
 		t.Errorf("Delete calls = %+v, want one delete of the allowed organizer's event", calls)
 	}
 	noSecretInAudit(t, e.Harness)
+}
+
+// oldSeries adds a weekly series James organizes that started ten weeks
+// ago, with boss invited, and an override of its second occurrence (nine
+// weeks ago, so calendar.db prunes it) that mod changes.
+func oldSeries(e *calEnv, uid string, mod func(ov *calendar.Event)) string {
+	first := e.start.Add(-70 * 24 * time.Hour)
+	master := own(uid, "james@mw.example", first, allowedAddr)
+	master.RRule = "FREQ=WEEKLY;COUNT=20"
+	p := e.mw.Add(mwCal, master)
+	e.mw.Change(mwCal, p, func(evs []calendar.Event) []calendar.Event {
+		rid := first.Add(7 * 24 * time.Hour)
+		ov := evs[0]
+		ov.RRule, ov.RecurrenceID = "", rid
+		ov.Start, ov.End = rid, rid.Add(time.Hour)
+		ov.Attendees = slices.Clone(ov.Attendees)
+		mod(&ov)
+		return append(evs, ov)
+	})
+	return p
+}
+
+// The CalDAV object and Google notify every override's attendees of a
+// series change, old overrides calendar.db pruned included: the series is
+// read from the store, and the change is checked against what it holds.
+func TestSeriesChangeChecksPrunedOverrides(t *testing.T) {
+	t.Parallel()
+	var withBlocked, withCut, plainSeries string
+	e := startCal(t, func(e *calEnv) {
+		withBlocked = oldSeries(e, "old-blocked@x", func(ov *calendar.Event) {
+			ov.Attendees = append(ov.Attendees, person(blockedAddr, calendar.PartStatNeedsAction))
+		})
+		withCut = oldSeries(e, "old-cut@x", func(ov *calendar.Event) { ov.AttendeesTruncated = true })
+		plainSeries = oldSeries(e, "old-plain@x", func(*calendar.Event) {})
+	})
+	for _, p := range []string{withBlocked, withCut} {
+		rows, err := e.cache.Series(t.Context(), "mw", mwCal, p)
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("cached series %s = %d rows (%v), want only the master: the old override is pruned", p, len(rows), err)
+		}
+	}
+
+	ref := calendar.EventRef("mw", mwCal, withBlocked)
+	etag := e.etagOf(t, ref)
+	got, err := e.cancel(t, ref, etag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GetCancelled() || got.GetHeld() == nil || len(got.GetHeld().GetBlocked()) != 1 || got.GetHeld().GetBlocked()[0].GetUntrusted() != blockedAddr {
+		t.Errorf("series cancel = %v, want held for the pruned override's attendee", got)
+	}
+	up, err := e.update(t, &chainmailv1.UpdateEventRequest{Ref: ref, Etag: etag, UpdateMask: mask("title"), Title: "Renamed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.GetHeld() == nil || len(up.GetHeld().GetBlocked()) != 1 {
+		t.Errorf("series update = %v, want held for the pruned override's attendee", up)
+	}
+
+	cref := calendar.EventRef("mw", mwCal, withCut)
+	_, err = e.cancel(t, cref, e.etagOf(t, cref))
+	wantCode(t, "cancel of a series with a truncated old override", err, connect.CodeFailedPrecondition)
+
+	// A series that cannot be read fresh is refused, never checked
+	// against calendar.db alone.
+	pref := calendar.EventRef("mw", mwCal, plainSeries)
+	petag := e.etagOf(t, pref)
+	e.mw.FailNext(calfake.MethodGetEvent, errors.New("read failed "+secretText))
+	_, err = e.cancel(t, pref, petag)
+	wantReason(t, "cancel when the series read fails", err, api.ReasonServerUnavailable)
+	e.mw.FailNext(calfake.MethodGetEvent, calstore.ErrUnavailable)
+	_, err = e.update(t, &chainmailv1.UpdateEventRequest{Ref: pref, Etag: petag, UpdateMask: mask("title"), Title: "Renamed"})
+	wantReason(t, "update when the series read fails", err, api.ReasonServerUnavailable)
+
+	if n := e.mw.Count(calfake.MethodPut) + e.mw.Count(calfake.MethodDelete); n != 0 {
+		t.Errorf("store writes = %d, want none", n)
+	}
+	noSecretInAudit(t, e.Harness)
+
+	// With the read working, the plain series is cancelled.
+	if got, err := e.cancel(t, pref, petag); err != nil || !got.GetCancelled() {
+		t.Errorf("cancel of the plain series = %v, %v", got, err)
+	}
 }
