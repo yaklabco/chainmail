@@ -95,6 +95,47 @@ func TestEncodePayload(t *testing.T) {
 			e:    Event{Kind: KindItemOverdue, Due: &ItemDue{ItemID: "it_03", Type: "bug", DueDate: "2026-11-01", State: "in-review"}},
 			want: `{"due":{"item_id":"it_03","type":"bug","due_date":"2026-11-01","state":"in-review"}}`,
 		},
+		{
+			name: "invite from a calendar",
+			e: Event{Kind: KindInvite, Account: "work", Ref: testCalRef, Calendar: &CalendarChange{
+				Ref: testCalRef, CalendarID: "primary", Start: "2026-11-10T17:00:00Z", End: "2026-11-10T17:30:00Z", Organizer: "ann@example.com",
+			}},
+			want: `{"calendar":{"ref":"` + testCalRef + `","calendar_id":"primary","start":"2026-11-10T17:00:00Z",` +
+				`"end":"2026-11-10T17:30:00Z","organizer":"ann@example.com"}}`,
+		},
+		{
+			name: "invite from mail",
+			e: Event{Kind: KindInvite, Account: "work", Ref: testCalRef, Calendar: &CalendarChange{
+				Ref: testCalRef, MessageRef: "cm:work:INBOX:7:12", Start: "2026-11-10T17:00:00Z", End: "2026-11-10T17:30:00Z", Organizer: "ann@example.com",
+			}},
+			want: `{"calendar":{"ref":"` + testCalRef + `","message_ref":"cm:work:INBOX:7:12","start":"2026-11-10T17:00:00Z",` +
+				`"end":"2026-11-10T17:30:00Z","organizer":"ann@example.com"}}`,
+		},
+		{
+			name: "event_changed",
+			e: Event{Kind: KindEventChanged, Account: "work", Ref: testCalRef, Calendar: &CalendarChange{
+				Ref: testCalRef, CalendarID: "primary", Start: "2026-11-10T18:00:00Z", End: "2026-11-10T18:30:00Z", Fields: []string{"start", "end"},
+			}},
+			want: `{"calendar":{"ref":"` + testCalRef + `","calendar_id":"primary","start":"2026-11-10T18:00:00Z",` +
+				`"end":"2026-11-10T18:30:00Z","fields":["start","end"]}}`,
+		},
+		{
+			name: "event_cancelled",
+			e:    Event{Kind: KindEventCancelled, Account: "work", Ref: testCalRef, Calendar: &CalendarChange{Ref: testCalRef, CalendarID: "primary"}},
+			want: `{"calendar":{"ref":"` + testCalRef + `","calendar_id":"primary"}}`,
+		},
+		{
+			name: "invite_reply",
+			e: Event{Kind: KindInviteReply, Account: "work", Ref: testCalRef, Calendar: &CalendarChange{
+				Ref: testCalRef, CalendarID: "primary", Attendee: "bob@example.com", PartStat: "ACCEPTED",
+			}},
+			want: `{"calendar":{"ref":"` + testCalRef + `","calendar_id":"primary","attendee":"bob@example.com","partstat":"ACCEPTED"}}`,
+		},
+		{
+			name: "calendar change with nothing but a ref",
+			e:    Event{Kind: KindEventChanged, Account: "work", Ref: testCalRef, Calendar: &CalendarChange{Ref: testCalRef}},
+			want: `{"calendar":{"ref":"` + testCalRef + `"}}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -125,6 +166,10 @@ func TestEncodePayloadRejects(t *testing.T) {
 		{name: "item_due_soon without due", e: Event{Kind: KindItemDueSoon}, want: "item_due_soon event has no due item"},
 		{name: "item_due without due", e: Event{Kind: KindItemDue}, want: "item_due event has no due item"},
 		{name: "item_overdue without due", e: Event{Kind: KindItemOverdue}, want: "item_overdue event has no due item"},
+		{name: "invite without change", e: Event{Kind: KindInvite, Ref: testCalRef}, want: "invite event for " + testCalRef + " has no calendar change"},
+		{name: "event_changed without change", e: Event{Kind: KindEventChanged, Ref: testCalRef}, want: "event_changed event for " + testCalRef + " has no calendar change"},
+		{name: "event_cancelled without change", e: Event{Kind: KindEventCancelled, Ref: testCalRef}, want: "event_cancelled event for " + testCalRef + " has no calendar change"},
+		{name: "invite_reply without change", e: Event{Kind: KindInviteReply, Ref: testCalRef}, want: "invite_reply event for " + testCalRef + " has no calendar change"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -180,6 +225,18 @@ func TestDecodePayloadRoundTrip(t *testing.T) {
 		{"item_due_soon with a parent", Event{Kind: KindItemDueSoon, Due: &ItemDue{ItemID: "it_01", Type: "task", DueDate: "2026-11-09", State: "backlog", ParentID: "it_00"}}},
 		{"item_due", Event{Kind: KindItemDue, Due: &ItemDue{ItemID: "it_02", Type: "feature", DueDate: "2026-11-07", State: "in-progress"}}},
 		{"item_overdue", Event{Kind: KindItemOverdue, Due: &ItemDue{ItemID: "it_03", Type: "support-ticket", DueDate: "2026-10-30", State: "in-review"}}},
+		{"invite with every field", Event{Kind: KindInvite, Calendar: &CalendarChange{
+			Ref: testCalRef, MessageRef: "cm:work:INBOX:7:12", CalendarID: "primary",
+			Start: "2026-11-10T17:00:00Z", End: "2026-11-10T17:30:00Z", Organizer: "ann@example.com",
+			Fields: []string{"start"}, Attendee: "me@example.com", PartStat: "NEEDS-ACTION",
+		}}},
+		{"event_changed with fields", Event{Kind: KindEventChanged, Calendar: &CalendarChange{
+			Ref: testCalRef + "@20261110T170000Z", CalendarID: "primary", Start: "2026-11-10T18:00:00Z", Fields: []string{"start", "location"},
+		}}},
+		{"event_cancelled with only a ref", Event{Kind: KindEventCancelled, Calendar: &CalendarChange{Ref: testCalRef}}},
+		{"invite_reply", Event{Kind: KindInviteReply, Calendar: &CalendarChange{
+			Ref: testCalRef, CalendarID: "primary", Attendee: "bob@example.com", PartStat: "DECLINED",
+		}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -210,7 +267,10 @@ func TestDecodePayloadRejects(t *testing.T) {
 	if err := decodePayload(&e, "{}"); err == nil || !strings.Contains(err.Error(), `unknown kind "moved"`) {
 		t.Errorf("unknown kind: err = %v, want a kind error", err)
 	}
-	for _, kind := range []Kind{KindItem, KindItemMail, KindRule, KindItemDueSoon, KindItemDue, KindItemOverdue} {
+	for _, kind := range []Kind{
+		KindItem, KindItemMail, KindRule, KindItemDueSoon, KindItemDue, KindItemOverdue,
+		KindInvite, KindEventChanged, KindEventCancelled, KindInviteReply,
+	} {
 		e = Event{ID: 9, Kind: kind}
 		if err := decodePayload(&e, "["); err == nil || !strings.Contains(err.Error(), "decoding event 9 payload") {
 			t.Errorf("bad %s JSON: err = %v, want a decoding error", kind, err)
@@ -254,5 +314,37 @@ func TestRuleAndDuePayloadsHoldNoText(t *testing.T) {
 		if !slices.Equal(got, tt.want) {
 			t.Errorf("%s fields = %v, want %v", tt.typ.Name(), got, tt.want)
 		}
+	}
+}
+
+// testCalRef is a calendar event ref of the ce_ form.
+const testCalRef = "ce_0123456789abcdefghjkmnpqrs"
+
+// The calendar kinds are stored under the spec's names, which the
+// migration's kind check and every client name.
+func TestCalendarKindNames(t *testing.T) {
+	t.Parallel()
+	got := []Kind{KindInvite, KindEventChanged, KindEventCancelled, KindInviteReply}
+	want := []Kind{"invite", "event_changed", "event_cancelled", "invite_reply"}
+	if !slices.Equal(got, want) {
+		t.Errorf("calendar kinds = %q, want %q", got, want)
+	}
+}
+
+// Calendar events reach every reader that opts in, outside any untrusted
+// wrapping, so CalendarChange holds refs, IDs, times, addresses, field names
+// and a PARTSTAT, never event text (summary, description, location,
+// organizer or attendee names, comments, calendar names). A new field here
+// is a deliberate decision that updates this list.
+func TestCalendarChangeHoldsNoText(t *testing.T) {
+	t.Parallel()
+	typ := reflect.TypeFor[CalendarChange]()
+	var got []string
+	for i := range typ.NumField() {
+		got = append(got, typ.Field(i).Name)
+	}
+	want := []string{"Ref", "MessageRef", "CalendarID", "Start", "End", "Organizer", "Fields", "Attendee", "PartStat"}
+	if !slices.Equal(got, want) {
+		t.Errorf("CalendarChange fields = %v, want %v", got, want)
 	}
 }
