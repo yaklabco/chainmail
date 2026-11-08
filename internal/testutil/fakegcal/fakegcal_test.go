@@ -525,3 +525,43 @@ func TestEventsTokensAreBound(t *testing.T) {
 		t.Errorf("sync token on its own calendar: %d, want 200", code)
 	}
 }
+
+// ChangeInstance turns one occurrence into an exception, as another
+// client's edit of that occurrence alone does: the series keeps its etag,
+// the instance gets one of its own and the exception is listed.
+func TestChangeInstance(t *testing.T) {
+	srv, c := setup(t)
+	master := single("series1")
+	master["recurrence"] = []any{"RRULE:FREQ=WEEKLY"}
+	master["attendees"] = []any{map[string]any{"email": "me@example.com", "self": true, "responseStatus": "needsAction"}}
+	masterTag := srv.AddEvent("me@example.com", master)
+	path := "/calendars/" + url.PathEscape("me@example.com") + "/events/"
+	_, before := c.do("GET", path+"series1_20261117T170000Z", nil, nil, nil)
+
+	tag := srv.ChangeInstance("me@example.com", "series1_20261117T170000Z", map[string]any{
+		"attendees": []any{
+			map[string]any{"email": "me@example.com", "self": true, "responseStatus": "needsAction"},
+			map[string]any{"email": "new@example.org", "responseStatus": "needsAction"},
+		},
+	})
+	if tag == "" || tag == before["etag"] || tag == masterTag {
+		t.Errorf("exception etag = %q, want a new one (instance had %v, series %q)", tag, before["etag"], masterTag)
+	}
+	if code, m := c.do("GET", path+"series1", nil, nil, nil); code != 200 || m["etag"] != masterTag {
+		t.Errorf("series after an instance change: %d etag %v, want %q", code, m["etag"], masterTag)
+	}
+	code, inst := c.do("GET", path+"series1_20261117T170000Z", nil, nil, nil)
+	if code != 200 || inst["etag"] != tag || inst["recurringEventId"] != "series1" || len(inst["attendees"].([]any)) != 2 {
+		t.Fatalf("changed instance: %d %v", code, inst)
+	}
+	if start := inst["originalStartTime"].(map[string]any); start["dateTime"] != "2026-11-17T09:00:00-08:00" {
+		t.Errorf("changed instance originalStartTime = %v", start)
+	}
+	if _, ok := srv.Event("me@example.com", "series1_20261117T170000Z"); !ok {
+		t.Error("changed instance not stored as an exception")
+	}
+	_, page := c.do("GET", "/calendars/"+url.PathEscape("me@example.com")+"/events", url.Values{"iCalUID": {"series1@google.com"}}, nil, nil)
+	if ids := items(t, page); len(ids) != 2 || ids[1] != "series1_20261117T170000Z" {
+		t.Errorf("listing after an instance change = %v, want the series and its exception", ids)
+	}
+}
