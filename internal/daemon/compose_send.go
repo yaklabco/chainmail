@@ -89,16 +89,17 @@ func (s *Server) openSendState() error {
 
 // startBackground runs the idempotency pruner, the upload sweeper, the
 // event log trimmer, the item tables' trimmer, the due checker, the rule
-// scheduler and, with a cache, the evictor and the cache housekeeping
-// until ctx ends or the returned stop is called. stop waits for all of
-// them to return. The trimmers, the due checker and the rule scheduler
-// run with DisableWatch too, since the log and its handlers still work
-// then: a scheduled run on an account with no rule runner is recorded as
-// cache_not_ready with the reason cache_disabled. The scheduler reads
-// ruleRunners, so Serve calls startWatch first. The scheduler can also
-// be stopped and joined alone, through s.ruleScheduler, which drain does
-// before it closes the mail stores: a scheduled forward can still be
-// using them after its context ends.
+// scheduler, the calendar syncers and, with a cache, the evictor and the
+// cache housekeeping until ctx ends or the returned stop is called. stop
+// waits for all of them to return. The trimmers, the due checker, the
+// rule scheduler and the syncers run with DisableWatch too, since the log
+// and its handlers still work then: a scheduled run on an account with
+// no rule runner is recorded as cache_not_ready with the reason
+// cache_disabled. The scheduler reads ruleRunners, so Serve calls
+// startWatch first. The scheduler can also be stopped and joined alone,
+// through s.ruleScheduler, which drain does before it closes the mail
+// stores: a scheduled forward can still be using them after its context
+// ends.
 func (s *Server) startBackground(ctx context.Context) (stop func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
@@ -115,6 +116,7 @@ func (s *Server) startBackground(ctx context.Context) (stop func()) {
 		wg.Go(func() { s.cacheEvictor.Run(ctx) })
 		wg.Go(func() { s.runCacheHousekeeping(ctx) })
 	}
+	s.startCalendarSyncers(ctx, &wg)
 	return func() {
 		s.ruleScheduler.stop()
 		cancel()

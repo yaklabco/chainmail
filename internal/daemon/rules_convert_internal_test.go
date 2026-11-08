@@ -67,6 +67,7 @@ func TestKindNamesCoverEveryKind(t *testing.T) {
 	kinds := []watch.Kind{
 		watch.KindNew, watch.KindFlags, watch.KindExpunged, watch.KindStatus, watch.KindGap,
 		watch.KindItem, watch.KindItemMail, watch.KindRule, watch.KindItemDueSoon, watch.KindItemDue, watch.KindItemOverdue,
+		watch.KindInvite, watch.KindEventChanged, watch.KindEventCancelled, watch.KindInviteReply,
 	}
 	for _, k := range kinds {
 		if got, ok := kindNames[string(k)]; !ok || got != k {
