@@ -1,7 +1,7 @@
 ---
 title: CLI settings and completion
 description: Point the CLI at a daemon socket, choose JSON or table output, and install shell completion.
-sidebar_position: 7
+sidebar_position: 8
 ---
 
 # CLI settings and completion

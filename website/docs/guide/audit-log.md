@@ -1,7 +1,7 @@
 ---
 title: The audit log
 description: Read the daemon's record of every call, filter it by account and action, and page through it.
-sidebar_position: 6
+sidebar_position: 7
 ---
 
 # The audit log

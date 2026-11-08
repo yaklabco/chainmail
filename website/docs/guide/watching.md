@@ -1,7 +1,7 @@
 ---
 title: Watching for mail
 description: Stream new mail, flag changes and expunges from the daemon's event log, and resume where you left off.
-sidebar_position: 5
+sidebar_position: 6
 ---
 
 # Watching for mail
