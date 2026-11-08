@@ -32,8 +32,8 @@ address = "me@work.example"
 `
 
 // groupHint is the daemon's hint for an invalid group name (contract C8),
-// which also covers the cache's reserved names (SP7 contract C3).
-const groupHint = "group names are lowercase letters, digits, dot, dash and underscore, and do not start with cache."
+// which also covers the reserved cache. and rules. names.
+const groupHint = "group names are lowercase letters, digits, dot, dash and underscore, and do not start with cache. or rules."
 
 // startWatch runs a daemon with watchConfig and the given heartbeat, where
 // 0 means the 30 second default. Supervisors stay off.

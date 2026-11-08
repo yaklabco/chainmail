@@ -88,10 +88,17 @@ func (s *Server) openSendState() error {
 }
 
 // startBackground runs the idempotency pruner, the upload sweeper, the
-// event log trimmer, the item tables' trimmer and, with a cache, the
-// evictor and the cache housekeeping until ctx ends or the returned stop is
-// called. stop waits for all of them to return. The trimmers run with
-// DisableWatch too, since the log and its handlers still work then.
+// event log trimmer, the item tables' trimmer, the due checker, the rule
+// scheduler and, with a cache, the evictor and the cache housekeeping
+// until ctx ends or the returned stop is called. stop waits for all of
+// them to return. The trimmers, the due checker and the rule scheduler
+// run with DisableWatch too, since the log and its handlers still work
+// then: a scheduled run on an account with no rule runner is recorded as
+// cache_not_ready with the reason cache_disabled. The scheduler reads
+// ruleRunners, so Serve calls startWatch first. The scheduler can also
+// be stopped and joined alone, through s.ruleScheduler, which drain does
+// before it closes the mail stores: a scheduled forward can still be
+// using them after its context ends.
 func (s *Server) startBackground(ctx context.Context) (stop func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
@@ -102,14 +109,47 @@ func (s *Server) startBackground(ctx context.Context) (stop func()) {
 	settings := s.opts.Config.WatchSettings()
 	wg.Go(func() { s.watchLog.Run(ctx, s.trimInterval, settings.Retention, settings.MaxEvents) })
 	wg.Go(func() { s.runItemsTrim(ctx, s.trimInterval, settings.Retention) })
+	wg.Go(func() { s.dueChecker.Run(ctx, s.rulesClock) })
+	s.ruleScheduler.start(ctx, s.runRuleScheduler)
 	if s.cacheEvictor != nil {
 		wg.Go(func() { s.cacheEvictor.Run(ctx) })
 		wg.Go(func() { s.runCacheHousekeeping(ctx) })
 	}
 	return func() {
+		s.ruleScheduler.stop()
 		cancel()
 		wg.Wait()
 	}
+}
+
+// schedulerStop runs the rule scheduler on its own context and
+// WaitGroup, so shutdown can stop and join it apart from the other
+// background loops.
+type schedulerStop struct {
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
+// start runs run on a context of its own, derived from ctx.
+func (st *schedulerStop) start(ctx context.Context, run func(context.Context)) {
+	ctx, cancel := context.WithCancel(ctx)
+	st.mu.Lock()
+	st.cancel = cancel
+	st.mu.Unlock()
+	st.wg.Go(func() { run(ctx) })
+}
+
+// stop cancels what start runs and waits for it to return. It does
+// nothing when nothing was started, and may be called again.
+func (st *schedulerStop) stop() {
+	st.mu.Lock()
+	cancel := st.cancel
+	st.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	st.wg.Wait()
 }
 
 // dialFunc opens an authenticated SMTP connection. Tests replace sender.Dial.

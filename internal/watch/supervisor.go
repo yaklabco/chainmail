@@ -376,7 +376,7 @@ func (s *Supervisor) watchLoop(ctx context.Context, p *parker, folder string) {
 		default:
 			s.logger.Warn("watch connection failed", "folder", w.folder, "reason", failureReason(err))
 			s.note(ctx, w.folder, w.mode, StateReconnecting, "", failureCode(err))
-			wait = backoff(failures, s.jitter())
+			wait = Backoff(failures, s.jitter())
 			failures++
 		}
 		if !s.sleep(ctx, wait) {
@@ -513,7 +513,7 @@ func (s *Supervisor) pollFolder(ctx context.Context, pf *polled) error {
 	}
 	s.logger.Warn("polling a folder failed", "folder", pf.folder, "reason", failureReason(err))
 	s.note(ctx, pf.folder, ModePoll, StateReconnecting, "", failureCode(err))
-	pf.next = s.clock.Now().Add(min(backoff(pf.failures, s.jitter()), s.syncPoll))
+	pf.next = s.clock.Now().Add(min(Backoff(pf.failures, s.jitter()), s.syncPoll))
 	pf.failures++
 	return err
 }

@@ -18,6 +18,9 @@ type Query struct {
 	Account string
 	// Action empty means all actions.
 	Action string
+	// Client is a client kind, such as cli, mcp, daemon or rule. Empty
+	// means every client. The caller validates it.
+	Client string
 	// Limit is 1 to 1000, validated by the caller.
 	Limit int
 	// BeforeID returns only rows with a smaller id. 0 means no bound.
@@ -65,6 +68,10 @@ func (r *Reader) Read(ctx context.Context, q Query) (rows []Row, nextBeforeID in
 	if q.Action != "" {
 		b.WriteString(` AND action = ?`)
 		args = append(args, q.Action)
+	}
+	if q.Client != "" {
+		b.WriteString(` AND client = ?`)
+		args = append(args, q.Client)
 	}
 	if q.BeforeID != 0 {
 		b.WriteString(` AND id < ?`)

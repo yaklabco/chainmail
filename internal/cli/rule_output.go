@@ -1,0 +1,303 @@
+package cli
+
+import (
+	"cmp"
+	"fmt"
+	"io"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+)
+
+// ruleState is a rule's state for a table: enabled, disabled with the
+// reason an automatic disable gave, or deleted.
+func ruleState(r *chainmailv1.Rule) string {
+	switch {
+	case r.GetDeletedAt() != nil:
+		return "deleted"
+	case r.GetEnabled():
+		return "enabled"
+	case r.GetDisabledReason() != "":
+		return "disabled (" + termText(r.GetDisabledReason()) + ")"
+	default:
+		return "disabled"
+	}
+}
+
+// ruleAccountsText names the accounts a rule covers, or "all" for a rule
+// that names none.
+func ruleAccountsText(r *chainmailv1.Rule) string {
+	if len(r.GetAccounts()) == 0 {
+		return "all"
+	}
+	names := make([]string, len(r.GetAccounts()))
+	for i, a := range r.GetAccounts() {
+		names[i] = termText(a)
+	}
+	return strings.Join(names, ", ")
+}
+
+// ruleTriggersText names what runs a rule: new mail, its schedule, or
+// "manual" when only rule run does.
+func ruleTriggersText(r *chainmailv1.Rule) string {
+	var parts []string
+	if r.GetOnNew() {
+		parts = append(parts, "new")
+	}
+	if s := r.GetSchedule(); s != "" {
+		parts = append(parts, termText(s))
+	}
+	if len(parts) == 0 {
+		return "manual"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// ruleActionText is one action in the --action form that gives it, cleaned
+// for the terminal. A forward's note is left out.
+func ruleActionText(a *chainmailv1.RuleAction) string {
+	kind := termText(a.GetKind())
+	switch a.GetKind() {
+	case "label", "unlabel":
+		return kind + "=" + termText(a.GetLabel())
+	case "copy", "move":
+		return kind + "=" + termText(a.GetFolder())
+	case "link_item":
+		s := kind + "=" + termText(a.GetItemId())
+		if a.GetAnchor() {
+			s += ",anchor"
+		}
+		return s
+	case "forward":
+		to := make([]string, len(a.GetTo()))
+		for i, addr := range a.GetTo() {
+			to[i] = termText(addr)
+		}
+		return kind + "=" + strings.Join(to, ",")
+	default:
+		return kind
+	}
+}
+
+// ruleFieldsTable prints a rule's fields, one name and value per line.
+// Every value is cleaned for the terminal, the query included.
+func ruleFieldsTable(w io.Writer, loc *time.Location, r *chainmailv1.Rule) error {
+	tw := newTable(w)
+	for _, f := range [][2]string{
+		{"id", termText(r.GetId())},
+		{"name", termText(r.GetName())},
+		{"state", ruleState(r)},
+		{"accounts", ruleAccountsText(r)},
+		{"query", orDash(termText(r.GetQuery().GetUntrusted()))},
+		{"triggers", ruleTriggersText(r)},
+		{"priority", strconv.Itoa(int(r.GetPriority()))},
+		{"stop", strconv.FormatBool(r.GetStop())},
+		{"max per run", strconv.Itoa(int(r.GetMaxPerRun()))},
+		{"revision", strconv.FormatInt(r.GetRevision(), 10)},
+		{"failed runs", strconv.Itoa(int(r.GetFailedRuns()))},
+		{"next run", orDash(shortDate(r.GetNextRunAt(), loc))},
+		{"last run", orDash(shortDate(r.GetLastRunAt(), loc))},
+		{"created", byText(r.GetCreatedAt(), loc, r.GetCreatedBy())},
+		{"updated", byText(r.GetUpdatedAt(), loc, r.GetUpdatedBy())},
+		{"deleted", orDash(shortDate(r.GetDeletedAt(), loc))},
+	} {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", f[0], f[1])
+	}
+	return tw.Flush()
+}
+
+// ruleViewText prints rule show's view: the fields, the description, the
+// actions one per line with a forward's note below it, the totals over
+// the runs the daemon keeps, the recent runs, and with --history the
+// revisions.
+func ruleViewText(w io.Writer, loc *time.Location, r *chainmailv1.GetRuleResponse) error {
+	rule := r.GetRule()
+	if err := ruleFieldsTable(w, loc, rule); err != nil {
+		return err
+	}
+	var b strings.Builder
+	if d := termBlock(rule.GetDescription().GetUntrusted()); strings.TrimSpace(d) != "" {
+		b.WriteString("\ndescription:\n")
+		b.WriteString(indent(d))
+	}
+	if actions := rule.GetActions(); len(actions) > 0 {
+		b.WriteString("\nactions:\n")
+		for _, a := range actions {
+			fmt.Fprintf(&b, "  %s\n", ruleActionText(a))
+			if note := termText(a.GetNote()); note != "" {
+				fmt.Fprintf(&b, "    note: %s\n", note)
+			}
+		}
+	}
+	c := r.GetCounts()
+	fmt.Fprintf(&b, "\nlast 30 days: %d runs, %d matched, %d applied, %d held, %d failed\n",
+		c.GetRuns(), c.GetMatched(), c.GetApplied(), c.GetHeld(), c.GetFailed())
+	if err := writeString(w, b.String()); err != nil {
+		return err
+	}
+	if runs := r.GetRuns(); len(runs) > 0 {
+		if err := writeString(w, "recent runs:\n"); err != nil {
+			return err
+		}
+		if err := ruleRunsTable(w, loc, runs, false); err != nil {
+			return err
+		}
+	}
+	if revs := r.GetRevisions(); len(revs) > 0 {
+		if err := writeString(w, "\nrevisions:\n"); err != nil {
+			return err
+		}
+		return ruleRevisionsTable(w, loc, revs)
+	}
+	return nil
+}
+
+// ruleRunsTable prints one line per run, with its rule's ID when withRule
+// is set, then the hint of each run that has one.
+func ruleRunsTable(w io.Writer, loc *time.Location, runs []*chainmailv1.RuleRun, withRule bool) error {
+	header := []string{"ID", "ACCOUNT", "TRIGGER", "STARTED", "OUTCOME", "MATCHED", "APPLIED", "HELD", "SKIPPED", "FAILED", "REASON"}
+	if withRule {
+		header = slices.Insert(header, 1, "RULE")
+	}
+	tw := newTable(w)
+	_, _ = fmt.Fprintln(tw, strings.Join(header, "\t"))
+	var hints strings.Builder
+	for _, run := range runs {
+		cells := []string{strconv.FormatInt(run.GetId(), 10)}
+		if withRule {
+			cells = append(cells, orDash(termText(run.GetRuleId())))
+		}
+		cells = append(cells,
+			orDash(termText(run.GetAccount())), orDash(termText(run.GetTrigger())), orDash(shortDate(run.GetStartedAt(), loc)),
+			orDash(termText(run.GetOutcome())), strconv.FormatInt(run.GetMatched(), 10), strconv.FormatInt(run.GetApplied(), 10),
+			strconv.FormatInt(run.GetHeld(), 10), strconv.FormatInt(run.GetSkipped(), 10), strconv.FormatInt(run.GetFailed(), 10),
+			orDash(termText(run.GetReason())))
+		_, _ = fmt.Fprintln(tw, strings.Join(cells, "\t"))
+		if hint := termText(run.GetHint()); hint != "" {
+			fmt.Fprintf(&hints, "run %d hint: %s\n", run.GetId(), hint)
+		}
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	return writeString(w, hints.String())
+}
+
+// ruleRevisionsTable prints one line per revision: its number, the change,
+// when and by whom.
+func ruleRevisionsTable(w io.Writer, loc *time.Location, revs []*chainmailv1.RuleRevision) error {
+	tw := newTable(w)
+	_, _ = fmt.Fprintln(tw, "REVISION\tCHANGE\tAT\tACTOR")
+	for _, rv := range revs {
+		_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n",
+			rv.GetRevision(), orDash(termText(rv.GetChange())), orDash(shortDate(rv.GetAt(), loc)), orDash(termText(rv.GetActor())))
+	}
+	return tw.Flush()
+}
+
+// ruleActionsWidth is the most runes of a rule's actions a list line shows.
+const ruleActionsWidth = 60
+
+// ruleActionsText is a rule's actions in order, each in its --action form,
+// separated by spaces.
+func ruleActionsText(actions []*chainmailv1.RuleAction) string {
+	parts := make([]string, len(actions))
+	for i, a := range actions {
+		parts[i] = ruleActionText(a)
+	}
+	return strings.Join(parts, " ")
+}
+
+// ruleListTable prints rule list's rows in the order the daemon sent them.
+func ruleListTable(w io.Writer, loc *time.Location, r *chainmailv1.ListRulesResponse) error {
+	tw := newTable(w)
+	_, _ = fmt.Fprintln(tw, "ID\tNAME\tSTATE\tPRI\tTRIGGERS\tACCOUNTS\tNEXT RUN\tACTIONS")
+	for _, rule := range r.GetRules() {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+			termText(rule.GetId()), termText(rule.GetName()), ruleState(rule), rule.GetPriority(),
+			ruleTriggersText(rule), ruleAccountsText(rule), orDash(shortDate(rule.GetNextRunAt(), loc)),
+			orDash(clip(ruleActionsText(rule.GetActions()), ruleActionsWidth)))
+	}
+	return tw.Flush()
+}
+
+// ruleChangedText is the line rule create, edit, enable, disable, delete
+// and restore print: what happened, the rule, and its revision now.
+func ruleChangedText(verb string, r *chainmailv1.Rule) string {
+	return fmt.Sprintf("%s rule %s %s, revision %d\n", verb, termText(r.GetName()), termText(r.GetId()), r.GetRevision())
+}
+
+// ruleDryRunText prints each account's dry run: the counts, the actions
+// every match would get, and the matches the daemon listed, or why the
+// cache could not answer for the account. Accounts are separated by blank
+// lines.
+func ruleDryRunText(w io.Writer, loc *time.Location, r *chainmailv1.DryRunRuleResponse) error {
+	for i, a := range r.GetAccounts() {
+		var b strings.Builder
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		account := termText(a.GetAccount())
+		if reason := a.GetReason(); reason != "" {
+			fmt.Fprintf(&b, "%s: the cache cannot answer completely yet: %s\n", account, termText(reason))
+			if err := writeString(w, b.String()); err != nil {
+				return err
+			}
+			continue
+		}
+		fmt.Fprintf(&b, "%s: %d matched, %d already acted on\n", account, a.GetMatched(), a.GetSkipped())
+		if actions := a.GetActions(); len(actions) > 0 {
+			fmt.Fprintf(&b, "actions: %s\n", ruleActionsText(actions))
+		}
+		matches := a.GetMatches()
+		if len(matches) > 0 {
+			heading := fmt.Sprintf("matches: %d\n", len(matches))
+			if int64(len(matches)) < a.GetMatched() {
+				heading = fmt.Sprintf("matches: %d of %d\n", len(matches), a.GetMatched())
+			}
+			b.WriteString(heading)
+		}
+		if err := writeString(w, b.String()); err != nil {
+			return err
+		}
+		if len(matches) > 0 {
+			if err := ruleMatchesTable(w, loc, matches); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ruleMatchesTable prints a dry run's matches, indented: each message's
+// date, sender, subject and ref. Senders and subjects come from mail, so
+// every value is cleaned for the terminal.
+func ruleMatchesTable(w io.Writer, loc *time.Location, rows []*chainmailv1.MessageRow) error {
+	tw := newTable(w)
+	_, _ = fmt.Fprintln(tw, "  DATE\tFROM\tSUBJECT\tREF")
+	for _, row := range rows {
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n",
+			orDash(shortDate(row.GetDate(), loc)), orDash(clip(termText(firstSender(row.GetFrom())), 30)),
+			orDash(clip(termText(row.GetSubject().GetUntrusted()), 60)), orDash(termText(row.GetRef())))
+	}
+	return tw.Flush()
+}
+
+// ruleStatusTable prints one line per account runner, then when the next
+// scheduled run and the next due check are, or none.
+func ruleStatusTable(w io.Writer, loc *time.Location, r *chainmailv1.RulesStatusResponse) error {
+	tw := newTable(w)
+	_, _ = fmt.Fprintln(tw, "ACCOUNT\tSTATE\tACKED\tLAG\tREASON")
+	for _, s := range r.GetRunners() {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\n",
+			orDash(termText(s.GetAccount())), orDash(termText(s.GetState())), s.GetAckedId(), s.GetLag(), orDash(termText(s.GetReason())))
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	return writeString(w, fmt.Sprintf("next scheduled run: %s\nnext due check: %s\n",
+		cmp.Or(shortDate(r.GetNextScheduledAt(), loc), "none"), cmp.Or(shortDate(r.GetNextDueCheckAt(), loc), "none")))
+}

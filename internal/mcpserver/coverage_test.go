@@ -56,6 +56,14 @@ var toolRPC = map[string]string{
 	"set_blocker":         chainmailv1connect.ItemsServiceSetBlockerProcedure,
 	"link_thread":         chainmailv1connect.ItemsServiceLinkThreadProcedure,
 	"unlink_thread":       chainmailv1connect.ItemsServiceUnlinkThreadProcedure,
+	"create_rule":         chainmailv1connect.RulesServiceCreateRuleProcedure,
+	"update_rule":         chainmailv1connect.RulesServiceUpdateRuleProcedure,
+	"get_rule":            chainmailv1connect.RulesServiceGetRuleProcedure,
+	"list_rules":          chainmailv1connect.RulesServiceListRulesProcedure,
+	"delete_rule":         chainmailv1connect.RulesServiceDeleteRuleProcedure,
+	"restore_rule":        chainmailv1connect.RulesServiceRestoreRuleProcedure,
+	"dry_run_rule":        chainmailv1connect.RulesServiceDryRunRuleProcedure,
+	"run_rule":            chainmailv1connect.RulesServiceRunRuleProcedure,
 }
 
 // leftOut lists agent-facing RPCs with no tool, and why (spec section 4).
@@ -70,6 +78,8 @@ var leftOut = map[string]string{
 	chainmailv1connect.WatchServiceDeleteGroupProcedure:        "group administration for operators",
 	chainmailv1connect.CacheServiceRebuildCacheProcedure:       "an operator action that drops cached mail and downloads it again",
 	chainmailv1connect.CacheServiceEvictCacheProcedure:         "an operator action; the daemon evicts bodies on its own",
+	chainmailv1connect.RulesServiceListRuleRunsProcedure:       "run history for operators; get_rule returns a rule's last 10 runs and its counts",
+	chainmailv1connect.RulesServiceRulesStatusProcedure:        "an operator diagnostic of the rule runners and the scheduler",
 }
 
 // ignored lists request fields no tool sets, keyed "<procedure> <field path>", and why.
@@ -90,6 +100,7 @@ var agentServices = []protoreflect.ServiceDescriptor{
 	chainmailv1.File_chainmail_v1_watch_proto.Services().ByName("WatchService"),
 	chainmailv1.File_chainmail_v1_cache_proto.Services().ByName("CacheService"),
 	chainmailv1.File_chainmail_v1_items_proto.Services().ByName("ItemsService"),
+	chainmailv1.File_chainmail_v1_rules_proto.Services().ByName("RulesService"),
 }
 
 func procedure(sd protoreflect.ServiceDescriptor, md protoreflect.MethodDescriptor) string {
@@ -183,6 +194,16 @@ func coverageSamples(file string) map[string][]map[string]any {
 	recips := map[string]any{"to": []string{"a@x.test"}, "cc": []string{"c@x.test"}, "bcc": []string{"b@x.test"}}
 	text := map[string]any{"body": "plain", "body_format": "text"}
 	html := map[string]any{"body": "<p>x</p>", "body_format": "html", "html_text": "x"}
+	ruleDef := map[string]any{
+		"name": "r", "description": "d", "accounts": []string{"work"}, "query": "from:a", "on_new": true, "schedule": "every:6h",
+		"priority": 50, "stop": true, "max_per_run": 200, "enabled": true,
+		"actions": []map[string]any{
+			{"kind": "label", "label": "L"},
+			{"kind": "link_item", "item_id": "it_a", "anchor": true},
+			{"kind": "forward", "to": []string{"a@x.test"}, "note": "n"},
+			{"kind": "move", "folder": "F"},
+		},
+	}
 	return map[string][]map[string]any{
 		"list_accounts":       {{}},
 		"test_account":        {{"account": "work"}},
@@ -238,6 +259,14 @@ func coverageSamples(file string) map[string][]map[string]any {
 		"set_blocker":    {{"item_id": "it_a", "blocked_by_id": "it_b", "linked": true}},
 		"link_thread":    {{"item_id": "it_a", "ref": testRef, "anchor": true, "note": "n"}},
 		"unlink_thread":  {{"item_id": "it_a", "account": "work", "thread_key": "1a2b"}},
+		"create_rule":    {ruleDef},
+		"update_rule":    {with(ruleDef, map[string]any{"rule": "r", "expected_revision": 3})},
+		"get_rule":       {{"rule": "r", "history": true}},
+		"list_rules":     {{"account": "work", "enabled": false, "deleted": true}},
+		"delete_rule":    {{"rule": "r"}},
+		"restore_rule":   {{"rule": "ru_a"}},
+		"dry_run_rule":   {{"rule": "r", "trigger": "new", "account": "work"}, {"definition": ruleDef}},
+		"run_rule":       {{"rule": "r", "max": 5, "account": "work"}},
 	}
 }
 

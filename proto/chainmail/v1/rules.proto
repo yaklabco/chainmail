@@ -1,0 +1,372 @@
+syntax = "proto3";
+
+package chainmail.v1;
+
+import "chainmail/v1/message.proto";
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+
+// RulesService keeps the rules that sort mail. A rule matches messages with
+// a search query against the local cache and runs its actions on them: on
+// new mail, on a schedule, or when asked. It acts on each message at most
+// once. Every call is audited. Rule descriptions and queries come back
+// wrapped in Untrusted, and no error message, hint or audit row ever holds
+// rule text. A rule field in a request takes an ID or a name: a value
+// starting ru_ is an ID, anything else the name of a live rule.
+service RulesService {
+  // CreateRule saves a new rule. Audited as rule.create, with the new
+  // rule's ID.
+  rpc CreateRule(CreateRuleRequest) returns (CreateRuleResponse);
+  // UpdateRule changes the fields update_mask names. Enabling and
+  // disabling go through it. With expected_revision, a rule that changed
+  // since that revision is refused. Audited as rule.update, with the rule's
+  // ID and the changed field names.
+  rpc UpdateRule(UpdateRuleRequest) returns (UpdateRuleResponse);
+  // DeleteRule marks a rule deleted, so it stops acting. A deleted rule
+  // stays readable by ID and can be restored. Deleting a deleted rule
+  // changes nothing. Audited as rule.delete, with the rule's ID.
+  rpc DeleteRule(DeleteRuleRequest) returns (DeleteRuleResponse);
+  // RestoreRule brings back a deleted rule, refused when a live rule holds
+  // its name. Audited as rule.restore, with the rule's ID.
+  rpc RestoreRule(RestoreRuleRequest) returns (RestoreRuleResponse);
+  // GetRule returns a rule, deleted or live, with its last 10 runs, its
+  // counts over the runs kept, and with history up to 50 revisions, newest
+  // first. Audited as rule.get, with the rule's ID.
+  rpc GetRule(GetRuleRequest) returns (GetRuleResponse);
+  // ListRules returns rules in priority order, ties by ID. Audited as
+  // rule.list.
+  rpc ListRules(ListRulesRequest) returns (ListRulesResponse);
+  // DryRunRule matches a saved rule or an unsaved definition against the
+  // cache and reports what it would act on, without acting. Audited as
+  // rule.dry_run.
+  rpc DryRunRule(DryRunRuleRequest) returns (DryRunRuleResponse);
+  // RunRule runs a rule once now, on each account it covers or on the named
+  // one, and returns one run per account. It runs under a 10 minute
+  // deadline when the client sets none. Audited as rule.run, with the
+  // rule's ID.
+  rpc RunRule(RunRuleRequest) returns (RunRuleResponse);
+  // ListRuleRuns returns run summaries, newest first, paged by before_id.
+  // Runs are kept for 30 days. Audited as rule.runs.
+  rpc ListRuleRuns(ListRuleRunsRequest) returns (ListRuleRunsResponse);
+  // RulesStatus reports each account's rule runner, the next scheduled run
+  // and the next due check. Audited as rule.status.
+  rpc RulesStatus(RulesStatusRequest) returns (RulesStatusResponse);
+}
+
+// One action. kind names it; the other fields are its arguments:
+// label and unlabel use label, copy and move use folder, link_item uses
+// item_id and anchor, forward uses to and note. Other kinds take none.
+message RuleAction {
+  // label, unlabel, copy, flag, unflag, read, unread, link_item, forward,
+  // move, archive or trash. label and unlabel work on Google accounts
+  // only. move, archive and trash must be the last action.
+  string kind = 1;
+  // A Gmail label, 1 to 255 bytes.
+  string label = 2;
+  // A folder name, 1 to 255 bytes.
+  string folder = 3;
+  // The work item to link the message's thread to, such as it_admin_work.
+  string item_id = 4;
+  // link_item: make the thread the item's anchor.
+  bool anchor = 5;
+  // forward: 1 to the policy's max_recipients addresses.
+  repeated string to = 6;
+  // forward: text put above the forwarded message, at most 2000
+  // characters.
+  string note = 7;
+}
+
+// RuleDefinition is what a client writes to create or change a rule.
+message RuleDefinition {
+  // 1 to 63 lowercase letters, digits and hyphens, starting with a letter
+  // or digit. Unique among live rules.
+  string name = 1;
+  // At most 1000 characters.
+  string description = 2;
+  repeated string accounts = 3;   // empty: every account
+  // A query in the search language, as search takes it.
+  string query = 4;
+  // Run on each new message.
+  bool on_new = 5;
+  // "", every:<duration> (15 minutes to 30 days, a Go duration or whole
+  // days) or at:HH:MM in the [rules] timezone.
+  string schedule = 6;            // "", "every:6h", "every:7d", "at:07:00"
+  // -1000000 to 1000000. Lower runs first.
+  optional int32 priority = 7;    // unset: 100
+  // Later rules skip every message this rule matched.
+  bool stop = 8;
+  // 1 to 16 actions, run in order.
+  repeated RuleAction actions = 9;
+  // The most messages one run acts on per account, 1 to 5000, for new
+  // mail, scheduled and manual runs alike.
+  int32 max_per_run = 10;         // 0: 500
+  optional bool enabled = 11;     // unset: true on create
+}
+
+// Rule is one rule with every field.
+message Rule {
+  // ru_ followed by lowercase letters, digits and underscores.
+  string id = 1;
+  string name = 2;
+  // Empty when there is none.
+  Untrusted description = 3;
+  // Empty: every account.
+  repeated string accounts = 4;
+  Untrusted query = 5;
+  bool on_new = 6;
+  // "", every:<duration> or at:HH:MM.
+  string schedule = 7;
+  int32 priority = 8;
+  bool stop = 9;
+  repeated RuleAction actions = 10;
+  int32 max_per_run = 11;
+  bool enabled = 12;
+  // all_failed or repeated_failures when the daemon turned the rule off.
+  // Empty otherwise.
+  string disabled_reason = 13;
+  // The rule's own revision. Each rule counts from 1.
+  int64 revision = 14;
+  google.protobuf.Timestamp created_at = 15;
+  google.protobuf.Timestamp updated_at = 16;
+  google.protobuf.Timestamp deleted_at = 17;   // unset when live
+  // <uid>/<client kind>, such as 1000/mcp.
+  string created_by = 18;
+  // <uid>/<client kind> of the last change.
+  string updated_by = 19;
+  google.protobuf.Timestamp next_run_at = 20;  // unset when none
+  // The last scheduled run. Unset when none.
+  google.protobuf.Timestamp last_run_at = 21;
+  // Consecutive runs with a permanent failure.
+  int32 failed_runs = 22;
+}
+
+// RuleRun is one run of a rule on one account.
+message RuleRun {
+  int64 id = 1;
+  string rule_id = 2;
+  string account = 3;
+  // new, schedule or manual.
+  string trigger = 4;
+  google.protobuf.Timestamp started_at = 5;
+  google.protobuf.Timestamp finished_at = 6;
+  // Messages the query matched.
+  int64 matched = 7;
+  // Messages every action ran on.
+  int64 applied = 8;
+  // Messages whose forward the policy held as a draft.
+  int64 held = 9;
+  // Matches the rule had already acted on.
+  int64 skipped = 10;
+  // Messages an action failed on.
+  int64 failed = 11;
+  // ok, capped, failed, cache_not_ready or interrupted.
+  string outcome = 12;
+  // An error reason such as CACHE_NOT_READY. Empty when none.
+  string reason = 13;
+  // What to do about reason.
+  string hint = 14;
+}
+
+// RuleCounts adds up a rule's runs that are still kept.
+message RuleCounts {
+  int64 runs = 1;
+  int64 matched = 2;
+  int64 applied = 3;
+  int64 held = 4;
+  int64 failed = 5;
+}
+
+// RuleRevision is a rule as one change left it.
+message RuleRevision {
+  int64 revision = 1;
+  // created, updated, deleted, restored, disabled or enabled.
+  string change = 2;
+  Rule rule = 3;
+  // <uid>/<client kind> of the change.
+  string actor = 4;
+  google.protobuf.Timestamp at = 5;
+}
+
+// CreateRuleRequest describes a new rule.
+message CreateRuleRequest {
+  RuleDefinition rule = 1;
+}
+
+// CreateRuleResponse is the rule CreateRule saved.
+message CreateRuleResponse {
+  Rule rule = 1;
+}
+
+// UpdateRuleRequest changes the fields update_mask names and leaves the
+// rest alone.
+message UpdateRuleRequest {
+  // The rule's ID or name.
+  string rule = 1;
+  // The new values. Only the fields update_mask names are read.
+  RuleDefinition patch = 2;
+  // update_mask paths are RuleDefinition field names: name, description,
+  // accounts, query, on_new, schedule, priority, stop, actions, max_per_run
+  // and enabled. An unknown path is refused.
+  google.protobuf.FieldMask update_mask = 3;
+  // When set, the update is refused unless the rule is at this revision.
+  optional int64 expected_revision = 4;
+}
+
+// UpdateRuleResponse is the rule after the change.
+message UpdateRuleResponse {
+  Rule rule = 1;
+}
+
+// DeleteRuleRequest names the rule to delete.
+message DeleteRuleRequest {
+  // The rule's ID or name.
+  string rule = 1;
+}
+
+// DeleteRuleResponse is the deleted rule.
+message DeleteRuleResponse {
+  Rule rule = 1;
+}
+
+// RestoreRuleRequest names the rule to restore.
+message RestoreRuleRequest {
+  // The rule's ID. A deleted rule has no name to look it up by.
+  string rule = 1;
+}
+
+// RestoreRuleResponse is the restored rule.
+message RestoreRuleResponse {
+  Rule rule = 1;
+}
+
+// GetRuleRequest names the rule to read.
+message GetRuleRequest {
+  // The rule's ID or name. A deleted rule is found by ID only.
+  string rule = 1;
+  // Also return up to 50 revisions, newest first.
+  bool history = 2;
+}
+
+// GetRuleResponse is the rule view.
+message GetRuleResponse {
+  Rule rule = 1;
+  // The last 10 runs, newest first.
+  repeated RuleRun runs = 2;
+  RuleCounts counts = 3;
+  // Set with history.
+  repeated RuleRevision revisions = 4;
+}
+
+// ListRulesRequest filters the rule list. Empty filters match every live
+// rule.
+message ListRulesRequest {
+  // Only rules covering this account, by name or by covering every
+  // account.
+  string account = 1;
+  // Only enabled rules when true, only disabled ones when false.
+  optional bool enabled = 2;
+  // Only deleted rules.
+  bool deleted = 3;
+}
+
+// ListRulesResponse is the rules in priority order, ties by ID.
+message ListRulesResponse {
+  repeated Rule rules = 1;
+}
+
+// rule or definition, not both. trigger: new, schedule or manual ("" is manual).
+message DryRunRuleRequest {
+  // A saved rule's ID or name.
+  string rule = 1;
+  // An unsaved rule. It is checked as CreateRule checks it.
+  RuleDefinition definition = 2;
+  // new matches the newest 200 cached messages per account; schedule and
+  // manual match the whole scope.
+  string trigger = 3;
+  // Only this account. Empty: every account the rule covers.
+  string account = 4;
+}
+
+// One account's dry run. reason is set, and matches empty, when the cache
+// cannot answer this account completely (a CACHE_NOT_READY reason code).
+message DryRunAccount {
+  string account = 1;
+  // Every message the query matched.
+  int64 matched = 2;
+  // Matches a saved rule already acted on.
+  int64 skipped = 3;
+  // At most 50 of the matches, oldest first, as search rows.
+  repeated MessageRow matches = 4;
+  // The actions a run would take on each match.
+  repeated RuleAction actions = 5;
+  string reason = 6;
+}
+
+// DryRunRuleResponse is one entry per account.
+message DryRunRuleResponse {
+  repeated DryRunAccount accounts = 1;
+}
+
+// RunRuleRequest names the rule to run now.
+message RunRuleRequest {
+  // The rule's ID or name.
+  string rule = 1;
+  // 1 to 5000. 0 means the rule's max_per_run.
+  int32 max = 2;
+  // Only this account. Empty: every account the rule covers.
+  string account = 3;
+}
+
+// RunRuleResponse is one run per account.
+message RunRuleResponse {
+  repeated RuleRun runs = 1;
+}
+
+// ListRuleRunsRequest filters and pages the run list. Empty filters match
+// every run.
+message ListRuleRunsRequest {
+  // Only runs of this rule, by ID or name.
+  string rule = 1;
+  // Only runs on this account.
+  string account = 2;
+  // Only new, schedule or manual runs.
+  string trigger = 3;
+  // Only runs with this outcome: ok, capped, failed, cache_not_ready or
+  // interrupted.
+  string outcome = 4;
+  // 1 to 500. 0 means 50.
+  int32 limit = 5;
+  // Paging: only runs with id < before_id. 0 means the newest.
+  int64 before_id = 6;
+}
+
+// ListRuleRunsResponse is one page of runs, newest first.
+message ListRuleRunsResponse {
+  repeated RuleRun runs = 1;
+  // Pass as before_id for the next page. 0 when there are no more runs.
+  int64 next_before_id = 2;
+}
+
+message RulesStatusRequest {}
+
+// RulesRunnerStatus is one account's new-mail runner.
+message RulesRunnerStatus {
+  string account = 1;
+  // starting, running, waiting_for_cache, backing_off, idle or
+  // cache_disabled.
+  string state = 2;
+  // The last event the runner acknowledged. -1 while starting.
+  int64 acked_id = 3;
+  // Events after acked_id still to read.
+  int64 lag = 4;
+  // What the runner waits on or why it backs off. Empty otherwise.
+  string reason = 5;
+}
+
+// RulesStatusResponse reports the rule engine.
+message RulesStatusResponse {
+  repeated RulesRunnerStatus runners = 1;
+  google.protobuf.Timestamp next_scheduled_at = 2; // unset when no rule is scheduled
+  // The next time the daemon checks work items for due dates.
+  google.protobuf.Timestamp next_due_check_at = 3;
+}

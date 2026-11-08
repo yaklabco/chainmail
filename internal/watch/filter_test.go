@@ -142,3 +142,93 @@ func TestFilterMatch(t *testing.T) {
 		})
 	}
 }
+
+// TestFilterMatchOptInKinds covers the rule and due kinds beside item and
+// item_mail. All six are opt-in: a filter with no kinds and no item filter,
+// the cache's reader included, sees none of them. A named kind passes. An
+// item filter passes the due kinds of its items and drops rule events. None
+// of the four has a folder or an account, so In and Accounts never drop
+// them.
+func TestFilterMatchOptInKinds(t *testing.T) {
+	t.Parallel()
+	inbox := Event{Kind: KindNew, Account: "a", Folder: "INBOX", Message: &Message{}}
+	status := Event{Kind: KindStatus, Account: "a", Folder: "INBOX", State: StateWatching}
+	item := Event{Kind: KindItem, Item: &ItemChange{ItemID: "it_a", Type: "task", Revision: 4, Op: "updated"}}
+	itemMail := Event{Kind: KindItemMail, Account: "a", Folder: "INBOX", Ref: "cm:a:INBOX:1:5", ItemID: "it_a", Message: &Message{}}
+	rule := Event{Kind: KindRule, Rule: &RuleChange{RuleID: "ru_a", Name: "receipts", Change: "created", Revision: 1, Actor: "1000/cli"}}
+	soonA := Event{Kind: KindItemDueSoon, Due: &ItemDue{ItemID: "it_a", Type: "task", DueDate: "2026-11-09", State: "backlog"}}
+	dueB := Event{Kind: KindItemDue, Due: &ItemDue{ItemID: "it_b", Type: "epic", DueDate: "2026-11-07", State: "in-progress"}}
+	overdueA := Event{Kind: KindItemOverdue, Due: &ItemDue{ItemID: "it_a", Type: "task", DueDate: "2026-11-01", State: "in-review"}}
+	dueWithout := Event{Kind: KindItemDue}
+	onlyA := map[string]bool{"it_a": true}
+	onlyB := map[string]bool{"it_b": true}
+	dueKinds := []Kind{KindItemDueSoon, KindItemDue, KindItemOverdue}
+	cache := Filter{Accounts: []string{"a"}, Internal: true}
+
+	tests := []struct {
+		name string
+		f    Filter
+		e    Event
+		want bool
+	}{
+		// Empty kinds hide all six opt-in kinds.
+		{"item hidden by empty kinds", Filter{}, item, false},
+		{"item_mail hidden by empty kinds", Filter{}, itemMail, false},
+		{"rule hidden by empty kinds", Filter{}, rule, false},
+		{"item_due_soon hidden by empty kinds", Filter{}, soonA, false},
+		{"item_due hidden by empty kinds", Filter{}, dueB, false},
+		{"item_overdue hidden by empty kinds", Filter{}, overdueA, false},
+		{"rule hidden with only accounts", Filter{Accounts: []string{"a"}}, rule, false},
+		{"item_due hidden with only in", Filter{In: "INBOX"}, dueB, false},
+		{"rule hidden from the cache reader", cache, rule, false},
+		{"item_due_soon hidden from the cache reader", cache, soonA, false},
+		{"item_due hidden from the cache reader", cache, dueB, false},
+		{"item_overdue hidden from the cache reader", cache, overdueA, false},
+		{"rule hidden from an internal reader", Filter{Internal: true}, rule, false},
+		{"new still passes empty kinds", Filter{}, inbox, true},
+
+		// Each new kind named.
+		{"rule named", Filter{Kinds: []Kind{KindRule}}, rule, true},
+		{"item_due_soon named", Filter{Kinds: []Kind{KindItemDueSoon}}, soonA, true},
+		{"item_due named", Filter{Kinds: []Kind{KindItemDue}}, dueB, true},
+		{"item_overdue named", Filter{Kinds: []Kind{KindItemOverdue}}, overdueA, true},
+		{"every due kind named", Filter{Kinds: dueKinds}, overdueA, true},
+		{"item_due not named beside item_due_soon", Filter{Kinds: []Kind{KindItemDueSoon}}, dueB, false},
+		{"rule not named beside item", Filter{Kinds: []Kind{KindItem}}, rule, false},
+		{"due not named beside rule", Filter{Kinds: []Kind{KindRule}}, soonA, false},
+		{"new not named beside rule", Filter{Kinds: []Kind{KindRule}}, inbox, false},
+		{"item not named beside the due kinds", Filter{Kinds: dueKinds}, item, false},
+		{"status passes the rule kind", Filter{Kinds: []Kind{KindRule}}, status, true},
+		{"status passes the due kinds", Filter{Kinds: dueKinds}, status, true},
+		{"rule named for an internal reader", Filter{Internal: true, Kinds: []Kind{KindRule}}, rule, true},
+
+		// The item filter.
+		{"item filter passes its item_due_soon", Filter{Items: onlyA}, soonA, true},
+		{"item filter passes its item_overdue", Filter{Items: onlyA}, overdueA, true},
+		{"item filter drops another item's item_due", Filter{Items: onlyA}, dueB, false},
+		{"item filter passes the other item's item_due", Filter{Items: onlyB}, dueB, true},
+		{"item filter needs a due payload", Filter{Items: onlyA}, dueWithout, false},
+		{"item filter drops rule", Filter{Items: onlyA}, rule, false},
+		{"item filter drops rule even when named", Filter{Kinds: []Kind{KindRule}, Items: onlyA}, rule, false},
+		{"item filter and kind item_due", Filter{Kinds: []Kind{KindItemDue}, Items: onlyB}, dueB, true},
+		{"item filter and kind item_due drops item_due_soon", Filter{Kinds: []Kind{KindItemDue}, Items: onlyA}, soonA, false},
+		{"empty item filter drops every due event", Filter{Items: map[string]bool{}}, soonA, false},
+
+		// In and Accounts.
+		{"rule passes in", Filter{Kinds: []Kind{KindRule}, In: "INBOX"}, rule, true},
+		{"item_due_soon passes in", Filter{Kinds: []Kind{KindItemDueSoon}, In: "Archive"}, soonA, true},
+		{"item_due passes in", Filter{Kinds: []Kind{KindItemDue}, In: "inbox"}, dueB, true},
+		{"item_overdue passes in with the item filter", Filter{Items: onlyA, In: "Receipts"}, overdueA, true},
+		{"rule passes accounts", Filter{Kinds: []Kind{KindRule}, Accounts: []string{"b"}}, rule, true},
+		{"item_overdue passes accounts", Filter{Kinds: []Kind{KindItemOverdue}, Accounts: []string{"b"}}, overdueA, true},
+		{"item_due_soon passes accounts with the item filter", Filter{Items: onlyA, Accounts: []string{"b"}}, soonA, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.f.Match(tt.e); got != tt.want {
+				t.Errorf("%+v.Match(%+v) = %v, want %v", tt.f, tt.e, got, tt.want)
+			}
+		})
+	}
+}

@@ -79,7 +79,7 @@ func (a *Account) openGroup(ctx context.Context) (int64, error) {
 	if err := a.track(ctx); err != nil {
 		return 0, err
 	}
-	a.applied.Store(acked)
+	a.setApplied(acked)
 	return acked, nil
 }
 
@@ -106,7 +106,7 @@ func (a *Account) build(ctx context.Context, pos int64) (int64, error) {
 	if err := a.o.Log.Ack(ctx, a.group, next); err != nil {
 		return pos, err
 	}
-	a.applied.Store(next)
+	a.setApplied(next)
 	// A folder skipped in error comes back with a status event; wake the
 	// backfill so it looks again.
 	if slices.ContainsFunc(seg, func(e watch.Event) bool { return e.Kind == watch.KindStatus }) {

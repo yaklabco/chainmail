@@ -6,7 +6,7 @@ sidebar_position: 3
 
 # MCP tools
 
-`chainmail mcp` serves 38 tools to an AI agent over the Model Context Protocol on stdio. 36 are always listed. `expunge` and `delete_folder` are listed only while the policy allows them (see [Gated tools](#gated-tools)). Every tool calls the daemon over its socket, behind the same policy and audit log as the CLI.
+`chainmail mcp` serves 46 tools to an AI agent over the Model Context Protocol on stdio. 44 are always listed. `expunge` and `delete_folder` are listed only while the policy allows them (see [Gated tools](#gated-tools)). Every tool calls the daemon over its socket, behind the same policy and audit log as the CLI.
 
 [Agents setup](../agents/setup.md) registers the server with a client. [Working with mail](../agents/working-with-mail.md) covers how an agent should treat untrusted content, held sends, derived idempotency keys, files and errors.
 
@@ -17,7 +17,7 @@ The tool list on this page matches [`tools_list.golden`](https://github.com/yakl
 - Inputs take refs, addresses and folder names as plain strings. Refs come from `search`, `get_message`, `get_thread` and `read_events`. Pass them unchanged. See [Refs and cursors](../concepts/refs-and-cursors.md).
 - Outputs give dates in RFC 3339.
 - A message's `flags` are the system flags by short name: `seen`, `flagged`, `answered`, `draft` and `deleted`. Every other flag, such as `$Forwarded`, is in `keywords`, as untrusted.
-- Text that comes from a message or a mail server is wrapped as `{"untrusted": "..."}`. So is work item text, whoever wrote it. Refs are the exception. See [Untrusted content](../concepts/untrusted-content.md).
+- Text that comes from a message or a mail server is wrapped as `{"untrusted": "..."}`. So is work item text, whoever wrote it, and a rule's description, query and forward note. Refs are the exception. See [Untrusted content](../concepts/untrusted-content.md).
 - The batch tools (`move`, `copy`, `archive`, `trash`, `expunge`, `set_flags`, `set_labels`) take 1 to 500 refs, from any accounts. Each acts on each message's own account.
 - The send and draft tools take `attachments` and `inline[].path` as absolute paths of regular files. Each file is uploaded to the daemon first, and each upload is audited as `upload`.
 - `body_format` is `markdown` (the default), `text` or `html`, as `--text` and `--html-file` choose on the CLI. With `html`, `body` holds the HTML and the optional `html_text` gives the plain-text part, which is otherwise converted from the HTML.
@@ -37,25 +37,32 @@ Every tool sets all four MCP annotations explicitly, because some clients read a
 | `create_draft` | Create a draft | no | no | no | yes |
 | `create_folder` | Create a folder | no | no | yes | yes |
 | `create_item` | Create a work item | no | no | no | no |
+| `create_rule` | Create a rule | no | no | no | no |
 | `delete_draft` | Delete a draft | no | with expunge allowed | yes | yes |
 | `delete_folder` | Delete a folder | no | yes | yes | yes |
 | `delete_item` | Delete a work item | no | no | yes | no |
+| `delete_rule` | Delete a rule | no | no | yes | no |
 | `download_attachment` | Download an attachment | yes | no | yes | yes |
+| `dry_run_rule` | Dry-run a rule | yes | no | yes | no |
 | `edit_criteria` | Edit acceptance criteria | no | no | no | no |
 | `expunge` | Expunge messages | no | yes | yes | yes |
 | `forward` | Forward a message | no | no | no | yes |
 | `get_item` | Show a work item | yes | no | yes | no |
 | `get_message` | Read messages | yes | no | yes | yes |
+| `get_rule` | Show a rule | yes | no | yes | no |
 | `get_thread` | Read a thread | yes | no | yes | yes |
 | `link_thread` | Link a thread to an item | no | no | yes | no |
 | `list_accounts` | List accounts | yes | no | yes | no |
 | `list_folders` | List folders | yes | no | yes | yes |
 | `list_items` | List work items | yes | no | yes | no |
+| `list_rules` | List rules | yes | no | yes | no |
 | `move` | Move messages | no | no | yes | yes |
 | `read_events` | Read mail events | no | no | no | yes |
 | `rename_folder` | Rename a folder | no | no | no | yes |
 | `reply` | Reply to a message | no | no | no | yes |
 | `restore_item` | Restore a work item | no | no | yes | no |
+| `restore_rule` | Restore a rule | no | no | yes | no |
+| `run_rule` | Run a rule now | no | yes | no | yes |
 | `save_raw_message` | Save the raw message | yes | no | yes | yes |
 | `search` | Search mail | yes | no | yes | yes |
 | `send_draft` | Send a draft | no | with expunge allowed | no | yes |
@@ -69,10 +76,13 @@ Every tool sets all four MCP annotations explicitly, because some clients read a
 | `unlink_thread` | Unlink a thread from an item | no | no | yes | no |
 | `update_draft` | Update a draft | no | with expunge allowed | no | yes |
 | `update_item` | Update a work item | no | no | yes | no |
+| `update_rule` | Update a rule | no | no | yes | no |
 
 `update_draft`, `send_draft` and `delete_draft` are destructive only while the policy allows expunge on at least one account. The daemon then expunges the old draft instead of moving it to Trash. Otherwise they are not destructive. No other annotation depends on the policy.
 
 `read_events` changes no mail, but it is neither read-only nor idempotent, since a read with a group moves the group's acknowledged position. `create_item` and `edit_criteria` are not idempotent, since a retry without a key makes a second item and a retried add appends again. The other item tools are idempotent and not destructive, since deletes are soft. No item tool is open world.
+
+`run_rule` is destructive, open world and not idempotent, since a rule can move, trash and forward mail on the servers, and a second run acts on mail the first did not reach. `create_rule` is not idempotent. `update_rule`, `delete_rule` and `restore_rule` are idempotent and not destructive, since deletes are soft. `get_rule`, `list_rules` and `dry_run_rule` are read-only and idempotent. No rule tool but `run_rule` is open world.
 
 ## Gated tools
 
@@ -451,7 +461,7 @@ Idempotent, open world. Audit action `labels`.
 
 ### `read_events`
 
-Reads mail and item events after a cursor or a group's acknowledged position, oldest first, waiting up to 60 seconds for the first. A group read acknowledges what it returns. New events carry the message's search row as untrusted. `item` and `item_mail` events come only when `kinds` names them or `item` is set. See [Watching for mail](../guide/watching.md) and [Work items](../guide/items.md).
+Reads mail, item, rule and due events after a cursor or a group's acknowledged position, oldest first, waiting up to 60 seconds for the first. A group read acknowledges what it returns. New events carry the message's search row as untrusted. `item`, `item_mail`, `rule` and due events come only when `kinds` names them. Setting `item` also brings that item's `item`, `item_mail` and due events. See [Watching for mail](../guide/watching.md), [Work items](../guide/items.md) and [Rules](../guide/rules.md).
 
 To wait for mail, call `read_events` with a `group` and `wait_seconds` 60, again and again.
 
@@ -459,10 +469,10 @@ To wait for mail, call `read_events` with a `group` and `wait_seconds` 60, again
 |---|---|---|---|
 | `accounts` | array of strings | no | accounts to return events for; empty means every account |
 | `cursor` | integer | no | next_cursor from an earlier read; reads the events after it; 0 reads from the oldest event kept; not with group |
-| `group` | string | no | a consumer group name of lowercase letters, digits, dot, dash and underscore, up to 64 characters, not starting with cache.; reads after the group's acknowledged event and acknowledges what it returns; not with cursor |
+| `group` | string | no | a consumer group name of lowercase letters, digits, dot, dash and underscore, up to 64 characters, not starting with cache. or rules.; reads after the group's acknowledged event and acknowledges what it returns; not with cursor |
 | `in` | string | no | a folder name or Gmail label, in any case; inbox also matches the Gmail label \Inbox and sent matches \Sent |
-| `item` | string | no | a work item ID: only item and item_mail events of that item and every live item below it, plus status and gap; new, flags and expunged events are left out |
-| `kinds` | array of strings | no | event kinds to return: new, flags, expunged, status, gap, item, item_mail; empty means every kind but item and item_mail, which are opt-in, unless item is set, when it means item, item_mail, status and gap; status and gap events pass a list that names neither |
+| `item` | string | no | a work item ID: only item, item_mail and due events of that item and every live item below it, plus status and gap; new, flags, expunged and rule events are left out |
+| `kinds` | array of strings | no | event kinds to return: new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due, item_overdue; empty means every kind but the opt-in ones (item, item_mail, rule and the three due kinds), unless item is set, when it means item, item_mail, the due kinds, status and gap; status and gap events pass a list that names neither |
 | `limit` | integer | no | events per read, 1 to 200; default 50 |
 | `wait_seconds` | integer | no | seconds to wait for the first event when none is ready, 0 to 60; default 0 returns at once |
 
@@ -641,8 +651,143 @@ Removes a thread link, named by the `account` and `thread_key` that `get_item` l
 
 Returns `revision`. Idempotent. Audit action `item.unlink`.
 
+## Rules
+
+Rule calls pass no policy gate, but every action a rule takes does. Deletes are soft. Descriptions, queries and forward notes come back as untrusted, as item text does. Every tool that names a rule takes its ID or its name, except `restore_rule`, which takes the ID. Dry-run a rule before you create it and before you run it by hand. See [Rules](../guide/rules.md).
+
+### `create_rule`
+
+Creates a rule from a definition and returns it. Dry-run the definition with `dry_run_rule` first.
+
+| Argument | Type | Required | Meaning |
+|---|---|---|---|
+| `accounts` | array of strings | no | the accounts the rule covers; empty means every account |
+| `actions` | array of objects | yes | 1 to 16 actions, run in order on each match |
+| `description` | string | no | what the rule is for, at most 1000 characters |
+| `enabled` | boolean | no | false saves the rule switched off; default true |
+| `max_per_run` | integer | no | the most messages one run acts on per account, 1 to 5000; default 500 |
+| `name` | string | yes | lowercase letters, digits and dashes, starting with a letter or digit, up to 63 characters, such as stripe-receipts; unique among live rules |
+| `on_new` | boolean | no | run the rule on new mail as the local cache takes it |
+| `priority` | integer | no | -1000000 to 1000000; lower runs first; default 100 |
+| `query` | string | yes | the messages to act on, in the language search takes, such as from:stripe.com subject:receipt |
+| `schedule` | string | no | `every:<duration>` from 15m to 30d, such as every:6h or every:7d, or at:HH:MM once a day; empty for none |
+| `stop` | boolean | no | keep later rules off every message this rule matched |
+
+Each `actions` entry is an object with these fields, of which an action sets only those its `kind` takes:
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `anchor` | boolean | no | link_item: make the message the link's anchor |
+| `folder` | string | no | copy and move: the folder, 1 to 255 bytes |
+| `item_id` | string | no | link_item: the live work item to file the message's thread under |
+| `kind` | string | yes | label, unlabel, copy, flag, unflag, read, unread, link_item, forward, move, archive or trash |
+| `label` | string | no | label and unlabel: the Gmail label, 1 to 255 bytes |
+| `note` | string | no | forward: a note sent with the forward, at most 2000 characters |
+| `to` | array of strings | no | forward: the addresses to forward to, up to the policy's max_recipients |
+
+Returns `rule`. Not idempotent. Audit action `rule.create`.
+
+### `update_rule`
+
+Changes the fields given, and leaves the rest. `clear` empties `description`, `accounts` or `schedule`. With `expected_revision`, a rule that changed after that revision is refused. Setting `enabled` turns a rule on or off, and turning it on clears an auto-disable.
+
+| Argument | Type | Required | Meaning |
+|---|---|---|---|
+| `accounts` | array of strings | no | the accounts the rule covers, replacing the old list; to cover every account, name accounts in clear |
+| `actions` | array of objects | no | 1 to 16 actions that replace every old one, in order |
+| `clear` | array of strings | no | fields to clear: description, accounts (the rule then covers every account) or schedule (the rule then runs only on new mail or through run_rule); a field cannot be both given and cleared |
+| `description` | string | no | a new description, at most 1000 characters |
+| `enabled` | boolean | no | switch the rule on or off; pass it alone to do only that |
+| `expected_revision` | integer | no | the revision get_rule showed; the change is refused if the rule changed since |
+| `max_per_run` | integer | no | 1 to 5000 |
+| `name` | string | no | a new name: lowercase letters, digits and dashes, starting with a letter or digit, up to 63 characters |
+| `on_new` | boolean | no | run the rule on new mail, or not |
+| `priority` | integer | no | -1000000 to 1000000; lower runs first |
+| `query` | string | no | a new query, in the language search takes |
+| `rule` | string | yes | the rule's ID (ru_...) or name |
+| `schedule` | string | no | `every:<duration>` from 15m to 30d, or at:HH:MM; to unschedule, name schedule in clear |
+| `stop` | boolean | no | keep later rules off every message this rule matched, or not |
+
+`actions` entries have the fields of `create_rule`'s.
+
+Returns `rule`. Idempotent. Audit action `rule.update`.
+
+### `get_rule`
+
+Reads a rule with its next run, its last 10 runs and its counts, and with `history` up to 50 revisions, newest first.
+
+| Argument | Type | Required | Meaning |
+|---|---|---|---|
+| `history` | boolean | no | also return up to 50 revisions, newest first |
+| `rule` | string | yes | the rule's ID (ru_...) or name; a deleted rule by ID only |
+
+Returns `counts`, `revisions`, `rule` and `runs`. Read-only, idempotent. Audit action `rule.get`.
+
+### `list_rules`
+
+Lists rules in priority order, filtered by account, by enabled, or to deleted rules only.
+
+| Argument | Type | Required | Meaning |
+|---|---|---|---|
+| `account` | string | no | only rules that cover this account, by name or by covering every account |
+| `deleted` | boolean | no | list the soft-deleted rules instead of the live ones |
+| `enabled` | boolean | no | true for only the rules that are on, false for only those that are off; absent for both |
+
+Returns `rules`. Read-only, idempotent. Audit action `rule.list`.
+
+### `delete_rule`
+
+Soft-deletes a rule. A deleted rule never runs and keeps its runs.
+
+| Argument | Type | Required | Meaning |
+|---|---|---|---|
+| `rule` | string | yes | the rule's ID (ru_...) or name |
+
+Returns `rule`. Idempotent. Audit action `rule.delete`.
+
+### `restore_rule`
+
+Restores a deleted rule, named by its ID. It fails with `INVALID_ARGUMENT` when a live rule took its name.
+
+| Argument | Type | Required | Meaning |
+|---|---|---|---|
+| `rule` | string | yes | the deleted rule's ID (ru_...); list_rules with deleted true shows it |
+
+Returns `rule`. Idempotent. Audit action `rule.restore`.
+
+### `dry_run_rule`
+
+Matches a saved rule, or an unsaved definition, without acting and without writing anything. For each account it returns the match count, the count already acted on, the first 50 matches as untrusted search rows, and the actions each would get. An account the cache cannot answer completely gets a `reason` and no matches. With trigger schedule or manual, an account whose covered folders hold messages the cache could not read gets the reason `unreadable_messages`, as a real run would. It waits up to 10 minutes.
+
+| Argument | Type | Required | Meaning |
+|---|---|---|---|
+| `account` | string | no | only this account; empty means every account the rule covers |
+| `definition` | object | no | an unsaved rule, with create_rule's fields; not with rule |
+| `rule` | string | no | a saved rule's ID (ru_...) or name; not with definition |
+| `trigger` | string | no | new tries the newest 200 cached messages per account, as for new mail; schedule and manual, the default, try the whole cache |
+
+`definition` has the arguments of `create_rule`.
+
+Returns `accounts`. Read-only, idempotent. Audit action `rule.dry_run`.
+
+### `run_rule`
+
+Runs a rule now on each account it covers, or on one, and returns one run per account. It acts on mail, so dry-run the rule first. `max` caps the messages it acts on per account. It waits up to 10 minutes.
+
+A run whose cache was not ready comes back as a run with outcome `cache_not_ready`, not as an error. When the call fails on an account, such as when it runs out of time, it returns only the error. The runs on the other accounts are still recorded and may have acted on mail. Read the rule with `get_rule`, whose last 10 runs show what each account did, before you call `run_rule` again. An operator can list every run with `chainmail rule runs`.
+
+| Argument | Type | Required | Meaning |
+|---|---|---|---|
+| `account` | string | no | only this account; empty means every account the rule covers |
+| `max` | integer | no | the most messages to act on per account, 1 to 5000; default the rule's max_per_run |
+| `rule` | string | yes | the rule's ID (ru_...) or name |
+
+Returns `runs`. Destructive, open world. Audit action `rule.run`, and each action the rule takes is audited under client kind `rule`.
+
 ## Not exposed
 
 These are operator actions and have no tool: the admin calls (`secret set`, `auth login`, `admin status`, `audit`), `send-raw`, `accounts probe`, `cache rebuild` and `cache evict`. Uploads are not a tool of their own, since the send and draft tools upload their files.
 
 Most of the watch service has no tool either. `read_events` reads a page at a time in place of the event stream, and a group read acknowledges itself in place of a separate `Ack`. `watch status`, `watch groups` and `watch groups delete` have no tool. Use the [commands](./commands/chainmail.md) for all of these.
+
+`ListRuleRuns` and `RulesStatus` have no tool either, since run history and the runners' state are for operators. Use `chainmail rule runs` and `chainmail rule status`. `get_rule` returns a rule's last 10 runs and its counts.

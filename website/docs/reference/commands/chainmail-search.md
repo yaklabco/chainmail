@@ -1,7 +1,7 @@
 ---
 title: "chainmail search"
 sidebar_label: "search"
-sidebar_position: 57
+sidebar_position: 70
 description: "Search mail on every account, newest first"
 ---
 

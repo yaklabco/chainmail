@@ -66,6 +66,8 @@ var usageErrorCases = []struct {
 	{name: "bare item", args: []string{"item"}},
 	{name: "unknown item subcommand", args: []string{"item", "nope"}},
 	{name: "bare item criteria", args: []string{"item", "criteria"}},
+	{name: "bare rule", args: []string{"rule"}},
+	{name: "unknown rule subcommand", args: []string{"rule", "nope"}},
 	{name: "extra argument to a subcommand", args: []string{"accounts", "list", "extra"}},
 	{name: "missing argument", args: []string{"accounts", "test"}},
 	{name: "daemon argument", args: []string{"daemon", "extra"}},

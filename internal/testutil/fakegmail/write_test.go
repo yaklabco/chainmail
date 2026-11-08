@@ -540,6 +540,47 @@ func TestFakeGmailFileSent(t *testing.T) {
 	}
 }
 
+// TestFakeGmailDeliver checks Deliver files a message the way Gmail files
+// mail it receives: unread, with only the \Inbox label, in INBOX and All
+// Mail, dated as given, on the thread its In-Reply-To names, and seen by a
+// session already in INBOX. Labels reads a message's labels, sorted.
+func TestFakeGmailDeliver(t *testing.T) {
+	t.Parallel()
+	s, ca := startWrites(t)
+	watcher := dial(t, s, ca)
+	selectRW(t, watcher, "INBOX")
+
+	date := time.Date(2026, 11, 7, 9, 30, 0, 0, time.UTC)
+	i := s.Deliver("From: Alex <alex@example.com>\r\nSubject: Re: Invoice\r\nMessage-ID: <d@example.com>\r\n"+
+		"In-Reply-To: <a@example.com>\r\nReferences: <a@example.com>\r\n\r\nPaid.\r\n", date)
+	if i != 3 {
+		t.Fatalf("Deliver = %d, want 3, after the three seeded messages", i)
+	}
+	got := where(t, s, ca, s.MsgID(i))
+	if len(got) != 2 || got["INBOX"] == 0 || got["[Gmail]/All Mail"] == 0 {
+		t.Fatalf("delivered message is in %v, want INBOX and All Mail only", got)
+	}
+	m := fetchIn(t, s, ca, "INBOX", got["INBOX"])
+	if !reflect.DeepEqual(m.GmailLabels, []string{`\Inbox`}) || slices.Contains(m.Flags, imap.FlagSeen) {
+		t.Errorf("delivered message labels %q flags %v, want only \\Inbox and no \\Seen", m.GmailLabels, m.Flags)
+	}
+	if s.ThreadID(i) != s.ThreadID(0) {
+		t.Errorf("delivered reply thread %d, want the original's %d", s.ThreadID(i), s.ThreadID(0))
+	}
+	if l := s.Labels(i); !reflect.DeepEqual(l, []string{`\Inbox`}) {
+		t.Errorf("Labels(%d) = %q, want [\\Inbox]", i, l)
+	}
+	if l := s.Labels(0); !reflect.DeepEqual(l, []string{"Receipts", `\Inbox`}) {
+		t.Errorf("Labels(0) = %q, want [Receipts \\Inbox], sorted", l)
+	}
+	if err := watcher.Noop().Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if n := watcher.Mailbox().NumMessages; n != 3 {
+		t.Errorf("INBOX count after Deliver = %d, want 3", n)
+	}
+}
+
 func TestFakeGmailOtherSessionsSeeChanges(t *testing.T) {
 	t.Parallel()
 	s, ca := startWrites(t)

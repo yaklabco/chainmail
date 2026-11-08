@@ -367,6 +367,10 @@ func TestDaemonFlagErrors(t *testing.T) {
 	}
 }
 
+// daemonServeWait bounds TestDaemonCommandServes's wait for the daemon
+// to answer on its socket.
+const daemonServeWait = 30 * time.Second
+
 func TestDaemonCommandServes(t *testing.T) {
 	t.Parallel()
 	dir, err := os.MkdirTemp("", "cmcli")
@@ -398,7 +402,10 @@ func TestDaemonCommandServes(t *testing.T) {
 		}, Env{Stdin: strings.NewReader(""), Stdout: &bytes.Buffer{}, Stderr: &daemonErr, Getenv: func(string) string { return "" }})
 	}()
 
-	deadline := time.Now().Add(5 * time.Second)
+	// The daemon opens state.db and applies its migrations before it
+	// serves, which under a loaded -race run can take several seconds, so
+	// the wait is generous. A daemon that serves returns at once.
+	deadline := time.Now().Add(daemonServeWait)
 	for {
 		got := runCLI(t, Env{}, "--socket", socket, "--output", "json", "admin", "status")
 		if got.code == 0 {

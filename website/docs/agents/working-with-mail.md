@@ -10,7 +10,7 @@ This page is for whoever writes an agent's prompts, and for the agent itself. It
 
 ## The tools
 
-The tools mirror the CLI. They read mail (`search`, `get_message`, `get_thread`, `list_folders`), save files (`download_attachment`, `save_raw_message`), send (`send_email`, `reply`, `forward` and the draft tools), organize (`move`, `copy`, `archive`, `trash`, `set_flags`, `set_labels` and the folder tools), wait for mail (`read_events`), report the cache (`cache_status`) and keep work items (the item tools).
+The tools mirror the CLI. They read mail (`search`, `get_message`, `get_thread`, `list_folders`), save files (`download_attachment`, `save_raw_message`), send (`send_email`, `reply`, `forward` and the draft tools), organize (`move`, `copy`, `archive`, `trash`, `set_flags`, `set_labels` and the folder tools), wait for mail (`read_events`), report the cache (`cache_status`), keep work items (the item tools) and keep rules (the rule tools).
 
 The [MCP tool reference](../reference/mcp-tools.md) lists every tool with its arguments, annotations and audit action.
 
@@ -277,16 +277,16 @@ read_events(group: "<name>", wait_seconds: 60)
 
 | Input | Meaning |
 |---|---|
-| `group` | A consumer group name: lowercase letters, digits, dot, dash and underscore, up to 64 characters, not starting with `cache.`. A read resumes after the group's acknowledged event and acknowledges what it returns. A new group starts at the newest event. |
+| `group` | A consumer group name: lowercase letters, digits, dot, dash and underscore, up to 64 characters, not starting with `cache.` or `rules.`. A read resumes after the group's acknowledged event and acknowledges what it returns. A new group starts at the newest event. |
 | `cursor` | `next_cursor` from an earlier read. Reads the events after it. `0` starts at the oldest event kept. |
-| `kinds` | Event kinds to return: `new`, `flags`, `expunged`, `status`, `gap`, `item`, `item_mail`. |
+| `kinds` | Event kinds to return: `new`, `flags`, `expunged`, `status`, `gap`, `item`, `item_mail`, `rule`, `item_due_soon`, `item_due`, `item_overdue`. |
 | `accounts` | Accounts to return events for. Empty means every account. |
 | `in` | A folder name or Gmail label, in any case. `inbox` also matches `\Inbox` and `sent` matches `\Sent`. |
-| `item` | A work item ID. Only `item` and `item_mail` events of that item and every live item below it, plus `status` and `gap`. |
+| `item` | A work item ID. Only `item`, `item_mail` and due events of that item and every live item below it, plus `status` and `gap`. |
 | `wait_seconds` | 0 to 60, default 0. When no event is ready, the read waits that long for the first one. |
 | `limit` | 1 to 200, default 50. |
 
-`group` and `cursor` together are `INVALID_ARGUMENT`. A read with neither returns only events that arrive during its wait. Empty `kinds` means every kind but `item` and `item_mail`, which come only when `kinds` names them or `item` is set. `status` and `gap` events pass a `kinds` list that names neither.
+`group` and `cursor` together are `INVALID_ARGUMENT`. A read with neither returns only events that arrive during its wait. Empty `kinds` means every kind but the six opt-in kinds: `item`, `item_mail`, `rule` and the three due kinds. They come only when `kinds` names them, or for the item and due kinds, when `item` is set. `status` and `gap` events pass a `kinds` list that names neither.
 
 The result is `{"events":[...],"next_cursor":...}`. Pass `next_cursor` as `cursor` to read on. A group read does not need it.
 
@@ -325,9 +325,17 @@ What to do with each kind:
 - A `gap` event means events were lost (reason `trimmed`) or a folder was reset (reason `uidvalidity`). Search again to catch up.
 - A `status` event with state `auth_required` means a person must act on the account. Tell them, with its `detail`, which says what to run.
 - Add `item_mail` to `kinds` to hear about replies on threads linked to work items.
+- Add `item_due` and `item_overdue` to `kinds` to hear when work items come due. The event holds no title, so read the item with `get_item`.
+- A `rule` event with change `disabled` and a `reason` means a rule turned itself off after failing. Read it with `get_rule`, and tell the person you work for before you turn it back on.
 
 A group read acknowledges before it answers, so under a disconnect it is at most once. A client that cancels the request ends the wait. [Delivery](../guide/watching.md#delivery) explains both.
 
 ## Work items
 
 The item tools keep the same tree as `chainmail item`. Link each mail thread to the item it belongs to with `link_thread`, find its mail with a search for `item:<id>`, and hear about replies with `item_mail` events. [Work items](../guide/items.md) covers the rules every item tool follows.
+
+## Rules
+
+The rule tools keep the same rules as `chainmail rule`. Dry-run a rule with `dry_run_rule` before you create it with `create_rule`, and again before you run it by hand with `run_rule`. A dry run acts on nothing and shows the first 50 matches with the actions each would get. When `run_rule` returns an error, the rule may still have acted on other accounts. Read it with `get_rule` and check its last runs before you call `run_rule` again.
+
+A rule acts as the daemon, under client kind `rule`, behind the same policy as your own calls. A forward off the allowlist is held as a draft, never sent. A rule that keeps failing turns itself off, and a `rule` event says so. [Rules](../guide/rules.md) covers every rule the tools follow.

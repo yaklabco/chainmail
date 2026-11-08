@@ -29,7 +29,7 @@ type fakeCall struct {
 	Msg       proto.Message // the request; nil for UploadAttachment
 }
 
-// fakeDaemon serves the seven agent-facing services on a Unix socket. Each
+// fakeDaemon serves the eight agent-facing services on a Unix socket. Each
 // RPC answers with the func a test set, or CodeUnimplemented when it is nil.
 // Set the funcs before startFake. To change an answer mid-test, close over
 // state the test guards with a mutex or an atomic.
@@ -90,6 +90,17 @@ type fakeDaemon struct {
 	LinkThread    unaryFn[chainmailv1.LinkThreadRequest, chainmailv1.LinkThreadResponse]
 	UnlinkThread  unaryFn[chainmailv1.UnlinkThreadRequest, chainmailv1.UnlinkThreadResponse]
 
+	CreateRule   unaryFn[chainmailv1.CreateRuleRequest, chainmailv1.CreateRuleResponse]
+	UpdateRule   unaryFn[chainmailv1.UpdateRuleRequest, chainmailv1.UpdateRuleResponse]
+	DeleteRule   unaryFn[chainmailv1.DeleteRuleRequest, chainmailv1.DeleteRuleResponse]
+	RestoreRule  unaryFn[chainmailv1.RestoreRuleRequest, chainmailv1.RestoreRuleResponse]
+	GetRule      unaryFn[chainmailv1.GetRuleRequest, chainmailv1.GetRuleResponse]
+	ListRules    unaryFn[chainmailv1.ListRulesRequest, chainmailv1.ListRulesResponse]
+	DryRunRule   unaryFn[chainmailv1.DryRunRuleRequest, chainmailv1.DryRunRuleResponse]
+	RunRule      unaryFn[chainmailv1.RunRuleRequest, chainmailv1.RunRuleResponse]
+	ListRuleRuns unaryFn[chainmailv1.ListRuleRunsRequest, chainmailv1.ListRuleRunsResponse]
+	RulesStatus  unaryFn[chainmailv1.RulesStatusRequest, chainmailv1.RulesStatusResponse]
+
 	mu    sync.Mutex
 	calls []fakeCall
 }
@@ -145,6 +156,7 @@ type (
 	fakeWatchSvc    struct{ f *fakeDaemon }
 	fakeCacheSvc    struct{ f *fakeDaemon }
 	fakeItemsSvc    struct{ f *fakeDaemon }
+	fakeRulesSvc    struct{ f *fakeDaemon }
 )
 
 func (a fakeAccountSvc) ListAccounts(ctx context.Context, req *connect.Request[chainmailv1.ListAccountsRequest]) (*connect.Response[chainmailv1.ListAccountsResponse], error) {
@@ -363,6 +375,46 @@ func (i fakeItemsSvc) UnlinkThread(ctx context.Context, req *connect.Request[cha
 	return fakeUnary(ctx, i.f, chainmailv1connect.ItemsServiceUnlinkThreadProcedure, i.f.UnlinkThread, req)
 }
 
+func (r fakeRulesSvc) CreateRule(ctx context.Context, req *connect.Request[chainmailv1.CreateRuleRequest]) (*connect.Response[chainmailv1.CreateRuleResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceCreateRuleProcedure, r.f.CreateRule, req)
+}
+
+func (r fakeRulesSvc) UpdateRule(ctx context.Context, req *connect.Request[chainmailv1.UpdateRuleRequest]) (*connect.Response[chainmailv1.UpdateRuleResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceUpdateRuleProcedure, r.f.UpdateRule, req)
+}
+
+func (r fakeRulesSvc) DeleteRule(ctx context.Context, req *connect.Request[chainmailv1.DeleteRuleRequest]) (*connect.Response[chainmailv1.DeleteRuleResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceDeleteRuleProcedure, r.f.DeleteRule, req)
+}
+
+func (r fakeRulesSvc) RestoreRule(ctx context.Context, req *connect.Request[chainmailv1.RestoreRuleRequest]) (*connect.Response[chainmailv1.RestoreRuleResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceRestoreRuleProcedure, r.f.RestoreRule, req)
+}
+
+func (r fakeRulesSvc) GetRule(ctx context.Context, req *connect.Request[chainmailv1.GetRuleRequest]) (*connect.Response[chainmailv1.GetRuleResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceGetRuleProcedure, r.f.GetRule, req)
+}
+
+func (r fakeRulesSvc) ListRules(ctx context.Context, req *connect.Request[chainmailv1.ListRulesRequest]) (*connect.Response[chainmailv1.ListRulesResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceListRulesProcedure, r.f.ListRules, req)
+}
+
+func (r fakeRulesSvc) DryRunRule(ctx context.Context, req *connect.Request[chainmailv1.DryRunRuleRequest]) (*connect.Response[chainmailv1.DryRunRuleResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceDryRunRuleProcedure, r.f.DryRunRule, req)
+}
+
+func (r fakeRulesSvc) RunRule(ctx context.Context, req *connect.Request[chainmailv1.RunRuleRequest]) (*connect.Response[chainmailv1.RunRuleResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceRunRuleProcedure, r.f.RunRule, req)
+}
+
+func (r fakeRulesSvc) ListRuleRuns(ctx context.Context, req *connect.Request[chainmailv1.ListRuleRunsRequest]) (*connect.Response[chainmailv1.ListRuleRunsResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceListRuleRunsProcedure, r.f.ListRuleRuns, req)
+}
+
+func (r fakeRulesSvc) RulesStatus(ctx context.Context, req *connect.Request[chainmailv1.RulesStatusRequest]) (*connect.Response[chainmailv1.RulesStatusResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceRulesStatusProcedure, r.f.RulesStatus, req)
+}
+
 // startFake serves f until the test ends and sets f.Socket. The socket
 // lives under a short os.MkdirTemp path: Unix socket paths stop at 108 bytes.
 func startFake(t *testing.T, f *fakeDaemon) {
@@ -385,6 +437,7 @@ func startFake(t *testing.T, f *fakeDaemon) {
 	mux.Handle(chainmailv1connect.NewWatchServiceHandler(fakeWatchSvc{f: f}))
 	mux.Handle(chainmailv1connect.NewCacheServiceHandler(fakeCacheSvc{f: f}))
 	mux.Handle(chainmailv1connect.NewItemsServiceHandler(fakeItemsSvc{f: f}))
+	mux.Handle(chainmailv1connect.NewRulesServiceHandler(fakeRulesSvc{f: f}))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)

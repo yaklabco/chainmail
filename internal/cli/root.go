@@ -160,6 +160,7 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 		newWatchCmd(ctx, env, g),
 		newCacheCmd(ctx, env, g),
 		newItemCmd(ctx, env, g),
+		newRuleCmd(ctx, env, g),
 		skipSettings(newCompletionCmd()),
 		skipSettings(newManCmd()),
 		skipSettings(newDocsCmd()),
@@ -187,6 +188,7 @@ var commandGroups = []*cobra.Group{
 	{ID: "organize", Title: "Organize"},
 	{ID: "watch", Title: "Watch"},
 	{ID: "items", Title: "Items"},
+	{ID: "rules", Title: "Rules"},
 	{ID: "accounts", Title: "Accounts and auth"},
 	{ID: "admin", Title: "Admin"},
 }
@@ -201,6 +203,7 @@ var groupOf = map[string]string{
 	"label": "organize", "folder": "organize",
 	"watch":    "watch",
 	"item":     "items",
+	"rule":     "rules",
 	"accounts": "accounts", "auth": "accounts", "secret": "accounts",
 	"admin": "admin", "audit": "admin", "cache": "admin", "daemon": "admin", "mcp": "admin", "version": "admin", "completion": "admin",
 }

@@ -67,11 +67,19 @@ type routeFixture struct {
 
 func newRouteFixture(t *testing.T) *routeFixture {
 	t.Helper()
+	return newRouteFixtureConfig(t, routeConfig)
+}
+
+// newRouteFixtureConfig is newRouteFixture with the given config TOML,
+// which must name the accounts host, a hostinger account, and gmail, a
+// gmail one.
+func newRouteFixtureConfig(t *testing.T, configTOML string) *routeFixture {
+	t.Helper()
 	fakes := map[string]*fake.Store{"host": fake.New("host", false), "gmail": fake.New("gmail", true)}
 	for _, fk := range fakes {
 		fk.SetNow(routeClock{}.Now)
 	}
-	s, stateDB := newTestServerOptions(t, routeConfig, Options{
+	s, stateDB := newTestServerOptions(t, configTOML, Options{
 		NewStore: func(a config.ResolvedAccount) mailstore.Store { return fakes[a.Name] },
 		Now:      routeClock{}.Now,
 	})

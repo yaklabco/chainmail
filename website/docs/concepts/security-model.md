@@ -76,19 +76,25 @@ Everything taken from a message, such as subjects, addresses and bodies, comes b
 
 Item calls pass no policy gate, so any client allowed on the socket can create, change and delete items. Deletes are soft, and the audit log records every call, so a bad change can be found and undone (see [Work items](../guide/items.md)).
 
+## Rules act inside the policy
+
+Any client allowed on the socket can create, change and delete rules, as it can items. A rule's actions run in the daemon as its own user with client kind `rule`, through the same code as a client's call. So a forward goes through the allowlist and `max_recipients`, and a forward off the allowlist is held as a draft. `expunge` and folder deletion are not actions.
+
+The cap per run and auto-disable bound what a bad rule can do before someone notices, and trashed mail stays recoverable while `expunge` stays refused. Rule descriptions and queries come back wrapped as untrusted, since they are often copied from mail. No error message, hint, log line or row of a rule call holds a rule's description, query, folder or label name, forward address or note. The row of an action a rule takes is the row the same call writes for a client, so a `move` or `copy` names its folder. See [Rules](../guide/rules.md).
+
 ## Every change is audited
 
-The `audit` table in `state.db` records, for each call, the time, the caller's UID, the client kind, the account, the action, the targets, the decision, the result and the error reason. The client kind is `cli`, `mcp`, `live-test`, or `daemon` for work the daemon starts itself, such as a background probe. `chainmail audit` reads the table (see [The audit log](../guide/audit-log.md)).
+The `audit` table in `state.db` records, for each call, the time, the caller's UID, the client kind, the account, the action, the targets, the decision, the result and the error reason. The client kind is `cli`, `mcp`, `live-test`, `daemon` for work the daemon starts itself, such as a background probe, or `rule` for an action a rule takes. `chainmail audit` reads the table (see [The audit log](../guide/audit-log.md)).
 
 Every call is recorded except `admin status`, `audit`, `watch status`, `cache status` and a watch's acknowledgements, the `Ack` call. The table is append-only, because triggers refuse updates and deletes. If the audit write fails, the call fails too, so chainmail never reports success for something it could not record.
 
-The client kind is self-reported in the `Chainmail-Client` header, so any local caller can claim any kind. The caller's UID comes from the socket and is the authoritative identity.
+The client kind is self-reported in the `Chainmail-Client` header, so any local caller can claim any kind. The caller's UID comes from the socket and is the authoritative identity. A socket client that claims `daemon` or `rule` is recorded as `(invalid)`, so those kinds mark only the daemon's own work.
 
 ### Actions
 
-The audited reads are `accounts.list`, `account.test`, `secret.set`, `auth.login.begin`, `auth.login.finish`, `folders.list`, `search`, `get`, `get.raw`, `thread`, `attachment`, `watch.subscribe`, `watch.read`, `watch.groups.list`, `item.get` and `item.list`.
+The audited reads are `accounts.list`, `account.test`, `secret.set`, `auth.login.begin`, `auth.login.finish`, `folders.list`, `search`, `get`, `get.raw`, `thread`, `attachment`, `watch.subscribe`, `watch.read`, `watch.groups.list`, `item.get`, `item.list`, `rule.get`, `rule.list`, `rule.dry_run`, `rule.runs` and `rule.status`.
 
-The audited writes are `send`, `send_raw`, `reply`, `forward`, `upload`, `draft.create`, `draft.update`, `draft.send`, `draft.delete`, `move`, `copy`, `archive`, `trash`, `expunge`, `flags`, `labels`, `folders.create`, `folders.rename`, `folders.delete`, `limits.probe`, `watch.groups.delete`, `cache.rebuild`, `cache.evict`, `item.create`, `item.update`, `item.delete`, `item.restore`, `item.criteria`, `item.tick`, `item.block`, `item.link` and `item.unlink`.
+The audited writes are `send`, `send_raw`, `reply`, `forward`, `upload`, `draft.create`, `draft.update`, `draft.send`, `draft.delete`, `move`, `copy`, `archive`, `trash`, `expunge`, `flags`, `labels`, `folders.create`, `folders.rename`, `folders.delete`, `limits.probe`, `watch.groups.delete`, `cache.rebuild`, `cache.evict`, `item.create`, `item.update`, `item.delete`, `item.restore`, `item.criteria`, `item.tick`, `item.block`, `item.link`, `item.unlink`, `rule.create`, `rule.update`, `rule.delete`, `rule.restore` and `rule.run`.
 
 ### What a row holds
 
@@ -106,6 +112,9 @@ Rows never contain secret values or message content. A read's row holds counts a
 - A retried `item.create` with the same idempotency key records the decision `duplicate`.
 - A `search` row that used `item:` records `item_op=1`, never the item ID.
 - Item rows never hold titles, descriptions, notes, criterion text or evidence.
+- A rule row names the rule as `rule=<id>`, or `rule=unsaved` for a dry run of an unsaved rule. Where they apply, it also names the number of actions (`actions=<n>`), the changed field names (`fields=<names>`), the new revision (`revision=<n>`), the trigger (`trigger=<trigger>`), the outcome filter (`outcome=<outcome>`), the cap of a run (`max=<n>`), `history=1`, `enabled=<bool>`, `deleted=1`, and counts such as `accounts=<n>`, `matched=<n>`, `runs=<n>`, `rows=<n>` and `runners=<n>`.
+- An action a rule took has client kind `rule` and the daemon's UID, and its targets add `rule=<id>` and `run=<id>`.
+- Rule rows never hold a rule's description, query, label names, forward addresses or note.
 
 An account or secret name that is not a valid name, or a client kind that is not a short lowercase name, is recorded as `(invalid)`, and the call fails with `INVALID_ARGUMENT`.
 

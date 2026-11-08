@@ -35,6 +35,19 @@ const (
 	// per item and message. It carries the new event's account, folder, ref
 	// and message. Readers opt in, as for KindItem.
 	KindItemMail Kind = "item_mail"
+	// KindRule is a change to a rule: created, updated, deleted, restored,
+	// disabled or enabled. It has no account, folder or ref, and its
+	// payload never holds rule text. Readers opt in: a Filter matches it
+	// only when Kinds names it.
+	KindRule Kind = "rule"
+	// KindItemDueSoon, KindItemDue and KindItemOverdue say a work item
+	// reached a due stage: due within the configured number of days, due
+	// today, or past its due date. The kind is the stage. They have no
+	// account, folder or ref, and their payload never holds item text.
+	// Readers opt in, as for KindItem.
+	KindItemDueSoon Kind = "item_due_soon"
+	KindItemDue     Kind = "item_due"
+	KindItemOverdue Kind = "item_overdue"
 )
 
 // Status is a folder's sync state, as status events and sync_folders rows
@@ -91,12 +104,47 @@ type ItemChange struct {
 	Fields []string `json:"fields,omitempty"`
 }
 
+// RuleChange is the payload of a rule event: a change to a rule. It never
+// holds rule text (description, query, folder or label names, forward
+// addresses or notes).
+type RuleChange struct {
+	// RuleID is the changed rule's ID.
+	RuleID string `json:"rule_id"`
+	// Name is the rule's name after the change. Names allow no free text.
+	Name string `json:"name"`
+	// Change is what happened: created, updated, deleted, restored,
+	// disabled or enabled.
+	Change string `json:"change"`
+	// Revision is the rule's own revision after the change.
+	Revision int64 `json:"revision"`
+	// Actor is who made the change, as "<uid>/<client>".
+	Actor string `json:"actor"`
+	// Reason is why the runner disabled the rule, all_failed or
+	// repeated_failures, and empty otherwise.
+	Reason string `json:"reason,omitempty"`
+}
+
+// ItemDue is the payload of an item_due_soon, item_due or item_overdue
+// event: a work item reached that due stage. It never holds item text.
+type ItemDue struct {
+	// ItemID is the item's ID.
+	ItemID string `json:"item_id"`
+	// Type is the item's type.
+	Type string `json:"type"`
+	// DueDate is the item's due date, YYYY-MM-DD.
+	DueDate string `json:"due_date"`
+	// State is the item's state when the stage was reached.
+	State string `json:"state"`
+	// ParentID is the item's parent, empty for a root item.
+	ParentID string `json:"parent_id,omitempty"`
+}
+
 // Event is one entry in the log. Which optional fields are set depends on Kind.
 type Event struct {
 	ID       int64 // assigned by Append; 0 before
 	At       time.Time
 	Kind     Kind
-	Account  string // "" for item and the trimmed gap
+	Account  string // "" for item, rule and due events and the trimmed gap
 	Folder   string
 	Ref      string
 	Message  *Message    // new, item_mail
@@ -109,6 +157,8 @@ type Event struct {
 	Item     *ItemChange // item
 	ItemID   string      // item_mail
 	FromSelf bool        // item_mail: the message is from the account's own address
+	Rule     *RuleChange // rule
+	Due      *ItemDue    // item_due_soon, item_due, item_overdue
 }
 
 // The payload column holds one of these per kind, as JSON. expunged and
@@ -136,6 +186,12 @@ type (
 		ItemID   string   `json:"item_id"`
 		FromSelf bool     `json:"from_self"`
 		Message  *Message `json:"message"`
+	}
+	rulePayload struct {
+		Rule *RuleChange `json:"rule"`
+	}
+	duePayload struct {
+		Due *ItemDue `json:"due"`
 	}
 )
 
@@ -167,6 +223,16 @@ func encodePayload(e Event) (string, error) {
 			return "", fmt.Errorf("item_mail event for %s has no item", e.Ref)
 		}
 		v = itemMailPayload{ItemID: e.ItemID, FromSelf: e.FromSelf, Message: e.Message}
+	case KindRule:
+		if e.Rule == nil {
+			return "", errors.New("rule event has no change")
+		}
+		v = rulePayload{Rule: e.Rule}
+	case KindItemDueSoon, KindItemDue, KindItemOverdue:
+		if e.Due == nil {
+			return "", fmt.Errorf("%s event has no due item", e.Kind)
+		}
+		v = duePayload{Due: e.Due}
 	case KindExpunged, KindUnreadable:
 		return "{}", nil
 	default:
@@ -214,6 +280,16 @@ func decodePayload(e *Event, payload string) error {
 		var p itemMailPayload
 		if err = json.Unmarshal(data, &p); err == nil {
 			e.ItemID, e.FromSelf, e.Message = p.ItemID, p.FromSelf, p.Message
+		}
+	case KindRule:
+		var p rulePayload
+		if err = json.Unmarshal(data, &p); err == nil {
+			e.Rule = p.Rule
+		}
+	case KindItemDueSoon, KindItemDue, KindItemOverdue:
+		var p duePayload
+		if err = json.Unmarshal(data, &p); err == nil {
+			e.Due = p.Due
 		}
 	case KindExpunged, KindUnreadable:
 	default:

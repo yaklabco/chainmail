@@ -23,21 +23,24 @@ const (
 )
 
 // WatchFilter selects events. Empty fields match everything, except that
-// item and item_mail events come only to a reader that names them in kinds
-// or sets item. Status and gap events pass a kinds filter unless kinds
-// names them.
+// the opt-in kinds (item, item_mail, rule, item_due_soon, item_due and
+// item_overdue) come only to a reader that names them in kinds, or, for
+// every opt-in kind but rule, sets item. Status and gap events pass a kinds
+// filter unless kinds names them.
 type WatchFilter struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Accounts []string               `protobuf:"bytes,1,rep,name=accounts,proto3" json:"accounts,omitempty"`
-	// new, flags, expunged, status, gap, item or item_mail. Empty matches
-	// every kind but item and item_mail.
+	// new, flags, expunged, status, gap, item, item_mail, rule,
+	// item_due_soon, item_due or item_overdue. Empty matches every kind but
+	// the opt-in ones.
 	Kinds []string `protobuf:"bytes,2,rep,name=kinds,proto3" json:"kinds,omitempty"`
 	// A folder name or label. inbox also matches the Gmail label \Inbox.
+	// Item, rule and due events always pass it.
 	In string `protobuf:"bytes,3,opt,name=in,proto3" json:"in,omitempty"`
-	// An item ID. Limits item and item_mail events to that item and every
-	// live item below it, resolved when the read starts, and drops new, flags
-	// and expunged events. With no kinds it returns item, item_mail, status
-	// and gap events.
+	// An item ID. Limits item, item_mail and due events to that item and
+	// every live item below it, resolved when the read starts, and drops new,
+	// flags, expunged and rule events. With no kinds it returns item,
+	// item_mail, due, status and gap events.
 	Item          string `protobuf:"bytes,4,opt,name=item,proto3" json:"item,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -107,9 +110,11 @@ type WatchEvent struct {
 	// 0 for a trimmed gap, which is generated at read time.
 	Id int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
 	At *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=at,proto3" json:"at,omitempty"`
-	// new, flags, expunged, status, gap, item or item_mail.
+	// new, flags, expunged, status, gap, item, item_mail, rule,
+	// item_due_soon, item_due or item_overdue.
 	Kind string `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
-	// Empty for item, which belongs to no account.
+	// Empty for item, rule, item_due_soon, item_due and item_overdue, which
+	// belong to no account.
 	Account string `protobuf:"bytes,4,opt,name=account,proto3" json:"account,omitempty"`
 	Folder  string `protobuf:"bytes,5,opt,name=folder,proto3" json:"folder,omitempty"`
 	Ref     string `protobuf:"bytes,6,opt,name=ref,proto3" json:"ref,omitempty"`
@@ -133,7 +138,12 @@ type WatchEvent struct {
 	// item_mail: the item linked to the message's thread.
 	ItemId string `protobuf:"bytes,15,opt,name=item_id,json=itemId,proto3" json:"item_id,omitempty"`
 	// item_mail: the message is from the account's own address.
-	FromSelf      bool `protobuf:"varint,16,opt,name=from_self,json=fromSelf,proto3" json:"from_self,omitempty"`
+	FromSelf bool `protobuf:"varint,16,opt,name=from_self,json=fromSelf,proto3" json:"from_self,omitempty"`
+	// rule: what changed. It never holds rule text.
+	Rule *RuleChange `protobuf:"bytes,17,opt,name=rule,proto3" json:"rule,omitempty"`
+	// item_due_soon, item_due and item_overdue: the item that reached the
+	// stage the kind names. It never holds item text.
+	Due           *WorkItemDue `protobuf:"bytes,18,opt,name=due,proto3" json:"due,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -280,6 +290,20 @@ func (x *WatchEvent) GetFromSelf() bool {
 	return false
 }
 
+func (x *WatchEvent) GetRule() *RuleChange {
+	if x != nil {
+		return x.Rule
+	}
+	return nil
+}
+
+func (x *WatchEvent) GetDue() *WorkItemDue {
+	if x != nil {
+		return x.Due
+	}
+	return nil
+}
+
 // WorkItemChange is the payload of an item event. It never holds item text.
 type WorkItemChange struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
@@ -364,6 +388,183 @@ func (x *WorkItemChange) GetFields() []string {
 	return nil
 }
 
+// RuleChange is the payload of a rule event. It never holds rule text.
+type RuleChange struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// ru_ followed by lowercase letters, digits and underscores.
+	RuleId string `protobuf:"bytes,1,opt,name=rule_id,json=ruleId,proto3" json:"rule_id,omitempty"`
+	Name   string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// created, updated, deleted, restored, disabled or enabled.
+	Change string `protobuf:"bytes,3,opt,name=change,proto3" json:"change,omitempty"`
+	// The rule's own revision after the change. Each rule counts from 1.
+	Revision int64 `protobuf:"varint,4,opt,name=revision,proto3" json:"revision,omitempty"`
+	// <uid>/<client kind> of the change, such as 1000/mcp. <uid>/rule when
+	// the daemon turned the rule off.
+	Actor string `protobuf:"bytes,5,opt,name=actor,proto3" json:"actor,omitempty"`
+	// all_failed or repeated_failures when the daemon turned the rule off.
+	// Empty otherwise.
+	Reason        string `protobuf:"bytes,6,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RuleChange) Reset() {
+	*x = RuleChange{}
+	mi := &file_chainmail_v1_watch_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RuleChange) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RuleChange) ProtoMessage() {}
+
+func (x *RuleChange) ProtoReflect() protoreflect.Message {
+	mi := &file_chainmail_v1_watch_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RuleChange.ProtoReflect.Descriptor instead.
+func (*RuleChange) Descriptor() ([]byte, []int) {
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *RuleChange) GetRuleId() string {
+	if x != nil {
+		return x.RuleId
+	}
+	return ""
+}
+
+func (x *RuleChange) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *RuleChange) GetChange() string {
+	if x != nil {
+		return x.Change
+	}
+	return ""
+}
+
+func (x *RuleChange) GetRevision() int64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
+func (x *RuleChange) GetActor() string {
+	if x != nil {
+		return x.Actor
+	}
+	return ""
+}
+
+func (x *RuleChange) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// WorkItemDue is the payload of item_due_soon, item_due and item_overdue
+// events: a work item with a due date reached the stage the event's kind
+// names. Each stage fires once per item and due date. It never holds item
+// text: read the title with GetItem.
+type WorkItemDue struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	ItemId string                 `protobuf:"bytes,1,opt,name=item_id,json=itemId,proto3" json:"item_id,omitempty"`
+	// objective, key-result, initiative, epic, feature, story, bug,
+	// support-ticket or task.
+	Type string `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
+	// YYYY-MM-DD.
+	DueDate string `protobuf:"bytes,3,opt,name=due_date,json=dueDate,proto3" json:"due_date,omitempty"`
+	// backlog, in-progress or in-review. Done items get no due events.
+	State string `protobuf:"bytes,4,opt,name=state,proto3" json:"state,omitempty"`
+	// Empty for a root, or for a task in the inbox.
+	ParentId      string `protobuf:"bytes,5,opt,name=parent_id,json=parentId,proto3" json:"parent_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkItemDue) Reset() {
+	*x = WorkItemDue{}
+	mi := &file_chainmail_v1_watch_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkItemDue) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkItemDue) ProtoMessage() {}
+
+func (x *WorkItemDue) ProtoReflect() protoreflect.Message {
+	mi := &file_chainmail_v1_watch_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkItemDue.ProtoReflect.Descriptor instead.
+func (*WorkItemDue) Descriptor() ([]byte, []int) {
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *WorkItemDue) GetItemId() string {
+	if x != nil {
+		return x.ItemId
+	}
+	return ""
+}
+
+func (x *WorkItemDue) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *WorkItemDue) GetDueDate() string {
+	if x != nil {
+		return x.DueDate
+	}
+	return ""
+}
+
+func (x *WorkItemDue) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *WorkItemDue) GetParentId() string {
+	if x != nil {
+		return x.ParentId
+	}
+	return ""
+}
+
 // SubscribeRequest starts a stream. Set at most one of group and since.
 // Neither streams events from now on.
 type SubscribeRequest struct {
@@ -379,7 +580,7 @@ type SubscribeRequest struct {
 
 func (x *SubscribeRequest) Reset() {
 	*x = SubscribeRequest{}
-	mi := &file_chainmail_v1_watch_proto_msgTypes[3]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -391,7 +592,7 @@ func (x *SubscribeRequest) String() string {
 func (*SubscribeRequest) ProtoMessage() {}
 
 func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_watch_proto_msgTypes[3]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -404,7 +605,7 @@ func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeRequest.ProtoReflect.Descriptor instead.
 func (*SubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{3}
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *SubscribeRequest) GetGroup() string {
@@ -444,7 +645,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_chainmail_v1_watch_proto_msgTypes[4]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -456,7 +657,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_watch_proto_msgTypes[4]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -469,7 +670,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{4}
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Heartbeat) GetAt() *timestamppb.Timestamp {
@@ -499,7 +700,7 @@ type SubscribeResponse struct {
 
 func (x *SubscribeResponse) Reset() {
 	*x = SubscribeResponse{}
-	mi := &file_chainmail_v1_watch_proto_msgTypes[5]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -511,7 +712,7 @@ func (x *SubscribeResponse) String() string {
 func (*SubscribeResponse) ProtoMessage() {}
 
 func (x *SubscribeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_watch_proto_msgTypes[5]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -524,7 +725,7 @@ func (x *SubscribeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeResponse.ProtoReflect.Descriptor instead.
 func (*SubscribeResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{5}
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *SubscribeResponse) GetItem() isSubscribeResponse_Item {
@@ -587,7 +788,7 @@ type ReadEventsRequest struct {
 
 func (x *ReadEventsRequest) Reset() {
 	*x = ReadEventsRequest{}
-	mi := &file_chainmail_v1_watch_proto_msgTypes[6]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -599,7 +800,7 @@ func (x *ReadEventsRequest) String() string {
 func (*ReadEventsRequest) ProtoMessage() {}
 
 func (x *ReadEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_watch_proto_msgTypes[6]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -612,7 +813,7 @@ func (x *ReadEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadEventsRequest.ProtoReflect.Descriptor instead.
 func (*ReadEventsRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{6}
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ReadEventsRequest) GetGroup() string {
@@ -661,7 +862,7 @@ type ReadEventsResponse struct {
 
 func (x *ReadEventsResponse) Reset() {
 	*x = ReadEventsResponse{}
-	mi := &file_chainmail_v1_watch_proto_msgTypes[7]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -673,7 +874,7 @@ func (x *ReadEventsResponse) String() string {
 func (*ReadEventsResponse) ProtoMessage() {}
 
 func (x *ReadEventsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_watch_proto_msgTypes[7]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -686,7 +887,7 @@ func (x *ReadEventsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadEventsResponse.ProtoReflect.Descriptor instead.
 func (*ReadEventsResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{7}
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ReadEventsResponse) GetEvents() []*WatchEvent {
@@ -714,7 +915,7 @@ type AckRequest struct {
 
 func (x *AckRequest) Reset() {
 	*x = AckRequest{}
-	mi := &file_chainmail_v1_watch_proto_msgTypes[8]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -726,7 +927,7 @@ func (x *AckRequest) String() string {
 func (*AckRequest) ProtoMessage() {}
 
 func (x *AckRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_watch_proto_msgTypes[8]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -739,7 +940,7 @@ func (x *AckRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AckRequest.ProtoReflect.Descriptor instead.
 func (*AckRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{8}
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *AckRequest) GetGroup() string {
@@ -764,7 +965,7 @@ type AckResponse struct {
 
 func (x *AckResponse) Reset() {
 	*x = AckResponse{}
-	mi := &file_chainmail_v1_watch_proto_msgTypes[9]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -776,7 +977,7 @@ func (x *AckResponse) String() string {
 func (*AckResponse) ProtoMessage() {}
 
 func (x *AckResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_watch_proto_msgTypes[9]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -789,7 +990,7 @@ func (x *AckResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AckResponse.ProtoReflect.Descriptor instead.
 func (*AckResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{9}
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{11}
 }
 
 type GetWatchStatusRequest struct {
@@ -800,7 +1001,7 @@ type GetWatchStatusRequest struct {
 
 func (x *GetWatchStatusRequest) Reset() {
 	*x = GetWatchStatusRequest{}
-	mi := &file_chainmail_v1_watch_proto_msgTypes[10]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -812,7 +1013,7 @@ func (x *GetWatchStatusRequest) String() string {
 func (*GetWatchStatusRequest) ProtoMessage() {}
 
 func (x *GetWatchStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_watch_proto_msgTypes[10]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -825,7 +1026,7 @@ func (x *GetWatchStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetWatchStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetWatchStatusRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{10}
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{12}
 }
 
 // FolderSyncStatus is one synced folder.
@@ -848,7 +1049,7 @@ type FolderSyncStatus struct {
 
 func (x *FolderSyncStatus) Reset() {
 	*x = FolderSyncStatus{}
-	mi := &file_chainmail_v1_watch_proto_msgTypes[11]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -860,7 +1061,7 @@ func (x *FolderSyncStatus) String() string {
 func (*FolderSyncStatus) ProtoMessage() {}
 
 func (x *FolderSyncStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_watch_proto_msgTypes[11]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -873,7 +1074,7 @@ func (x *FolderSyncStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FolderSyncStatus.ProtoReflect.Descriptor instead.
 func (*FolderSyncStatus) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{11}
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *FolderSyncStatus) GetAccount() string {
@@ -941,7 +1142,7 @@ type GetWatchStatusResponse struct {
 
 func (x *GetWatchStatusResponse) Reset() {
 	*x = GetWatchStatusResponse{}
-	mi := &file_chainmail_v1_watch_proto_msgTypes[12]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -953,7 +1154,7 @@ func (x *GetWatchStatusResponse) String() string {
 func (*GetWatchStatusResponse) ProtoMessage() {}
 
 func (x *GetWatchStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_watch_proto_msgTypes[12]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -966,7 +1167,7 @@ func (x *GetWatchStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetWatchStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetWatchStatusResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{12}
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *GetWatchStatusResponse) GetFolders() []*FolderSyncStatus {
@@ -984,7 +1185,7 @@ type ListGroupsRequest struct {
 
 func (x *ListGroupsRequest) Reset() {
 	*x = ListGroupsRequest{}
-	mi := &file_chainmail_v1_watch_proto_msgTypes[13]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -996,7 +1197,7 @@ func (x *ListGroupsRequest) String() string {
 func (*ListGroupsRequest) ProtoMessage() {}
 
 func (x *ListGroupsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_watch_proto_msgTypes[13]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1009,7 +1210,7 @@ func (x *ListGroupsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListGroupsRequest.ProtoReflect.Descriptor instead.
 func (*ListGroupsRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{13}
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{15}
 }
 
 type GroupStatus struct {
@@ -1025,7 +1226,7 @@ type GroupStatus struct {
 
 func (x *GroupStatus) Reset() {
 	*x = GroupStatus{}
-	mi := &file_chainmail_v1_watch_proto_msgTypes[14]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1037,7 +1238,7 @@ func (x *GroupStatus) String() string {
 func (*GroupStatus) ProtoMessage() {}
 
 func (x *GroupStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_watch_proto_msgTypes[14]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1050,7 +1251,7 @@ func (x *GroupStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GroupStatus.ProtoReflect.Descriptor instead.
 func (*GroupStatus) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{14}
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *GroupStatus) GetName() string {
@@ -1097,7 +1298,7 @@ type ListGroupsResponse struct {
 
 func (x *ListGroupsResponse) Reset() {
 	*x = ListGroupsResponse{}
-	mi := &file_chainmail_v1_watch_proto_msgTypes[15]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1109,7 +1310,7 @@ func (x *ListGroupsResponse) String() string {
 func (*ListGroupsResponse) ProtoMessage() {}
 
 func (x *ListGroupsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_watch_proto_msgTypes[15]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1122,7 +1323,7 @@ func (x *ListGroupsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListGroupsResponse.ProtoReflect.Descriptor instead.
 func (*ListGroupsResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{15}
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ListGroupsResponse) GetGroups() []*GroupStatus {
@@ -1141,7 +1342,7 @@ type DeleteGroupRequest struct {
 
 func (x *DeleteGroupRequest) Reset() {
 	*x = DeleteGroupRequest{}
-	mi := &file_chainmail_v1_watch_proto_msgTypes[16]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1153,7 +1354,7 @@ func (x *DeleteGroupRequest) String() string {
 func (*DeleteGroupRequest) ProtoMessage() {}
 
 func (x *DeleteGroupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_watch_proto_msgTypes[16]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1166,7 +1367,7 @@ func (x *DeleteGroupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteGroupRequest.ProtoReflect.Descriptor instead.
 func (*DeleteGroupRequest) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{16}
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *DeleteGroupRequest) GetName() string {
@@ -1185,7 +1386,7 @@ type DeleteGroupResponse struct {
 
 func (x *DeleteGroupResponse) Reset() {
 	*x = DeleteGroupResponse{}
-	mi := &file_chainmail_v1_watch_proto_msgTypes[17]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1197,7 +1398,7 @@ func (x *DeleteGroupResponse) String() string {
 func (*DeleteGroupResponse) ProtoMessage() {}
 
 func (x *DeleteGroupResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_chainmail_v1_watch_proto_msgTypes[17]
+	mi := &file_chainmail_v1_watch_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1210,7 +1411,7 @@ func (x *DeleteGroupResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteGroupResponse.ProtoReflect.Descriptor instead.
 func (*DeleteGroupResponse) Descriptor() ([]byte, []int) {
-	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{17}
+	return file_chainmail_v1_watch_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *DeleteGroupResponse) GetDeleted() bool {
@@ -1229,7 +1430,7 @@ const file_chainmail_v1_watch_proto_rawDesc = "" +
 	"\baccounts\x18\x01 \x03(\tR\baccounts\x12\x14\n" +
 	"\x05kinds\x18\x02 \x03(\tR\x05kinds\x12\x0e\n" +
 	"\x02in\x18\x03 \x01(\tR\x02in\x12\x12\n" +
-	"\x04item\x18\x04 \x01(\tR\x04item\"\xc9\x03\n" +
+	"\x04item\x18\x04 \x01(\tR\x04item\"\xa4\x04\n" +
 	"\n" +
 	"WatchEvent\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12*\n" +
@@ -1248,13 +1449,29 @@ const file_chainmail_v1_watch_proto_rawDesc = "" +
 	"\anext_id\x18\r \x01(\x03R\x06nextId\x120\n" +
 	"\x04item\x18\x0e \x01(\v2\x1c.chainmail.v1.WorkItemChangeR\x04item\x12\x17\n" +
 	"\aitem_id\x18\x0f \x01(\tR\x06itemId\x12\x1b\n" +
-	"\tfrom_self\x18\x10 \x01(\bR\bfromSelf\"\x81\x01\n" +
+	"\tfrom_self\x18\x10 \x01(\bR\bfromSelf\x12,\n" +
+	"\x04rule\x18\x11 \x01(\v2\x18.chainmail.v1.RuleChangeR\x04rule\x12+\n" +
+	"\x03due\x18\x12 \x01(\v2\x19.chainmail.v1.WorkItemDueR\x03due\"\x81\x01\n" +
 	"\x0eWorkItemChange\x12\x17\n" +
 	"\aitem_id\x18\x01 \x01(\tR\x06itemId\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12\x1a\n" +
 	"\brevision\x18\x03 \x01(\x03R\brevision\x12\x0e\n" +
 	"\x02op\x18\x04 \x01(\tR\x02op\x12\x16\n" +
-	"\x06fields\x18\x05 \x03(\tR\x06fields\"\x80\x01\n" +
+	"\x06fields\x18\x05 \x03(\tR\x06fields\"\x9b\x01\n" +
+	"\n" +
+	"RuleChange\x12\x17\n" +
+	"\arule_id\x18\x01 \x01(\tR\x06ruleId\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x16\n" +
+	"\x06change\x18\x03 \x01(\tR\x06change\x12\x1a\n" +
+	"\brevision\x18\x04 \x01(\x03R\brevision\x12\x14\n" +
+	"\x05actor\x18\x05 \x01(\tR\x05actor\x12\x16\n" +
+	"\x06reason\x18\x06 \x01(\tR\x06reason\"\x88\x01\n" +
+	"\vWorkItemDue\x12\x17\n" +
+	"\aitem_id\x18\x01 \x01(\tR\x06itemId\x12\x12\n" +
+	"\x04type\x18\x02 \x01(\tR\x04type\x12\x19\n" +
+	"\bdue_date\x18\x03 \x01(\tR\adueDate\x12\x14\n" +
+	"\x05state\x18\x04 \x01(\tR\x05state\x12\x1b\n" +
+	"\tparent_id\x18\x05 \x01(\tR\bparentId\"\x80\x01\n" +
 	"\x10SubscribeRequest\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x19\n" +
 	"\x05since\x18\x02 \x01(\x03H\x00R\x05since\x88\x01\x01\x121\n" +
@@ -1336,62 +1553,66 @@ func file_chainmail_v1_watch_proto_rawDescGZIP() []byte {
 	return file_chainmail_v1_watch_proto_rawDescData
 }
 
-var file_chainmail_v1_watch_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_chainmail_v1_watch_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_chainmail_v1_watch_proto_goTypes = []any{
 	(*WatchFilter)(nil),            // 0: chainmail.v1.WatchFilter
 	(*WatchEvent)(nil),             // 1: chainmail.v1.WatchEvent
 	(*WorkItemChange)(nil),         // 2: chainmail.v1.WorkItemChange
-	(*SubscribeRequest)(nil),       // 3: chainmail.v1.SubscribeRequest
-	(*Heartbeat)(nil),              // 4: chainmail.v1.Heartbeat
-	(*SubscribeResponse)(nil),      // 5: chainmail.v1.SubscribeResponse
-	(*ReadEventsRequest)(nil),      // 6: chainmail.v1.ReadEventsRequest
-	(*ReadEventsResponse)(nil),     // 7: chainmail.v1.ReadEventsResponse
-	(*AckRequest)(nil),             // 8: chainmail.v1.AckRequest
-	(*AckResponse)(nil),            // 9: chainmail.v1.AckResponse
-	(*GetWatchStatusRequest)(nil),  // 10: chainmail.v1.GetWatchStatusRequest
-	(*FolderSyncStatus)(nil),       // 11: chainmail.v1.FolderSyncStatus
-	(*GetWatchStatusResponse)(nil), // 12: chainmail.v1.GetWatchStatusResponse
-	(*ListGroupsRequest)(nil),      // 13: chainmail.v1.ListGroupsRequest
-	(*GroupStatus)(nil),            // 14: chainmail.v1.GroupStatus
-	(*ListGroupsResponse)(nil),     // 15: chainmail.v1.ListGroupsResponse
-	(*DeleteGroupRequest)(nil),     // 16: chainmail.v1.DeleteGroupRequest
-	(*DeleteGroupResponse)(nil),    // 17: chainmail.v1.DeleteGroupResponse
-	(*timestamppb.Timestamp)(nil),  // 18: google.protobuf.Timestamp
-	(*MessageRow)(nil),             // 19: chainmail.v1.MessageRow
+	(*RuleChange)(nil),             // 3: chainmail.v1.RuleChange
+	(*WorkItemDue)(nil),            // 4: chainmail.v1.WorkItemDue
+	(*SubscribeRequest)(nil),       // 5: chainmail.v1.SubscribeRequest
+	(*Heartbeat)(nil),              // 6: chainmail.v1.Heartbeat
+	(*SubscribeResponse)(nil),      // 7: chainmail.v1.SubscribeResponse
+	(*ReadEventsRequest)(nil),      // 8: chainmail.v1.ReadEventsRequest
+	(*ReadEventsResponse)(nil),     // 9: chainmail.v1.ReadEventsResponse
+	(*AckRequest)(nil),             // 10: chainmail.v1.AckRequest
+	(*AckResponse)(nil),            // 11: chainmail.v1.AckResponse
+	(*GetWatchStatusRequest)(nil),  // 12: chainmail.v1.GetWatchStatusRequest
+	(*FolderSyncStatus)(nil),       // 13: chainmail.v1.FolderSyncStatus
+	(*GetWatchStatusResponse)(nil), // 14: chainmail.v1.GetWatchStatusResponse
+	(*ListGroupsRequest)(nil),      // 15: chainmail.v1.ListGroupsRequest
+	(*GroupStatus)(nil),            // 16: chainmail.v1.GroupStatus
+	(*ListGroupsResponse)(nil),     // 17: chainmail.v1.ListGroupsResponse
+	(*DeleteGroupRequest)(nil),     // 18: chainmail.v1.DeleteGroupRequest
+	(*DeleteGroupResponse)(nil),    // 19: chainmail.v1.DeleteGroupResponse
+	(*timestamppb.Timestamp)(nil),  // 20: google.protobuf.Timestamp
+	(*MessageRow)(nil),             // 21: chainmail.v1.MessageRow
 }
 var file_chainmail_v1_watch_proto_depIdxs = []int32{
-	18, // 0: chainmail.v1.WatchEvent.at:type_name -> google.protobuf.Timestamp
-	19, // 1: chainmail.v1.WatchEvent.message:type_name -> chainmail.v1.MessageRow
+	20, // 0: chainmail.v1.WatchEvent.at:type_name -> google.protobuf.Timestamp
+	21, // 1: chainmail.v1.WatchEvent.message:type_name -> chainmail.v1.MessageRow
 	2,  // 2: chainmail.v1.WatchEvent.item:type_name -> chainmail.v1.WorkItemChange
-	0,  // 3: chainmail.v1.SubscribeRequest.filter:type_name -> chainmail.v1.WatchFilter
-	18, // 4: chainmail.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
-	1,  // 5: chainmail.v1.SubscribeResponse.event:type_name -> chainmail.v1.WatchEvent
-	4,  // 6: chainmail.v1.SubscribeResponse.heartbeat:type_name -> chainmail.v1.Heartbeat
-	0,  // 7: chainmail.v1.ReadEventsRequest.filter:type_name -> chainmail.v1.WatchFilter
-	1,  // 8: chainmail.v1.ReadEventsResponse.events:type_name -> chainmail.v1.WatchEvent
-	18, // 9: chainmail.v1.FolderSyncStatus.last_sync_at:type_name -> google.protobuf.Timestamp
-	18, // 10: chainmail.v1.FolderSyncStatus.last_sweep_at:type_name -> google.protobuf.Timestamp
-	11, // 11: chainmail.v1.GetWatchStatusResponse.folders:type_name -> chainmail.v1.FolderSyncStatus
-	18, // 12: chainmail.v1.GroupStatus.created_at:type_name -> google.protobuf.Timestamp
-	18, // 13: chainmail.v1.GroupStatus.last_seen_at:type_name -> google.protobuf.Timestamp
-	14, // 14: chainmail.v1.ListGroupsResponse.groups:type_name -> chainmail.v1.GroupStatus
-	3,  // 15: chainmail.v1.WatchService.Subscribe:input_type -> chainmail.v1.SubscribeRequest
-	6,  // 16: chainmail.v1.WatchService.ReadEvents:input_type -> chainmail.v1.ReadEventsRequest
-	8,  // 17: chainmail.v1.WatchService.Ack:input_type -> chainmail.v1.AckRequest
-	10, // 18: chainmail.v1.WatchService.GetWatchStatus:input_type -> chainmail.v1.GetWatchStatusRequest
-	13, // 19: chainmail.v1.WatchService.ListGroups:input_type -> chainmail.v1.ListGroupsRequest
-	16, // 20: chainmail.v1.WatchService.DeleteGroup:input_type -> chainmail.v1.DeleteGroupRequest
-	5,  // 21: chainmail.v1.WatchService.Subscribe:output_type -> chainmail.v1.SubscribeResponse
-	7,  // 22: chainmail.v1.WatchService.ReadEvents:output_type -> chainmail.v1.ReadEventsResponse
-	9,  // 23: chainmail.v1.WatchService.Ack:output_type -> chainmail.v1.AckResponse
-	12, // 24: chainmail.v1.WatchService.GetWatchStatus:output_type -> chainmail.v1.GetWatchStatusResponse
-	15, // 25: chainmail.v1.WatchService.ListGroups:output_type -> chainmail.v1.ListGroupsResponse
-	17, // 26: chainmail.v1.WatchService.DeleteGroup:output_type -> chainmail.v1.DeleteGroupResponse
-	21, // [21:27] is the sub-list for method output_type
-	15, // [15:21] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	3,  // 3: chainmail.v1.WatchEvent.rule:type_name -> chainmail.v1.RuleChange
+	4,  // 4: chainmail.v1.WatchEvent.due:type_name -> chainmail.v1.WorkItemDue
+	0,  // 5: chainmail.v1.SubscribeRequest.filter:type_name -> chainmail.v1.WatchFilter
+	20, // 6: chainmail.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
+	1,  // 7: chainmail.v1.SubscribeResponse.event:type_name -> chainmail.v1.WatchEvent
+	6,  // 8: chainmail.v1.SubscribeResponse.heartbeat:type_name -> chainmail.v1.Heartbeat
+	0,  // 9: chainmail.v1.ReadEventsRequest.filter:type_name -> chainmail.v1.WatchFilter
+	1,  // 10: chainmail.v1.ReadEventsResponse.events:type_name -> chainmail.v1.WatchEvent
+	20, // 11: chainmail.v1.FolderSyncStatus.last_sync_at:type_name -> google.protobuf.Timestamp
+	20, // 12: chainmail.v1.FolderSyncStatus.last_sweep_at:type_name -> google.protobuf.Timestamp
+	13, // 13: chainmail.v1.GetWatchStatusResponse.folders:type_name -> chainmail.v1.FolderSyncStatus
+	20, // 14: chainmail.v1.GroupStatus.created_at:type_name -> google.protobuf.Timestamp
+	20, // 15: chainmail.v1.GroupStatus.last_seen_at:type_name -> google.protobuf.Timestamp
+	16, // 16: chainmail.v1.ListGroupsResponse.groups:type_name -> chainmail.v1.GroupStatus
+	5,  // 17: chainmail.v1.WatchService.Subscribe:input_type -> chainmail.v1.SubscribeRequest
+	8,  // 18: chainmail.v1.WatchService.ReadEvents:input_type -> chainmail.v1.ReadEventsRequest
+	10, // 19: chainmail.v1.WatchService.Ack:input_type -> chainmail.v1.AckRequest
+	12, // 20: chainmail.v1.WatchService.GetWatchStatus:input_type -> chainmail.v1.GetWatchStatusRequest
+	15, // 21: chainmail.v1.WatchService.ListGroups:input_type -> chainmail.v1.ListGroupsRequest
+	18, // 22: chainmail.v1.WatchService.DeleteGroup:input_type -> chainmail.v1.DeleteGroupRequest
+	7,  // 23: chainmail.v1.WatchService.Subscribe:output_type -> chainmail.v1.SubscribeResponse
+	9,  // 24: chainmail.v1.WatchService.ReadEvents:output_type -> chainmail.v1.ReadEventsResponse
+	11, // 25: chainmail.v1.WatchService.Ack:output_type -> chainmail.v1.AckResponse
+	14, // 26: chainmail.v1.WatchService.GetWatchStatus:output_type -> chainmail.v1.GetWatchStatusResponse
+	17, // 27: chainmail.v1.WatchService.ListGroups:output_type -> chainmail.v1.ListGroupsResponse
+	19, // 28: chainmail.v1.WatchService.DeleteGroup:output_type -> chainmail.v1.DeleteGroupResponse
+	23, // [23:29] is the sub-list for method output_type
+	17, // [17:23] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_chainmail_v1_watch_proto_init() }
@@ -1400,19 +1621,19 @@ func file_chainmail_v1_watch_proto_init() {
 		return
 	}
 	file_chainmail_v1_message_proto_init()
-	file_chainmail_v1_watch_proto_msgTypes[3].OneofWrappers = []any{}
-	file_chainmail_v1_watch_proto_msgTypes[5].OneofWrappers = []any{
+	file_chainmail_v1_watch_proto_msgTypes[5].OneofWrappers = []any{}
+	file_chainmail_v1_watch_proto_msgTypes[7].OneofWrappers = []any{
 		(*SubscribeResponse_Event)(nil),
 		(*SubscribeResponse_Heartbeat)(nil),
 	}
-	file_chainmail_v1_watch_proto_msgTypes[6].OneofWrappers = []any{}
+	file_chainmail_v1_watch_proto_msgTypes[8].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_chainmail_v1_watch_proto_rawDesc), len(file_chainmail_v1_watch_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   18,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

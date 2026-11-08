@@ -1,7 +1,7 @@
 ---
 title: "chainmail watch status"
 sidebar_label: "watch status"
-sidebar_position: 70
+sidebar_position: 83
 description: "Show each synced folder's mode, state, last sync and last error"
 ---
 

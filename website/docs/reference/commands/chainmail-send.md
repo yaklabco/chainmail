@@ -1,7 +1,7 @@
 ---
 title: "chainmail send"
 sidebar_label: "send"
-sidebar_position: 60
+sidebar_position: 73
 description: "Send a new message"
 ---
 

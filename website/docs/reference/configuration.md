@@ -22,7 +22,7 @@ The CLI's own settings, such as the socket and the output format, live in a diff
 
 ### How the file is checked
 
-- An unknown key is an error, and the message names it, such as `unknown config key: rules`.
+- An unknown key is an error, and the message names it, such as `unknown config key: rules.time_zone`.
 - A key with a capital letter is an error, such as `[Policy]`. So is a key with a dot inside quotes, such as `[accounts."a.b"]`.
 - A value of the wrong type is an error, such as `pool = "2"`.
 - No environment variable can set or change a key.
@@ -33,8 +33,6 @@ A config error stops the daemon at startup. It exits 1 with the reason `INTERNAL
 ```text
 config /etc/chainmail/config.toml: invalid config: policy.max_recipients must be 1 to 500; watch.retention: 30m must be between 1h and 2160h
 ```
-
-Keys from the full design, such as `rules`, belong to later sub-projects. This version rejects them as unknown.
 
 ## Value formats
 
@@ -131,6 +129,11 @@ backfill_batch = 250
 backfill_pause = "250ms"
 fresh_lag = "30s"                  # how far the cache may trail mail events and still answer
 # dir = "/var/cache/chainmail"     # default: the daemon's --state-dir
+
+[rules]
+timezone = "America/Los_Angeles"   # default: the daemon's local zone
+due_time = "08:00"                 # when item due events fire
+due_soon_days = 2                  # 0 turns item_due_soon off
 ```
 
 ## `[daemon]`
@@ -260,6 +263,18 @@ The local cache of every account. Every key but `max_size` and `dir` can also be
 | `backfill_pause` | cache duration | `250ms` | `0s` to `60s` | The pause between backfill batches. |
 | `fresh_lag` | cache duration | `30s` | `1s` to `10m` | How far the cache may trail the account's mail events and still answer searches. |
 | `dir` | string | the daemon's `--state-dir` | an absolute path | The directory for `cache.db`. Global only. The daemon creates a missing directory with mode `0700`. |
+
+## `[rules]`
+
+When rules and item due events fire. The table is optional, and every key has a default. Rules themselves live in `state.db`, not here. See [Rules](../guide/rules.md) and [due events](../guide/items.md#due-events).
+
+| Key | Type | Default | Valid values | What it does |
+|---|---|---|---|---|
+| `timezone` | string | the daemon's local zone, from `TZ` or `/etc/localtime` | an IANA zone name, such as `America/Los_Angeles` or `UTC` | The zone of `at:` schedules and of `due_time`. The binary carries its own copy of the zone database, so a host without zoneinfo accepts any name. |
+| `due_time` | string | `08:00` | `HH:MM` from `00:00` to `23:59`, two digits each | The time of day item due events fire. |
+| `due_soon_days` | integer | `2` | `0` to `30` | How many days before its due date an item raises `item_due_soon`. `0` turns `item_due_soon` off. |
+
+On NixOS set them under `services.chainmail.settings.rules`.
 
 ## Vault secrets
 

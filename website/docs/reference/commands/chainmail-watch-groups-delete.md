@@ -1,7 +1,7 @@
 ---
 title: "chainmail watch groups delete"
 sidebar_label: "watch groups delete"
-sidebar_position: 69
+sidebar_position: 82
 description: "Delete a watch group, so its next use starts at the newest event"
 ---
 

@@ -22,7 +22,7 @@ Items never live in `cache.db`, so deleting the cache loses none of them. [Items
 | State | `backlog`, `in-progress`, `in-review` or `done`. A new item starts in `backlog`. |
 | Area | `work` or `personal`. |
 | Priority | `p0` to `p3`. |
-| Start and due dates | `YYYY-MM-DD`. |
+| Start and due dates | `YYYY-MM-DD`. An open item with a due date raises [due events](#due-events). |
 | Estimate | A number of zero or more, in a unit of your choosing. |
 
 An item without an area or a priority of its own takes its nearest ancestor's. A root item must have an area of its own, and a root without a priority counts as `p2`. `item show` gives both the item's own values and the effective ones, and `item list` gives the effective ones.
@@ -119,6 +119,8 @@ Moving or archiving a linked message does not change the key, so the link surviv
 
 A thread can link to several items, and an item to several threads. A message with no thread key cannot be linked, and `--anchor` on a message without a Message-ID is refused. A deleted item cannot be linked.
 
+A rule's `link_item` action links threads the same way, as mail arrives (see [Rules](./rules.md#actions)).
+
 `item unlink <id> <account> <thread-key>` removes a link. It takes an account that is no longer in the config too. `item show` lists each link's account and thread key.
 
 ```sh
@@ -182,19 +184,40 @@ The daemon writes an `item_mail` event in the same transaction as the message's 
 
 The daemon trims its record of which messages raised an event hourly, together with the event log, once a row is older than `watch.retention`. After that, a copy of the message that arrives in another folder raises the event again.
 
+### Due events
+
+Three more opt-in kinds report due dates: `item_due_soon`, `item_due` and `item_overdue`. Each fires at `[rules] due_time` in `[rules] timezone`, 08:00 in the daemon's local zone by default.
+
+| Kind | Fires on |
+|---|---|
+| `item_due_soon` | `due_soon_days` days before the due date, 2 by default. `due_soon_days = 0` turns it off. |
+| `item_due` | The due date. |
+| `item_overdue` | The day after the due date. |
+
+The event's `due` field holds `item_id`, `type`, `due_date`, `state` and `parent_id`. The event has no account or folder. It never holds item text, so read the title with `item show` or `get_item`.
+
+- Only open items count: items with a due date that are not `done` and not deleted.
+- Each stage fires once for each item and due date. A new due date gives new stages, which fire again.
+- When an item first reaches a stage, only the most advanced stage it has reached fires, and the earlier ones never will. An item created already overdue gets one `item_overdue`. An item made due tomorrow, with `due_soon_days = 2`, gets `item_due_soon` at once.
+- No stage repeats, so an overdue item gets one `item_overdue` for each due date.
+- The daemon checks every open item at `due_time` each day and when it starts. A machine that was asleep at `due_time` gets the check within about 5 minutes of waking. It also checks an item in the same transaction as its creation, its restore, or an update that changes its due date or state.
+
+The `[rules]` keys are in the [configuration reference](../reference/configuration.md#rules).
+
 ### Watching for item events
 
-`chainmail watch --kind item,item_mail` asks for both kinds.
+`chainmail watch --kind item,item_mail` asks for both kinds, and `--kind item_due,item_overdue` for two of the due kinds.
 
 ```sh
 chainmail watch --group lathe --kind item
 chainmail watch --kind item,item_mail --item it_admin_work
+chainmail watch --group follow-ups --kind item_due,item_overdue
 ```
 
-- `--item <id>` limits both kinds to that item and every live item below it, resolved when the watch starts.
-- With `--item` and no `--kind`, a watch gets `item`, `item_mail`, `status` and `gap` events, and never `new`, `flags` or `expunged` events.
-- `--account` applies to `item_mail` events and not to `item` events, which have no account.
-- `item` events pass any `--in`, and `item_mail` events match `--in` as `new` events do.
+- `--item <id>` limits the item kinds, the due kinds included, to that item and every live item below it, resolved when the watch starts.
+- With `--item` and no `--kind`, a watch gets `item`, `item_mail`, due, `status` and `gap` events, and never `new`, `flags`, `expunged` or `rule` events.
+- `--account` applies to `item_mail` events and not to `item` or due events, which have no account.
+- `item` and due events pass any `--in`, and `item_mail` events match `--in` as `new` events do.
 - An unknown or deleted item fails with `NOT_FOUND`.
 
 The MCP tool `read_events` takes the same kinds and an `item` input.

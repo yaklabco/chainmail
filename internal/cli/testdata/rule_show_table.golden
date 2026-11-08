@@ -1,0 +1,35 @@
+id           ru_01jcb7m2k9r8q3v4w5x6y7z8a9
+name         receipts
+state        enabled
+accounts     gmail, gwork
+query        from:stripe.com subject:receipt
+triggers     new, every:6h
+priority     50
+stop         false
+max per run  500
+revision     3
+failed runs  0
+next run     2026-11-07 15:00
+last run     2026-11-07 09:00
+created      2026-11-07 09:00 by 1000/mcp
+updated      2026-11-07 10:00 by 1000/cli
+deleted      -
+
+description:
+  Stripe receipts.
+
+  File them under [31mAdmin.
+
+actions:
+  label=Receipts
+  link_item=it_admin_work,anchor
+  forward=books@example.com
+    note: for the books
+  archive
+
+last 30 days: 14 runs, 40 matched, 37 applied, 2 held, 1 failed
+recent runs:
+ID  ACCOUNT  TRIGGER   STARTED           OUTCOME          MATCHED  APPLIED  HELD  SKIPPED  FAILED  REASON
+12  gmail    new       2026-11-07 09:30  ok               2        1        1     0        0       -
+11  gwork    schedule  2026-11-07 09:00  cache_not_ready  0        0        0     0        0       CACHE_NOT_READY
+run 11 hint: the cache has not caught up; run: chainmail cache status

@@ -1,7 +1,7 @@
 ---
 title: Watching for mail
 description: Stream new mail, flag changes and expunges from the daemon's event log, and resume where you left off.
-sidebar_position: 5
+sidebar_position: 6
 ---
 
 # Watching for mail
@@ -65,22 +65,24 @@ Every event has `id`, `at`, `kind`, `account` and `folder`. The rest depends on 
 | `gap` | `reason`, `next_id` | Events are missing. `trimmed` means the log no longer holds them, and `uidvalidity` means the server renumbered the folder. |
 | `item` | `item` | An item changed. Watchers get it only when they ask for it (see [item events](./items.md#item-events)). |
 | `item_mail` | `ref`, `message`, `item_id`, `from_self` | New mail arrived on a thread linked to an item. Watchers get it only when they ask for it. |
+| `rule` | `rule` | A rule changed. `rule` holds `rule_id`, `name`, `change`, `revision`, `actor` and, when the rule turned itself off, `reason`. Watchers get it only when they ask for it (see [rule events](./rules.md#rule-events)). |
+| `item_due_soon`, `item_due`, `item_overdue` | `due` | A work item reached a due stage. `due` holds `item_id`, `type`, `due_date`, `state` and `parent_id`. Watchers get these only when they ask for them (see [due events](./items.md#due-events)). |
 
 ### JSON lines
 
-`chainmail watch --output json` prints one line per event, with every field, empty ones included, as other commands do. Like other 64-bit fields, `id`, `next_id`, a message's `size` and an `item` event's `revision` are JSON strings. These lines are what it prints for each mail kind:
+`chainmail watch --output json` prints one line per event, with every field, empty ones included, as other commands do. Like other 64-bit fields, `id`, `next_id`, a message's `size`, and the `revision` of an `item` or `rule` event are JSON strings. These lines are what it prints for each mail kind:
 
 ```json
-{"id":"1","at":"2026-11-02T10:00:01Z","kind":"new","account":"host","folder":"INBOX","ref":"cm1:host:INBOX:1:1","message":{"ref":"cm1:host:INBOX:1:1","account":"host","folder":"INBOX","date":"2026-11-02T10:00:00Z","internal_date":"2026-11-02T10:00:00Z","from":[{"name":{"untrusted":"Sam"},"email":{"untrusted":"sam@example.org"}}],"to":[],"subject":{"untrusted":"Hello"},"flags":[],"size":"300","has_attachment":false,"thread_id":"","labels":[],"snippet":null,"thread_count":0},"flags":[],"labels":[],"state":"","detail":"","reason":"","next_id":"0","item":null,"item_id":"","from_self":false}
-{"id":"2","at":"2026-11-02T10:00:02Z","kind":"flags","account":"host","folder":"INBOX","ref":"cm1:host:INBOX:1:1","message":null,"flags":["\\Seen"],"labels":["Work"],"state":"","detail":"","reason":"","next_id":"0","item":null,"item_id":"","from_self":false}
-{"id":"3","at":"2026-11-02T10:00:03Z","kind":"status","account":"host","folder":"INBOX","ref":"","message":null,"flags":[],"labels":[],"state":"watching","detail":"","reason":"","next_id":"0","item":null,"item_id":"","from_self":false}
-{"id":"4","at":"2026-11-02T10:00:04Z","kind":"expunged","account":"host","folder":"INBOX","ref":"cm1:host:INBOX:1:2","message":null,"flags":[],"labels":[],"state":"","detail":"","reason":"","next_id":"0","item":null,"item_id":"","from_self":false}
-{"id":"0","at":"2026-11-02T10:00:05Z","kind":"gap","account":"","folder":"","ref":"","message":null,"flags":[],"labels":[],"state":"","detail":"","reason":"trimmed","next_id":"9","item":null,"item_id":"","from_self":false}
+{"id":"1","at":"2026-11-02T10:00:01Z","kind":"new","account":"host","folder":"INBOX","ref":"cm1:host:INBOX:1:1","message":{"ref":"cm1:host:INBOX:1:1","account":"host","folder":"INBOX","date":"2026-11-02T10:00:00Z","internal_date":"2026-11-02T10:00:00Z","from":[{"name":{"untrusted":"Sam"},"email":{"untrusted":"sam@example.org"}}],"to":[],"subject":{"untrusted":"Hello"},"flags":[],"size":"300","has_attachment":false,"thread_id":"","labels":[],"snippet":null,"thread_count":0},"flags":[],"labels":[],"state":"","detail":"","reason":"","next_id":"0","item":null,"item_id":"","from_self":false,"rule":null,"due":null}
+{"id":"2","at":"2026-11-02T10:00:02Z","kind":"flags","account":"host","folder":"INBOX","ref":"cm1:host:INBOX:1:1","message":null,"flags":["\\Seen"],"labels":["Work"],"state":"","detail":"","reason":"","next_id":"0","item":null,"item_id":"","from_self":false,"rule":null,"due":null}
+{"id":"3","at":"2026-11-02T10:00:03Z","kind":"status","account":"host","folder":"INBOX","ref":"","message":null,"flags":[],"labels":[],"state":"watching","detail":"","reason":"","next_id":"0","item":null,"item_id":"","from_self":false,"rule":null,"due":null}
+{"id":"4","at":"2026-11-02T10:00:04Z","kind":"expunged","account":"host","folder":"INBOX","ref":"cm1:host:INBOX:1:2","message":null,"flags":[],"labels":[],"state":"","detail":"","reason":"","next_id":"0","item":null,"item_id":"","from_self":false,"rule":null,"due":null}
+{"id":"0","at":"2026-11-02T10:00:05Z","kind":"gap","account":"","folder":"","ref":"","message":null,"flags":[],"labels":[],"state":"","detail":"","reason":"trimmed","next_id":"9","item":null,"item_id":"","from_self":false,"rule":null,"due":null}
 ```
 
 Subjects, names, addresses and snippets come from the message and are untrusted, wrapped as `{"untrusted": "..."}` as in search rows. Folder names, flags and labels come from the server.
 
-On a terminal each event is one line instead: the time, the kind, the account and the folder, then what happened. That is a new message's subject, a changed message's ref with its flags and labels, an expunged message's ref, a status's state and detail, a gap's reason and next ID, an item change's item ID, type, op, fields and revision, or an `item_mail` event's item ID and subject, with `(from self)` for the account's own mail. Every value is cleaned of terminal control characters.
+On a terminal each event is one line instead: the time, the kind, the account and the folder, then what happened. That is a new message's subject, a changed message's ref with its flags and labels, an expunged message's ref, a status's state and detail, a gap's reason and next ID, an item change's item ID, type, op, fields and revision, an `item_mail` event's item ID and subject with `(from self)` for the account's own mail, a rule change's rule ID, name, change, reason, revision and actor, or a due event's item ID, type, due date and state. Every value is cleaned of terminal control characters.
 
 ### Gaps
 
@@ -111,7 +113,7 @@ chainmail watch groups delete <name>
 
 ### Where a read starts
 
-- `--group <name>` resumes after the group's acknowledged event. A group is created the first time it is used, at the newest event, so a new group sees only what comes after. Group names match `^[a-z0-9][a-z0-9._-]{0,63}$` and may not start with `cache.`, which names the groups the daemon's cache reads the log through.
+- `--group <name>` resumes after the group's acknowledged event. A group is created the first time it is used, at the newest event, so a new group sees only what comes after. Group names match `^[a-z0-9][a-z0-9._-]{0,63}$` and may not start with `cache.` or `rules.`, which name the groups the daemon's cache and its rule runners read the log through.
 - `--since <id>` resumes after that event ID, or after a heartbeat's position.
 - Neither starts with the events that arrive from now on.
 
@@ -126,11 +128,12 @@ chainmail watch --since 0 --account work --in inbox --once
 
 Filters apply in the daemon.
 
-- `--account`, repeatable, keeps the named accounts' events. An unknown account fails with `NOT_FOUND`.
-- `--kind` takes `new`, `flags`, `expunged`, `status`, `gap`, `item` and `item_mail`, comma separated or repeated. Without `--kind`, a watch gets every kind except `item` and `item_mail`.
+- `--account`, repeatable, keeps the named accounts' events. Events with no account, such as `item`, `rule` and due events, pass it. An unknown account fails with `NOT_FOUND`.
+- `--kind` takes `new`, `flags`, `expunged`, `status`, `gap`, `item`, `item_mail`, `rule`, `item_due_soon`, `item_due` and `item_overdue`, comma separated or repeated.
+- Without `--kind`, a watch gets every kind except the six opt-in kinds: `item`, `item_mail`, `rule` and the three due kinds.
 - `status` and `gap` events pass a `--kind` list that names neither of them. So a `--kind new` watcher still hears about gaps and auth problems.
-- `--in` keeps events whose folder or Gmail labels match, ignoring case. `inbox` also matches Gmail's `\Inbox` label and `sent` matches `\Sent`. `status` and `gap` events always pass `--in`.
-- `--item <id>` keeps the `item` and `item_mail` events of that item and every live item below it, and drops `new`, `flags` and `expunged` events (see [item events](./items.md#item-events)).
+- `--in` keeps events whose folder or Gmail labels match, ignoring case. `inbox` also matches Gmail's `\Inbox` label and `sent` matches `\Sent`. `status` and `gap` events always pass `--in`, and so do `item`, `rule` and due events, which have no folder.
+- `--item <id>` keeps the `item`, `item_mail` and due events of that item and every live item below it, and drops `new`, `flags`, `expunged` and `rule` events (see [item events](./items.md#item-events)).
 
 ### Trimming
 
@@ -138,9 +141,9 @@ A start older than the oldest event kept, after a trim, first gets a `trimmed` g
 
 The daemon trims the log when it starts and every hour after. It removes events older than `watch.retention` or beyond `watch.max_events`, oldest first, whatever any group has acknowledged. A group that falls further behind than that gets a gap.
 
-A group not used for longer than `watch.retention` is removed with the events. The cache's own `cache.` groups are the exception and never expire.
+A group not used for longer than `watch.retention` is removed with the events. The daemon's own `cache.` and `rules.` groups are the exception and never expire.
 
-`chainmail watch groups` lists the groups, leaving out the cache's, with the event each has acknowledged, how many events lie past it, its creation time and its last use. `chainmail watch groups delete <name>` removes one, so its next use starts at the newest event. Deleting a group that does not exist succeeds with `deleted` false.
+`chainmail watch groups` lists the groups, leaving out the daemon's own `cache.` and `rules.` groups, with the event each has acknowledged, how many events lie past it, its creation time and its last use. `chainmail watch groups delete <name>` removes one, so its next use starts at the newest event. Deleting a group that does not exist succeeds with `deleted` false.
 
 ```sh
 chainmail watch groups

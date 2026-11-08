@@ -27,8 +27,9 @@ const (
 	// subscribePage is how many events a Subscribe stream reads at a time.
 	subscribePage = 100
 	// groupHint answers an invalid group name. Names starting with cache.
-	// are the daemon's own (watch.IsCacheGroup).
-	groupHint = "group names are lowercase letters, digits, dot, dash and underscore, and do not start with cache."
+	// and rules. are the daemon's own (watch.IsCacheGroup,
+	// watch.IsRulesGroup).
+	groupHint = "group names are lowercase letters, digits, dot, dash and underscore, and do not start with cache. or rules."
 	// maxReadWaitSeconds is the longest ReadEvents wait.
 	maxReadWaitSeconds = 60
 	// defaultReadLimit is the ReadEvents page size when a request sets none.
@@ -51,7 +52,10 @@ const (
 
 var (
 	errGroupName = &argError{msg: "invalid group name", hint: groupHint}
-	errWatchKind = &argError{msg: "kinds must be new, flags, expunged, status, gap, item or item_mail", hint: "leave kinds empty for every kind but item and item_mail"}
+	errWatchKind = &argError{
+		msg:  "kinds must be new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due or item_overdue",
+		hint: "leave kinds empty for every kind but item, item_mail, rule, item_due_soon, item_due and item_overdue",
+	}
 	errReadWait  = &argError{msg: "wait_seconds must be 0 to 60", hint: "0 returns at once"}
 	errReadLimit = &argError{msg: "limit must be 0 to 200", hint: "0 means 50"}
 	errAckID     = &argError{msg: "id must be 0 or more", hint: "acknowledge an event ID or a heartbeat position"}
@@ -59,13 +63,17 @@ var (
 
 // kindNames maps the API's event kind names to the log's.
 var kindNames = map[string]watch.Kind{
-	string(watch.KindNew):      watch.KindNew,
-	string(watch.KindFlags):    watch.KindFlags,
-	string(watch.KindExpunged): watch.KindExpunged,
-	string(watch.KindStatus):   watch.KindStatus,
-	string(watch.KindGap):      watch.KindGap,
-	string(watch.KindItem):     watch.KindItem,
-	string(watch.KindItemMail): watch.KindItemMail,
+	string(watch.KindNew):         watch.KindNew,
+	string(watch.KindFlags):       watch.KindFlags,
+	string(watch.KindExpunged):    watch.KindExpunged,
+	string(watch.KindStatus):      watch.KindStatus,
+	string(watch.KindGap):         watch.KindGap,
+	string(watch.KindItem):        watch.KindItem,
+	string(watch.KindItemMail):    watch.KindItemMail,
+	string(watch.KindRule):        watch.KindRule,
+	string(watch.KindItemDueSoon): watch.KindItemDueSoon,
+	string(watch.KindItemDue):     watch.KindItemDue,
+	string(watch.KindItemOverdue): watch.KindItemOverdue,
 }
 
 // watchService implements chainmailv1connect.WatchServiceHandler.
@@ -594,9 +602,11 @@ func (w *watchService) ListGroups(ctx context.Context, req *connect.Request[chai
 	if listErr != nil {
 		listErr = w.s.watchLogErr(listErr)
 	}
-	// The cache's groups belong to the daemon: they are left out of the
-	// list and of its audited count.
-	groups = slices.DeleteFunc(groups, func(g watch.GroupInfo) bool { return watch.IsCacheGroup(g.Name) })
+	// The cache's and the rule runners' groups belong to the daemon: they
+	// are left out of the list and of its audited count.
+	groups = slices.DeleteFunc(groups, func(g watch.GroupInfo) bool {
+		return watch.IsCacheGroup(g.Name) || watch.IsRulesGroup(g.Name)
+	})
 	entry := audit.Entry{Action: "watch.groups.list", Targets: []string{tally("groups", len(groups))}}
 	if err := w.s.record(ctx, c, entry, listErr); err != nil {
 		return nil, err

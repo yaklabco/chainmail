@@ -183,6 +183,8 @@ var (
 	// errAuditAccount has fixed text: the name is client-supplied bytes of any size.
 	errAuditAccount = &argError{msg: "unknown account", hint: "leave account empty for all accounts; run: chainmail accounts list"}
 	errAuditSince   = &argError{msg: "since is not a valid time", hint: "send a time between the years 1 and 9999"}
+	// errAuditClient has fixed text: the kind is client-supplied bytes of any size.
+	errAuditClient = &argError{msg: "invalid client kind", hint: "client kinds are lowercase letters, digits, dot, dash and underscore, such as cli, mcp or rule"}
 )
 
 // ReadAudit returns audit rows newest first, paged by before_id. Like
@@ -234,6 +236,9 @@ func (s *Server) auditQuery(req *chainmailv1.ReadAuditRequest) (audit.Query, err
 			return audit.Query{}, errAuditAccount
 		}
 	}
+	if client := req.GetClient(); client != "" && !clientKindRE.MatchString(client) {
+		return audit.Query{}, errAuditClient
+	}
 	since := s.opts.Now().Add(-defaultAuditWindow)
 	if ts := req.GetSince(); ts != nil {
 		if ts.CheckValid() != nil {
@@ -245,6 +250,7 @@ func (s *Server) auditQuery(req *chainmailv1.ReadAuditRequest) (audit.Query, err
 		Since:    since,
 		Account:  req.GetAccount(),
 		Action:   req.GetAction(),
+		Client:   req.GetClient(),
 		Limit:    limit,
 		BeforeID: req.GetBeforeId(),
 	}, nil

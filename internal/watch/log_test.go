@@ -368,3 +368,83 @@ func TestReadItemKinds(t *testing.T) {
 		})
 	}
 }
+
+// rule and due events survive Publish and Read with every field intact.
+// None has an account, folder or ref.
+func TestRuleAndDuePayloadRoundTrip(t *testing.T) {
+	t.Parallel()
+	l, _, _ := newLog(t)
+	at := time.Date(2026, 11, 7, 8, 0, 0, 123456789, time.UTC)
+	in := []Event{
+		{At: at, Kind: KindRule, Rule: &RuleChange{RuleID: "ru_01", Name: "receipts", Change: "created", Revision: 1, Actor: "1000/cli"}},
+		{At: at, Kind: KindRule, Rule: &RuleChange{RuleID: "ru_01", Name: "receipts", Change: "disabled", Revision: 4, Actor: "1000/rule", Reason: "all_failed"}},
+		{At: at, Kind: KindItemDueSoon, Due: &ItemDue{ItemID: "it_01", Type: "task", DueDate: "2026-11-09", State: "backlog", ParentID: "it_admin_work"}},
+		{At: at, Kind: KindItemDue, Due: &ItemDue{ItemID: "it_02", Type: "story", DueDate: "2026-11-07", State: "in-progress"}},
+		{At: at, Kind: KindItemOverdue, Due: &ItemDue{ItemID: "it_03", Type: "bug", DueDate: "2026-11-01", State: "in-review", ParentID: "it_01"}},
+	}
+	stored := publish(t, l, in...)
+	page, err := l.Read(t.Context(), Query{Filter: Filter{Kinds: []Kind{KindRule, KindItemDueSoon, KindItemDue, KindItemOverdue}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != len(stored) {
+		t.Fatalf("read %d events, want %d", len(page.Events), len(stored))
+	}
+	for i, got := range page.Events {
+		if !reflect.DeepEqual(got, stored[i]) {
+			t.Errorf("event %d:\n got %+v\nwant %+v", i, got, stored[i])
+		}
+		if got.Account != "" || got.Folder != "" || got.Ref != "" {
+			t.Errorf("event %d has account %q, folder %q, ref %q, want none", i, got.Account, got.Folder, got.Ref)
+		}
+	}
+}
+
+// A reader that names no kinds, and the cache's internal reader, never sees
+// the rule and due kinds and still moves past them. Named kinds see them; an
+// item filter sees its items' due events and no rule events.
+func TestReadOptInKinds(t *testing.T) {
+	t.Parallel()
+	l, _, _ := newLog(t)
+	at := time.Date(2026, 11, 7, 8, 0, 0, 0, time.UTC)
+	stored := publish(t, l,
+		Event{At: at, Kind: KindNew, Account: "a", Folder: "INBOX", Ref: "cm:a:INBOX:7:1", Message: &Message{Subject: "hi"}},
+		Event{At: at, Kind: KindRule, Rule: &RuleChange{RuleID: "ru_a", Name: "receipts", Change: "created", Revision: 1, Actor: "1000/cli"}},
+		Event{At: at, Kind: KindItemDueSoon, Due: &ItemDue{ItemID: "it_a", Type: "task", DueDate: "2026-11-09", State: "backlog"}},
+		Event{At: at, Kind: KindItemDue, Due: &ItemDue{ItemID: "it_b", Type: "epic", DueDate: "2026-11-07", State: "backlog"}},
+		Event{At: at, Kind: KindItemOverdue, Due: &ItemDue{ItemID: "it_a", Type: "task", DueDate: "2026-11-01", State: "in-review"}},
+		Event{At: at, Kind: KindItem, Item: &ItemChange{ItemID: "it_a", Type: "task", Revision: 2, Op: "updated"}},
+		Event{At: at, Kind: KindStatus, Account: "a", Folder: "INBOX", State: StateWatching},
+	)
+	last := stored[len(stored)-1].ID
+	dueKinds := []Kind{KindItemDueSoon, KindItemDue, KindItemOverdue}
+	tests := []struct {
+		name string
+		f    Filter
+		want []int // indexes into stored
+	}{
+		{"api reader with no kinds", Filter{}, []int{0, 6}},
+		{"api reader for the account", Filter{Accounts: []string{"a"}}, []int{0, 6}},
+		{"cache reader", Filter{Accounts: []string{"a"}, Internal: true}, []int{0, 6}},
+		{"internal reader", Filter{Internal: true}, []int{0, 6}},
+		{"rule named", Filter{Kinds: []Kind{KindRule}}, []int{1, 6}},
+		{"due kinds named", Filter{Kinds: dueKinds}, []int{2, 3, 4, 6}},
+		// The due events have no folder and the status event is a control
+		// event, so In drops none of them.
+		{"due kinds named with in", Filter{Kinds: dueKinds, In: "Archive"}, []int{2, 3, 4, 6}},
+		{"item filter", Filter{Items: map[string]bool{"it_a": true}}, []int{2, 4, 5, 6}},
+		{"item filter and the rule kind", Filter{Kinds: []Kind{KindRule}, Items: map[string]bool{"it_a": true}}, []int{6}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var want []int64
+			for _, i := range tt.want {
+				want = append(want, stored[i].ID)
+			}
+			got, next := readIDs(t, l, Query{Filter: tt.f})
+			if !slices.Equal(got, want) || next != last {
+				t.Errorf("Read(%+v) = %v next %d, want %v next %d", tt.f, got, next, want, last)
+			}
+		})
+	}
+}

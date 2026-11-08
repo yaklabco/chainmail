@@ -12,7 +12,7 @@ chainmail is one Go binary, `chainmail`, built from `cmd/chainmail`. It runs as 
 
 | Process | Started by | What it does |
 |---|---|---|
-| `chainmail daemon` | systemd, launchd or a terminal | Opens the vault, `state.db` and `cache.db`, listens on the Unix socket, checks each peer, runs the API handlers, watches and syncs mail, and keeps the cache. |
+| `chainmail daemon` | systemd, launchd or a terminal | Opens the vault, `state.db` and `cache.db`, listens on the Unix socket, checks each peer, runs the API handlers, watches and syncs mail, keeps the cache, and runs rules. |
 | `chainmail <command>` | a person or a script | Makes the calls for one command, prints the answer as a table or JSON, and exits with a code from `internal/api`. Every call carries client kind `cli`. |
 | `chainmail mcp` | an agent's MCP client | Serves chainmail's tools over MCP on stdin and stdout, for as long as the agent runs. It turns each tool call into daemon calls with client kind `mcp`, moves attachment files, and wraps message text as untrusted. |
 
@@ -38,6 +38,7 @@ flowchart LR
     W[watch engine<br/>and supervisors]
     C[cache]
     It[items]
+    Ru[rules<br/>runners, scheduler, due checker]
     V[(vault.age)]
     S[(state.db)]
     K[(cache.db)]
@@ -51,6 +52,9 @@ flowchart LR
   H --> Aud --> S
   W --> S
   It --> S
+  H --> Ru
+  Ru --> S
+  Ru --> C
   C --> K
   W --> Store
   C --> Store
@@ -94,6 +98,7 @@ Everything but the entry point and the generated code lives under `internal/`, s
 | `internal/query` | Parses the Gmail-style search language into a typed tree and checks it. It knows nothing about IMAP. |
 | `internal/ref` | Encodes and decodes message refs and search cursors, which are opaque to agents. |
 | `internal/render` | Turns MIME messages into text an agent can read: picks the text part, decodes charsets, converts HTML, trims quotes and signatures, truncates, and cleans message-derived strings. |
+| `internal/rules` | Rules in `state.db`: definitions with revisions and soft delete, validation, schedules, run history and the act-once table, plus the due checker that writes item due events. It knows nothing about IMAP. |
 | `internal/sender` | Submits mail over SMTP. |
 | `internal/upload` | Holds uploaded attachment bytes in `uploads/` under the state directory until a send uses them. Uploads expire, and the index lives in memory. |
 | `internal/vault` | Keeps the secrets in one age-encrypted file, `vault.age`. No API returns a secret to a client. |
@@ -111,22 +116,24 @@ Everything but the entry point and the generated code lives under `internal/`, s
 
 ## Inside the daemon
 
-`daemon.New` wires the packages together and registers one ConnectRPC handler per service: `AccountService`, `AdminService`, `MessageService`, `ComposeService`, `OrganizeService`, `WatchService`, `CacheService` and `ItemsService`. The [API page](./api.md) lists their RPCs. The HTTP server speaks HTTP/1.1 and unencrypted HTTP/2 on the socket, and every request passes the peer check before it reaches a handler.
+`daemon.New` wires the packages together and registers one ConnectRPC handler per service: `AccountService`, `AdminService`, `MessageService`, `ComposeService`, `OrganizeService`, `WatchService`, `CacheService`, `ItemsService` and `RulesService`. The [API page](./api.md) lists their RPCs. The HTTP server speaks HTTP/1.1 and unencrypted HTTP/2 on the socket, and every request passes the peer check before it reaches a handler.
 
 `Server.Serve` starts things in this order:
 
 1. It creates the two standing Admin items if they are missing.
 2. It recovers sends an earlier daemon left in progress, marking their outcome unknown so a repeat never sends them again.
 3. It opens `cache.db`.
-4. It starts the background loops: the idempotency pruner, the upload sweeper, the event log trimmer, the item tables' trimmer and, with a cache, the evictor and the cache housekeeping.
-5. It starts one watch supervisor per synced account, and the cache workers of each account with the cache on.
+4. It starts one watch supervisor per synced account, and the cache workers of each account with the cache on. After the cache workers it starts one rule runner per account with a cache worker.
+5. It starts the background loops: the idempotency pruner, the upload sweeper, the event log trimmer, the item and rule run tables' trimmer, the due checker, the rule scheduler and, with a cache, the evictor and the cache housekeeping. They run even when no account is watched.
 6. It accepts connections.
 
-On shutdown it stops taking requests, cancels the ones in flight, waits for every handler to return, stops the supervisors and cache workers, and logs out of the mail servers. Only then does the CLI close `state.db`.
+On shutdown it stops taking requests, cancels the ones in flight, waits for every handler to return, stops the supervisors and cache workers, and logs out of the mail servers. It then stops the background loops, the rule scheduler among them, and closes `cache.db`. Only then does the CLI close `state.db`.
 
 Each account's `mailstore.Store` is built once, on its first use, with a connection pool sized from the probed connection limit. Watchers hold connections of their own outside the pool.
 
 Most handlers write one audit row through `Server.record` after the action runs, with the caller's uid from the peer check and the client kind from the `Chainmail-Client` header. A failed audit write fails the request, so chainmail never reports success for something it could not record. A few status reads write no row: `GetStatus`, `GetCacheStatus`, `GetWatchStatus`, `ReadAudit` and `Ack`.
+
+Rule actions call the same internal functions as the organize, compose and items handlers, as the daemon's own uid with client kind `rule`, and write their rows through `Server.record` too.
 
 ## A search
 
@@ -221,6 +228,12 @@ flowchart LR
   BF[cache backfill and prefetch] --> K
   BF -- FETCH --> M
   Log -- client groups --> R[watch, read_events,<br/>Subscribe]
+  Log -- group rules.account --> RR[rule runner<br/>one per account]
+  B -. applied position .-> RR
+  RR -- match --> K
+  RR -- actions --> Act[organize, compose<br/>and items paths]
+  Rs[rules.Store] -- rule events --> Log
+  Due[rules.DueChecker] -- due events --> Log
 ```
 
 - A `watch.Supervisor` runs per account. It keeps one IDLE loop on its own connection for each watched folder, and one poller for the synced folders that are not watched. While the account needs a human, every loop stops and the account is parked.
@@ -228,6 +241,8 @@ flowchart LR
 - The engine's `OnNew` hook turns new messages on threads linked to live items into `item_mail` events, inside the same transaction. Item writes append `item` events through `items.Store`.
 - The event log has named groups with Redis Streams semantics: each group has an acknowledged position, and a reader continues from it after a restart. Clients read through their own groups with `chainmail watch`, the `read_events` tool, or `WatchService`.
 - The cache of each account reads the same log through an internal group named `cache.` followed by the account name. Clients can never use such a name. The builder applies events to `cache.db` and acknowledges them only after they are applied, so a failure loses nothing. The backfill fetches the headers of mail that was in a folder before the cache tracked it, and the prefetcher fetches bodies inside the window. The internal `unreadable` event kind, which the API never shows, tells the cache about new mail a pass could not read.
+- The rule runner of each account reads the log through its own internal group, `rules.` followed by the account name, which clients cannot use either. It waits until the cache builder has applied a batch, matches the enabled `on_new` rules against `cache.db`, acts, and only then acknowledges. A transient failure leaves the batch unacknowledged, and the act-once table in `state.db` keeps the replay from acting twice.
+- The rule scheduler sleeps until the next scheduled rule is due and hands it to each covered account's runner. An account with no runner gets a `cache_not_ready` run with the reason `cache_disabled`, and the rule moves on to its next time. The scheduler sleeps at most 5 minutes at a time and reads the wall clock after each sleep, as the due checker does. The due checker scans open items with due dates when the daemon starts and each day at `[rules] due_time`. It waits at most 5 minutes at a time and reads the wall clock after each wait, so a machine that wakes from sleep after `due_time` scans within about 5 minutes. `items.Store` calls it inside the transaction of each item write that can change a due stage. Rule changes append `rule` events through `rules.Store`.
 
 [Watching for mail](../guide/watching.md) covers the user's view of events and groups.
 
@@ -244,8 +259,9 @@ Migrations are embedded SQL files in `internal/db/migrations/state/`, named `NNN
 | `0003_watch.sql` | `sync_folders` (each synced folder's checkpoint, mode and state), `sync_uids` (the UIDs and flag hashes a folder is known to hold), `events` (the event log) and `event_groups` (each group's acknowledged position). |
 | `0004_unreadable_events.sql` | Rebuilds `events` to allow the internal `unreadable` kind, keeping every event ID and the sequence. |
 | `0005_items.sql` | `items`, `item_revision`, `item_criteria`, `item_blockers`, `item_links`, `item_mail_seen` and `item_requests`, then rebuilds `events` again to allow the `item` and `item_mail` kinds. |
+| `0006_rules.sql` | `rules`, `rule_revisions`, `rule_runs`, `rule_applied` and `item_due_sent`, an index on the items' due dates, the removal of any client group named like a rules group, then a rebuild of `events` to allow the `rule`, `item_due_soon`, `item_due` and `item_overdue` kinds. |
 
-To change the schema, add the next numbered file. Never edit a migration that has shipped. SQLite cannot change a `CHECK` constraint in place, so `0004` and `0005` rebuild the `events` table and copy its rows across.
+To change the schema, add the next numbered file. Never edit a migration that has shipped. SQLite cannot change a `CHECK` constraint in place, so `0004`, `0005` and `0006` rebuild the `events` table and copy its rows across.
 
 ## The cache database
 
