@@ -263,8 +263,9 @@
 .close__mascot { width: 102px; height: auto; flex: none; }
 @media (max-width: 639px) { .close__mascot { width: 65px; } .section-head--split > .close__cta-end { gap: var(--s-4); width: 100%; } .close__cta-end > .btn { flex: 1; } }
 
-/* the nav mark beside the wordmark */
-.nav__mark { border-radius: 6px; margin-right: 10px; vertical-align: -6px; }
+/* the wordmark in the nav: rings, the name in DM Mono, a blinking cursor */
+.nav__logo .nav__wordmark { display: block; height: 22px; width: auto; }
+@media (max-width: 639px) { .nav__logo .nav__wordmark { height: 20px; } }
 
 /* Footer column headings are h3 for a correct outline; they keep the kit's small h4 look. */
 .footer__col h3 { font: 500 var(--t-small)/1.4 var(--font-text); letter-spacing: 0; color: var(--muted); margin-bottom: var(--s-4); }

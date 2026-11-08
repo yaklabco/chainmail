@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The upgrade applies `state.db` migration 6, and an older binary refuses the database afterwards. Take a snapshot before you upgrade.
 - The manual has the landing page's look, and the chainmail gopher is redrawn.
 - The manual's tables and diagrams are restyled to match, and a diagram too wide for the page opens at full size.
+- The logo is now a wordmark: two linked gold rings, the name in DM Mono and a blinking cursor. The favicons and the link preview image use it too.
 
 ### Fixed
 
