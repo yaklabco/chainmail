@@ -459,7 +459,13 @@ func (s *Server) dryRunAccount(ctx context.Context, ruleID string, d rules.Defin
 	} else {
 		tally, err = s.dryRunScope(ctx, sc, rulePageSize)
 	}
-	if err != nil {
+	switch {
+	case errors.Is(err, errRuleCacheOff):
+		// The cache went down after scopeRule found it: the account cannot
+		// answer, as if scopeRule had seen it down, and the others still do.
+		out.Reason = reasonCacheDisabled
+		return out, nil
+	case err != nil:
 		return nil, err
 	}
 	out.Matched, out.Skipped = int64(tally.matched), int64(tally.skipped)

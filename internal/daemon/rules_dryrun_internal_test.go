@@ -14,6 +14,8 @@ import (
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/config"
+	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/mailstore/fake"
 	"github.com/yaklabco/chainmail/internal/rules"
 )
@@ -228,6 +230,47 @@ func TestRuleDryRunNotReady(t *testing.T) {
 				t.Errorf("dry run = %+v, want %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+// downScoper is a fake store whose SearchFolders turns the daemon's cache
+// off first, as a full disk noticed mid-scope does: scopeRule has already
+// found the account's cache worker, and every later look finds none.
+type downScoper struct {
+	*fake.Store
+	s *Server
+}
+
+func (d downScoper) SearchFolders(ctx context.Context, in string) ([]string, error) {
+	d.s.cacheDown.Store(true)
+	return d.Store.SearchFolders(ctx, in)
+}
+
+// TestRuleDryRunCacheDownMidRun checks amendment 11 when the cache goes
+// down after an account's scope succeeded: that account reports
+// cache_disabled with no matches, and the accounts already answered keep
+// their results rather than the whole dry run failing.
+func TestRuleDryRunCacheDownMidRun(t *testing.T) {
+	t.Parallel()
+	f := ruleFixture(t)
+	// The fixture's workers have stopped, so nothing else reads the store
+	// set while the test swaps it.
+	f.s.stores = &storeSet{build: func(a config.ResolvedAccount) mailstore.Store {
+		if a.Name == "host" {
+			return downScoper{Store: f.fakes["host"], s: f.s}
+		}
+		return f.fakes[a.Name]
+	}}
+	resp, err := f.s.dryRun(t.Context(), "", ruleAcme, rules.TriggerNew, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ruleDryRunSummary{ruleGmailAcme, {Account: "host", Reason: reasonCacheDisabled}}
+	if got := ruleDryRunSummaries(t, resp, ruleAcme.Actions); !reflect.DeepEqual(got, want) {
+		t.Errorf("dry run = %+v, want %+v", got, want)
+	}
+	if !f.s.cacheDown.Load() {
+		t.Error("the cache is still up, so the test did not turn it off mid-run")
 	}
 }
 
