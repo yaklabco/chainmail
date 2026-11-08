@@ -12,9 +12,15 @@ import (
 // or one single event) that overlap [from, to), sorted by Start, at most limit.
 // It applies RDATE, EXDATE and overrides, drops CANCELLED overrides, keeps
 // local wall time across DST using TZID, and reports truncated when there
-// were more than limit instances. SECONDLY or MINUTELY rules return
-// ErrUnsafeRecurrence, as does a rule with more than a million periods
-// between DTSTART and to; a rule that does not parse returns ErrInvalidICS.
+// were more than limit instances.
+//
+// SECONDLY and MINUTELY rules return ErrUnsafeRecurrence, as do an INTERVAL
+// over 10000, HOURLY with BYSETPOS, and a rule whose estimated work (the
+// periods from DTSTART to to, times the days and candidate instances of
+// each, plus the search for an instance past to) is too large. A rule that
+// does not parse, or holds a value outside its RFC 5545 range, returns
+// ErrInvalidICS. A rule with no instance at all adds nothing to DTSTART and
+// the RDATEs.
 //
 // limit <= 0 means MaxInstances. An event without RRULE but with RDATEs
 // recurs on DTSTART and its RDATEs. An override is placed by its own Start
@@ -71,62 +77,113 @@ func Expand(series []Event, from, to time.Time, limit int) (insts []Instance, tr
 
 // occurrences expands the rule, RDATEs and EXDATEs of one master into at
 // most limit instances overlapping [from, to), skipping overridden ones.
-func occurrences(ev Event, from, to time.Time, limit int, overridden map[int64]bool) ([]Instance, error) {
-	loc := time.UTC
-	if !ev.AllDay {
-		if l, _, ok := loadZone(ev.TZID); ok {
-			loc = l
+func occurrences(ev Event, from, to time.Time, limit int, overridden map[int64]bool) (out []Instance, err error) {
+	// rrule-go panics on input parseRule does not foresee. A panic here is
+	// reported as a bad rule, since one hostile invite must not stop the
+	// daemon; it also covers this function's own arithmetic.
+	defer func() {
+		if recover() != nil {
+			out, err = nil, fmt.Errorf("%w: bad RRULE", ErrInvalidICS)
 		}
-	}
+	}()
+	fr := frameOf(ev)
 	dur := max(ev.End.Sub(ev.Start), 0)
-	start := ev.Start.In(loc)
+	start := fr.wall(ev.Start)
 
 	var set rrule.Set
 	if ev.RRule != "" {
-		opt, err := rrule.StrToROptionInLocation(ev.RRule, loc)
+		r, err := seriesRule(ev.RRule, fr, start, to)
 		if err != nil {
-			return nil, fmt.Errorf("%w: bad RRULE", ErrInvalidICS)
+			return nil, err
 		}
-		if opt.Freq == rrule.SECONDLY || opt.Freq == rrule.MINUTELY {
-			return nil, ErrUnsafeRecurrence
+		if r != nil {
+			set.RRule(r)
 		}
-		opt.Dtstart = start
-		// No instance at or after to is wanted, so the rule stops there.
-		if opt.Until.IsZero() || opt.Until.After(to) {
-			opt.Until = to
-		}
-		if periods(opt.Freq, opt.Interval, opt.Until.Sub(start)) > maxPeriods {
-			return nil, ErrUnsafeRecurrence
-		}
-		r, err := rrule.NewRRule(*opt)
-		if err != nil {
-			return nil, fmt.Errorf("%w: bad RRULE", ErrInvalidICS)
-		}
-		set.RRule(r)
 	}
 	set.DTStart(start)
 	set.RDate(start) // DTSTART is always the first instance (RFC 5545 3.8.5.3)
 	for _, t := range ev.RDates {
-		set.RDate(t.In(loc))
+		set.RDate(fr.wall(t))
 	}
 	for _, t := range ev.ExDates {
-		set.ExDate(t.In(loc))
+		set.ExDate(fr.wall(t))
 	}
 
-	var out []Instance
 	next := set.Iterator()
 	for len(out) < limit {
-		t, ok := next()
-		if !ok || !t.Before(to) {
+		w, ok := next()
+		if !ok {
 			break
 		}
-		t = t.UTC()
+		t := fr.instant(w)
+		if !t.Before(to) {
+			break
+		}
 		if overridden[t.Unix()] || !overlaps(t, t.Add(dur), from, to) {
 			continue
 		}
 		out = append(out, Instance{Event: ev, Start: t, End: t.Add(dur), RecurrenceID: t})
 	}
 	return out, nil
+}
+
+// seriesRule builds the rule of a master starting at start, in the frame
+// fr, ending at to. It returns nil when the rule adds no instance to
+// DTSTART and the RDATEs, and ErrUnsafeRecurrence when its estimated work
+// is over maxRuleWork.
+func seriesRule(value string, fr frame, start, to time.Time) (*rrule.RRule, error) {
+	opt, err := parseRule(value, fr.loc)
+	if err != nil {
+		return nil, err
+	}
+	opt.Dtstart = start
+	// No instance at or after to is wanted, so the rule stops there.
+	if end := fr.wall(to); opt.Until.IsZero() || opt.Until.After(end) {
+		opt.Until = end
+	}
+	if !hourReachable(opt, start.Hour()) {
+		return nil, nil
+	}
+	c := costOf(opt)
+	if c.canMiss && patternYears(opt) > maxPatternYears {
+		return nil, ErrUnsafeRecurrence
+	}
+	if c.work(periodsBetween(opt, start, opt.Until), searchSteps(opt, c)) > maxRuleWork {
+		return nil, ErrUnsafeRecurrence
+	}
+	if c.canMiss && !matchesEver(opt, start) {
+		return nil, nil
+	}
+	r, err := rrule.NewRRule(*opt)
+	if err != nil {
+		return nil, fmt.Errorf("%w: bad RRULE", ErrInvalidICS)
+	}
+	return r, nil
+}
+
+// frame is the clock a series recurs on: rrule-go runs in its zone.
+type frame struct {
+	loc *time.Location
+}
+
+// frameOf returns the frame of a master: its TZID's IANA zone, else UTC.
+func frameOf(ev Event) frame {
+	if !ev.AllDay {
+		if l, _, ok := loadZone(ev.TZID); ok {
+			return frame{loc: l}
+		}
+	}
+	return frame{loc: time.UTC}
+}
+
+// wall returns the instant u in the frame.
+func (f frame) wall(u time.Time) time.Time {
+	return u.In(f.loc)
+}
+
+// instant returns the UTC instant of a time in the frame.
+func (f frame) instant(w time.Time) time.Time {
+	return w.UTC()
 }
 
 // overlaps reports whether [s, e) overlaps [from, to). A zero-length
@@ -136,27 +193,4 @@ func overlaps(s, e, from, to time.Time) bool {
 		return s.Before(to) && e.After(from)
 	}
 	return !s.Before(from) && s.Before(to)
-}
-
-// maxPeriods bounds the rule periods between DTSTART and the end of the
-// range. rrule-go iterates every period from DTSTART, so an hourly rule
-// starting centuries ago would take seconds to reach the range.
-const maxPeriods = 1_000_000
-
-// periods estimates how many periods of a rule fit in d.
-func periods(freq rrule.Frequency, interval int, d time.Duration) int64 {
-	var period time.Duration
-	switch freq {
-	case rrule.HOURLY:
-		period = time.Hour
-	case rrule.DAILY:
-		period = 24 * time.Hour
-	case rrule.WEEKLY:
-		period = 7 * 24 * time.Hour
-	case rrule.MONTHLY:
-		period = 28 * 24 * time.Hour
-	default:
-		period = 365 * 24 * time.Hour
-	}
-	return int64(d / (period * time.Duration(max(interval, 1))))
 }
