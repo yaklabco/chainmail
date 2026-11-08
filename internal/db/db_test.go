@@ -22,8 +22,8 @@ func TestOpenStateCreatesSchema(t *testing.T) {
 	if err := conn.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 {
-		t.Errorf("user_version = %d, want 6", version)
+	if version != 7 {
+		t.Errorf("user_version = %d, want 7", version)
 	}
 	for _, table := range []string{
 		"audit", "idempotency", "account_limits", "sync_folders", "sync_uids", "events", "event_groups",
@@ -189,7 +189,7 @@ func TestWatchTablesCheckValues(t *testing.T) {
 	const event = "INSERT INTO events (at, account, kind) VALUES ('t', 'a', ?)"
 	for _, kind := range []string{
 		"new", "flags", "expunged", "status", "gap", "unreadable", "item", "item_mail",
-		"rule", "item_due_soon", "item_due", "item_overdue",
+		"rule", "item_due_soon", "item_due", "item_overdue", "invite", "event_changed", "event_cancelled", "invite_reply",
 	} {
 		if _, err := conn.ExecContext(t.Context(), event, kind); err != nil {
 			t.Errorf("event kind %q: %v", kind, err)
@@ -440,8 +440,8 @@ func TestItemsMigrationKeepsTheLog(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = conn.Close() }) // a close error at test end changes nothing
 			var version int
-			if err := conn.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil || version != 6 {
-				t.Errorf("user_version = %d, %v, want 6", version, err)
+			if err := conn.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil || version != 7 {
+				t.Errorf("user_version = %d, %v, want 7", version, err)
 			}
 			var tail int64
 			if err := conn.QueryRowContext(t.Context(), "SELECT seq FROM sqlite_sequence WHERE name = 'events'").Scan(&tail); err != nil || tail != 57 {

@@ -120,8 +120,8 @@ func TestRulesMigrationKeepsTheLog(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = conn.Close() }) // a close error at test end changes nothing
 			var version int
-			if err := conn.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil || version != 6 {
-				t.Errorf("user_version = %d, %v, want 6", version, err)
+			if err := conn.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil || version != 7 {
+				t.Errorf("user_version = %d, %v, want 7", version, err)
 			}
 			var tail int64
 			if err := conn.QueryRowContext(t.Context(), "SELECT seq FROM sqlite_sequence WHERE name = 'events'").Scan(&tail); err != nil || tail != 57 {
