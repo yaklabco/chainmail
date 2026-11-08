@@ -458,3 +458,36 @@ func TestTrimRuns(t *testing.T) {
 		t.Errorf("second TrimRuns = %d, %v, want 0", n, err)
 	}
 }
+
+// TestAutoDisableIgnoresUnattemptedFailures checks that a failure no action
+// was attempted on, such as a text rule's message whose body the cache did
+// not hold, counts in failed_runs but never toward all_failed: only the
+// acted-on matches decide that.
+func TestAutoDisableIgnoresUnattemptedFailures(t *testing.T) {
+	t.Parallel()
+	r := newStoreRig(t)
+	rule := r.create(t, storeDef("receipts"))
+	steps := []struct {
+		name string
+		run  Run
+		want bool
+	}{
+		{"only unattempted failures", Run{Matched: 2, Failed: 2, Unattempted: 2, Outcome: OutcomeFailed}, false},
+		{"one acted-on match applied", Run{Matched: 3, Applied: 1, Failed: 2, Unattempted: 1, Outcome: OutcomeFailed}, false},
+		{"unattempted beside a skip", Run{Matched: 3, Skipped: 1, Failed: 2, Unattempted: 1, Outcome: OutcomeFailed}, true},
+	}
+	for i, st := range steps {
+		run := st.run
+		run.ID = r.begin(t, rule.ID, "work", TriggerNew, r.clock.Now())
+		run.FinishedAt = r.clock.Now()
+		if got := r.finish(t, run); got != st.want {
+			t.Fatalf("%s: disabled = %t, want %t", st.name, got, st.want)
+		}
+		if got := r.get(t, rule.ID).FailedRuns; got != i+1 {
+			t.Errorf("after %s failed_runs = %d, want %d", st.name, got, i+1)
+		}
+	}
+	if got := r.get(t, rule.ID); got.DisabledReason != ReasonAllFailed {
+		t.Errorf("disabled reason %q, want %s", got.DisabledReason, ReasonAllFailed)
+	}
+}
