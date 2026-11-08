@@ -70,7 +70,9 @@ func (e *secretNameError) Unwrap() error { return vault.ErrInvalidName }
 var errNULPassword = errors.New("the password contains a NUL byte, which no login can send")
 
 // checkSecret allows the password of a configured password account and the
-// secret of a configured OAuth2 client. Refresh tokens are refused: only a
+// secret of a configured OAuth2 client. A client with an issuer needs no
+// secret, as a public client, but may have one, as a confidential client,
+// so its secret is allowed too. Refresh tokens are refused: only a
 // login writes one, after the provider issued it. A password may not hold a
 // NUL byte, which SASL PLAIN uses as its separator.
 func (s *Server) checkSecret(name string, value []byte) error {
@@ -111,7 +113,7 @@ func (a *adminService) BeginAuthLogin(ctx context.Context, req *connect.Request[
 	account, loginErr := accountTarget(req.Msg.GetAccount())
 	var ch auth.Challenge
 	if loginErr == nil {
-		ch, loginErr = a.s.auth.BeginLogin(account)
+		ch, loginErr = a.s.auth.BeginLogin(ctx, account)
 	}
 	if err := a.s.record(ctx, c, audit.Entry{Account: account, Action: "auth.login.begin"}, loginErr); err != nil {
 		return nil, err

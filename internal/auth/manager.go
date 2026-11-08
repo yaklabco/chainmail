@@ -104,6 +104,12 @@ type Manager struct {
 	httpClient *http.Client
 	endpoint   *oauth2.Endpoint
 
+	// discoverMu serializes OIDC discoveries, so concurrent first logins
+	// of a client fetch its document once. discovered holds each issuer
+	// client's endpoints by client name; a failed discovery is not kept.
+	discoverMu sync.Mutex
+	discovered map[string]oauth2.Endpoint
+
 	mu       sync.Mutex
 	required map[string]string
 	pending  map[string]pendingLogin
@@ -133,7 +139,8 @@ func WithHTTPClient(c *http.Client) Option {
 	}
 }
 
-// WithOAuthEndpoint replaces every provider's OAuth2 endpoint. Tests use it.
+// WithOAuthEndpoint replaces the OAuth2 endpoint of every preset with its own
+// endpoints. Clients with an issuer still use discovery. Tests use it.
 func WithOAuthEndpoint(ep oauth2.Endpoint) Option { return func(m *Manager) { m.endpoint = &ep } }
 
 // NewManager returns a Manager for the accounts in cfg.
@@ -147,6 +154,7 @@ func NewManager(cfg *config.Config, store SecretStore, opts ...Option) *Manager 
 		pending:    map[string]pendingLogin{},
 		sources:    map[string]oauth2.TokenSource{},
 		accountGen: map[string]uint64{},
+		discovered: map[string]oauth2.Endpoint{},
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -270,7 +278,7 @@ func refreshHint(acct config.ResolvedAccount, err error) (string, bool) {
 	case "invalid_grant":
 		return "the refresh token was rejected; run: chainmail auth login " + acct.Name, true
 	case "invalid_client":
-		return "the OAuth client was rejected; run: chainmail secret set " + ClientSecret(acct.OAuthClient), true
+		return clientRejectedHint(acct), true
 	case "unauthorized_client":
 		// Google sends this when the refresh token belongs to another
 		// client, such as after client_id changed. Only a new login fixes it.
@@ -278,6 +286,16 @@ func refreshHint(acct config.ResolvedAccount, err error) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// clientRejectedHint says what to do about an OAuth client the token
+// endpoint refused. An issuer client may be public, with no secret to set.
+func clientRejectedHint(acct config.ResolvedAccount) string {
+	if acct.OAuthIssuer != "" {
+		return "the OAuth client was rejected; check client_id in oauth_clients." + acct.OAuthClient +
+			", and if the client has a secret, run: chainmail secret set " + ClientSecret(acct.OAuthClient)
+	}
+	return "the OAuth client was rejected; run: chainmail secret set " + ClientSecret(acct.OAuthClient)
 }
 
 // exchangeRefused reports whether the token endpoint refused an
@@ -299,7 +317,7 @@ func exchangeRefused(err error) bool {
 func exchangeHint(acct config.ResolvedAccount, err error) (hint string, definitive bool) {
 	var re *oauth2.RetrieveError
 	if errors.As(err, &re) && re.ErrorCode == "invalid_client" {
-		return "the OAuth client was rejected; run: chainmail secret set " + ClientSecret(acct.OAuthClient), false
+		return clientRejectedHint(acct), false
 	}
 	return "run: chainmail auth login " + acct.Name + " again", true
 }
@@ -335,7 +353,7 @@ func (m *Manager) SecretChanged(name string) {
 		if err != nil {
 			continue
 		}
-		if slices.Contains(neededSecrets(acct), name) {
+		if slices.Contains(usedSecrets(acct), name) {
 			delete(m.required, account)
 			delete(m.sources, account)
 			m.accountGen[account]++
@@ -343,13 +361,14 @@ func (m *Manager) SecretChanged(name string) {
 	}
 }
 
-// BeginLogin starts an OAuth2 consent flow for account.
-func (m *Manager) BeginLogin(account string) (Challenge, error) {
+// BeginLogin starts an OAuth2 consent flow for account. ctx bounds the OIDC
+// discovery of an issuer client's endpoints, which runs once per client.
+func (m *Manager) BeginLogin(ctx context.Context, account string) (Challenge, error) {
 	acct, err := m.cfg.Account(account)
 	if err != nil {
 		return Challenge{}, err
 	}
-	conf, err := m.oauthConfig(acct)
+	conf, err := m.oauthConfig(ctx, acct)
 	if err != nil {
 		return Challenge{}, err
 	}
@@ -375,7 +394,7 @@ func (m *Manager) FinishLogin(ctx context.Context, account, redirectURL string) 
 	if err != nil {
 		return err
 	}
-	conf, err := m.oauthConfig(acct)
+	conf, err := m.oauthConfig(ctx, acct)
 	if err != nil {
 		return err
 	}
@@ -419,6 +438,9 @@ func (m *Manager) FinishLogin(ctx context.Context, account, redirectURL string) 
 		return fmt.Errorf("%w: token exchange for %s: %w", ErrTokenEndpoint, account, tokenError(err))
 	}
 	if tok.RefreshToken == "" {
+		if acct.OAuthIssuer != "" {
+			return fmt.Errorf("%w: give oauth_clients.%s offline access, such as the offline_access scope, and log in again", ErrNoRefreshToken, acct.OAuthClient)
+		}
 		return fmt.Errorf("%w: remove chainmail's access at https://myaccount.google.com/permissions and log in again", ErrNoRefreshToken)
 	}
 	if err := m.store.Set(RefreshTokenSecret(account), []byte(tok.RefreshToken)); err != nil {
@@ -503,7 +525,7 @@ func (m *Manager) tokenSource(ctx context.Context, acct config.ResolvedAccount) 
 	if ok {
 		return src, gen, nil
 	}
-	conf, err := m.oauthConfig(acct)
+	conf, err := m.oauthConfig(ctx, acct)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -528,29 +550,56 @@ func (m *Manager) tokenSource(ctx context.Context, acct config.ResolvedAccount) 
 	return src, gen, nil
 }
 
-func (m *Manager) oauthConfig(acct config.ResolvedAccount) (*oauth2.Config, error) {
-	if acct.Auth != provider.AuthOAuth2 || acct.Provider.OAuth2 == nil {
+// oauthConfig builds acct's OAuth2 client: the preset's endpoints, or for
+// an issuer client those its discovery gives, and the account's scopes. An
+// issuer client's secret is optional: without one it is a public client and
+// no client_secret is sent, since AuthStyleInParams leaves an empty one out.
+func (m *Manager) oauthConfig(ctx context.Context, acct config.ResolvedAccount) (*oauth2.Config, error) {
+	if acct.Auth != provider.AuthOAuth2 || (acct.Provider.OAuth2 == nil && acct.OAuthIssuer == "") {
 		return nil, fmt.Errorf("%w: %s", ErrNotOAuth, acct.Name)
 	}
-	secret, err := m.secret(acct, ClientSecret(acct.OAuthClient))
+	secret, err := m.clientSecret(acct)
 	if err != nil {
 		return nil, err
 	}
-	ep := oauth2.Endpoint{
-		AuthURL:   acct.Provider.OAuth2.AuthURL,
-		TokenURL:  acct.Provider.OAuth2.TokenURL,
-		AuthStyle: oauth2.AuthStyleInParams,
-	}
-	if m.endpoint != nil {
+	var ep oauth2.Endpoint
+	switch {
+	case acct.OAuthIssuer != "":
+		if ep, err = m.issuerEndpoint(ctx, acct); err != nil {
+			return nil, err
+		}
+	case m.endpoint != nil:
 		ep = *m.endpoint
+	default:
+		ep = oauth2.Endpoint{
+			AuthURL:   acct.Provider.OAuth2.AuthURL,
+			TokenURL:  acct.Provider.OAuth2.TokenURL,
+			AuthStyle: oauth2.AuthStyleInParams,
+		}
 	}
 	return &oauth2.Config{
 		ClientID:     acct.ClientID,
 		ClientSecret: string(secret),
 		Endpoint:     ep,
 		RedirectURL:  LoginRedirectURL,
-		Scopes:       acct.Provider.OAuth2.Scopes,
+		Scopes:       acct.OAuthScopes,
 	}, nil
+}
+
+// clientSecret reads acct's OAuth client secret. A missing secret is a
+// RequiredError, except for an issuer client, which may be public.
+func (m *Manager) clientSecret(acct config.ResolvedAccount) ([]byte, error) {
+	if acct.OAuthIssuer == "" {
+		return m.secret(acct, ClientSecret(acct.OAuthClient))
+	}
+	v, err := m.store.Get(ClientSecret(acct.OAuthClient))
+	switch {
+	case errors.Is(err, vault.ErrNotFound):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("reading secret %s: %w", ClientSecret(acct.OAuthClient), err)
+	}
+	return v, nil
 }
 
 // withHTTPClient carries the HTTP client into a one-off oauth2 call.
@@ -583,11 +632,26 @@ func tokenError(err error) error {
 	return fmt.Errorf("token endpoint returned %s: %s", status, re.ErrorCode)
 }
 
+// neededSecrets lists the secrets acct cannot log in without. An issuer
+// client's secret is optional, so it is not among them.
 func neededSecrets(acct config.ResolvedAccount) []string {
+	switch {
+	case acct.Auth == provider.AuthOAuth2 && acct.OAuthIssuer != "":
+		return []string{RefreshTokenSecret(acct.Name)}
+	case acct.Auth == provider.AuthOAuth2:
+		return []string{ClientSecret(acct.OAuthClient), RefreshTokenSecret(acct.Name)}
+	default:
+		return []string{PasswordSecret(acct.Name)}
+	}
+}
+
+// usedSecrets lists every secret acct logs in with when it is set: the
+// needed ones and an issuer client's optional secret.
+func usedSecrets(acct config.ResolvedAccount) []string {
 	if acct.Auth == provider.AuthOAuth2 {
 		return []string{ClientSecret(acct.OAuthClient), RefreshTokenSecret(acct.Name)}
 	}
-	return []string{PasswordSecret(acct.Name)}
+	return neededSecrets(acct)
 }
 
 func hintFor(acct config.ResolvedAccount, secret string) string {

@@ -226,3 +226,75 @@ func TestDefaultPoolFitsConnectionLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestEndpointTLSServerName(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		ep   Endpoint
+		want string
+	}{
+		{name: "host", ep: Endpoint{Host: "imap.example.com", Port: 993}, want: "imap.example.com"},
+		{
+			name: "server name",
+			ep:   Endpoint{Host: "nlb.internal.example", Port: 993, ServerName: "mail.example.com"},
+			want: "mail.example.com",
+		},
+	}
+	for _, tt := range tests {
+		if got := tt.ep.TLSServerName(); got != tt.want {
+			t.Errorf("%s: TLSServerName() = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestGoogleCalendarScopes(t *testing.T) {
+	t.Parallel()
+	want := []string{
+		"https://www.googleapis.com/auth/calendar.events",
+		"https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+		"https://www.googleapis.com/auth/calendar.freebusy",
+	}
+	if !slices.Equal(GoogleCalendarScopes, want) {
+		t.Errorf("GoogleCalendarScopes = %v, want %v", GoogleCalendarScopes, want)
+	}
+	for _, name := range []string{"google-workspace", "gmail"} {
+		p, _ := Lookup(name)
+		for _, s := range GoogleCalendarScopes {
+			if slices.Contains(p.OAuth2.Scopes, s) {
+				t.Errorf("%s preset scopes hold %s; calendar scopes are per account", name, s)
+			}
+		}
+	}
+}
+
+// The custom preset takes oauth2 only through an OAuth client with an
+// issuer, whose endpoints come from discovery. Every other preset either
+// has its own endpoints or takes no oauth2 at all.
+func TestAcceptsAuth(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		preset string
+		method AuthMethod
+		issuer bool
+		want   bool
+	}{
+		{preset: "custom", method: AuthPassword, issuer: false, want: true},
+		{preset: "custom", method: AuthOAuth2, issuer: false, want: false},
+		{preset: "custom", method: AuthOAuth2, issuer: true, want: true},
+		{preset: "hostinger", method: AuthOAuth2, issuer: true, want: false},
+		{preset: "icloud", method: AuthOAuth2, issuer: true, want: false},
+		{preset: "google-workspace", method: AuthOAuth2, issuer: false, want: true},
+		{preset: "google-workspace", method: AuthOAuth2, issuer: true, want: false},
+		{preset: "gmail", method: AuthPassword, issuer: false, want: true},
+	}
+	for _, tt := range tests {
+		p, ok := Lookup(tt.preset)
+		if !ok {
+			t.Fatalf("Lookup(%q) not found", tt.preset)
+		}
+		if got := p.AcceptsAuth(tt.method, tt.issuer); got != tt.want {
+			t.Errorf("%s.AcceptsAuth(%s, issuer %v) = %v, want %v", tt.preset, tt.method, tt.issuer, got, tt.want)
+		}
+	}
+}

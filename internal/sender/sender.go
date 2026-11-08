@@ -56,7 +56,7 @@ func Probe(ctx context.Context, ep provider.Endpoint, creds auth.Credentials, op
 }
 
 func handshake(ctx context.Context, conn net.Conn, ep provider.Endpoint, roots *x509.CertPool) (*smtp.Client, error) {
-	tlsConfig := &tls.Config{ServerName: ep.Host, RootCAs: roots, MinVersion: tls.VersionTLS12}
+	tlsConfig := &tls.Config{ServerName: ep.TLSServerName(), RootCAs: roots, MinVersion: tls.VersionTLS12}
 	switch ep.Security {
 	case provider.SecurityTLS:
 		tlsConn := tls.Client(conn, tlsConfig)
