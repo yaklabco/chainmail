@@ -639,3 +639,48 @@ func TestCalendarTimesAroundDaylightSaving(t *testing.T) {
 		}
 	}
 }
+
+// The request carries the attendees in one order, sorted, with addresses
+// that differ only in case kept once, so the derived key and the request
+// agree: a retry with the attendees in another order sends the same
+// request under the same key.
+func TestEventAttendeesAreCanonical(t *testing.T) {
+	t.Parallel()
+	create := func(attendees ...string) *chainmailv1.CreateEventRequest {
+		t.Helper()
+		f := &fakeCalendar{}
+		args := []string{"event", "create", "--title", "x", "--start", "2026-11-10 09:00", "--duration", "1h"}
+		for _, a := range attendees {
+			args = append(args, "--attendee", a)
+		}
+		if got := runCal(t, f, args...); got.code != 0 {
+			t.Fatalf("event create: %+v", got)
+		}
+		return createReq(t, f)
+	}
+	first := create("carol@example.com", "Bob@example.com", "alice@example.com", "bob@example.com")
+	again := create("bob@example.com", "alice@example.com", "carol@example.com", "Bob@example.com", "ALICE@example.com")
+	want := []string{"alice@example.com", "Bob@example.com", "carol@example.com"}
+	if got := first.GetAttendees(); !slices.Equal(got, want) {
+		t.Errorf("attendees = %q, want %q", got, want)
+	}
+	if got, want := again.GetAttendees(), []string{"ALICE@example.com", "Bob@example.com", "carol@example.com"}; !slices.Equal(got, want) {
+		t.Errorf("attendees = %q, want %q", got, want)
+	}
+	if deriveEventKey(again) != again.GetIdempotencyKey() || deriveEventKey(first) != first.GetIdempotencyKey() {
+		t.Error("the derived key does not match the request it was sent with")
+	}
+
+	f := &fakeCalendar{}
+	if got := runCal(t, f, "event", "edit", calRef, "--etag", "x", "--attendee", "b@example.com", "--attendee", "a@example.com", "--attendee", "B@example.com"); got.code != 0 {
+		t.Fatalf("event edit: %+v", got)
+	}
+	reqs := f.requests()
+	if len(reqs) != 1 {
+		t.Fatalf("requests = %v, want one UpdateEvent", reqs)
+	}
+	update, ok := reqs[0].(*chainmailv1.UpdateEventRequest)
+	if want := []string{"a@example.com", "B@example.com"}; !ok || !slices.Equal(update.GetAttendees(), want) {
+		t.Errorf("edit request = %v, want attendees %q", reqs[0], want)
+	}
+}

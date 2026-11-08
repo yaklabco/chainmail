@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"encoding/base32"
 	"errors"
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -47,7 +49,9 @@ Without it the event takes the daemon's [calendar] timezone.
 
 Running the same create again within 7 days returns the event already
 created instead of creating it twice: without --idempotency-key, the key
-is derived from the account, calendar and every field. To create the same
+is derived from the account, calendar and every field. The attendees are
+sent sorted, and an address given twice in different case once, so their
+order does not change the key. To create the same
 event again on purpose, pass a new --idempotency-key.
 
 ` + calendarTimesHelp
@@ -90,7 +94,7 @@ func addEventFlags(cmd *cobra.Command, ef *eventFlags) {
 	f.StringVar(&ef.end, "end", "", "when it ends; a date alone takes in that whole day")
 	f.StringVar(&ef.duration, "duration", "", "how long it lasts, such as 30m, 1h30m or 2d, instead of --end")
 	f.BoolVar(&ef.allDay, "all-day", false, "an all-day event, with dates for --start and --end")
-	f.StringArrayVar(&ef.attendees, "attendee", nil, "an attendee's address; repeat for more")
+	f.StringArrayVar(&ef.attendees, "attendee", nil, "an attendee's address; repeat for more (sent sorted, and once when addresses differ only in case)")
 	f.StringVar(&ef.location, "location", "", "where it takes place")
 	f.StringVar(&ef.description, "description", "", "the event's description")
 	f.StringVar(&ef.rrule, "rrule", "", "a recurrence rule, such as FREQ=WEEKLY;BYDAY=MO")
@@ -281,13 +285,14 @@ func (ef *eventFlags) createRequest(cmd *cobra.Command, env Env) (*chainmailv1.C
 	}
 	return &chainmailv1.CreateEventRequest{
 		Title: ef.title, Start: timestamppb.New(start), End: timestamppb.New(end), TimeZone: ef.tz, AllDay: ef.allDay,
-		Location: ef.location, Description: ef.description, Attendees: ef.attendees, RecurrenceRule: ef.rrule,
+		Location: ef.location, Description: ef.description, Attendees: canonicalAttendees(ef.attendees), RecurrenceRule: ef.rrule,
 	}, nil
 }
 
 // deriveEventKey returns "cli-" and the unpadded base32 SHA-256 of every
-// field of req but the key. Attendees are sorted, so their order does not
-// matter, and the fields are labelled so no create shares a key with a send.
+// field of req but the key. Attendees are in canonical order, as the
+// request sends them, so their order does not matter, and the fields are
+// labelled so no create shares a key with a send.
 func deriveEventKey(req *chainmailv1.CreateEventRequest) string {
 	h := newKeyHash()
 	h.str("mode", "event-create")
@@ -300,7 +305,7 @@ func deriveEventKey(req *chainmailv1.CreateEventRequest) string {
 	h.str("all_day", strconv.FormatBool(req.GetAllDay()))
 	h.str("location", req.GetLocation())
 	h.str("description", req.GetDescription())
-	attendees := slices.Sorted(slices.Values(req.GetAttendees()))
+	attendees := canonicalAttendees(req.GetAttendees())
 	h.str("attendees", strconv.Itoa(len(attendees)))
 	for _, a := range attendees {
 		h.str("attendee", a)
@@ -382,7 +387,7 @@ func newEventEditCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			}
 			_, req.AllDay = ef.allDayChange(cmd)
 			if !noAttendees {
-				req.Attendees = ef.attendees
+				req.Attendees = canonicalAttendees(ef.attendees)
 			}
 			if paths, err = ef.editTimes(cmd, r, loc, req, paths); err != nil {
 				return err
@@ -566,4 +571,19 @@ func newEventCancelCmd(ctx context.Context, env Env, g *globals) *cobra.Command 
 	}
 	cmd.Flags().StringVar(&etag, "etag", "", "refuse the cancel if the event no longer has this etag (default: the etag it has now)")
 	return cmd
+}
+
+// canonicalAttendees is the attendee list a request sends: sorted without
+// regard to case, and with addresses that differ only in case kept once,
+// as the one that sorts first. Any order of the same addresses gives the
+// same list, so a derived key and the request it goes with agree.
+func canonicalAttendees(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := slices.Clone(in)
+	slices.SortFunc(out, func(a, b string) int {
+		return cmp.Or(cmp.Compare(strings.ToLower(a), strings.ToLower(b)), cmp.Compare(a, b))
+	})
+	return slices.CompactFunc(out, func(a, b string) bool { return strings.ToLower(a) == strings.ToLower(b) })
 }
