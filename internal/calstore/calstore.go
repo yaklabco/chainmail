@@ -32,6 +32,7 @@ package calstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/yaklabco/chainmail/internal/calendar"
@@ -46,6 +47,19 @@ var (
 	ErrSyncTokenInvalid = errors.New("sync token no longer valid")
 	ErrAuth             = errors.New("calendar access not authorized")
 	ErrUnavailable      = errors.New("calendar server unavailable")
+	// ErrSyncTooLarge is a Sync that would keep more than MaxSyncBytes of
+	// server data or MaxSyncEvents events. It is ErrUnavailable, so the
+	// caller keeps its token, backs off and reports the calendar in error.
+	ErrSyncTooLarge = fmt.Errorf("%w: calendar too large to sync", ErrUnavailable)
+)
+
+// Bounds on what one Sync keeps.
+const (
+	// MaxSyncBytes bounds the server data one Sync reads and keeps.
+	MaxSyncBytes = 64 << 20
+	// MaxSyncEvents bounds the events, or for CalDAV the objects, one Sync
+	// keeps.
+	MaxSyncEvents = 40000
 )
 
 // Store is one account's calendars on one backend. Every method makes
