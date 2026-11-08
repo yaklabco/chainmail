@@ -548,7 +548,8 @@ func (h *calendarService) UpdateEvent(ctx context.Context, req *connect.Request[
 // organizer of an event with other attendees cancels it and notifies
 // them, under the send policy; a held cancel is not applied. An event with
 // no other attendees is deleted. One instance of a series is cancelled as
-// an override.
+// an override. Removing an event someone else organizes tells that
+// organizer, so the organizer is checked against the send policy too.
 func (h *calendarService) CancelEvent(ctx context.Context, req *connect.Request[chainmailv1.CancelEventRequest]) (*connect.Response[chainmailv1.CancelEventResponse], error) {
 	s := h.s
 	return calendarCall(ctx, s, req, "calendar.cancel_event", calendarWriteTimeout, func(ctx context.Context, _ caller, entry *audit.Entry) (*chainmailv1.CancelEventResponse, error) {
@@ -569,7 +570,7 @@ func (h *calendarService) CancelEvent(ctx context.Context, req *connect.Request[
 		if err != nil {
 			return nil, err
 		}
-		notified := s.notified(audience)
+		notified := s.notified(slices.Concat(audience, s.removalNotice(res)))
 		if d := s.policy.CheckSend(ca.name, notified); len(notified) > 0 && !d.Allowed {
 			heldTargets(entry, len(d.Blocked), d.TooMany)
 			return &chainmailv1.CancelEventResponse{Held: &chainmailv1.CalendarHeld{
@@ -666,6 +667,22 @@ func (s *Server) audience(ctx context.Context, res resolvedEvent) ([]calendar.At
 		return nil, errIncompleteAudience
 	}
 	return atts, nil
+}
+
+// removalNotice is who a cancel of res tells besides its attendees: the
+// organizer, when someone other than James organizes it. Removing such an
+// event from James's calendar is an attendee's removal, which tells the
+// organizer (a CalDAV scheduling server sends a REPLY, RFC 6638 section
+// 8.1; Google a decline) whether or not he is listed as an attendee.
+func (s *Server) removalNotice(res resolvedEvent) []calendar.Attendee {
+	if _, org := res.role(); org {
+		return nil
+	}
+	o := res.organizer()
+	if o == nil || s.ownAddress(o.Email) {
+		return nil
+	}
+	return []calendar.Attendee{{Person: calendar.Person{Email: o.Email}}}
 }
 
 // mayChange reports whether James may change an event: he organizes it,
