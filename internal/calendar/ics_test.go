@@ -762,3 +762,32 @@ func TestExpandSharedZoneConcurrently(t *testing.T) {
 		}
 	}
 }
+
+// berlinRules are Central European rules, the same as Europe/Berlin's.
+const berlinRules = "BEGIN:STANDARD\nDTSTART:19701025T030000\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\nTZOFFSETFROM:+0200\nTZOFFSETTO:+0100\nEND:STANDARD\n" +
+	"BEGIN:DAYLIGHT\nDTSTART:19700329T020000\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0200\nEND:DAYLIGHT\n"
+
+// A local time a DST change repeats is its first occurrence, and one a
+// change skips is read with the offset before the gap (RFC 5545 3.3.5),
+// in a VTIMEZONE and in an IANA zone, west and east of Greenwich.
+func TestParseICSRepeatedAndSkippedLocalTimes(t *testing.T) {
+	cases := []struct {
+		name, iana, rules, local string
+		want                     time.Time
+	}{
+		{"pacific repeated", "America/Los_Angeles", pacificRules, "20261101T013000", utc(2026, 11, 1, 8, 30, 0)}, // PDT
+		{"pacific skipped", "America/Los_Angeles", pacificRules, "20260308T023000", utc(2026, 3, 8, 10, 30, 0)},  // read at PST
+		{"berlin repeated", "Europe/Berlin", berlinRules, "20261025T023000", utc(2026, 10, 25, 0, 30, 0)},        // CEST
+		{"berlin skipped", "Europe/Berlin", berlinRules, "20260329T023000", utc(2026, 3, 29, 1, 30, 0)},          // read at CET
+	}
+	for _, c := range cases {
+		event := "BEGIN:VEVENT\nUID:u\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:" + c.local + "\nEND:VEVENT\n"
+		_, custom := mustParse(t, zoneCalendar("Office Time", c.rules, event))
+		_, tzdata := mustParse(t, []byte("BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:x\n"+strings.ReplaceAll(event, "TZ:", c.iana+":")+"END:VCALENDAR\n"))
+		for zone, ev := range map[string]Event{"vtimezone": custom[0], "iana": tzdata[0]} {
+			if !ev.Start.Equal(c.want) {
+				t.Errorf("%s/%s: start %v, want %v", c.name, zone, ev.Start, c.want)
+			}
+		}
+	}
+}
