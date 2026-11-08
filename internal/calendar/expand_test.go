@@ -2,6 +2,7 @@ package calendar
 
 import (
 	"errors"
+	"fmt"
 	"runtime"
 	"strconv"
 	"strings"
@@ -487,4 +488,161 @@ func TestExpandFirstInstanceCenturiesAway(t *testing.T) {
 		t.Fatalf("Expand: %v", err)
 	}
 	sameTimes(t, starts(insts), []time.Time{utc(2400, 2, 29, 9, 0, 0)})
+}
+
+// dstZones parses an event body whose TZID-qualified times are written
+// "TZ:", once in a zone known only from its VTIMEZONE (US Pacific rules)
+// and once in the IANA zone America/Los_Angeles, which have the same
+// rules.
+func dstZones(t *testing.T, body string) map[string][]Event {
+	t.Helper()
+	iana := "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:x\n" + strings.ReplaceAll(body, "TZ:", "America/Los_Angeles:") + "END:VCALENDAR\n"
+	_, custom := mustParse(t, zoneCalendar("Office Time", pacificRules, body))
+	_, tzdata := mustParse(t, []byte(iana))
+	return map[string][]Event{"vtimezone": custom, "iana": tzdata}
+}
+
+// A UTC UNTIL is an instant, even when it falls in the hour the autumn
+// change repeats: an instance in the first pass of that hour is before it.
+// The end of the range is an instant in the same way.
+func TestExpandUTCUntilInRepeatedHour(t *testing.T) {
+	const ev = "BEGIN:VEVENT\nUID:s\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20261031T%s\nDURATION:PT30M\nRRULE:FREQ=DAILY%s\nEND:VEVENT\n"
+	oct31, nov1 := utc(2026, 10, 31, 8, 30, 0), utc(2026, 11, 1, 8, 30, 0) // 01:30 PDT both days
+	cases := []struct {
+		name, start, until string
+		from, to           time.Time
+		want               []time.Time
+	}{
+		// 09:15Z is 01:15 in the second pass of the repeated hour, after
+		// the first 01:30 (08:30Z).
+		{"until in the second pass", "013000", ";UNTIL=20261101T091500Z", utc(2026, 10, 1, 0, 0, 0), utc(2026, 12, 1, 0, 0, 0), []time.Time{oct31, nov1}},
+		{"until before the first pass", "013000", ";UNTIL=20261101T082000Z", utc(2026, 10, 1, 0, 0, 0), utc(2026, 12, 1, 0, 0, 0), []time.Time{oct31}},
+		{"range ends in the second pass", "013000", "", utc(2026, 10, 1, 0, 0, 0), utc(2026, 11, 1, 9, 15, 0), []time.Time{oct31, nov1}},
+		// 02:00 on 11-01 is PST, 10:00Z, after an UNTIL of 09:15Z although
+		// its wall time is before 02:15, the wall time 09:15Z has in PDT.
+		{"until before the hour after", "020000", ";UNTIL=20261101T091500Z", utc(2026, 10, 1, 0, 0, 0), utc(2026, 12, 1, 0, 0, 0), []time.Time{utc(2026, 10, 31, 9, 0, 0)}},
+	}
+	for _, c := range cases {
+		for zone, events := range dstZones(t, fmt.Sprintf(ev, c.start, c.until)) {
+			t.Run(c.name+"/"+zone, func(t *testing.T) {
+				insts, _ := mustExpand(t, events, c.from, c.to, MaxInstances)
+				sameTimes(t, starts(insts), c.want)
+			})
+		}
+	}
+}
+
+// An instance whose wall time is DTSTART's is DTSTART, even when DTSTART,
+// as a calendar API can give it, is in the second pass of a repeated hour.
+func TestExpandStartInSecondPass(t *testing.T) {
+	start := utc(2026, 11, 1, 9, 30, 0) // 01:30 PST, the second 01:30
+	ev := master("FREQ=DAILY;COUNT=2", start, 30*time.Minute)
+	ev.TZID = "America/Los_Angeles"
+	insts, _ := mustExpand(t, []Event{ev}, utc(2026, 10, 1, 0, 0, 0), utc(2026, 12, 1, 0, 0, 0), MaxInstances)
+	sameTimes(t, starts(insts), []time.Time{start, utc(2026, 11, 2, 9, 30, 0)})
+}
+
+// A rule instance at a local time the spring change skips is ignored and
+// does not count toward COUNT (RFC 5545 3.3.10) when the rule recurs more
+// than once a day. A rule recurring once a day at one time of day keeps
+// its instance on the day of the change, read with the offset before the
+// gap (RFC 5545 3.3.5), as DTSTART itself is.
+func TestExpandSpringGap(t *testing.T) {
+	const ev = "BEGIN:VEVENT\nUID:s\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:%s\nDURATION:PT30M\nRRULE:%s\nEND:VEVENT\n"
+	cases := []struct {
+		name, start, rule string
+		want              []time.Time
+	}{
+		{
+			// 00:30 PST, 01:30 PST, (02:30 does not exist), 03:30 PDT, 04:30, 05:30.
+			name: "hourly", start: "20260308T003000", rule: "FREQ=HOURLY;COUNT=5",
+			want: []time.Time{utc(2026, 3, 8, 8, 30, 0), utc(2026, 3, 8, 9, 30, 0), utc(2026, 3, 8, 10, 30, 0), utc(2026, 3, 8, 11, 30, 0), utc(2026, 3, 8, 12, 30, 0)},
+		},
+		{
+			// 00:30 PST, (02:30 does not exist), 04:30 PDT, 06:30 PDT: not
+			// 03:30 PDT, where 02:30 read before the gap would land.
+			name: "every two hours", start: "20260308T003000", rule: "FREQ=HOURLY;INTERVAL=2;COUNT=3",
+			want: []time.Time{utc(2026, 3, 8, 8, 30, 0), utc(2026, 3, 8, 11, 30, 0), utc(2026, 3, 8, 13, 30, 0)},
+		},
+		{
+			name: "several times a day", start: "20260307T013000", rule: "FREQ=DAILY;BYHOUR=1,2,3;BYMINUTE=30;COUNT=6",
+			want: []time.Time{
+				utc(2026, 3, 7, 9, 30, 0), utc(2026, 3, 7, 10, 30, 0), utc(2026, 3, 7, 11, 30, 0), // PST
+				utc(2026, 3, 8, 9, 30, 0), utc(2026, 3, 8, 10, 30, 0), // 01:30 PST, 03:30 PDT
+				utc(2026, 3, 9, 8, 30, 0), // 01:30 PDT
+			},
+		},
+		{
+			// 02:30 on 03-08 is read as 03:30 PDT (10:30Z).
+			name: "once a day", start: "20260307T023000", rule: "FREQ=DAILY;COUNT=3",
+			want: []time.Time{utc(2026, 3, 7, 10, 30, 0), utc(2026, 3, 8, 10, 30, 0), utc(2026, 3, 9, 9, 30, 0)},
+		},
+		{
+			// DTSTART in the gap is read with the offset before it.
+			name: "start in the gap", start: "20260308T023000", rule: "FREQ=DAILY;COUNT=1",
+			want: []time.Time{utc(2026, 3, 8, 10, 30, 0)},
+		},
+	}
+	for _, c := range cases {
+		for zone, events := range dstZones(t, fmt.Sprintf(ev, c.start, c.rule)) {
+			t.Run(c.name+"/"+zone, func(t *testing.T) {
+				insts, _ := mustExpand(t, events, utc(2026, 3, 1, 0, 0, 0), utc(2026, 4, 1, 0, 0, 0), MaxInstances)
+				sameTimes(t, starts(insts), c.want)
+				uniqueInstances(t, insts)
+			})
+		}
+	}
+}
+
+// uniqueInstances fails when two instances share a start or a
+// recurrence ID.
+func uniqueInstances(t *testing.T, insts []Instance) {
+	t.Helper()
+	starts, ids := map[time.Time]bool{}, map[time.Time]bool{}
+	for _, in := range insts {
+		if starts[in.Start] || ids[in.RecurrenceID] {
+			t.Fatalf("instance %v (recurrence ID %v) is repeated", in.Start, in.RecurrenceID)
+		}
+		starts[in.Start], ids[in.RecurrenceID] = true, true
+	}
+}
+
+// An hourly series has one instance per hour that exists, with its own
+// recurrence ID, across both DST changes: 23 on the spring day and 24 on
+// the autumn one, whose repeated hour recurs once, in its first pass.
+func TestExpandHourlyAcrossDSTUnique(t *testing.T) {
+	const ev = "BEGIN:VEVENT\nUID:s\nDTSTAMP:20260101T000000Z\nDTSTART;TZID=TZ:20260301T000000\nDURATION:PT15M\n" +
+		"RRULE:FREQ=HOURLY;BYMONTH=3,11;BYMONTHDAY=1,8\nEND:VEVENT\n"
+	for zone, events := range dstZones(t, ev) {
+		t.Run(zone, func(t *testing.T) {
+			insts, truncated := mustExpand(t, events, utc(2026, 1, 1, 0, 0, 0), utc(2027, 1, 1, 0, 0, 0), MaxInstances)
+			uniqueInstances(t, insts)
+			if len(insts) != 24+23+24+24 || truncated {
+				t.Fatalf("got %d instances (truncated %v), want 95", len(insts), truncated)
+			}
+			if got := insts[46].Start; !got.Equal(utc(2026, 3, 8, 23+7, 0, 0)) {
+				t.Fatalf("last instance on 03-08 = %v, want 23:00 PDT", got)
+			}
+		})
+	}
+}
+
+// Samoa skipped 2011-12-30, moving from UTC-10 to UTC+14. A daily
+// instance on the skipped day, read with the offset before the gap, is
+// the next day's instance, and is one instance, counted once.
+func TestExpandSkippedDay(t *testing.T) {
+	apia, err := time.LoadLocation("Pacific/Apia")
+	if err != nil {
+		t.Skip("no tzdata for Pacific/Apia")
+	}
+	ev := master("FREQ=DAILY;COUNT=4", time.Date(2011, 12, 29, 9, 0, 0, 0, apia).UTC(), time.Hour)
+	ev.TZID = "Pacific/Apia"
+	insts, _ := mustExpand(t, []Event{ev}, utc(2011, 12, 1, 0, 0, 0), utc(2012, 2, 1, 0, 0, 0), MaxInstances)
+	uniqueInstances(t, insts)
+	sameTimes(t, starts(insts), []time.Time{
+		utc(2011, 12, 29, 19, 0, 0), // 09:00 UTC-10
+		utc(2011, 12, 30, 19, 0, 0), // the skipped 30th, read at UTC-10, is 09:00 on the 31st
+		utc(2011, 12, 31, 19, 0, 0), // 2012-01-01 09:00 UTC+14
+		utc(2012, 1, 1, 19, 0, 0),
+	})
 }

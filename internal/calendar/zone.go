@@ -2,6 +2,7 @@ package calendar
 
 import (
 	"bytes"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
@@ -495,6 +496,14 @@ func (v *vtimezone) instant(w time.Time) (time.Time, bool) {
 	return u, true
 }
 
+// maxOffset returns the largest offset of the zone.
+func (v *vtimezone) maxOffset() time.Duration {
+	if len(v.offs) == 0 {
+		return 0
+	}
+	return v.offs[len(v.offs)-1]
+}
+
 // localInstant returns the UTC instant of a wall time w, held as a UTC
 // value, in the IANA zone loc, and whether the wall time exists. It reads
 // w as vtimezone.instant does, after RFC 5545 3.3.5: the first occurrence
@@ -527,6 +536,28 @@ func localInstant(w time.Time, loc *time.Location) (time.Time, bool) {
 // naiveOf returns the wall time of t as a UTC value.
 func naiveOf(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
+}
+
+// maxZonePeriods bounds the zone periods maxLocalOffset walks; real zones
+// change offset a few times a year.
+const maxZonePeriods = 16
+
+// maxLocalOffset returns the largest offset loc has in force at any instant
+// in [from, to].
+func maxLocalOffset(loc *time.Location, from, to time.Time) time.Duration {
+	best := math.MinInt
+	t := from
+	for range maxZonePeriods {
+		lt := t.In(loc)
+		_, off := lt.Zone()
+		best = max(best, off)
+		_, end := lt.ZoneBounds()
+		if end.IsZero() || end.After(to) {
+			break
+		}
+		t = end
+	}
+	return time.Duration(best) * time.Second
 }
 
 // lastOnset returns the observance's last onset at or before local, and

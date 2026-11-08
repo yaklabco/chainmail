@@ -17,7 +17,11 @@ import (
 // The zone a series recurs in is the VTIMEZONE its DTSTART names in the
 // master's Raw, when Raw is an iCalendar object holding one (so a zone
 // known only from its VTIMEZONE, which gives TZID "", still recurs on its
-// own rules), else the IANA zone TZID names, else UTC.
+// own rules), else the IANA zone TZID names, else UTC. A UTC UNTIL and
+// the end of the range are instants, so a repeated hour does not move
+// them. An instance at a local time a DST change skips moves past the gap
+// when the rule recurs once a day or less often, and is dropped, not
+// counted toward COUNT, when it recurs more often (see seriesRule).
 //
 // SECONDLY and MINUTELY rules return ErrUnsafeRecurrence, as do an INTERVAL
 // over 10000, HOURLY with BYSETPOS, and a rule whose estimated work (the
@@ -80,8 +84,9 @@ func Expand(series []Event, from, to time.Time, limit int) (insts []Instance, tr
 	return insts, false, nil
 }
 
-// occurrences expands the rule, RDATEs and EXDATEs of one master into at
-// most limit instances overlapping [from, to), skipping overridden ones.
+// occurrences expands the rule, RDATEs and EXDATEs of one master into the
+// earliest instances overlapping [from, to), at most limit, skipping
+// overridden ones. EXDATEs and overrides name instances by their instant.
 func occurrences(ev Event, from, to time.Time, limit int, overridden map[int64]bool) (out []Instance, err error) {
 	// rrule-go panics on input parseRule does not foresee. A panic here is
 	// reported as a bad rule, since one hostile invite must not stop the
@@ -92,90 +97,166 @@ func occurrences(ev Event, from, to time.Time, limit int, overridden map[int64]b
 		}
 	}()
 	fr := frameOf(ev)
-	dur := max(ev.End.Sub(ev.Start), 0)
-	start := fr.wall(ev.Start)
+	start := ev.Start.UTC()
+	dur := max(ev.End.Sub(start), 0)
 
-	var set rrule.Set
+	rule := func() (w, t time.Time, ok bool) { return w, t, false }
 	if ev.RRule != "" {
-		r, err := seriesRule(ev.RRule, fr, start, to)
+		next, err := seriesRule(ev.RRule, fr, start, to)
 		if err != nil {
 			return nil, err
 		}
-		if r != nil {
-			set.RRule(r)
+		if next != nil {
+			rule = next
 		}
 	}
-	set.DTStart(start)
-	set.RDate(start) // DTSTART is always the first instance (RFC 5545 3.8.5.3)
+	// DTSTART is always the first instance (RFC 5545 3.8.5.3). It and the
+	// RDATEs are instants already.
+	dates := make([]time.Time, 0, len(ev.RDates)+1)
+	dates = append(dates, start)
 	for _, t := range ev.RDates {
-		set.RDate(fr.wall(t))
+		dates = append(dates, t.UTC())
 	}
+	slices.SortFunc(dates, time.Time.Compare)
+	excluded := make(map[int64]bool, len(ev.ExDates))
 	for _, t := range ev.ExDates {
-		set.ExDate(fr.wall(t))
+		excluded[t.Unix()] = true
 	}
 
-	next := set.Iterator()
-	for len(out) < limit {
-		w, ok := next()
-		if !ok {
+	// Rule instances come in wall-time order. Their instants follow it,
+	// except one moved past a gap, so the instants still to come are no
+	// earlier than the next wall time less the zone's largest offset. The
+	// rule itself ends past to (seriesRule bounds it), the dates are sorted.
+	w, t, more := rule()
+	seen := map[int64]bool{}
+	var latest time.Time // the latest start kept, once limit are kept
+	for more || len(dates) > 0 {
+		if !more && !dates[0].Before(to) {
 			break
 		}
-		t := fr.instant(w)
-		if !t.Before(to) {
-			break
+		if len(out) >= limit && (!more || !w.Add(-fr.maxOffset(w)).Before(latest)) &&
+			(len(dates) == 0 || !dates[0].Before(latest)) {
+			break // nothing left starts before the instances kept
 		}
-		if overridden[t.Unix()] || !overlaps(t, t.Add(dur), from, to) {
+		var at time.Time
+		if more && (len(dates) == 0 || !dates[0].Before(t)) {
+			at = t
+			w, t, more = rule()
+		} else {
+			at, dates = dates[0], dates[1:]
+		}
+		key := at.Unix()
+		if seen[key] || excluded[key] || overridden[key] || !overlaps(at, at.Add(dur), from, to) ||
+			(len(out) >= limit && !at.Before(latest)) {
 			continue
 		}
-		out = append(out, Instance{Event: ev, Start: t, End: t.Add(dur), RecurrenceID: t})
+		seen[key] = true
+		out = append(out, Instance{Event: ev, Start: at, End: at.Add(dur), RecurrenceID: at})
+		if len(out) == limit {
+			for _, in := range out {
+				if in.Start.After(latest) {
+					latest = in.Start
+				}
+			}
+		}
+	}
+	if len(out) > limit {
+		slices.SortFunc(out, func(a, b Instance) int { return a.Start.Compare(b.Start) })
+		out = out[:limit]
 	}
 	return out, nil
 }
 
-// seriesRule builds the rule of a master starting at start, in the frame
-// fr, ending at to. It returns nil when the rule adds no instance to
-// DTSTART and the RDATEs, and ErrUnsafeRecurrence when its estimated work
-// is over maxRuleWork.
-func seriesRule(value string, fr frame, start, to time.Time) (*rrule.RRule, error) {
-	opt, err := parseRule(value, fr.loc)
+// seriesRule returns the instances of a master's rule, in the frame fr,
+// from DTSTART start to past to: their wall times in rule order, with their
+// instants. It returns nil when the rule adds no instance to DTSTART and
+// the RDATEs, and ErrUnsafeRecurrence when its estimated work is over
+// maxRuleWork.
+//
+// A rule wall time that a DST change skips is handled after RFC 5545. A
+// rule that recurs at most once a day at one time of day (FREQ=DAILY or
+// coarser, with at most one BYHOUR, BYMINUTE and BYSECOND value) names
+// that time of day on each of its days, so, as 3.3.5 reads a DATE-TIME
+// such as DTSTART, its instance on the day of the change is read with the
+// offset before the gap and lands as far past it. That is what calendar
+// clients show. Any other rule (FREQ=HOURLY, or several times a day) loses
+// the instances in the gap, which 3.3.10 says are ignored and not counted;
+// moving them could land them on another instance. COUNT is therefore
+// applied here, not by rrule-go. A wall time a change repeats is its first
+// occurrence, and the wall time of DTSTART is DTSTART itself.
+func seriesRule(value string, fr frame, start, to time.Time) (next func() (w, t time.Time, ok bool), err error) {
+	// The frame's wall times are UTC values, so a local UNTIL reads as one.
+	opt, err := parseRule(value, time.UTC)
 	if err != nil {
 		return nil, err
 	}
-	// A UTC UNTIL is an instant, which the wall-clock frame of a VTIMEZONE
-	// reads as the wall time it is then.
-	if fr.vtz != nil && !opt.Until.IsZero() && untilIsUTC(value) {
-		opt.Until = fr.wall(opt.Until)
+	// A UTC UNTIL is an instant. The rule runs to the last wall time that
+	// can be at or before it, and instances after it are dropped.
+	var until time.Time
+	if !opt.Until.IsZero() && untilIsUTC(value) {
+		until = opt.Until
+		opt.Until = fr.latestWall(until)
 	}
-	opt.Dtstart = start
-	// No instance at or after to is wanted, so the rule stops there.
-	if end := fr.wall(to); opt.Until.IsZero() || opt.Until.After(end) {
+	startWall := fr.wall(start)
+	opt.Dtstart = startWall
+	// No instance at or after to is wanted, so the rule stops at the last
+	// wall time before it.
+	if end := fr.latestWall(to); opt.Until.IsZero() || opt.Until.After(end) {
 		opt.Until = end
 	}
-	if !hourReachable(opt, start.Hour()) {
+	count := opt.Count
+	opt.Count = 0
+	if !hourReachable(opt, startWall.Hour()) {
 		return nil, nil
 	}
 	c := costOf(opt)
 	if c.canMiss && patternYears(opt) > maxPatternYears {
 		return nil, ErrUnsafeRecurrence
 	}
-	if c.work(periodsBetween(opt, start, opt.Until), searchSteps(opt, c)) > maxRuleWork {
+	if c.work(periodsBetween(opt, startWall, opt.Until), searchSteps(opt, c)) > maxRuleWork {
 		return nil, ErrUnsafeRecurrence
 	}
-	if c.canMiss && !matchesEver(opt, start) {
+	if c.canMiss && !matchesEver(opt, startWall) {
 		return nil, nil
 	}
 	r, err := rrule.NewRRule(*opt)
 	if err != nil {
 		return nil, fmt.Errorf("%w: bad RRULE", ErrInvalidICS)
 	}
-	return r, nil
+	skipGaps := opt.Freq > rrule.DAILY || len(opt.Byhour) > 1 || len(opt.Byminute) > 1 || len(opt.Bysecond) > 1
+	it := r.Iterator()
+	n := 0
+	var last time.Time
+	return func() (time.Time, time.Time, bool) {
+		for count == 0 || n < count {
+			w, ok := it()
+			if !ok {
+				break
+			}
+			t, exists := fr.instant(w)
+			if w.Equal(startWall) {
+				t, exists = start, true
+			}
+			// A day moved past a gap of a day or more lands on the next
+			// one, which is then the same instance, counted once.
+			if (!exists && skipGaps) || (n > 0 && t.Equal(last)) {
+				continue
+			}
+			n, last = n+1, t
+			if !until.IsZero() && t.After(until) {
+				continue
+			}
+			return w, t, true
+		}
+		return time.Time{}, time.Time{}, false
+	}, nil
 }
 
-// frame is the clock a series recurs on. With an IANA zone, rrule-go runs
-// in it. With a VTIMEZONE, rrule-go runs on wall times held as UTC values,
-// converted with the zone's rules as ParseICS converts them.
+// frame is the clock a series recurs on. rrule-go runs on its wall times,
+// held as UTC values, which are converted with the series' VTIMEZONE as
+// ParseICS converts them, or with its IANA zone, or are UTC.
 type frame struct {
-	loc *time.Location
+	loc *time.Location // the IANA zone or UTC, when vtz is nil
 	vtz *vtimezone
 }
 
@@ -195,20 +276,44 @@ func frameOf(ev Event) frame {
 	return frame{loc: time.UTC}
 }
 
-// wall returns the instant u in the frame.
+// wall returns the wall time of the instant u in the frame.
 func (f frame) wall(u time.Time) time.Time {
 	if f.vtz != nil {
 		return f.vtz.wallOf(u.UTC())
 	}
-	return u.In(f.loc)
+	return naiveOf(u.In(f.loc))
 }
 
-// instant returns the UTC instant of a time in the frame.
-func (f frame) instant(w time.Time) time.Time {
-	if f.vtz != nil {
-		return w.Add(-f.vtz.offset(w)).UTC()
+// instant returns the UTC instant of a wall time in the frame, and whether
+// the wall time exists, read as RFC 5545 3.3.5 reads a DATE-TIME.
+func (f frame) instant(w time.Time) (time.Time, bool) {
+	switch {
+	case f.vtz != nil:
+		return f.vtz.instant(w)
+	case f.loc == time.UTC:
+		return w, true
+	default:
+		return localInstant(w, f.loc)
 	}
-	return w.UTC()
+}
+
+// maxOffset returns an offset no smaller than any the frame has in force
+// within days of the time around, a wall time or an instant.
+func (f frame) maxOffset(around time.Time) time.Duration {
+	switch {
+	case f.vtz != nil:
+		return f.vtz.maxOffset()
+	case f.loc == time.UTC:
+		return 0
+	default:
+		return maxLocalOffset(f.loc, around.AddDate(0, 0, -3), around.AddDate(0, 0, 3))
+	}
+}
+
+// latestWall returns a wall time no earlier than any whose instant is at or
+// before u: no wall time after it is at or before u.
+func (f frame) latestWall(u time.Time) time.Time {
+	return u.UTC().Add(f.maxOffset(u))
 }
 
 // overlaps reports whether [s, e) overlaps [from, to). A zero-length
