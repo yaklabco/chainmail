@@ -430,6 +430,7 @@ type ReadAuditRequest struct {
 	Action        string                 `protobuf:"bytes,3,opt,name=action,proto3" json:"action,omitempty"`                      // empty: all actions
 	Limit         int32                  `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`                       // 0 means 100; maximum 1000
 	BeforeId      int64                  `protobuf:"varint,5,opt,name=before_id,json=beforeId,proto3" json:"before_id,omitempty"` // paging: only rows with id < before_id; 0 means no bound
+	Client        string                 `protobuf:"bytes,6,opt,name=client,proto3" json:"client,omitempty"`                      // empty: every client
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -497,6 +498,13 @@ func (x *ReadAuditRequest) GetBeforeId() int64 {
 		return x.BeforeId
 	}
 	return 0
+}
+
+func (x *ReadAuditRequest) GetClient() string {
+	if x != nil {
+		return x.Client
+	}
+	return ""
 }
 
 // ReadAuditResponse is one page of audit rows.
@@ -697,13 +705,14 @@ const file_chainmail_v1_admin_proto_rawDesc = "" +
 	"\bdev_mode\x18\x03 \x01(\bR\adevMode\x12!\n" +
 	"\fsecret_names\x18\x04 \x03(\tR\vsecretNames\x122\n" +
 	"\x04sync\x18\x05 \x03(\v2\x1e.chainmail.v1.FolderSyncStatusR\x04sync\x126\n" +
-	"\x05cache\x18\x06 \x03(\v2 .chainmail.v1.AccountCacheStatusR\x05cache\"\xa9\x01\n" +
+	"\x05cache\x18\x06 \x03(\v2 .chainmail.v1.AccountCacheStatusR\x05cache\"\xc1\x01\n" +
 	"\x10ReadAuditRequest\x120\n" +
 	"\x05since\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x05since\x12\x18\n" +
 	"\aaccount\x18\x02 \x01(\tR\aaccount\x12\x16\n" +
 	"\x06action\x18\x03 \x01(\tR\x06action\x12\x14\n" +
 	"\x05limit\x18\x04 \x01(\x05R\x05limit\x12\x1b\n" +
-	"\tbefore_id\x18\x05 \x01(\x03R\bbeforeId\"m\n" +
+	"\tbefore_id\x18\x05 \x01(\x03R\bbeforeId\x12\x16\n" +
+	"\x06client\x18\x06 \x01(\tR\x06client\"m\n" +
 	"\x11ReadAuditResponse\x122\n" +
 	"\aentries\x18\x01 \x03(\v2\x18.chainmail.v1.AuditEntryR\aentries\x12$\n" +
 	"\x0enext_before_id\x18\x02 \x01(\x03R\fnextBeforeId\"\x97\x02\n" +
