@@ -43,6 +43,7 @@ func toConnectError(err error) *connect.Error {
 		invalidItem *items.InvalidError
 		invalidRule *rules.InvalidError
 		calAuth     *calendarAuthError
+		calRefused  *calendarRefusal
 	)
 	switch {
 	case errors.As(err, &required):
@@ -94,6 +95,8 @@ func toConnectError(err error) *connect.Error {
 	case errors.As(err, &noFolder):
 		return api.New(connect.CodeNotFound, api.ReasonNotFound, folderHint,
 			&fixedTextError{msg: folderMissingText(noFolder), err: err})
+	case errors.As(err, &calRefused):
+		return api.New(calRefused.code, calRefused.reason, calRefused.hint, err)
 	case errors.As(err, &calAuth):
 		return api.New(connect.CodeUnauthenticated, api.ReasonAuthRequired, "run: chainmail auth login "+calAuth.account, err)
 	case errors.Is(err, calstore.ErrAuth):
