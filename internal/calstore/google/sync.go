@@ -33,6 +33,7 @@ type calendarListPage struct {
 func (s *Store) ListCalendars(ctx context.Context) ([]calendar.Calendar, error) {
 	q := url.Values{"maxResults": {strconv.Itoa(pageSize)}}
 	var out []calendar.Calendar
+	seen := map[string]bool{}
 	for range maxPages {
 		data, err := s.do(ctx, call{method: "GET", path: "/users/me/calendarList", query: q, limit: maxPageBytes})
 		if err != nil {
@@ -59,6 +60,10 @@ func (s *Store) ListCalendars(ctx context.Context) ([]calendar.Calendar, error) 
 		if page.NextPageToken == "" {
 			return out, nil
 		}
+		if seen[page.NextPageToken] {
+			return nil, errPageRepeated
+		}
+		seen[page.NextPageToken] = true
 		q.Set("pageToken", page.NextPageToken)
 	}
 	return nil, fmt.Errorf("%w: more than %d pages", calstore.ErrUnavailable, maxPages)
@@ -197,16 +202,29 @@ func listQuery() url.Values {
 
 // listEvents reads every page of an events.list, calling each for each
 // event and done with the final page's sync token. syncing says the query
-// is a Sync, so a 410 means its sync or page token expired.
+// is a Sync, so a 410 means its sync or page token expired. A listing that
+// reads more than calstore.MaxSyncBytes of pages or more than
+// calstore.MaxSyncEvents events gives calstore.ErrSyncTooLarge, and one
+// whose server repeats a page token gives errPageRepeated, so a server
+// cannot make a sync keep data without bound.
 func (s *Store) listEvents(ctx context.Context, calID string, q url.Values, syncing bool, each func(calendar.Event, apiEvent), done func(syncToken string)) error {
+	maxBytes, maxEvents := s.syncLimits()
+	var read, events int
+	seen := map[string]bool{}
 	for range maxPages {
 		data, err := s.do(ctx, call{method: "GET", path: eventsPath(calID), query: q, limit: maxPageBytes, sync: syncing})
 		if err != nil {
 			return err
 		}
+		if read += len(data); read > maxBytes {
+			return calstore.ErrSyncTooLarge
+		}
 		var page eventsPage
 		if err := json.Unmarshal(data, &page); err != nil {
 			return errBadResponse
+		}
+		if events += len(page.Items); events > maxEvents {
+			return calstore.ErrSyncTooLarge
 		}
 		for _, raw := range page.Items {
 			ev, a, err := decodeEvent(raw)
@@ -219,7 +237,27 @@ func (s *Store) listEvents(ctx context.Context, calID string, q url.Values, sync
 			done(page.NextSyncToken)
 			return nil
 		}
+		if seen[page.NextPageToken] {
+			return errPageRepeated
+		}
+		seen[page.NextPageToken] = true
 		q.Set("pageToken", page.NextPageToken)
 	}
 	return fmt.Errorf("%w: more than %d pages", calstore.ErrUnavailable, maxPages)
+}
+
+// errPageRepeated is a listing whose server handed out a page token it had
+// already given, which would page for ever.
+var errPageRepeated = fmt.Errorf("%w: page token repeated", calstore.ErrUnavailable)
+
+// syncLimits returns the bytes and events one listing may read.
+func (s *Store) syncLimits() (bytes, events int) {
+	bytes, events = s.syncBytes, s.syncEvents
+	if bytes <= 0 {
+		bytes = calstore.MaxSyncBytes
+	}
+	if events <= 0 {
+		events = calstore.MaxSyncEvents
+	}
+	return bytes, events
 }
