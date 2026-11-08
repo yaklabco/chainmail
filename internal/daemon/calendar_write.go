@@ -18,6 +18,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/api"
 	"github.com/yaklabco/chainmail/internal/audit"
 	"github.com/yaklabco/chainmail/internal/calcache"
 	"github.com/yaklabco/chainmail/internal/calendar"
@@ -452,4 +453,287 @@ func canonicalAddresses(list []string) []string {
 	}
 	slices.SortFunc(out, func(a, b string) int { return cmp.Compare(strings.ToLower(a), strings.ToLower(b)) })
 	return out
+}
+
+const (
+	// eventMaskHint lists UpdateEvent's mask paths.
+	eventMaskHint = "paths are title, start, end, time_zone, all_day, location, description, attendees and recurrence_rule"
+	// editHeldHint is CalendarHeld.hint for a held update or cancel.
+	editHeldHint = "held by policy: the change was not applied and no one was notified; James can make it in the calendar app"
+)
+
+// eventPaths are UpdateEvent's mask paths, in request field order.
+var eventPaths = []string{"title", "start", "end", "time_zone", "all_day", "location", "description", "attendees", "recurrence_rule"}
+
+var (
+	errNotOrganizer = &calendarRefusal{
+		code: connect.CodeFailedPrecondition, reason: api.ReasonNotOrganizer,
+		msg:  "only the organizer can change or cancel an event with other attendees",
+		hint: "ask the organizer, or answer the event: chainmail rsvp <ref> decline",
+	}
+	errEventEtag      = &argError{msg: "etag is required", hint: "pass the etag the event was read with: chainmail event <ref>"}
+	errEventMask      = &argError{msg: "update_mask must name one or more fields", hint: eventMaskHint}
+	errEventPath      = &argError{msg: "update_mask names an unknown field", hint: eventMaskHint}
+	errAllDayChange   = &argError{msg: "making an event all-day or timed needs both start and end", hint: "pass start and end with all_day"}
+	errInstanceRule   = &argError{msg: "one instance of a series has no recurrence rule of its own", hint: "change the rule on the series: pass its ref without @ and the recurrence ID"}
+	errTruncatedGuest = &argError{msg: "the event has more than 500 attendees, so its attendee list cannot be replaced", hint: "change the attendees in the calendar app"}
+)
+
+// UpdateEvent implements chainmailv1connect.CalendarServiceHandler. Only
+// the organizer may change an event with other attendees. The masked
+// fields are applied to the cached event, and the change is checked
+// against the send policy for every attendee but James, as both providers
+// notify them all; a held change is not applied.
+func (h *calendarService) UpdateEvent(ctx context.Context, req *connect.Request[chainmailv1.UpdateEventRequest]) (*connect.Response[chainmailv1.UpdateEventResponse], error) {
+	s := h.s
+	return calendarCall(ctx, s, req, "calendar.update_event", calendarWriteTimeout, func(ctx context.Context, _ caller, entry *audit.Entry) (*chainmailv1.UpdateEventResponse, error) {
+		m := req.Msg
+		target, _, err := eventRefTarget(m.GetRef())
+		entry.Targets = []string{target}
+		if err != nil {
+			return nil, err
+		}
+		paths, err := eventMaskFields(m.GetUpdateMask().GetPaths())
+		if err != nil {
+			entry.Targets = append(entry.Targets, "fields="+invalidTarget)
+			return nil, err
+		}
+		entry.Targets = append(entry.Targets, "fields="+strings.Join(paths, ","))
+		if m.GetEtag() == "" {
+			return nil, errEventEtag
+		}
+		res, ca, err := s.editTarget(ctx, m.GetRef(), m.GetEtag(), entry)
+		if err != nil {
+			return nil, err
+		}
+		ev, err := s.applyEdit(res, m, paths)
+		if err != nil {
+			return nil, err
+		}
+		notified := s.notified(slices.Concat(res.ev.Attendees, ev.Attendees))
+		if d := s.policy.CheckSend(ca.name, notified); len(notified) > 0 && !d.Allowed {
+			heldTargets(entry, len(d.Blocked), d.TooMany)
+			return &chainmailv1.UpdateEventResponse{Held: &chainmailv1.CalendarHeld{
+				Hint: editHeldHint, Blocked: untrustedList(d.Blocked), TooMany: d.TooMany, Summary: changeSummary(paths, ev),
+			}}, nil
+		}
+		entry.Decision = decisionAllowed
+		if _, err := ca.store.Put(ctx, res.row.CalendarID, ev, m.GetEtag(), calendar.NotifySend); err != nil {
+			return nil, calendarError(ca.name, err)
+		}
+		s.syncAfterWrite(ctx, ca)
+		v := viewOfResolved(res)
+		v.ev = ev
+		if after, err := s.resolveEvent(ctx, res.ref); err == nil {
+			v = viewOfResolved(after)
+		}
+		return &chainmailv1.UpdateEventResponse{Event: eventProto(v, s.ownAddress)}, nil
+	})
+}
+
+// CancelEvent implements chainmailv1connect.CalendarServiceHandler. The
+// organizer of an event with other attendees cancels it and notifies
+// them, under the send policy; a held cancel is not applied. An event with
+// no other attendees is deleted. One instance of a series is cancelled as
+// an override.
+func (h *calendarService) CancelEvent(ctx context.Context, req *connect.Request[chainmailv1.CancelEventRequest]) (*connect.Response[chainmailv1.CancelEventResponse], error) {
+	s := h.s
+	return calendarCall(ctx, s, req, "calendar.cancel_event", calendarWriteTimeout, func(ctx context.Context, _ caller, entry *audit.Entry) (*chainmailv1.CancelEventResponse, error) {
+		m := req.Msg
+		target, _, err := eventRefTarget(m.GetRef())
+		entry.Targets = []string{target}
+		if err != nil {
+			return nil, err
+		}
+		if m.GetEtag() == "" {
+			return nil, errEventEtag
+		}
+		res, ca, err := s.editTarget(ctx, m.GetRef(), m.GetEtag(), entry)
+		if err != nil {
+			return nil, err
+		}
+		notified := s.notified(res.ev.Attendees)
+		if d := s.policy.CheckSend(ca.name, notified); len(notified) > 0 && !d.Allowed {
+			heldTargets(entry, len(d.Blocked), d.TooMany)
+			return &chainmailv1.CancelEventResponse{Held: &chainmailv1.CalendarHeld{
+				Hint: editHeldHint, Blocked: untrustedList(d.Blocked), TooMany: d.TooMany,
+				Summary: fmt.Sprintf("cancel; attendees %d", len(notified)),
+			}}, nil
+		}
+		entry.Decision = decisionAllowed
+		if res.rid.IsZero() {
+			err = ca.store.Delete(ctx, res.row.CalendarID, res.row.Event.ProviderID, m.GetEtag(), calendar.NotifySend)
+		} else {
+			ev := res.ev
+			ev.Status = calendar.StatusCancelled
+			_, err = ca.store.Put(ctx, res.row.CalendarID, ev, m.GetEtag(), calendar.NotifySend)
+		}
+		if err != nil {
+			return nil, calendarError(ca.name, err)
+		}
+		s.syncAfterWrite(ctx, ca)
+		return &chainmailv1.CancelEventResponse{Cancelled: true}, nil
+	})
+}
+
+// editTarget resolves the event an update or cancel names and checks that
+// it may be changed: its account has a store, its calendar is writable,
+// James organizes it or it has no other attendees, and etag is its
+// current etag. When the cache holds another etag, a sync runs first, as
+// the caller can have read a newer event than the cache has.
+func (s *Server) editTarget(ctx context.Context, ref, etag string, entry *audit.Entry) (resolvedEvent, *calAccount, error) {
+	res, err := s.resolveEvent(ctx, ref)
+	if err != nil {
+		return resolvedEvent{}, nil, err
+	}
+	entry.Account = res.row.Account
+	entry.Targets = append(entry.Targets, "calendar="+plain(res.row.CalendarID))
+	ca, ok := s.calendars[res.row.Account]
+	if !ok || ca.store == nil {
+		return resolvedEvent{}, nil, errNoCalendarStore
+	}
+	if !s.mayChange(res) {
+		return resolvedEvent{}, nil, errNotOrganizer
+	}
+	cal, err := s.calcache.Calendar(ctx, res.row.Account, res.row.CalendarID)
+	if err != nil {
+		return resolvedEvent{}, nil, err
+	}
+	if cal.Access != calendar.AccessWrite {
+		return resolvedEvent{}, nil, calstore.ErrReadOnly
+	}
+	if res.ev.ETag != etag {
+		s.syncAfterWrite(ctx, ca)
+		if again, err := s.resolveEvent(ctx, ref); err == nil {
+			res = again
+		}
+		if res.ev.ETag != etag {
+			return resolvedEvent{}, nil, calstore.ErrConflict
+		}
+	}
+	return res, ca, nil
+}
+
+// mayChange reports whether James may change an event: he organizes it,
+// or it has no attendee but him.
+func (s *Server) mayChange(res resolvedEvent) bool {
+	_, org := res.role()
+	return org || !hasOtherAttendees(res.ev, s.ownAddress)
+}
+
+// eventMaskFields checks an UpdateEvent mask's paths and returns them
+// without repeats, in field order. An unknown path fails the whole mask
+// and is never recorded.
+func eventMaskFields(paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, errEventMask
+	}
+	for _, p := range paths {
+		if !slices.Contains(eventPaths, p) {
+			return nil, errEventPath
+		}
+	}
+	return slices.DeleteFunc(slices.Clone(eventPaths), func(p string) bool { return !slices.Contains(paths, p) }), nil
+}
+
+// applyEdit returns the cached event with the masked fields of m applied.
+// All-day values follow Amendment 17 whether or not all_day is in the
+// mask. When start moves and end is not given, the event keeps its length.
+func (s *Server) applyEdit(res resolvedEvent, m *chainmailv1.UpdateEventRequest, paths []string) (calendar.Event, error) {
+	ev := res.ev
+	has := func(p string) bool { return slices.Contains(paths, p) }
+	var err error
+	if has("title") {
+		if ev.Summary, err = checkTitle(m.GetTitle()); err != nil {
+			return calendar.Event{}, err
+		}
+	}
+	location, description := ev.Location, ev.Description
+	if has("location") {
+		location = m.GetLocation()
+	}
+	if has("description") {
+		description = m.GetDescription()
+	}
+	if ev.Location, ev.Description, err = checkText(location, description); err != nil {
+		return calendar.Event{}, err
+	}
+	if ev, err = s.applyTimes(ev, m, has); err != nil {
+		return calendar.Event{}, err
+	}
+	if has("attendees") {
+		if ev.AttendeesTruncated {
+			return calendar.Event{}, errTruncatedGuest
+		}
+		people, err := parseAttendees(m.GetAttendees())
+		if err != nil {
+			return calendar.Event{}, err
+		}
+		ev.Attendees = s.mergeAttendees(ev.Attendees, people)
+	}
+	if has("recurrence_rule") {
+		if !res.rid.IsZero() || !ev.RecurrenceID.IsZero() {
+			return calendar.Event{}, errInstanceRule
+		}
+		if ev.RRule, err = checkRule(m.GetRecurrenceRule(), ev); err != nil {
+			return calendar.Event{}, err
+		}
+	}
+	return ev, nil
+}
+
+// applyTimes applies start, end, time_zone and all_day.
+func (s *Server) applyTimes(ev calendar.Event, m *chainmailv1.UpdateEventRequest, has func(string) bool) (calendar.Event, error) {
+	allDay := ev.AllDay
+	if has("all_day") {
+		allDay = m.GetAllDay()
+	}
+	if allDay != ev.AllDay && (!has("start") || !has("end")) {
+		return calendar.Event{}, errAllDayChange
+	}
+	zone := ev.TZID
+	if has("time_zone") {
+		zone = m.GetTimeZone()
+	}
+	loc, tzid, err := s.eventZone(zone)
+	if err != nil {
+		return calendar.Event{}, err
+	}
+	length := ev.End.Sub(ev.Start)
+	if has("start") {
+		if m.GetStart() == nil {
+			return calendar.Event{}, errEventTimes
+		}
+		ev.Start = eventTime(m.GetStart(), allDay, loc)
+		ev.End = ev.Start.Add(length)
+	}
+	if has("end") {
+		if m.GetEnd() == nil {
+			return calendar.Event{}, errEventTimes
+		}
+		ev.End = eventTime(m.GetEnd(), allDay, loc)
+	}
+	ev.AllDay = allDay
+	switch {
+	case allDay:
+		ev.TZID = ""
+	case has("time_zone") || has("all_day"):
+		ev.TZID = tzid
+	}
+	if !ev.End.After(ev.Start) {
+		return calendar.Event{}, errEventTimes
+	}
+	return ev, nil
+}
+
+// changeSummary is CalendarHeld.summary for a held update: the field
+// names, the new times when they changed and the attendee count. It holds
+// no event text.
+func changeSummary(paths []string, ev calendar.Event) string {
+	parts := []string{"fields: " + strings.Join(paths, ",")}
+	if slices.ContainsFunc(paths, func(p string) bool { return p == "start" || p == "end" || p == "all_day" || p == "time_zone" }) {
+		parts = append(parts, "start "+ev.Start.UTC().Format(time.RFC3339), "end "+ev.End.UTC().Format(time.RFC3339))
+	}
+	parts = append(parts, fmt.Sprintf("attendees %d", len(ev.Attendees)))
+	return strings.Join(parts, "; ")
 }

@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 	"github.com/yaklabco/chainmail/internal/api"
 	"github.com/yaklabco/chainmail/internal/calendar"
+	"github.com/yaklabco/chainmail/internal/calstore"
 	calfake "github.com/yaklabco/chainmail/internal/calstore/fake"
 )
 
@@ -212,6 +214,223 @@ func TestCreateEventRefusals(t *testing.T) {
 	}
 	if n := e.mw.Count(calfake.MethodPut); n != 0 {
 		t.Errorf("Put calls = %d, want none", n)
+	}
+	noSecretInAudit(t, e.Harness)
+}
+
+// etagOf reads an event's etag with GetEvent, as a client does before a
+// change.
+func (e *calEnv) etagOf(t *testing.T, ref string) string {
+	t.Helper()
+	resp, err := e.Client.Calendar.GetEvent(t.Context(), connect.NewRequest(&chainmailv1.GetEventRequest{Ref: ref}))
+	if err != nil {
+		t.Fatalf("GetEvent: %v", err)
+	}
+	return resp.Msg.GetEvent().GetEtag()
+}
+
+func (e *calEnv) update(t *testing.T, req *chainmailv1.UpdateEventRequest) (*chainmailv1.UpdateEventResponse, error) {
+	t.Helper()
+	resp, err := e.Client.Calendar.UpdateEvent(t.Context(), connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+func (e *calEnv) cancel(t *testing.T, ref, etag string) (*chainmailv1.CancelEventResponse, error) {
+	t.Helper()
+	resp, err := e.Client.Calendar.CancelEvent(t.Context(), connect.NewRequest(&chainmailv1.CancelEventRequest{Ref: ref, Etag: etag}))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+func mask(paths ...string) *fieldmaskpb.FieldMask { return &fieldmaskpb.FieldMask{Paths: paths} }
+
+func TestUpdateEvent(t *testing.T) {
+	t.Parallel()
+	var p, weekly string
+	e := startCal(t, func(e *calEnv) {
+		p = e.mw.Add(mwCal, own("mine@x", "james@mw.example", e.start, allowedAddr))
+		master := own("weekly@x", "james@mw.example", e.start)
+		master.RRule = "FREQ=WEEKLY;COUNT=3"
+		weekly = e.mw.Add(mwCal, master)
+	})
+	ref := calendar.EventRef("mw", mwCal, p)
+	etag := e.etagOf(t, ref)
+	got, err := e.update(t, &chainmailv1.UpdateEventRequest{
+		Ref: ref, Etag: etag, UpdateMask: mask("title", "start", "location"),
+		Title: "New " + secretText, Start: ts(e.start.Add(time.Hour)), Location: "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := got.GetEvent()
+	if got.GetHeld() != nil || ev.GetSummary().GetUntrusted() != "New "+secretText || ev.GetLocation().GetUntrusted() != "" ||
+		!ev.GetStart().AsTime().Equal(e.start.Add(time.Hour)) || !ev.GetEnd().AsTime().Equal(e.start.Add(2*time.Hour)) || ev.GetEtag() == etag {
+		t.Errorf("event = %v, want the new title and an hour later, an hour long", ev)
+	}
+	checkUntrusted(t, got)
+	calls := e.mw.CallsTo(calfake.MethodPut)
+	if len(calls) != 1 || calls[0].ETag != etag || calls[0].Notify != calendar.NotifySend || calls[0].Event.ProviderID != p {
+		t.Fatalf("Put calls = %+v", calls)
+	}
+	if r := auditRow(t, e.Harness, "calendar.update_event"); r.Result != "ok" || !strings.Contains(r.Targets, ref) || !strings.Contains(r.Targets, "fields=title,start,location") {
+		t.Errorf("audit row %+v", r)
+	}
+
+	// One instance of a series.
+	second := e.start.Add(7 * 24 * time.Hour)
+	iref := calendar.InstanceRef(calendar.EventRef("mw", mwCal, weekly), second)
+	got, err = e.update(t, &chainmailv1.UpdateEventRequest{Ref: iref, Etag: e.etagOf(t, iref), UpdateMask: mask("title"), Title: "Moved"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls = e.mw.CallsTo(calfake.MethodPut)
+	if len(calls) != 2 || !calls[1].Event.RecurrenceID.Equal(second) || got.GetEvent().GetRef() != iref || got.GetEvent().GetSummary().GetUntrusted() != "Moved" {
+		t.Errorf("instance update: Put %+v, event %v", calls, got.GetEvent())
+	}
+	noSecretInAudit(t, e.Harness)
+}
+
+func TestUpdateEventHeld(t *testing.T) {
+	t.Parallel()
+	var p string
+	e := startCal(t, func(e *calEnv) {
+		p = e.mw.Add(mwCal, own("mine@x", "james@mw.example", e.start, allowedAddr))
+	})
+	ref := calendar.EventRef("mw", mwCal, p)
+	got, err := e.update(t, &chainmailv1.UpdateEventRequest{
+		Ref: ref, Etag: e.etagOf(t, ref), UpdateMask: mask("attendees", "end"),
+		Attendees: []string{allowedAddr, blockedAddr}, End: ts(e.start.Add(2 * time.Hour)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := got.GetHeld()
+	if held == nil || got.GetEvent() != nil || len(held.GetBlocked()) != 1 || held.GetHint() == "" ||
+		!strings.Contains(held.GetSummary(), "attendees") || !strings.Contains(held.GetSummary(), e.start.Add(2*time.Hour).Format(time.RFC3339)) ||
+		strings.Contains(held.GetSummary(), blockedAddr) {
+		t.Fatalf("response = %v, want held with a summary", got)
+	}
+	if n := e.mw.Count(calfake.MethodPut); n != 0 {
+		t.Errorf("Put calls = %d, want none: a held change is not applied", n)
+	}
+	if r := auditRow(t, e.Harness, "calendar.update_event"); r.Reason != api.ReasonHeld || !strings.Contains(r.Targets, "blocked:1") {
+		t.Errorf("audit row %+v", r)
+	}
+}
+
+func TestUpdateEventRefusals(t *testing.T) {
+	t.Parallel()
+	var mine, invited, shared, weekly string
+	e := startCal(t, func(e *calEnv) {
+		mine = e.mw.Add(mwCal, own("mine@x", "james@mw.example", e.start, allowedAddr))
+		invited = e.mw.Add(mwCal, invitation("inv@x", "james@mw.example", e.start))
+		shared = e.mw.Add(mwShared, own("shared@x", "james@mw.example", e.start))
+		master := own("weekly@x", "james@mw.example", e.start)
+		master.RRule = "FREQ=WEEKLY;COUNT=3"
+		weekly = e.mw.Add(mwCal, master)
+	})
+	ref := calendar.EventRef("mw", mwCal, mine)
+	etag := e.etagOf(t, ref)
+	iref := calendar.InstanceRef(calendar.EventRef("mw", mwCal, weekly), e.start)
+	for name, tt := range map[string]struct {
+		req  *chainmailv1.UpdateEventRequest
+		want string
+	}{
+		"not organizer": {&chainmailv1.UpdateEventRequest{Ref: calendar.EventRef("mw", mwCal, invited), Etag: "x", UpdateMask: mask("title"), Title: "t"}, api.ReasonNotOrganizer},
+		"read-only":     {&chainmailv1.UpdateEventRequest{Ref: calendar.EventRef("mw", mwShared, shared), Etag: "x", UpdateMask: mask("title"), Title: "t"}, api.ReasonCalendarReadOnly},
+		"stale etag":    {&chainmailv1.UpdateEventRequest{Ref: ref, Etag: "stale", UpdateMask: mask("title"), Title: "t"}, api.ReasonEventConflict},
+		"no etag":       {&chainmailv1.UpdateEventRequest{Ref: ref, UpdateMask: mask("title"), Title: "t"}, api.ReasonInvalidArgument},
+		"no mask":       {&chainmailv1.UpdateEventRequest{Ref: ref, Etag: etag}, api.ReasonInvalidArgument},
+		"unknown path":  {&chainmailv1.UpdateEventRequest{Ref: ref, Etag: etag, UpdateMask: mask("uid " + secretText)}, api.ReasonInvalidArgument},
+		"empty title":   {&chainmailv1.UpdateEventRequest{Ref: ref, Etag: etag, UpdateMask: mask("title")}, api.ReasonInvalidArgument},
+		"backwards":     {&chainmailv1.UpdateEventRequest{Ref: ref, Etag: etag, UpdateMask: mask("end"), End: ts(e.start.Add(-time.Hour))}, api.ReasonInvalidArgument},
+		"all-day alone": {&chainmailv1.UpdateEventRequest{Ref: ref, Etag: etag, UpdateMask: mask("all_day"), AllDay: true}, api.ReasonInvalidArgument},
+		"instance rule": {&chainmailv1.UpdateEventRequest{Ref: iref, Etag: e.etagOf(t, iref), UpdateMask: mask("recurrence_rule"), RecurrenceRule: "FREQ=DAILY"}, api.ReasonInvalidArgument},
+		"unknown ref":   {&chainmailv1.UpdateEventRequest{Ref: calendar.EventRef("mw", mwCal, "nope"), Etag: "x", UpdateMask: mask("title"), Title: "t"}, api.ReasonNotFound},
+	} {
+		_, err := e.update(t, tt.req)
+		wantReason(t, name, err, tt.want)
+		if err != nil && strings.Contains(err.Error()+api.Detail(err).GetHint(), secretText) {
+			t.Errorf("%s: error %v repeats the request", name, err)
+		}
+	}
+	if n := e.mw.Count(calfake.MethodPut); n != 0 {
+		t.Errorf("Put calls = %d, want none", n)
+	}
+	// The store finds the event changed since it was read.
+	e.mw.FailNext(calfake.MethodPut, calstore.ErrConflict)
+	_, err := e.update(t, &chainmailv1.UpdateEventRequest{Ref: ref, Etag: etag, UpdateMask: mask("title"), Title: "t"})
+	wantReason(t, "store conflict", err, api.ReasonEventConflict)
+}
+
+func TestCancelEvent(t *testing.T) {
+	t.Parallel()
+	var withPeople, alone, invited, blocked, weekly string
+	e := startCal(t, func(e *calEnv) {
+		withPeople = e.mw.Add(mwCal, own("people@x", "james@mw.example", e.start, allowedAddr))
+		alone = e.mw.Add(mwCal, own("alone@x", "james@mw.example", e.start))
+		invited = e.mw.Add(mwCal, invitation("inv@x", "james@mw.example", e.start))
+		blocked = e.mw.Add(mwCal, own("blocked@x", "james@mw.example", e.start, blockedAddr))
+		master := own("weekly@x", "james@mw.example", e.start, allowedAddr)
+		master.RRule = "FREQ=WEEKLY;COUNT=3"
+		weekly = e.mw.Add(mwCal, master)
+	})
+	for _, p := range []string{withPeople, alone} {
+		ref := calendar.EventRef("mw", mwCal, p)
+		etag := e.etagOf(t, ref)
+		got, err := e.cancel(t, ref, etag)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got.GetCancelled() || got.GetHeld() != nil {
+			t.Errorf("cancel of %s = %v", p, got)
+		}
+		calls := e.mw.CallsTo(calfake.MethodDelete)
+		if last := calls[len(calls)-1]; last.ProviderID != p || last.ETag != etag || last.Notify != calendar.NotifySend {
+			t.Errorf("Delete call = %+v", last)
+		}
+		if _, ok := e.mw.Object(mwCal, p); ok {
+			t.Errorf("object %s still there", p)
+		}
+	}
+	if r := auditRow(t, e.Harness, "calendar.cancel_event"); r.Result != "ok" {
+		t.Errorf("audit row %+v", r)
+	}
+
+	ref := calendar.EventRef("mw", mwCal, blocked)
+	got, err := e.cancel(t, ref, e.etagOf(t, ref))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GetCancelled() || got.GetHeld() == nil || !strings.Contains(got.GetHeld().GetSummary(), "attendees 1") {
+		t.Errorf("held cancel = %v", got)
+	}
+	if n := e.mw.Count(calfake.MethodDelete); n != 2 {
+		t.Errorf("Delete calls = %d, want the held cancel not applied", n)
+	}
+
+	_, err = e.cancel(t, calendar.EventRef("mw", mwCal, invited), "x")
+	wantReason(t, "not organizer", err, api.ReasonNotOrganizer)
+	_, err = e.cancel(t, calendar.EventRef("mw", mwCal, withPeople), "x")
+	wantReason(t, "gone", err, api.ReasonNotFound)
+	wref := calendar.EventRef("mw", mwCal, weekly)
+	_, err = e.cancel(t, wref, "stale")
+	wantReason(t, "stale etag", err, api.ReasonEventConflict)
+
+	// One instance: an override that is cancelled.
+	second := e.start.Add(7 * 24 * time.Hour)
+	iref := calendar.InstanceRef(wref, second)
+	if _, err := e.cancel(t, iref, e.etagOf(t, iref)); err != nil {
+		t.Fatal(err)
+	}
+	calls := e.mw.CallsTo(calfake.MethodPut)
+	if len(calls) != 1 || !calls[0].Event.RecurrenceID.Equal(second) || calls[0].Event.Status != calendar.StatusCancelled {
+		t.Errorf("Put calls = %+v, want the instance cancelled", calls)
 	}
 	noSecretInAudit(t, e.Harness)
 }

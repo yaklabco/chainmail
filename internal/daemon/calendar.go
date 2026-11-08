@@ -98,7 +98,6 @@ var (
 // names, comments or calendar names. Event text comes back wrapped as
 // Untrusted.
 type calendarService struct {
-	chainmailv1connect.UnimplementedCalendarServiceHandler
 	s *Server
 }
 
