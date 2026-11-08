@@ -33,6 +33,20 @@ describe('wordmark', () => {
       expect(svg).toMatch(/@media \(prefers-reduced-motion: reduce\)\s*\{[^}]*animation:\s*none/);
     });
 
+    test(`${path} types the name in, one letter at a time`, () => {
+      const svg = read(path);
+      expect(svg.match(/<path class="letter"/g)).toHaveLength(9);
+      // Reduced motion must show every letter, so the letters are visible by
+      // default and only an animation hides them.
+      expect(svg).toMatch(/@media \(prefers-reduced-motion: reduce\)\s*\{[^}]*\.letter/);
+    });
+
+    test(`${path} ends in an underscore cursor`, () => {
+      const cursor = read(path).match(/<rect class="cursor"[^>]*height="(\d+)"/);
+      expect(cursor).not.toBeNull();
+      expect(Number(cursor[1])).toBeLessThan(150);
+    });
+
     test(`${path} uses its colourway`, () => {
       const svg = read(path).toLowerCase();
       for (const colour of colours) expect(svg).toContain(colour);

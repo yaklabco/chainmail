@@ -70,7 +70,7 @@ const config: Config = {
         srcDark: 'img/wordmark-dark.svg',
         href: 'https://chainmail.sh/',
         target: '_self',
-        width: 173,
+        width: 166,
         height: 22,
       },
       items: [

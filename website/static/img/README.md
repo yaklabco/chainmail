@@ -2,7 +2,7 @@
 
 ## Logo
 
-- `wordmark-dark.svg` and `wordmark-light.svg` are the logo for dark and light backgrounds: two linked gold rings, "chainmail" in DM Mono 500 and a block cursor. The letters are outlined, so the files need no font. The cursor blinks, and stays still for visitors who ask for reduced motion.
+- `wordmark-dark.svg` and `wordmark-light.svg` are the logo for dark and light backgrounds: two linked gold rings, "chainmail" in DM Mono 500 and an underscore cursor. The letters are outlined, so the files need no font. On load the name types itself in, one letter at a time, and then the cursor blinks. Visitors who ask for reduced motion see the finished name and a still cursor.
 - `favicon.svg` is the rings on a navy rounded square. `favicon.ico`, `favicon-192.png` and `apple-touch-icon.png` are the same mark at icon sizes. The Apple icon is square, because iOS rounds the corners itself.
 
 The repository README shows the wordmark too, through a `<picture>` element that picks the dark or light file.
