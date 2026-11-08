@@ -217,8 +217,10 @@ A run stops at its cap with outcome `capped`. A scheduled run or a run by hand g
 |---|---|---|
 | Transient | `SERVER_UNAVAILABLE`, `TIMEOUT`, `AUTH_REQUIRED`, `CACHE_NOT_READY` | The run stops with outcome `interrupted`. A new-mail batch is not acknowledged, and the runner tries it again after a backoff. Messages already recorded are skipped, so the retry acts on none of them twice. A message whose actions only partly ran starts again at its first action, which at worst repeats a label or a flag. |
 | Permanent | `NOT_FOUND` for the destination folder or the linked item, `INVALID_ARGUMENT`, `body_not_cached` | The message counts as `failed` and is not recorded. New-mail matching does not try it again. A later scheduled run or a run by hand matches it again. |
-| Gone | `NOT_FOUND` or `STALE_REF` for the matched message itself, such as when another client moved or deleted it after the rule matched it | The message counts as `skipped`, not as a failure, and is not recorded. If it turns up again, in another folder for example, a later run can match it there. |
+| Gone | `NOT_FOUND` or `STALE_REF` for the matched message itself, such as when another client moved or deleted it, or deleted or renamed its folder, after the rule matched it | The message counts as `skipped`, not as a failure, and is not recorded. If it turns up again, in another folder for example, a later run can match it there. A missing destination folder is still a permanent failure. |
 | Held | a forward the policy held as a draft | The message counts as `held` and is recorded as done. |
+
+If a rule acts on a message but `state.db` will not take the record, the daemon keeps the record in memory and saves it before the account's runner matches anything else. That happens before the next new-mail batch, and before a scheduled run or a run by hand. Until it is saved, new mail on the account waits. A scheduled run or a run by hand that cannot save it stops with outcome `interrupted` and reason `INTERNAL`, and acts on nothing. A daemon that stops before the record is saved forgets it.
 
 ### Forwards and copies across a crash or an outage
 
