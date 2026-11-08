@@ -218,7 +218,7 @@ func eventFrom(e *chainmailv1.WatchEvent) eventOut {
 	if c := e.GetCalendar(); c != nil {
 		out.Calendar = &calendarChangeOut{
 			Ref: c.GetRef(), MessageRef: c.GetMessageRef(), CalendarID: c.GetCalendarId(), Start: rfc3339(c.GetStart()), End: rfc3339(c.GetEnd()),
-			Organizer: addressPtr(c.GetOrganizer()), Fields: c.GetFields(), Attendee: addressPtr(c.GetAttendee()), PartStat: c.GetPartstat(),
+			Organizer: addressPtr(c.GetOrganizer()), Fields: c.GetFields(), Attendee: addressPtr(c.GetAttendee()), PartStat: knownToken(c.GetPartstat(), partStats),
 		}
 	}
 	return out

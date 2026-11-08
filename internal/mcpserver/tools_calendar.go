@@ -425,11 +425,11 @@ func eventTextPtr(s string) *untrusted {
 func calendarEventFrom(e *chainmailv1.CalendarEvent) calendarEventOut {
 	out := calendarEventOut{
 		Ref: e.GetRef(), Account: e.GetAccount(), CalendarID: e.GetCalendarId(), UID: eventTextPtr(e.GetUid()),
-		Start: rfc3339(e.GetStart()), End: rfc3339(e.GetEnd()), TimeZone: e.GetTimeZone(), AllDay: e.GetAllDay(),
-		Status: e.GetStatus(), Sequence: e.GetSequence(),
+		Start: rfc3339(e.GetStart()), End: rfc3339(e.GetEnd()), TimeZone: zoneName(e.GetTimeZone()), AllDay: e.GetAllDay(),
+		Status: knownToken(e.GetStatus(), eventStatuses), Sequence: e.GetSequence(),
 		Summary: itemTextPtr(e.GetSummary()), Location: itemTextPtr(e.GetLocation()), Description: itemTextPtr(e.GetDescription()),
 		Organizer: addressPtr(e.GetOrganizer()), Attendees: make([]attendeeOut, 0, len(e.GetAttendees())),
-		AttendeesTruncated: e.GetAttendeesTruncated(), MyPartStat: e.GetMyPartstat(), IsOrganizer: e.GetIsOrganizer(),
+		AttendeesTruncated: e.GetAttendeesTruncated(), MyPartStat: knownToken(e.GetMyPartstat(), partStats), IsOrganizer: e.GetIsOrganizer(),
 		Etag: e.GetEtag(), RecurrenceRule: eventTextPtr(e.GetRecurrenceRule()), Recurring: e.GetRecurring(),
 		RecurrenceID: rfc3339(e.GetRecurrenceId()), Transparent: e.GetTransparent(), MessageRef: e.GetMessageRef(),
 	}
@@ -438,7 +438,7 @@ func calendarEventFrom(e *chainmailv1.CalendarEvent) calendarEventOut {
 		if p := addressPtr(a.GetAddress()); p != nil {
 			addr = *p
 		}
-		out.Attendees = append(out.Attendees, attendeeOut{Address: addr, PartStat: a.GetPartstat(), Role: a.GetRole(), IsSelf: a.GetIsSelf()})
+		out.Attendees = append(out.Attendees, attendeeOut{Address: addr, PartStat: knownToken(a.GetPartstat(), partStats), Role: knownToken(a.GetRole(), attendeeRoles), IsSelf: a.GetIsSelf()})
 	}
 	return out
 }
@@ -460,7 +460,7 @@ func calendarEventsFrom(es []*chainmailv1.CalendarEvent) []calendarEventOut {
 }
 
 func inviteFrom(i *chainmailv1.Invite) inviteOut {
-	return inviteOut{Event: calendarEventFrom(i.GetEvent()), Source: i.GetSource(), Method: i.GetMethod()}
+	return inviteOut{Event: calendarEventFrom(i.GetEvent()), Source: knownToken(i.GetSource(), inviteSources), Method: knownToken(i.GetMethod(), inviteMethods)}
 }
 
 func busyFrom(bs []*chainmailv1.BusyBlock) []busyOut {
@@ -835,4 +835,37 @@ func (s *Server) cancelEvent(ctx context.Context, _ *mcp.CallToolRequest, in can
 		return itemResult(s, heldCalendarSummary("the cancel was NOT applied.", held, "attendee"), out)
 	}
 	return &mcp.CallToolResult{Content: plainText("Cancelled event "+in.Ref+".", out)}, out, nil
+}
+
+// Event data can carry any token in STATUS, PARTSTAT, ROLE and METHOD, and
+// any text in TZID. Only the fixed words below pass through as trusted
+// fields; anything else becomes otherToken, so an invite cannot speak to the
+// agent outside the untrusted envelope.
+const otherToken = "OTHER"
+
+var (
+	eventStatuses = []string{"CONFIRMED", "TENTATIVE", "CANCELLED"}
+	partStats     = []string{"NEEDS-ACTION", "ACCEPTED", "DECLINED", "TENTATIVE", "DELEGATED"}
+	attendeeRoles = []string{"REQ-PARTICIPANT", "OPT-PARTICIPANT", "CHAIR", "NON-PARTICIPANT"}
+	inviteMethods = []string{"REQUEST", "UPDATE", "CANCEL"}
+	inviteSources = []string{"calendar", "mail"}
+	zoneNameRE    = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+){0,3}$`)
+)
+
+// knownToken returns v when it is "" or one of allowed, and otherToken
+// otherwise.
+func knownToken(v string, allowed []string) string {
+	if v == "" || slices.Contains(allowed, v) {
+		return v
+	}
+	return otherToken
+}
+
+// zoneName returns tz when it has the shape of an IANA zone name, such as
+// America/Los_Angeles or UTC, and "" otherwise.
+func zoneName(tz string) string {
+	if len(tz) <= 64 && zoneNameRE.MatchString(tz) {
+		return tz
+	}
+	return ""
 }
