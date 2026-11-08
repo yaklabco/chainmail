@@ -55,6 +55,13 @@ type AccountOptions struct {
 	// EvictorOptions.OnError does, so the daemon can turn the cache off on
 	// a full disk at once. Nil drops them after logging.
 	OnError func(err error)
+	// OnInvites, when set, receives the invites the builder finds in new
+	// mail (not in backfilled mail): calendar parts with method REQUEST,
+	// UPDATE or CANCEL and at most calendar.MaxICSBytes, read once their
+	// messages are stored. The builder calls it with no lock held and
+	// outside any cache.db transaction, and waits for it to return. Nil
+	// means no part is read.
+	OnInvites func(ctx context.Context, invites []FoundInvite)
 	// Started is when the daemon began this run, taken before any
 	// supervisor starts. A folder is fresh only once a pass at or after it
 	// has synced the folder. Zero means NewAccount's time on Clock.
