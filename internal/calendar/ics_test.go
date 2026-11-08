@@ -567,3 +567,23 @@ func TestParseICSLongParameterValueWithEquals(t *testing.T) {
 		t.Fatalf("comma-separated values: %+v", events)
 	}
 }
+
+// EncodeICS is deterministic: a zero Updated gives the Unix epoch as
+// DTSTAMP, and EncodeICSAt takes the time to use instead.
+func TestEncodeICSDeterministicStamp(t *testing.T) {
+	ev := Event{UID: "u", Start: utc(2026, 11, 10, 17, 0, 0), End: utc(2026, 11, 10, 18, 0, 0)}
+	a, b := mustEncode(t, "", []Event{ev}), mustEncode(t, "", []Event{ev})
+	if !bytes.Equal(a, b) || !bytes.Contains(a, []byte("DTSTAMP:19700101T000000Z\r\n")) {
+		t.Fatalf("zero Updated:\n%s\n%s", a, b)
+	}
+	now := utc(2026, 11, 8, 12, 0, 0)
+	c, err := EncodeICSAt("", []Event{ev}, now)
+	if err != nil || !bytes.Contains(c, []byte("DTSTAMP:20261108T120000Z\r\n")) {
+		t.Fatalf("EncodeICSAt: %v\n%s", err, c)
+	}
+	ev.Updated = utc(2026, 1, 1, 0, 0, 0)
+	d, err := EncodeICSAt("", []Event{ev}, now)
+	if err != nil || !bytes.Contains(d, []byte("DTSTAMP:20260101T000000Z\r\n")) {
+		t.Fatalf("Updated wins over now: %v\n%s", err, d)
+	}
+}

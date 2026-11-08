@@ -407,13 +407,23 @@ func cleanLine(s string) string {
 // any other timed event is written in UTC. All-day events are written as
 // DATE values. Lines are folded at 75 octets.
 //
-// DTSTAMP is Updated, or the current time when Updated is zero. Text is
-// escaped and stripped of control characters; values that cannot be
-// escaped (UID, RRULE, addresses, PARTSTAT, ROLE) are refused with
+// DTSTAMP is Updated, or the Unix epoch when Updated is zero, so the output
+// depends only on the events. iTIP orders messages of one SEQUENCE by
+// DTSTAMP, so a caller sending a REQUEST, UPDATE or CANCEL sets Updated or
+// uses EncodeICSAt with the current time.
+//
+// Text is escaped and stripped of control characters; values that cannot
+// be escaped (UID, RRULE, addresses, PARTSTAT, ROLE) are refused with
 // ErrInvalidICS when they hold a line break or control character, so no
 // field can inject a property. ProviderID, ETag, Raw and AttendeesTruncated
 // are not written.
 func EncodeICS(method string, events []Event) ([]byte, error) {
+	return EncodeICSAt(method, events, time.Unix(0, 0))
+}
+
+// EncodeICSAt is EncodeICS with now as the DTSTAMP of each event whose
+// Updated is zero.
+func EncodeICSAt(method string, events []Event, now time.Time) ([]byte, error) {
 	if len(events) == 0 {
 		return nil, fmt.Errorf("%w: no events", ErrInvalidICS)
 	}
@@ -424,7 +434,7 @@ func EncodeICS(method string, events []Event) ([]byte, error) {
 	for i := range events {
 		stamp := events[i].Updated
 		if stamp.IsZero() {
-			stamp = time.Now()
+			stamp = now
 		}
 		comp, err := encodeEvent(events[i], stamp)
 		if err != nil {
