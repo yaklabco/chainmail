@@ -201,7 +201,33 @@ func TestHTTPClientRefusesRedirectToAnotherHost(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "redirect to another host") {
 		t.Errorf("err = %v, want a refused redirect", err)
 	}
+	if err != nil && strings.Contains(err.Error(), "stolen") {
+		t.Errorf("err = %v, quotes the server's Location", err)
+	}
 	if n := len(other.seen()); n != 0 {
 		t.Errorf("other host saw %d requests, want none", n)
+	}
+}
+
+// A 304 Not Modified is an answer, not a redirect: the caller gets it.
+func TestHTTPClientPassesNotModified(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.set(t, auth.PasswordSecret("host"), "pw")
+	c, err := f.m.HTTPClient("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	t.Cleanup(srv.Close)
+	resp, err := c.Get(srv.URL + "/cal")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	_ = resp.Body.Close() // nothing to read
+	if resp.StatusCode != http.StatusNotModified {
+		t.Errorf("status = %d, want 304", resp.StatusCode)
 	}
 }

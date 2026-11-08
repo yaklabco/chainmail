@@ -50,7 +50,7 @@ func (m *Manager) HTTPClient(account string) (*http.Client, error) {
 	}
 	return &http.Client{
 		Timeout:       httpTimeout,
-		Transport:     &authTransport{m: m, account: account, base: base},
+		Transport:     redirectGuard{base: &authTransport{m: m, account: account, base: base}, allow: sameOrigin, refused: errRedirectHost},
 		CheckRedirect: sameHostRedirect,
 	}, nil
 }
@@ -134,7 +134,7 @@ type redirectGuard struct {
 // that allow does not accept.
 func (g redirectGuard) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := g.base.RoundTrip(req)
-	if err != nil || resp.StatusCode < http.StatusMultipleChoices || resp.StatusCode >= http.StatusBadRequest {
+	if err != nil || !isRedirect(resp.StatusCode) {
 		return resp, err
 	}
 	if g.allow != nil {
@@ -163,4 +163,15 @@ func sameHostRedirect(req *http.Request, via []*http.Request) error {
 		return errRedirectHost
 	}
 	return nil
+}
+
+// isRedirect reports whether code is a status net/http follows. Other 3xx
+// codes, such as 304 Not Modified, are answers, not redirects.
+func isRedirect(code int) bool {
+	switch code {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	}
+	return false
 }
