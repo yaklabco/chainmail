@@ -530,3 +530,29 @@ func TestWriteRefusedForTheToken(t *testing.T) {
 		}
 	}
 }
+
+// TestPutReplaceEndOnlyRaisesSequence: a change of DTEND alone is a
+// change of the event's time (RFC 5546 section 2.1.4), so SEQUENCE rises.
+func TestPutReplaceEndOnlyRaisesSequence(t *testing.T) {
+	f := newFakeServer(t)
+	href := testCal + "single.ics"
+	etag := f.backend.put(t, href, singleICS)
+	s := f.store(t, WithClock(clock))
+	evs, err := s.GetEvent(context.Background(), testCal, href)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := evs[0]
+	ev.End = ev.End.Add(30 * time.Minute)
+	got, err := s.Put(context.Background(), testCal, ev, etag, calendar.NotifySend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := f.backend.raw(t, href)
+	if line(raw, "DTSTART") != "DTSTART:20261110T150000Z" || line(raw, "DTEND") != "DTEND:20261110T163000Z" {
+		t.Errorf("stored times %q %q", line(raw, "DTSTART"), line(raw, "DTEND"))
+	}
+	if got.Sequence != 1 || line(raw, "SEQUENCE") != "SEQUENCE:1" {
+		t.Errorf("Sequence %d, line %q; want 1", got.Sequence, line(raw, "SEQUENCE"))
+	}
+}

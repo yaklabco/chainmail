@@ -126,9 +126,9 @@ func eventComponent(ev calendar.Event) (*ical.Component, error) {
 
 // patch applies the fields of ev that differ from old to comp, the stored
 // VEVENT old was read from. Properties chainmail does not model, and the
-// parameters of unchanged properties, are kept. A change to the time, the
-// recurrence or the status raises SEQUENCE past the stored one unless ev
-// already does.
+// parameters of unchanged properties, are kept. A change to the start, the
+// end, the recurrence or the status raises SEQUENCE past the stored one
+// unless ev already does.
 func patch(comp *ical.Component, old, ev calendar.Event, now time.Time) error {
 	nc, err := eventComponent(ev)
 	if err != nil {
@@ -146,7 +146,8 @@ func patch(comp *ical.Component, old, ev calendar.Event, now time.Time) error {
 	if timeChanged {
 		replace(ical.PropDateTimeStart)
 	}
-	if timeChanged || !old.End.Equal(ev.End) {
+	endChanged := !old.End.Equal(ev.End)
+	if timeChanged || endChanged {
 		comp.Props.Del(ical.PropDuration)
 		replace(ical.PropDateTimeEnd)
 	}
@@ -184,7 +185,10 @@ func patch(comp *ical.Component, old, ev calendar.Event, now time.Time) error {
 		replace(ical.PropExceptionDates)
 	}
 	seq := ev.Sequence
-	if (timeChanged || recurChanged || old.Status != ev.Status) && seq <= old.Sequence {
+	// Changes to DTSTART, DTEND, DURATION, the recurrence or STATUS need a
+	// new SEQUENCE for attendees to accept them (RFC 5546 section 2.1.4,
+	// RFC 5545 section 3.8.7.4).
+	if (timeChanged || endChanged || recurChanged || old.Status != ev.Status) && seq <= old.Sequence {
 		seq = old.Sequence + 1
 	}
 	if seq != old.Sequence || comp.Props.Get(ical.PropSequence) == nil {
