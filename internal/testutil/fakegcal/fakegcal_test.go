@@ -437,3 +437,91 @@ func TestAttendeesOmitted(t *testing.T) {
 		t.Errorf("plain attendee patch kept %d attendees, want 1", n)
 	}
 }
+
+// listAll reads every page of an events.list and returns the ids and the
+// sync token. between runs after the first page.
+func listAll(t *testing.T, c client, path string, q url.Values, between func()) ([]string, string) {
+	t.Helper()
+	var got []string
+	for first := true; ; first = false {
+		code, page := c.do("GET", path, q, nil, nil)
+		if code != 200 {
+			t.Fatalf("list: %d %v", code, page)
+		}
+		got = append(got, items(t, page)...)
+		if first && between != nil {
+			between()
+		}
+		next, ok := page["nextPageToken"].(string)
+		if !ok {
+			tok, _ := page["nextSyncToken"].(string)
+			return got, tok
+		}
+		q.Set("pageToken", next)
+	}
+}
+
+func TestEventsPagesAreFrozen(t *testing.T) {
+	srv, c := setup(t)
+	srv.SetPageSize(1)
+	for _, id := range []string{"aaaaa1", "aaaaa2", "aaaaa3"} {
+		srv.AddEvent("me@example.com", single(id))
+	}
+	path := "/calendars/" + url.PathEscape("me@example.com") + "/events"
+	// A change after the first page must not shift the later pages.
+	got, token := listAll(t, c, path, url.Values{"showDeleted": {"true"}}, func() {
+		srv.ChangeEvent("me@example.com", "aaaaa1", map[string]any{"summary": "changed"})
+		srv.AddEvent("me@example.com", single("aaaaa4"))
+	})
+	if strings.Join(got, ",") != "aaaaa1,aaaaa2,aaaaa3" {
+		t.Fatalf("listing with a change between pages = %v", got)
+	}
+	// What changed during the listing comes with the next sync.
+	got, _ = listAll(t, c, path, url.Values{"syncToken": {token}}, nil)
+	if strings.Join(got, ",") != "aaaaa1,aaaaa4" {
+		t.Errorf("sync after the listing = %v, want aaaaa1,aaaaa4", got)
+	}
+}
+
+func TestEventsTokensAreBound(t *testing.T) {
+	srv, c := setup(t)
+	srv.SetPageSize(1)
+	for _, id := range []string{"aaaaa1", "aaaaa2"} {
+		srv.AddEvent("me@example.com", single(id))
+		srv.AddEvent("team#ro@group.calendar.google.com", single(id))
+	}
+	mine := "/calendars/" + url.PathEscape("me@example.com") + "/events"
+	team := "/calendars/" + url.PathEscape("team#ro@group.calendar.google.com") + "/events"
+
+	code, page := c.do("GET", mine, url.Values{"showDeleted": {"true"}}, nil, nil)
+	if code != 200 {
+		t.Fatalf("list: %d", code)
+	}
+	pt := page["nextPageToken"].(string)
+	for name, tc := range map[string]struct {
+		path string
+		q    url.Values
+	}{
+		"another calendar": {team, url.Values{"showDeleted": {"true"}, "pageToken": {pt}}},
+		"another query":    {mine, url.Values{"pageToken": {pt}}},
+		"never issued":     {mine, url.Values{"showDeleted": {"true"}, "pageToken": {"pg:999:0"}}},
+	} {
+		if code, _ := c.do("GET", tc.path, tc.q, nil, nil); code != http.StatusBadRequest {
+			t.Errorf("page token from %s: %d, want 400", name, code)
+		}
+	}
+	if code, _ := c.do("GET", mine, url.Values{"showDeleted": {"true"}, "pageToken": {pt}}, nil, nil); code != 200 {
+		t.Errorf("page token on its own listing: %d, want 200", code)
+	}
+
+	_, token := listAll(t, c, mine, url.Values{"showDeleted": {"true"}}, nil)
+	if code, _ := c.do("GET", team, url.Values{"syncToken": {token}}, nil, nil); code != http.StatusGone {
+		t.Errorf("sync token of another calendar: %d, want 410", code)
+	}
+	if code, _ := c.do("GET", mine, url.Values{"syncToken": {"sync:0:0"}}, nil, nil); code != http.StatusGone {
+		t.Errorf("sync token never issued: %d, want 410", code)
+	}
+	if code, _ := c.do("GET", mine, url.Values{"syncToken": {token}}, nil, nil); code != 200 {
+		t.Errorf("sync token on its own calendar: %d, want 200", code)
+	}
+}

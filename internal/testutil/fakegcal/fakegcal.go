@@ -8,7 +8,10 @@
 //     showDeleted, singleEvents=false and iCalUID, which matches a series's
 //     master and every exception of it, cancelled ones included, even when
 //     an exception carries no iCalUID of its own. A sync token from before
-//     InvalidateSyncTokens, or one the fake did not issue, answers 410.
+//     InvalidateSyncTokens, one the fake did not issue, or one of another
+//     calendar answers 410. A listing is frozen at its first page, so a
+//     change between pages does not shift the later ones, and its page
+//     tokens answer 400 on another calendar or with another query.
 //     Cancelled instances of a series are listed even without showDeleted,
 //     as Google does with singleEvents=false; deleted events need
 //     showDeleted or a sync token.
@@ -126,6 +129,9 @@ type Server struct {
 	maxAtt   int
 	token    string
 	gen      int
+	issued   int
+	listings map[string]*listing
+	syncs    map[string]syncState
 	etags    int
 	now      func() time.Time
 }
@@ -145,11 +151,13 @@ type storedEvent struct {
 func Start(t testing.TB) *Server {
 	t.Helper()
 	s := &Server{
-		t:     t,
-		cals:  map[string]*fakeCalendar{},
-		busy:  map[string][]Busy{},
-		now:   func() time.Time { return time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC) },
-		etags: 3393000,
+		t:        t,
+		cals:     map[string]*fakeCalendar{},
+		busy:     map[string][]Busy{},
+		listings: map[string]*listing{},
+		syncs:    map[string]syncState{},
+		now:      func() time.Time { return time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC) },
+		etags:    3393000,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+BasePath+"/users/me/calendarList", s.calendarList)
@@ -475,11 +483,32 @@ func (s *Server) writable(w http.ResponseWriter, c *fakeCalendar) bool {
 	return false
 }
 
-// listPage is the cursor a page token carries.
-type listPage struct {
-	offset, snapshot, since, gen int
-	showDeleted                  bool
-	uid                          string
+// listing is one events.list, frozen at its first page: later pages serve
+// the same items, whatever changes in between, as a snapshot would. Its page
+// tokens are good only for the same calendar and query.
+type listing struct {
+	cal, query string
+	gen        int
+	items      []map[string]any
+	syncToken  string
+}
+
+// syncState is what a sync token the fake issued stands for.
+type syncState struct {
+	cal      string
+	gen, seq int
+}
+
+// listQueryKey is the part of an events.list query its page tokens are
+// bound to.
+func listQueryKey(q url.Values) string {
+	k := url.Values{}
+	for _, name := range []string{"showDeleted", "iCalUID", "syncToken", "maxAttendees"} {
+		if q.Has(name) {
+			k[name] = q[name]
+		}
+	}
+	return k.Encode()
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
@@ -494,37 +523,39 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid", "singleEvents is not supported by the fake")
 		return
 	}
-	cur := listPage{snapshot: c.seq, since: -1, gen: s.gen, showDeleted: q.Get("showDeleted") == "true", uid: q.Get("iCalUID")}
-	if tok := q.Get("syncToken"); tok != "" {
-		gen, seq, ok := parseSyncToken(tok)
-		if !ok || gen != s.gen || seq > c.seq {
-			writeError(w, http.StatusGone, "fullSyncRequired", "Sync token is no longer valid, a full sync is required.")
-			return
-		}
-		cur.since = seq
-		cur.showDeleted = true
-	}
+	key := listQueryKey(q)
 	if pt := q.Get("pageToken"); pt != "" {
-		p, ok := parsePageToken(pt)
-		if !ok {
+		l, offset, ok := s.parsePageToken(pt)
+		if !ok || l.cal != c.ID || l.query != key {
 			writeError(w, http.StatusBadRequest, "invalid", "Invalid page token")
 			return
 		}
-		if p.gen != s.gen {
+		if l.gen != s.gen {
 			writeError(w, http.StatusGone, "fullSyncRequired", "Sync token is no longer valid, a full sync is required.")
 			return
 		}
-		cur = p
+		s.writePage(w, r, c, pt[:strings.LastIndexByte(pt, ':')], l, offset)
+		return
 	}
+	since, showDeleted := -1, q.Get("showDeleted") == "true"
+	if tok := q.Get("syncToken"); tok != "" {
+		st, ok := s.syncs[tok]
+		if !ok || st.cal != c.ID || st.gen != s.gen || st.seq > c.seq {
+			writeError(w, http.StatusGone, "fullSyncRequired", "Sync token is no longer valid, a full sync is required.")
+			return
+		}
+		since, showDeleted = st.seq, true
+	}
+	uid := q.Get("iCalUID")
 	ids := make([]string, 0, len(c.events))
 	for id, se := range c.events {
-		if se.seq > cur.snapshot || se.seq <= cur.since {
+		if se.seq <= since {
 			continue
 		}
-		if cur.uid != "" && c.uidOf(se.obj) != cur.uid {
+		if uid != "" && c.uidOf(se.obj) != uid {
 			continue
 		}
-		if !cur.showDeleted && isDeleted(se.obj) {
+		if !showDeleted && isDeleted(se.obj) {
 			continue
 		}
 		ids = append(ids, id)
@@ -535,24 +566,31 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		return strings.Compare(a, b)
 	})
-	if cur.offset > len(ids) {
-		cur.offset = len(ids)
+	l := &listing{cal: c.ID, query: key, gen: s.gen, items: make([]map[string]any, 0, len(ids))}
+	for _, id := range ids {
+		l.items = append(l.items, s.view(r, c.events[id].obj))
 	}
-	end := min(cur.offset+s.pageLimit(r), len(ids))
-	items := make([]map[string]any, 0, end-cur.offset)
-	for _, id := range ids[cur.offset:end] {
-		items = append(items, s.view(r, c.events[id].obj))
-	}
-	resp := map[string]any{"kind": "calendar#events", "summary": c.Summary, "items": items}
+	s.issued++
+	l.syncToken = "sync:" + strconv.Itoa(s.issued)
+	s.syncs[l.syncToken] = syncState{cal: c.ID, gen: s.gen, seq: c.seq}
+	s.issued++
+	name := "pg:" + strconv.Itoa(s.issued)
+	s.listings[name] = l
+	s.writePage(w, r, c, name, l, 0)
+}
+
+// writePage answers the page of l that starts at offset. s.mu is held.
+func (s *Server) writePage(w http.ResponseWriter, r *http.Request, c *fakeCalendar, name string, l *listing, offset int) {
+	offset = min(offset, len(l.items))
+	end := min(offset+s.pageLimit(r), len(l.items))
+	resp := map[string]any{"kind": "calendar#events", "summary": c.Summary, "items": l.items[offset:end]}
 	if c.TimeZone != "" {
 		resp["timeZone"] = c.TimeZone
 	}
-	if end < len(ids) {
-		next := cur
-		next.offset = end
-		resp["nextPageToken"] = pageToken(next)
+	if end < len(l.items) {
+		resp["nextPageToken"] = name + ":" + strconv.Itoa(end)
 	} else {
-		resp["nextSyncToken"] = fmt.Sprintf("sync:%d:%d", s.gen, cur.snapshot)
+		resp["nextSyncToken"] = l.syncToken
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -819,40 +857,19 @@ func isDeleted(obj map[string]any) bool {
 	return obj["status"] == "cancelled" && !instance
 }
 
-func parseSyncToken(tok string) (gen, seq int, ok bool) {
-	parts := strings.Split(tok, ":")
-	if len(parts) != 3 || parts[0] != "sync" {
-		return 0, 0, false
+// parsePageToken returns the listing and offset of a page token the fake
+// issued. s.mu is held.
+func (s *Server) parsePageToken(tok string) (*listing, int, bool) {
+	i := strings.LastIndexByte(tok, ':')
+	if i < 0 {
+		return nil, 0, false
 	}
-	gen, err1 := strconv.Atoi(parts[1])
-	seq, err2 := strconv.Atoi(parts[2])
-	return gen, seq, err1 == nil && err2 == nil && seq >= 0
-}
-
-func pageToken(p listPage) string {
-	return fmt.Sprintf("pg:%d:%d:%d:%d:%t:%s", p.offset, p.snapshot, p.since, p.gen, p.showDeleted, url.QueryEscape(p.uid))
-}
-
-func parsePageToken(tok string) (listPage, bool) {
-	parts := strings.SplitN(tok, ":", 7)
-	if len(parts) != 7 || parts[0] != "pg" {
-		return listPage{}, false
+	l, ok := s.listings[tok[:i]]
+	offset, err := strconv.Atoi(tok[i+1:])
+	if !ok || err != nil || offset < 0 {
+		return nil, 0, false
 	}
-	var p listPage
-	var err error
-	nums := []*int{&p.offset, &p.snapshot, &p.since, &p.gen}
-	for i, n := range nums {
-		if *n, err = strconv.Atoi(parts[i+1]); err != nil {
-			return listPage{}, false
-		}
-	}
-	if p.showDeleted, err = strconv.ParseBool(parts[5]); err != nil {
-		return listPage{}, false
-	}
-	if p.uid, err = url.QueryUnescape(parts[6]); err != nil {
-		return listPage{}, false
-	}
-	return p, p.offset >= 0
+	return l, offset, true
 }
 
 // mergePatch applies patch to obj as Google's patch semantics do (JSON merge
