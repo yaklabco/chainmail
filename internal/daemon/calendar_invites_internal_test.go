@@ -62,6 +62,10 @@ type inviteRig struct {
 	publishes atomic.Int32
 	// nowNS is the hook's clock, inviteNow unless a test moves it.
 	nowNS atomic.Int64
+	// readFn is the hook's ReadPart; set it before the hook reads a
+	// deferred part. reads counts the reads.
+	readFn func(ctx context.Context, c cache.InviteCandidate) (cache.FoundInvite, error)
+	reads  atomic.Int32
 }
 
 func newInviteRig(t *testing.T) *inviteRig {
@@ -87,6 +91,7 @@ func newInviteRig(t *testing.T) *inviteRig {
 		StoreNone: func(account string) bool { return account == "none" },
 		Self:      func(addr string) bool { return strings.EqualFold(addr, "me@example.com") },
 		Now:       r.now,
+		ReadPart:  r.readPart,
 	})
 	r.hook = r.h.onInvites
 	return r
