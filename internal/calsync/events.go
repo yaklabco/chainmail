@@ -17,6 +17,7 @@ const (
 	fieldLocation   = "location"
 	fieldRecurrence = "recurrence"
 	fieldAttendees  = "attendees"
+	fieldStatus     = "status"
 )
 
 // seriesHorizon is how far ahead a series is searched for an instance when
@@ -47,7 +48,9 @@ type eventInput struct {
 //     (moved or cancelled) asks for an answer and ends after now.
 //   - event_changed: start, end, location, recurrence or the attendee set
 //     changed on a row James attends or organizes, including a new override
-//     that moves one instance of a stored series.
+//     that moves one instance of a stored series, and an override taken out
+//     of a series that stays, which gives its instance back as the master
+//     has it (status when a cancelled instance comes back).
 //   - event_cancelled: a row James attends, not organizes, became
 //     CANCELLED, or its object was deleted, including one cancelled
 //     instance of a series.
@@ -306,15 +309,72 @@ func (b *eventBuilder) updated(before, after *calcache.EventRow) {
 }
 
 func (b *eventBuilder) deleted(row *calcache.EventRow) {
-	// An override removed from a series that stays is an exception
-	// undone, not a cancellation; a deleted series is reported once, by
-	// its base row.
 	if !row.Event.RecurrenceID.IsZero() {
+		b.overrideRemoved(row)
 		return
 	}
+	// A deleted series is reported once, by its base row.
 	if row.Event.Status != calendar.StatusCancelled && b.roleOf(row).attends() && b.endsAfter(row, b.past) {
 		b.cancelled(row)
 	}
+}
+
+// overrideRemoved reports an override taken out of a series that stays.
+// That is not a cancellation: its instance goes back to what the master
+// gives. A moved or changed override gives an event_changed naming what
+// the instance gets back (start, end, location, attendees); a cancelled
+// one brings the instance back, an invite when James has still to answer
+// the series, else an event_changed of its status. An instance that ended
+// before now - windowPast, as removed and as restored, stays quiet, and so
+// does one the master no longer gives (its recurrence changed too, which
+// the master's own change reports).
+func (b *eventBuilder) overrideRemoved(o *calcache.EventRow) {
+	if c, ok := b.base[o.Event.ProviderID]; ok && c.Kind == calcache.ChangeDeleted {
+		return // the whole series is gone, reported by its base row
+	}
+	m := b.masterOf(o)
+	if m == nil || m.Event.Status == calendar.StatusCancelled || (m.Event.RRule == "" && len(m.Event.RDates) == 0) {
+		return
+	}
+	rid := o.Event.RecurrenceID
+	insts, _, err := calendar.Expand([]calendar.Event{m.Event}, rid, rid.Add(time.Second), 1)
+	if err != nil || len(insts) == 0 || !insts[0].Start.Equal(rid) {
+		return
+	}
+	back := restored(m, o)
+	if !b.endsAfter(o, b.past) && !back.Event.End.After(b.past) {
+		return
+	}
+	if o.Event.Status == calendar.StatusCancelled {
+		if b.needsReply(back) && back.Event.End.After(b.in.now) {
+			b.invite(back)
+			return
+		}
+		if b.roleOf(back).involved() {
+			b.changed(back, []string{fieldStatus})
+		}
+		return
+	}
+	if !b.roleOf(o).involved() && !b.roleOf(back).involved() {
+		return
+	}
+	if fields := overrideFields(o, m); len(fields) > 0 {
+		b.changed(back, fields)
+	}
+}
+
+// restored is the instance of master m that the removed override o
+// replaced, as m gives it: at o's recurrence ID with m's length, under o's
+// instance ref.
+func restored(m, o *calcache.EventRow) *calcache.EventRow {
+	r := *m
+	r.Ref = o.Ref
+	rid := o.Event.RecurrenceID
+	r.Event.RecurrenceID = rid
+	r.Event.Start = rid
+	r.Event.End = rid.Add(max(m.Event.End.Sub(m.Event.Start), 0))
+	r.Event.RRule, r.Event.RDates, r.Event.ExDates = "", nil, nil
+	return &r
 }
 
 func (b *eventBuilder) emit(kind watch.Kind, row *calcache.EventRow, c watch.CalendarChange) {

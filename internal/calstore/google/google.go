@@ -103,6 +103,9 @@ type Store struct {
 	hc      *http.Client
 	base    string
 	timeout time.Duration
+	// syncBytes and syncEvents bound one listing; zero means
+	// calstore.MaxSyncBytes and calstore.MaxSyncEvents.
+	syncBytes, syncEvents int
 }
 
 var _ calstore.Store = (*Store)(nil)

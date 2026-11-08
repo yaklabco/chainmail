@@ -56,7 +56,7 @@ func (s *Store) Respond(ctx context.Context, calID, providerID string, r calenda
 		if m < 0 || !isInstance(o.events, r.RecurrenceID) {
 			return calendar.Event{}, fmt.Errorf("%w: no such instance", calstore.ErrNotFound)
 		}
-		o.cal.Children = append(o.cal.Children, overrideFrom(o.comps[m], o.events[m], r.RecurrenceID))
+		o.cal.Children = append(o.cal.Children, overrideFrom(o.comps[m], o.events[m], r.RecurrenceID, calendar.ZonesOf(o.cal)))
 		o.comps = append(o.comps, o.cal.Children[len(o.cal.Children)-1])
 		i = len(o.comps) - 1
 	}

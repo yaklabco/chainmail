@@ -300,7 +300,11 @@ func TestMultigetSplitsLargeAnswers(t *testing.T) {
 	})
 	s := d.store(t, "/")
 	hrefs := []string{"/cal/1.ics", "/cal/2.ics", "/cal/3.ics", "/cal/4.ics", "/cal/5.ics"}
-	objs, missing, err := s.multiget(context.Background(), "/cal/", hrefs)
+	var objs []*storedObject
+	missing, err := s.multiget(context.Background(), "/cal/", hrefs, func(o *storedObject) error {
+		objs = append(objs, o)
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

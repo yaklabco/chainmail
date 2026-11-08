@@ -756,3 +756,32 @@ func (m *memo) put(raw []byte, uid string, v *vtimezone) {
 	m.entries[m.next] = memoEntry{raw: raw, uid: uid, vtz: v}
 	m.next = (m.next + 1) % len(m.entries)
 }
+
+// Zones converts instants to the wall times of one decoded VCALENDAR's
+// TZIDs, by the rules ParseICS reads that calendar's times with: the
+// calendar's own VTIMEZONE when it is usable, else the IANA zone the TZID
+// names. A time written with Wall's result under the same TZID reads back
+// as the instant it was made from. A Zones is not safe for concurrent use.
+type Zones struct {
+	z *zones
+}
+
+// ZonesOf returns the Zones of cal.
+func ZonesOf(cal *ical.Calendar) *Zones {
+	return &Zones{z: newZones(cal.Component)}
+}
+
+// Wall returns the wall time, held as a UTC value, of instant t under
+// tzid, and false when tzid names neither a usable VTIMEZONE of the
+// calendar nor an IANA zone, so ParseICS reads its times as UTC.
+func (z *Zones) Wall(tzid string, t time.Time) (time.Time, bool) {
+	r := z.z.resolve(tzid)
+	switch {
+	case r.vtz != nil:
+		return r.vtz.wallOf(t.UTC()), true
+	case r.loc != nil:
+		return naiveOf(t.In(r.loc)), true
+	default:
+		return time.Time{}, false
+	}
+}

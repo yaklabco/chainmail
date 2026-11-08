@@ -123,7 +123,7 @@ func freeBusyRequest(organizer string, people []string, from, to, now time.Time)
 	}
 	line("END:VFREEBUSY")
 	line("END:VCALENDAR")
-	return fold([]byte(b.String())), nil
+	return calendar.Fold([]byte(b.String()), calendar.MaxICSBytes)
 }
 
 func safeAddress(s string) bool {

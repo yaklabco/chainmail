@@ -79,6 +79,9 @@ type Store struct {
 	base    *url.URL
 	now     func() time.Time
 	timeout time.Duration
+	// syncBytes and syncEvents bound one Sync; zero means
+	// calstore.MaxSyncBytes and calstore.MaxSyncEvents.
+	syncBytes, syncEvents int
 
 	mu   sync.Mutex
 	disc *discovery
