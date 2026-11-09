@@ -867,3 +867,82 @@ func (s *changedInstances) Sync(ctx context.Context, calID, token string) (calen
 	ch.Upserts = slices.DeleteFunc(ch.Upserts, func(ev calendar.Event) bool { return ev.RecurrenceID.IsZero() })
 	return ch, nil
 }
+
+// TestRemovedOverrideRestoresAnAnswer checks a series James organizes
+// whose override differed from its master only in the boss's answer:
+// removing the override gives the instance the master's answer back, an
+// invite_reply for the boss. An instance past the window stays quiet.
+func TestRemovedOverrideRestoresAnAnswer(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		past bool
+	}{{"upcoming", false}, {"past", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newRig(t)
+			r.store = fake.New(fake.Options{ObjectReplace: true, Now: r.clock.Now})
+			r.store.AddCalendar(calendar.Calendar{ID: "work", Name: "Work", Access: calendar.AccessWrite, Primary: true})
+			r.syncer = calsync.New(calsync.Options{Account: account, Store: r.store, Cache: r.cache, Log: r.log, Self: self, Poll: poll, WindowPast: windowPast, Clock: r.clock})
+			master := organized("s@x", t0.Add(24*time.Hour), calendar.PartStatAccepted)
+			master.RRule = "FREQ=WEEKLY"
+			rid := master.Start.AddDate(0, 0, 7)
+			answered := master
+			answered.RRule = ""
+			answered.RecurrenceID, answered.Start, answered.End = rid, rid, rid.Add(time.Hour)
+			answered.Attendees = slices.Clone(master.Attendees)
+			answered.Attendees[1].PartStat = calendar.PartStatDeclined
+			p := r.store.Add("work", master, answered)
+			r.sync(t)
+			if tc.past {
+				r.clock.set(rid.Add(windowPast + 72*time.Hour))
+			}
+			r.store.Change("work", p, func(rows []calendar.Event) []calendar.Event { return rows[:1] })
+			r.sync(t)
+			evs := r.events(t)
+			if tc.past {
+				if len(evs) != 0 {
+					t.Errorf("events = %+v, want none", evs)
+				}
+				return
+			}
+			if len(evs) != 1 || evs[0].Kind != watch.KindInviteReply {
+				t.Fatalf("events = %+v, want one invite_reply", evs)
+			}
+			if c := evs[0].Calendar; c.Attendee != boss || c.PartStat != "ACCEPTED" || c.Ref != calendar.InstanceRef(calendar.EventRef(account, "work", p), rid) {
+				t.Errorf("payload = %+v, want the boss's restored ACCEPTED on the instance", c)
+			}
+		})
+	}
+}
+
+// TestRemovedCancelledOverrideRestoresAnAnswer checks a cancelled override
+// that listed the boss with another answer: bringing the instance back
+// reports its status and the boss's restored answer.
+func TestRemovedCancelledOverrideRestoresAnAnswer(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	r.store = fake.New(fake.Options{ObjectReplace: true, Now: r.clock.Now})
+	r.store.AddCalendar(calendar.Calendar{ID: "work", Name: "Work", Access: calendar.AccessWrite, Primary: true})
+	r.syncer = calsync.New(calsync.Options{Account: account, Store: r.store, Cache: r.cache, Log: r.log, Self: self, Poll: poll, WindowPast: windowPast, Clock: r.clock})
+	master := organized("s@x", t0.Add(24*time.Hour), calendar.PartStatAccepted)
+	master.RRule = "FREQ=WEEKLY"
+	rid := master.Start.AddDate(0, 0, 7)
+	gone := master
+	gone.RRule, gone.Status = "", calendar.StatusCancelled
+	gone.RecurrenceID, gone.Start, gone.End = rid, rid, rid.Add(time.Hour)
+	gone.Attendees = slices.Clone(master.Attendees)
+	gone.Attendees[1].PartStat = calendar.PartStatDeclined
+	p := r.store.Add("work", master, gone)
+	r.sync(t)
+	r.store.Change("work", p, func(rows []calendar.Event) []calendar.Event { return rows[:1] })
+	r.sync(t)
+	var got []string
+	for _, e := range r.events(t) {
+		got = append(got, string(e.Kind)+" "+strings.Join(e.Calendar.Fields, ",")+" "+e.Calendar.Attendee+" "+e.Calendar.PartStat)
+	}
+	want := []string{"event_changed status  ", "invite_reply  " + boss + " ACCEPTED"}
+	if !slices.Equal(got, want) {
+		t.Errorf("events = %q, want %q", got, want)
+	}
+}

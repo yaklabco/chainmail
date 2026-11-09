@@ -740,6 +740,12 @@ func (s *Server) writtenView(ctx context.Context, res resolvedEvent, written cal
 	}
 	v := viewOfResolved(res)
 	v.ev = written
+	if res.rid.IsZero() && written.RecurrenceID.IsZero() {
+		// A single event or a whole series: its recurrence is the written
+		// one, which may have gained or lost its rule. An instance keeps
+		// its series's rule, which a write of one instance cannot change.
+		v.rrule, v.recurring = written.RRule, isSeries(written)
+	}
 	if len(written.Attendees) > 0 {
 		v.myPartStat = selfPartStat(written, s.ownAddress)
 	}

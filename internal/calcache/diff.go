@@ -62,27 +62,35 @@ type querier interface {
 // Changes come sorted by ProviderID and then recurrence ID. A row whose
 // stored form, including the etag, raw object, MyPartStat and IsOrganizer,
 // is unchanged is not a change. The changes are admitted first (Admit):
-// a skipped object's stored rows are not changes.
+// a skipped object's stored rows are not changes. The stored rows and
+// their raw objects are read in one read transaction (readTx).
 func (s *Store) Diff(ctx context.Context, account, calID string, ch calendar.Changes, self func(string) bool) ([]Change, error) {
-	p, err := planChanges(ctx, s.db, account, calID, ch, self)
+	var (
+		p    plan
+		rows []EventRow
+	)
+	err := s.readTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		if p, err = planChanges(ctx, tx, account, calID, ch, self); err != nil {
+			return err
+		}
+		if s.rowsRead != nil {
+			s.rowsRead()
+		}
+		var recs []storedRecord
+		for _, c := range p.changes {
+			if c.before != nil {
+				recs = append(recs, storedRecord{account: account, calID: calID, r: *c.before})
+			}
+			if c.after != nil {
+				recs = append(recs, storedRecord{account: account, calID: calID, r: *c.after})
+			}
+		}
+		rows, err = decodeRecords(ctx, tx, recs, p.raws.bySum)
+		return err
+	})
 	if err != nil {
-		if errors.Is(err, errNoProviderID) {
-			return nil, err
-		}
-		return nil, s.fail("diffing calendar changes", err)
-	}
-	var recs []storedRecord
-	for _, c := range p.changes {
-		if c.before != nil {
-			recs = append(recs, storedRecord{account: account, calID: calID, r: *c.before})
-		}
-		if c.after != nil {
-			recs = append(recs, storedRecord{account: account, calID: calID, r: *c.after})
-		}
-	}
-	rows, err := decodeRecords(ctx, s.db, recs, p.raws.bySum)
-	if err != nil {
-		if errors.Is(err, errStoredRow) {
+		if errors.Is(err, errNoProviderID) || errors.Is(err, errStoredRow) {
 			return nil, err
 		}
 		return nil, s.fail("diffing calendar changes", err)

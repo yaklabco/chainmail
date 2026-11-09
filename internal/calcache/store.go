@@ -49,6 +49,9 @@ type Store struct {
 	db        *sql.DB
 	path      string // the database file, for the corruption marker
 	recreated string
+	// rowsRead, when set, runs between reading event rows and reading
+	// their raw objects. Tests use it to change the file in between.
+	rowsRead func()
 }
 
 // Open opens or creates the cache at path. A file with another

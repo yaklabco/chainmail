@@ -29,14 +29,20 @@ type calendarListPage struct {
 	NextPageToken string `json:"nextPageToken"`
 }
 
-// ListCalendars returns the calendars on the account's calendar list.
+// ListCalendars returns the calendars on the account's calendar list. Its
+// pages and page tokens count against one byte budget (listing), as a
+// Sync's do: past it ListCalendars gives calstore.ErrSyncTooLarge.
 func (s *Store) ListCalendars(ctx context.Context) ([]calendar.Calendar, error) {
 	q := url.Values{"maxResults": {strconv.Itoa(pageSize)}}
 	var out []calendar.Calendar
-	seen := map[string]bool{}
+	l := s.newListing()
 	for range maxPages {
 		data, err := s.do(ctx, call{method: "GET", path: "/users/me/calendarList", query: q, limit: maxPageBytes})
 		if err != nil {
+			return nil, err
+		}
+		// What a page holds is kept, as calendars, until the listing ends.
+		if err := l.charge(len(data)); err != nil {
 			return nil, err
 		}
 		var page calendarListPage
@@ -60,10 +66,9 @@ func (s *Store) ListCalendars(ctx context.Context) ([]calendar.Calendar, error) 
 		if page.NextPageToken == "" {
 			return out, nil
 		}
-		if seen[page.NextPageToken] {
-			return nil, errPageRepeated
+		if err := l.next(page.NextPageToken); err != nil {
+			return nil, err
 		}
-		seen[page.NextPageToken] = true
 		q.Set("pageToken", page.NextPageToken)
 	}
 	return nil, fmt.Errorf("%w: more than %d pages", calstore.ErrUnavailable, maxPages)
@@ -203,21 +208,22 @@ func listQuery() url.Values {
 // listEvents reads every page of an events.list, calling each for each
 // event and done with the final page's sync token. syncing says the query
 // is a Sync, so a 410 means its sync or page token expired. A listing that
-// reads more than calstore.MaxSyncBytes of pages or more than
-// calstore.MaxSyncEvents events gives calstore.ErrSyncTooLarge, and one
-// whose server repeats a page token gives errPageRepeated, so a server
-// cannot make a sync keep data without bound.
+// reads more than calstore.MaxSyncBytes of pages and page tokens, or more
+// than calstore.MaxSyncEvents events, gives calstore.ErrSyncTooLarge; one
+// whose server repeats a page token gives errPageRepeated, and one with a
+// page token over maxPageToken errLongPageToken, so a server cannot make a
+// sync keep data without bound.
 func (s *Store) listEvents(ctx context.Context, calID string, q url.Values, syncing bool, each func(calendar.Event, apiEvent), done func(syncToken string)) error {
-	maxBytes, maxEvents := s.syncLimits()
-	var read, events int
-	seen := map[string]bool{}
+	_, maxEvents := s.syncLimits()
+	var events int
+	l := s.newListing()
 	for range maxPages {
 		data, err := s.do(ctx, call{method: "GET", path: eventsPath(calID), query: q, limit: maxPageBytes, sync: syncing})
 		if err != nil {
 			return err
 		}
-		if read += len(data); read > maxBytes {
-			return calstore.ErrSyncTooLarge
+		if err := l.charge(len(data)); err != nil {
+			return err
 		}
 		var page eventsPage
 		if err := json.Unmarshal(data, &page); err != nil {
@@ -237,10 +243,9 @@ func (s *Store) listEvents(ctx context.Context, calID string, q url.Values, sync
 			done(page.NextSyncToken)
 			return nil
 		}
-		if seen[page.NextPageToken] {
-			return errPageRepeated
+		if err := l.next(page.NextPageToken); err != nil {
+			return err
 		}
-		seen[page.NextPageToken] = true
 		q.Set("pageToken", page.NextPageToken)
 	}
 	return fmt.Errorf("%w: more than %d pages", calstore.ErrUnavailable, maxPages)
@@ -260,4 +265,50 @@ func (s *Store) syncLimits() (bytes, events int) {
 		events = calstore.MaxSyncEvents
 	}
 	return bytes, events
+}
+
+// maxPageToken bounds one page token. Google's are short; a longer one is
+// refused, not kept.
+const maxPageToken = 4 << 10
+
+// errLongPageToken is a listing whose server handed out a page token
+// longer than maxPageToken.
+var errLongPageToken = fmt.Errorf("%w: page token too long", calstore.ErrUnavailable)
+
+// listing bounds one paged listing: the bytes of the pages it reads and
+// the page tokens it keeps to spot a repeat count against one byte budget,
+// the bytes syncLimits gives.
+type listing struct {
+	seen map[string]bool
+	left int
+}
+
+func (s *Store) newListing() *listing {
+	bytes, _ := s.syncLimits()
+	return &listing{seen: map[string]bool{}, left: bytes}
+}
+
+// charge takes n bytes from the budget, before they are kept; past it the
+// listing gives calstore.ErrSyncTooLarge.
+func (l *listing) charge(n int) error {
+	if l.left -= n; l.left < 0 {
+		return calstore.ErrSyncTooLarge
+	}
+	return nil
+}
+
+// next checks and keeps the token of the next page: one too long gives
+// errLongPageToken, one already handed out errPageRepeated.
+func (l *listing) next(token string) error {
+	if len(token) > maxPageToken {
+		return errLongPageToken
+	}
+	if l.seen[token] {
+		return errPageRepeated
+	}
+	if err := l.charge(len(token)); err != nil {
+		return err
+	}
+	l.seen[token] = true
+	return nil
 }

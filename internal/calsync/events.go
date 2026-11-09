@@ -327,7 +327,9 @@ func (b *eventBuilder) deleted(row *calcache.EventRow) {
 // the series, else an event_changed of its status. An instance that ended
 // before now - windowPast, as removed and as restored, stays quiet, and so
 // does one the master no longer gives (its recurrence changed too, which
-// the master's own change reports).
+// the master's own change reports). On a series James organizes, each
+// attendee the restored instance gives another answer gets an
+// invite_reply (C9).
 func (b *eventBuilder) overrideRemoved(o *calcache.EventRow) {
 	if c, ok := b.base[o.Event.ProviderID]; ok && c.Kind == calcache.ChangeDeleted {
 		return // the whole series is gone, reported by its base row
@@ -353,6 +355,7 @@ func (b *eventBuilder) overrideRemoved(o *calcache.EventRow) {
 		if b.roleOf(back).involved() {
 			b.changed(back, []string{fieldStatus})
 		}
+		b.restoredReplies(o, back)
 		return
 	}
 	if !b.roleOf(o).involved() && !b.roleOf(back).involved() {
@@ -360,6 +363,17 @@ func (b *eventBuilder) overrideRemoved(o *calcache.EventRow) {
 	}
 	if fields := overrideFields(o, m); len(fields) > 0 {
 		b.changed(back, fields)
+	}
+	b.restoredReplies(o, back)
+}
+
+// restoredReplies emits, on a series James organizes, an invite_reply for
+// each attendee whose answer the removed override o held and the restored
+// instance back gives differently. An override that lists no attendees
+// took its series' answers, so nothing changes.
+func (b *eventBuilder) restoredReplies(o, back *calcache.EventRow) {
+	if b.roleOf(back).organizer {
+		b.replies(back, o.Event.Attendees, back.Event.Attendees)
 	}
 }
 
