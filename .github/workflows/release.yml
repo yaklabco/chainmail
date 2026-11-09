@@ -2,8 +2,6 @@ name: release
 # Cuts a release: the next version from the commits since the last tag, its
 # notes from that version's CHANGELOG.md section. Run it from main once the
 # changelog for the version is merged.
-env:
-  HOMEBREW_NO_ANALYTICS: "1"
 on:
   workflow_dispatch:
 concurrency:
@@ -34,62 +32,8 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
-      - name: Cache Homebrew downloads
-        id: brew_dl
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cache/Homebrew
-          key: brew-cache-${{ runner.os }}-${{ hashFiles('Brewfile') }}
-          restore-keys: |
-            brew-cache-${{ runner.os }}-
-      - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@main
-      - name: Detect Homebrew prefix
-        id: brew
-        run: echo "prefix=$(brew --prefix)" >> "$GITHUB_OUTPUT"
-      - name: Cache Homebrew installation
-        id: brew_install
-        uses: actions/cache@v6
-        with:
-          path: |
-            ${{ steps.brew.outputs.prefix }}/Cellar
-            ${{ steps.brew.outputs.prefix }}/opt
-            ${{ steps.brew.outputs.prefix }}/bin
-            ${{ steps.brew.outputs.prefix }}/sbin
-            ${{ steps.brew.outputs.prefix }}/lib
-            ${{ steps.brew.outputs.prefix }}/include
-            ${{ steps.brew.outputs.prefix }}/share
-            ${{ steps.brew.outputs.prefix }}/etc
-            ${{ steps.brew.outputs.prefix }}/var
-            ${{ steps.brew.outputs.prefix }}/Homebrew/Library/Taps
-          key: brew-install-${{ runner.os }}-${{ hashFiles('Brewfile') }}
-          restore-keys: |
-            brew-install-${{ runner.os }}-
-      - name: Install Homebrew tools (only if cache miss)
-        if: steps.brew_install.outputs.cache-hit != 'true'
-        run: |
-          brew upgrade go >& /dev/null || brew install go
-          brew bundle --file=Brewfile
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version-file: go.mod
-      - uses: bufbuild/buf-action@37ac33d8960807670a6e9719080e885197b09cc6 # v1.7.0
-        with:
-          # Pinned so a new buf lint rule cannot fail a release. The same
-          # version the Nix dev shell gives local runs.
-          version: 1.73.0
-          setup_only: true
-      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        with:
-          version: v2.15.0
-          install-only: true
-      # The same goreleaser version the Nix dev shell gives local runs.
-      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
-        with:
-          distribution: goreleaser
-          version: v2.17.1
-          install-only: true
+      # The same tool setup the ci workflow runs on every pull request.
+      - uses: ./.github/actions/setup-tools
       - name: Configure git user
         run: |
           git config --global user.name "github-actions[bot]"

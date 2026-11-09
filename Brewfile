@@ -4,5 +4,3 @@ brew "go"
 brew "golangci-lint"
 brew "goreleaser"
 brew "buf"
-
-go "github.com/yaklabco/stave"

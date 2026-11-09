@@ -9,54 +9,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Cache Homebrew downloads
-        id: brew_dl
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cache/Homebrew
-          key: brew-cache-${{ runner.os }}-${{ hashFiles('Brewfile') }}
-          restore-keys: |
-            brew-cache-${{ runner.os }}-
-      - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@main
-      - name: Detect Homebrew prefix
-        id: brew
-        run: echo "prefix=$(brew --prefix)" >> "$GITHUB_OUTPUT"
-      - name: Cache Homebrew installation
-        id: brew_install
-        uses: actions/cache@v6
-        with:
-          path: |
-            ${{ steps.brew.outputs.prefix }}/Cellar
-            ${{ steps.brew.outputs.prefix }}/opt
-            ${{ steps.brew.outputs.prefix }}/bin
-            ${{ steps.brew.outputs.prefix }}/sbin
-            ${{ steps.brew.outputs.prefix }}/lib
-            ${{ steps.brew.outputs.prefix }}/include
-            ${{ steps.brew.outputs.prefix }}/share
-            ${{ steps.brew.outputs.prefix }}/etc
-            ${{ steps.brew.outputs.prefix }}/var
-            ${{ steps.brew.outputs.prefix }}/Homebrew/Library/Taps
-          key: brew-install-${{ runner.os }}-${{ hashFiles('Brewfile') }}
-          restore-keys: |
-            brew-install-${{ runner.os }}-
-      - name: Install Homebrew tools (only if cache miss)
-        if: steps.brew_install.outputs.cache-hit != 'true'
-        run: |
-          brew upgrade go >& /dev/null || brew install go
-          brew bundle --file=Brewfile
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - uses: bufbuild/buf-action@v1
-        with:
-          setup_only: true
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.15.0
-          install-only: true
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup-tools
       - run: go tool stave check
       # chainmail runs on any Linux and on macOS, so a build that works on
       # only one of them fails here.
@@ -69,146 +23,67 @@ jobs:
             GOOS=${target%/*} GOARCH=${target#*/} go build ./...
           done
   macos:
-    # The unit tests on macOS. The Dovecot tests need Docker, so they stay
-    # in the integration job on Linux; their integration build tag keeps
-    # them out of this run, as the live tag keeps out the live tests.
+    # The unit tests on macOS, with the tools from the Brewfile, so the
+    # Homebrew setup for contributors is tested here. The Dovecot tests need
+    # Docker, so they stay in the integration job on Linux; their
+    # integration build tag keeps them out of this run, as the live tag
+    # keeps out the live tests. Lint runs in the check job, at the pinned
+    # golangci-lint, because Homebrew's version is not pinned.
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - name: Cache Homebrew downloads
-        id: brew_dl
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cache/Homebrew
-          key: brew-cache-${{ runner.os }}-${{ hashFiles('Brewfile') }}
-          restore-keys: |
-            brew-cache-${{ runner.os }}-
-      - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@main
-      - name: Detect Homebrew prefix
-        id: brew
-        run: echo "prefix=$(brew --prefix)" >> "$GITHUB_OUTPUT"
-      - name: Cache Homebrew installation
-        id: brew_install
-        uses: actions/cache@v6
-        with:
-          path: |
-            ${{ steps.brew.outputs.prefix }}/Cellar
-            ${{ steps.brew.outputs.prefix }}/opt
-            ${{ steps.brew.outputs.prefix }}/bin
-            ${{ steps.brew.outputs.prefix }}/sbin
-            ${{ steps.brew.outputs.prefix }}/lib
-            ${{ steps.brew.outputs.prefix }}/include
-            ${{ steps.brew.outputs.prefix }}/share
-            ${{ steps.brew.outputs.prefix }}/etc
-            ${{ steps.brew.outputs.prefix }}/var
-            ${{ steps.brew.outputs.prefix }}/Homebrew/Library/Taps
-          key: brew-install-${{ runner.os }}-${{ hashFiles('Brewfile') }}
-          restore-keys: |
-            brew-install-${{ runner.os }}-
-      - name: Install Homebrew tools (only if cache miss)
-        if: steps.brew_install.outputs.cache-hit != 'true'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: brew bundle check --file=Brewfile || brew bundle install --file=Brewfile
+      - name: Require the tools to come from Homebrew
         run: |
-          brew upgrade go >& /dev/null || brew install go
-          brew bundle --file=Brewfile
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
+          prefix=$(brew --prefix)
+          for tool in go buf golangci-lint goreleaser; do
+            path=$(command -v "$tool") || { echo "::error::$tool is not on PATH"; exit 1; }
+            case $path in
+              "$prefix"/*) echo "$tool: $path" ;;
+              *) echo "::error::$tool is $path, not from Homebrew"; exit 1 ;;
+            esac
+          done
+      - run: go tool stave prereq
+      - run: go tool stave build
       - run: go test -short -race -p 2 ./...
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - name: Cache Homebrew downloads
-        id: brew_dl
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cache/Homebrew
-          key: brew-cache-${{ runner.os }}-${{ hashFiles('Brewfile') }}
-          restore-keys: |
-            brew-cache-${{ runner.os }}-
-      - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@main
-      - name: Detect Homebrew prefix
-        id: brew
-        run: echo "prefix=$(brew --prefix)" >> "$GITHUB_OUTPUT"
-      - name: Cache Homebrew installation
-        id: brew_install
-        uses: actions/cache@v6
-        with:
-          path: |
-            ${{ steps.brew.outputs.prefix }}/Cellar
-            ${{ steps.brew.outputs.prefix }}/opt
-            ${{ steps.brew.outputs.prefix }}/bin
-            ${{ steps.brew.outputs.prefix }}/sbin
-            ${{ steps.brew.outputs.prefix }}/lib
-            ${{ steps.brew.outputs.prefix }}/include
-            ${{ steps.brew.outputs.prefix }}/share
-            ${{ steps.brew.outputs.prefix }}/etc
-            ${{ steps.brew.outputs.prefix }}/var
-            ${{ steps.brew.outputs.prefix }}/Homebrew/Library/Taps
-          key: brew-install-${{ runner.os }}-${{ hashFiles('Brewfile') }}
-          restore-keys: |
-            brew-install-${{ runner.os }}-
-      - name: Install Homebrew tools (only if cache miss)
-        if: steps.brew_install.outputs.cache-hit != 'true'
-        run: |
-          brew upgrade go >& /dev/null || brew install go
-          brew bundle --file=Brewfile
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup-tools
       - run: go tool stave test:integration
   nix:
     # Builds the flake's package, so a vendorHash that go.mod or go.sum has
     # made stale fails here and not for someone installing from the flake.
+    # Then runs the full check in the dev shell with no Homebrew on PATH, as
+    # a contributor who uses Nix does.
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - name: Cache Homebrew downloads
-        id: brew_dl
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cache/Homebrew
-          key: brew-cache-${{ runner.os }}-${{ hashFiles('Brewfile') }}
-          restore-keys: |
-            brew-cache-${{ runner.os }}-
-      - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@main
-      - name: Detect Homebrew prefix
-        id: brew
-        run: echo "prefix=$(brew --prefix)" >> "$GITHUB_OUTPUT"
-      - name: Cache Homebrew installation
-        id: brew_install
-        uses: actions/cache@v6
-        with:
-          path: |
-            ${{ steps.brew.outputs.prefix }}/Cellar
-            ${{ steps.brew.outputs.prefix }}/opt
-            ${{ steps.brew.outputs.prefix }}/bin
-            ${{ steps.brew.outputs.prefix }}/sbin
-            ${{ steps.brew.outputs.prefix }}/lib
-            ${{ steps.brew.outputs.prefix }}/include
-            ${{ steps.brew.outputs.prefix }}/share
-            ${{ steps.brew.outputs.prefix }}/etc
-            ${{ steps.brew.outputs.prefix }}/var
-            ${{ steps.brew.outputs.prefix }}/Homebrew/Library/Taps
-          key: brew-install-${{ runner.os }}-${{ hashFiles('Brewfile') }}
-          restore-keys: |
-            brew-install-${{ runner.os }}-
-      - name: Install Homebrew tools (only if cache miss)
-        if: steps.brew_install.outputs.cache-hit != 'true'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # The ubuntu image has Homebrew installed but not on PATH. This job
+      # tests the setup without it, so fail if that ever changes.
+      - name: Require no Homebrew on PATH
         run: |
-          brew upgrade go >& /dev/null || brew install go
-          brew bundle --file=Brewfile
-      - uses: cachix/install-nix-action@v31.11.3
+          if command -v brew; then
+            echo "::error::brew is on PATH, so this job does not test a Nix-only setup"
+            exit 1
+          fi
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
       - run: nix build .#default --print-build-logs
+      - name: Require the tools to come from the dev shell
+        shell: nix develop -c bash -e {0}
+        run: |
+          for tool in go buf golangci-lint goreleaser; do
+            path=$(command -v "$tool") || { echo "::error::$tool is not on PATH"; exit 1; }
+            case $path in
+              /nix/store/*) echo "$tool: $path" ;;
+              *) echo "::error::$tool is $path, not from the dev shell"; exit 1 ;;
+            esac
+          done
+      - run: nix develop -c go tool stave check
   release-config:
     # Checks the goreleaser config and builds the release archives and the
     # Cask into dist/ without publishing, so a broken release config fails
@@ -219,57 +94,12 @@ jobs:
       # goreleaser's --parallelism. Without it a 4-core runner gets 1.
       STAVE_NUM_PROCESSORS: "2"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # The next version comes from the commits since the last tag.
           fetch-depth: 0
           fetch-tags: true
-      - name: Cache Homebrew downloads
-        id: brew_dl
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cache/Homebrew
-          key: brew-cache-${{ runner.os }}-${{ hashFiles('Brewfile') }}
-          restore-keys: |
-            brew-cache-${{ runner.os }}-
-      - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@main
-      - name: Detect Homebrew prefix
-        id: brew
-        run: echo "prefix=$(brew --prefix)" >> "$GITHUB_OUTPUT"
-      - name: Cache Homebrew installation
-        id: brew_install
-        uses: actions/cache@v6
-        with:
-          path: |
-            ${{ steps.brew.outputs.prefix }}/Cellar
-            ${{ steps.brew.outputs.prefix }}/opt
-            ${{ steps.brew.outputs.prefix }}/bin
-            ${{ steps.brew.outputs.prefix }}/sbin
-            ${{ steps.brew.outputs.prefix }}/lib
-            ${{ steps.brew.outputs.prefix }}/include
-            ${{ steps.brew.outputs.prefix }}/share
-            ${{ steps.brew.outputs.prefix }}/etc
-            ${{ steps.brew.outputs.prefix }}/var
-            ${{ steps.brew.outputs.prefix }}/Homebrew/Library/Taps
-          key: brew-install-${{ runner.os }}-${{ hashFiles('Brewfile') }}
-          restore-keys: |
-            brew-install-${{ runner.os }}-
-      - name: Install Homebrew tools (only if cache miss)
-        if: steps.brew_install.outputs.cache-hit != 'true'
-        run: |
-          brew upgrade go >& /dev/null || brew install go
-          brew bundle --file=Brewfile
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      # The same goreleaser version the Nix dev shell gives local runs.
-      - uses: goreleaser/goreleaser-action@v7
-        with:
-          distribution: goreleaser
-          version: v2.17.1
-          install-only: true
+      - uses: ./.github/actions/setup-tools
       - run: goreleaser check
       - run: go tool stave snapshot
   docs:
@@ -280,43 +110,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Cache Homebrew downloads
-        id: brew_dl
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cache/Homebrew
-          key: brew-cache-${{ runner.os }}-${{ hashFiles('Brewfile') }}
-          restore-keys: |
-            brew-cache-${{ runner.os }}-
-      - name: Set up Homebrew
-        uses: Homebrew/actions/setup-homebrew@main
-      - name: Detect Homebrew prefix
-        id: brew
-        run: echo "prefix=$(brew --prefix)" >> "$GITHUB_OUTPUT"
-      - name: Cache Homebrew installation
-        id: brew_install
-        uses: actions/cache@v6
-        with:
-          path: |
-            ${{ steps.brew.outputs.prefix }}/Cellar
-            ${{ steps.brew.outputs.prefix }}/opt
-            ${{ steps.brew.outputs.prefix }}/bin
-            ${{ steps.brew.outputs.prefix }}/sbin
-            ${{ steps.brew.outputs.prefix }}/lib
-            ${{ steps.brew.outputs.prefix }}/include
-            ${{ steps.brew.outputs.prefix }}/share
-            ${{ steps.brew.outputs.prefix }}/etc
-            ${{ steps.brew.outputs.prefix }}/var
-            ${{ steps.brew.outputs.prefix }}/Homebrew/Library/Taps
-          key: brew-install-${{ runner.os }}-${{ hashFiles('Brewfile') }}
-          restore-keys: |
-            brew-install-${{ runner.os }}-
-      - name: Install Homebrew tools (only if cache miss)
-        if: steps.brew_install.outputs.cache-hit != 'true'
-        run: |
-          brew upgrade go >& /dev/null || brew install go
-          brew bundle --file=Brewfile
       - run: sudo apt-get update && sudo apt-get install -y fish
       - run: scripts/check-doc-shell_test.sh
       - run: scripts/check-doc-shell.sh README.md
+  workflows:
+    # Lints the workflows and the setup action, including the shell in their
+    # run steps, which shellcheck on the runner image checks.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
