@@ -337,3 +337,34 @@ func TestClientOptionsDecodeEveryCharset(t *testing.T) {
 		})
 	}
 }
+
+// An endpoint with a TLS server name verifies the certificate against that
+// name, not the host dialed, as when a load balancer is reached by a
+// private name and serves the public name's certificate.
+func TestDialVerifiesTLSServerName(t *testing.T) {
+	t.Parallel()
+	for _, sec := range []provider.Security{provider.SecurityTLS, provider.SecurityStartTLS} {
+		t.Run(sec.String(), func(t *testing.T) {
+			t.Parallel()
+			ca := tlstest.NewFor(t, "mail.example.test")
+			ep := imaptest.Start(t, ca, sec, user)
+			if _, err := Dial(t.Context(), ep, password("pw"), DialOptions{RootCAs: ca.Pool}); err == nil {
+				t.Fatal("Dial by address succeeded against a certificate for another name")
+			}
+			ep.ServerName = "mail.example.test"
+			s, err := Dial(t.Context(), ep, password("pw"), DialOptions{RootCAs: ca.Pool})
+			if err != nil {
+				t.Fatalf("Dial with server name: %v", err)
+			}
+			if err := s.Close(); err != nil {
+				t.Errorf("Close: %v", err)
+			}
+			ep.ServerName = "other.example.test"
+			_, err = Dial(t.Context(), ep, password("pw"), DialOptions{RootCAs: ca.Pool})
+			var hostErr x509.HostnameError
+			if !errors.As(err, &hostErr) {
+				t.Errorf("Dial with the wrong server name: err = %v, want x509.HostnameError", err)
+			}
+		})
+	}
+}

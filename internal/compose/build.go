@@ -61,8 +61,10 @@ const (
 // multipart/mixed (when there are attachments) around multipart/related
 // (when there are inline images) around multipart/alternative (Markdown and
 // HTML bodies) around the text and HTML parts. A Text body is a single
-// format=flowed part. Bcc is only in the envelope. An empty MessageID is
-// generated from the From domain, and a zero Date is now.
+// format=flowed part. A Calendar alternative goes last in
+// multipart/alternative, which a Text body then gets too. Bcc is only in
+// the envelope. An empty MessageID is generated from the From domain, and a
+// zero Date is now.
 //
 // Every problem with s is an error wrapping ErrInvalid.
 func Build(s Spec) (Message, error) {
@@ -177,6 +179,9 @@ func validate(s Spec) error {
 		if f.ContentID != "" && !ValidContentID(f.ContentID) {
 			return fmt.Errorf("%w: bad attachment Content-ID", ErrInvalid)
 		}
+	}
+	if s.Calendar != nil {
+		return validCalendar(*s.Calendar)
 	}
 	return nil
 }
@@ -442,7 +447,11 @@ func contentPart(s Spec, rnd io.Reader, related []*part) (*part, error) {
 		if len(s.Inline) > 0 {
 			return nil, fmt.Errorf("%w: a text body cannot show inline images", ErrInvalid)
 		}
-		return textPart(flowed(s.Body.Source, s.Signature, s.Quote), "flowed"), nil
+		text := textPart(flowed(s.Body.Source, s.Signature, s.Quote), "flowed")
+		if s.Calendar == nil {
+			return text, nil
+		}
+		return &part{mediaType: "multipart/alternative", children: []*part{text, calendarPart(*s.Calendar)}}, nil
 	}
 	text, bodyHTML, err := bodies(s)
 	if err != nil {
@@ -476,6 +485,9 @@ func contentPart(s Spec, rnd io.Reader, related []*part) (*part, error) {
 		textPart(plainText(text, s.Signature, s.Quote), ""),
 		{mediaType: "text/html", params: map[string]string{"charset": "utf-8"}, encoding: quotedPrintable, body: []byte(doc)},
 	}}
+	if s.Calendar != nil {
+		alt.children = append(alt.children, calendarPart(*s.Calendar))
+	}
 	if len(images) == 0 {
 		return alt, nil
 	}
@@ -1004,4 +1016,38 @@ func percentEncode(s string) string {
 		fmt.Fprintf(&b, "%%%02X", c)
 	}
 	return b.String()
+}
+
+// maxMethod caps an iTIP method name. The registered ones are at most
+// 14 bytes, COUNTER and DECLINECOUNTER among them.
+const maxMethod = 64
+
+// validCalendar checks a calendar alternative: a method that is an
+// iCalendar name, letters, digits and hyphens, and data that is UTF-8, as
+// the part declares. The errors name neither, as the data can come from
+// someone else's invite.
+func validCalendar(c CalendarAlternative) error {
+	if c.Method == "" || len(c.Method) > maxMethod || strings.ContainsFunc(c.Method, func(r rune) bool {
+		return (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-'
+	}) {
+		return fmt.Errorf("%w: bad calendar method", ErrInvalid)
+	}
+	if len(c.Data) == 0 {
+		return fmt.Errorf("%w: no calendar data", ErrInvalid)
+	}
+	if !utf8.Valid(c.Data) {
+		return fmt.Errorf("%w: calendar data is not UTF-8", ErrInvalid)
+	}
+	return nil
+}
+
+// calendarPart is the text/calendar alternative of an iMIP message: inline,
+// with no disposition, and quoted-printable as the other text parts are.
+func calendarPart(c CalendarAlternative) *part {
+	return &part{
+		mediaType: "text/calendar",
+		params:    map[string]string{"charset": "utf-8", "method": strings.ToUpper(c.Method)},
+		encoding:  quotedPrintable,
+		body:      c.Data,
+	}
 }

@@ -9,6 +9,11 @@ import (
 
 	"github.com/yaklabco/chainmail/internal/api"
 	"github.com/yaklabco/chainmail/internal/auth"
+	"github.com/yaklabco/chainmail/internal/calcache"
+	"github.com/yaklabco/chainmail/internal/calendar"
+	"github.com/yaklabco/chainmail/internal/calstore"
+	"github.com/yaklabco/chainmail/internal/calstore/caldav"
+	"github.com/yaklabco/chainmail/internal/calstore/google"
 	"github.com/yaklabco/chainmail/internal/config"
 	"github.com/yaklabco/chainmail/internal/items"
 	"github.com/yaklabco/chainmail/internal/mailstore"
@@ -37,6 +42,8 @@ func toConnectError(err error) *connect.Error {
 		noFolder    *mailstore.FolderNotFoundError
 		invalidItem *items.InvalidError
 		invalidRule *rules.InvalidError
+		calAuth     *calendarAuthError
+		calRefused  *calendarRefusal
 	)
 	switch {
 	case errors.As(err, &required):
@@ -88,6 +95,40 @@ func toConnectError(err error) *connect.Error {
 	case errors.As(err, &noFolder):
 		return api.New(connect.CodeNotFound, api.ReasonNotFound, folderHint,
 			&fixedTextError{msg: folderMissingText(noFolder), err: err})
+	case errors.As(err, &calRefused):
+		return api.New(calRefused.code, calRefused.reason, calRefused.hint, err)
+	case errors.As(err, &calAuth):
+		return api.New(connect.CodeUnauthenticated, api.ReasonAuthRequired, "run: chainmail auth login "+calAuth.account, err)
+	case errors.Is(err, calstore.ErrAuth):
+		return api.New(connect.CodeUnauthenticated, api.ReasonAuthRequired, calendarAuthHint,
+			&fixedTextError{msg: "the calendar server refused the account's credentials", err: err})
+	case errors.Is(err, calendar.ErrInvalidRef):
+		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, eventRefHint, err)
+	case errors.Is(err, calstore.ErrConflict):
+		return api.New(connect.CodeAborted, api.ReasonEventConflict, "read the event again and retry with its new etag",
+			&fixedTextError{msg: "the event changed since it was read", err: err})
+	case errors.Is(err, calstore.ErrReadOnly):
+		return api.New(connect.CodePermissionDenied, api.ReasonCalendarReadOnly, "pick a writable calendar; chainmail calendars lists them",
+			&fixedTextError{msg: "the calendar is read-only", err: err})
+	case errors.Is(err, calstore.ErrNotFound), errors.Is(err, calcache.ErrNotFound):
+		return api.New(connect.CodeNotFound, api.ReasonNotFound, "find events with: chainmail agenda",
+			&fixedTextError{msg: "the event or calendar was not found", err: err})
+	case errors.Is(err, google.ErrRequest):
+		return api.New(connect.CodeInvalidArgument, api.ReasonInvalidArgument, "",
+			&fixedTextError{msg: "the calendar server refused the request", err: err})
+	case errors.Is(err, caldav.ErrNotAttendee):
+		return api.New(connect.CodeFailedPrecondition, api.ReasonInvalidArgument, "",
+			&fixedTextError{msg: "none of the account's addresses is an attendee of the event", err: err})
+	case errors.Is(err, caldav.ErrSilentUnsupported):
+		// The daemon never applies a held change, so it never asks for one.
+		return api.New(connect.CodeFailedPrecondition, api.ReasonInvalidArgument, "make the change in the calendar app",
+			&fixedTextError{msg: "the calendar server would notify attendees of this change", err: err})
+	case errors.Is(err, caldav.ErrRejected):
+		return api.New(connect.CodeFailedPrecondition, api.ReasonInvalidArgument, "check the event's times, attendees and recurrence rule",
+			&fixedTextError{msg: "the calendar server rejected the change", err: err})
+	case errors.Is(err, calstore.ErrUnavailable):
+		// The error's text is calstore's fixed text and a status code.
+		return api.New(connect.CodeUnavailable, api.ReasonServerUnavailable, "", err)
 	case errors.Is(err, errNotReady):
 		return api.New(connect.CodeFailedPrecondition, api.ReasonCacheNotReady, notReadyHint(err), err)
 	case errors.Is(err, items.ErrNotFound):

@@ -117,3 +117,38 @@ func TestBackgroundCallsKeepFail(t *testing.T) {
 		t.Errorf("background ListFolders with Fail set = %v, want %v", err, boom)
 	}
 }
+
+// StreamPartBackground is StreamPart admitted as background work: it
+// fails with ErrBusy while SetBusy is on, whatever ctx says, and otherwise
+// opens the part. Each call counts as a StreamPart call made with a
+// background context, and Fail("StreamPart") applies to it.
+func TestStreamPartBackground(t *testing.T) {
+	t.Parallel()
+	var _ mailstore.BackgroundPartStreamer = (*Store)(nil)
+	s := New("acct", false)
+	r := s.Add(Message{Folder: "INBOX", Subject: "s", Body: "b", Attachments: []Attachment{{Part: "2", ContentType: "text/calendar; method=REQUEST", Data: []byte("ics")}}})
+	s.SetBusy(true)
+	if _, _, err := s.StreamPartBackground(t.Context(), r, "2"); !errors.Is(err, mailstore.ErrBusy) {
+		t.Errorf("busy StreamPartBackground = %v, want ErrBusy", err)
+	}
+	s.SetBusy(false)
+	info, rc, err := s.StreamPartBackground(t.Context(), r, "2")
+	if err != nil {
+		t.Fatalf("StreamPartBackground = %v", err)
+	}
+	data, err := io.ReadAll(rc)
+	if err != nil || string(data) != "ics" || info.ContentType != "text/calendar; method=REQUEST" {
+		t.Errorf("read %q, %v, info %+v, want the part", data, err, info)
+	}
+	if n := s.Calls("StreamPart"); n != 2 {
+		t.Errorf("Calls(StreamPart) = %d, want 2", n)
+	}
+	if n := s.BackgroundCalls("StreamPart"); n != 2 {
+		t.Errorf("BackgroundCalls(StreamPart) = %d, want 2", n)
+	}
+	boom := errors.New("boom")
+	s.Fail("StreamPart", boom)
+	if _, _, err := s.StreamPartBackground(t.Context(), r, "2"); !errors.Is(err, boom) {
+		t.Errorf("StreamPartBackground with Fail set = %v, want %v", err, boom)
+	}
+}

@@ -1,0 +1,348 @@
+syntax = "proto3";
+
+package chainmail.v1;
+
+import "chainmail/v1/message.proto";
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/timestamp.proto";
+
+// CalendarService reads and changes calendars under the send policy. Every
+// call is audited as calendar.<snake_case rpc>, with accounts, calendar
+// IDs, event refs, the decision and counts as targets. Event text comes
+// back as Untrusted, and no error, hint or audit row holds event text:
+// summaries, locations, descriptions, names, comments or calendar names.
+service CalendarService {
+  // ListCalendars lists the calendars of every account with a calendar
+  // store, or of those named. Audited as calendar.list_calendars.
+  rpc ListCalendars(ListCalendarsRequest) returns (ListCalendarsResponse);
+  // Agenda returns the event instances that overlap a time range, from the
+  // calendar cache, in time order. Audited as calendar.agenda.
+  rpc Agenda(AgendaRequest) returns (AgendaResponse);
+  // GetEvent returns one event or one instance of a series, with its
+  // attendees. Audited as calendar.get_event, with the ref.
+  rpc GetEvent(GetEventRequest) returns (GetEventResponse);
+  // ListInvites lists the invites that wait for James's reply, from a
+  // calendar or from mail. Audited as calendar.list_invites.
+  rpc ListInvites(ListInvitesRequest) returns (ListInvitesResponse);
+  // GetInvite returns one invite. Audited as calendar.get_invite, with the
+  // ref.
+  rpc GetInvite(GetInviteRequest) returns (GetInviteResponse);
+  // FreeBusy returns James's busy blocks across every account, and the
+  // busy blocks of other people the named account's provider can see.
+  // Audited as calendar.free_busy.
+  rpc FreeBusy(FreeBusyRequest) returns (FreeBusyResponse);
+  // Respond answers an invite: through the calendar store, or by an iTIP
+  // REPLY email to the organizer. The organizer is checked against the
+  // send policy. Audited as calendar.respond, with the ref and the
+  // decision.
+  rpc Respond(RespondRequest) returns (RespondResponse);
+  // CreateEvent creates an event. Attendees the policy does not allow make
+  // it a held draft event that notifies no one. Audited as
+  // calendar.create_event, with the account, calendar ID, new ref and the
+  // decision.
+  rpc CreateEvent(CreateEventRequest) returns (CreateEventResponse);
+  // UpdateEvent changes an event James organizes, or one with no other
+  // attendees. A change that would notify attendees the policy does not
+  // allow is held and not applied. Audited as calendar.update_event, with
+  // the ref and the decision.
+  rpc UpdateEvent(UpdateEventRequest) returns (UpdateEventResponse);
+  // CancelEvent cancels an event James organizes and notifies its
+  // attendees, or deletes one with no other attendees. A cancel that would
+  // notify attendees the policy does not allow is held and not applied.
+  // Audited as calendar.cancel_event, with the ref and the decision.
+  rpc CancelEvent(CancelEventRequest) returns (CancelEventResponse);
+}
+
+// CalendarInfo is one calendar of an account.
+message CalendarInfo {
+  string account = 1;
+  // The provider's calendar ID: a Google calendar ID or a CalDAV
+  // collection path.
+  string id = 2;
+  // The calendar's display name.
+  Untrusted name = 3;
+  // read or write.
+  string access = 4;
+  // Created events go here when no calendar is named.
+  bool is_default = 5;
+  // The provider's primary calendar of the account.
+  bool primary = 6;
+  // IANA zone, empty when unknown.
+  string time_zone = 7;
+}
+
+// Attendee is one attendee of an event.
+message Attendee {
+  Address address = 1;
+  // NEEDS-ACTION, ACCEPTED, DECLINED, TENTATIVE or DELEGATED.
+  string partstat = 2;
+  // REQ-PARTICIPANT, OPT-PARTICIPANT, CHAIR or NON-PARTICIPANT. Empty when
+  // the event does not say.
+  string role = 3;
+  // The attendee is one of the account's own addresses.
+  bool is_self = 4;
+}
+
+// CalendarEvent is one event: a single event, or one instance of a series.
+message CalendarEvent {
+  // ce_ followed by 26 characters, and @<recurrence ID> for an instance.
+  string ref = 1;
+  string account = 2;
+  string calendar_id = 3;
+  // The iCalendar UID, shared by every instance of a series.
+  string uid = 4;
+  // UTC. An all-day event starts at 00:00 UTC of its first date and ends at
+  // 00:00 UTC of the day after its last date.
+  google.protobuf.Timestamp start = 5;
+  google.protobuf.Timestamp end = 6;
+  // IANA zone of start, empty for UTC or floating times.
+  string time_zone = 7;
+  bool all_day = 8;
+  // CONFIRMED, TENTATIVE or CANCELLED.
+  string status = 9;
+  int32 sequence = 10;
+  Untrusted summary = 11;
+  Untrusted location = 12;
+  Untrusted description = 13;
+  Address organizer = 14;
+  repeated Attendee attendees = 15;
+  // The event had more than 500 attendees; the rest are left out.
+  bool attendees_truncated = 16;
+  // James's own PARTSTAT, empty when he is not an attendee.
+  string my_partstat = 17;
+  // James organizes the event, or it has no other attendees.
+  bool is_organizer = 18;
+  // Pass to UpdateEvent and CancelEvent. A changed event is refused with
+  // EVENT_CONFLICT.
+  string etag = 19;
+  // The series RRULE, set on a series and on each of its instances.
+  string recurrence_rule = 20;
+  // The event is a series or an instance of one.
+  bool recurring = 21;
+  // The original start of an instance, UTC. Unset for a single event.
+  google.protobuf.Timestamp recurrence_id = 22;
+  // The event does not count as busy.
+  bool transparent = 23;
+  // The mail message the invite came in, when it came by mail.
+  string message_ref = 24;
+}
+
+// CalendarHeld reports a calendar operation the policy held. A hold is
+// final: chainmail never sends a held operation's notifications later.
+message CalendarHeld {
+  // Fixed text: what was done and what James can do next.
+  string hint = 1;
+  // Attendee addresses the policy did not allow, as given.
+  repeated Untrusted blocked = 2;
+  // More attendees would be notified than max_recipients allows.
+  bool too_many = 3;
+  // A held create: the draft event, created without notifications.
+  string event_ref = 4;
+  // A held RSVP by email: the REPLY saved to Drafts.
+  string draft_ref = 5;
+  // A held update or cancel: the changed field names, the new times and the
+  // attendee count. It never holds event text.
+  string summary = 6;
+}
+
+message ListCalendarsRequest {
+  // Empty means every account with a calendar store.
+  repeated string accounts = 1;
+}
+
+message ListCalendarsResponse {
+  repeated CalendarInfo calendars = 1;
+}
+
+message AgendaRequest {
+  // Empty means every account with a calendar store.
+  repeated string accounts = 1;
+  // Calendar IDs. Empty means every calendar.
+  repeated string calendars = 2;
+  // from is before to, and they are at most 400 days apart.
+  google.protobuf.Timestamp from = 3;
+  google.protobuf.Timestamp to = 4;
+  // Include events James declined.
+  bool include_declined = 5;
+}
+
+message AgendaResponse {
+  repeated CalendarEvent events = 1;
+  // A series had more than 1000 instances in the range, or a recurrence
+  // rule was not expanded, so some instances are left out.
+  bool truncated = 2;
+}
+
+message GetEventRequest {
+  // A ce_ ref. One with @<recurrence ID> names that instance.
+  string ref = 1;
+}
+
+message GetEventResponse {
+  CalendarEvent event = 1;
+}
+
+// Invite is an event invite that waits for James's reply.
+message Invite {
+  CalendarEvent event = 1;
+  // calendar or mail.
+  string source = 2;
+  // REQUEST, UPDATE or CANCEL.
+  string method = 3;
+}
+
+message ListInvitesRequest {
+  // Empty means every account.
+  repeated string accounts = 1;
+}
+
+message ListInvitesResponse {
+  repeated Invite invites = 1;
+}
+
+message GetInviteRequest {
+  // A ce_ ref.
+  string ref = 1;
+}
+
+message GetInviteResponse {
+  Invite invite = 1;
+}
+
+// BusyBlock is one busy span. It names no event.
+message BusyBlock {
+  google.protobuf.Timestamp start = 1;
+  google.protobuf.Timestamp end = 2;
+}
+
+// PersonFreeBusy is the busy time of one person.
+message PersonFreeBusy {
+  // The address, as given.
+  string person = 1;
+  // The provider can see this person's calendar. When false, busy is empty
+  // and means unknown, never free.
+  bool known = 2;
+  repeated BusyBlock busy = 3;
+}
+
+message FreeBusyRequest {
+  // The account whose provider is asked about people. Required when
+  // people is set.
+  string account = 1;
+  // Addresses of other people. Empty asks only for James.
+  repeated string people = 2;
+  // from is before to, and they are at most 400 days apart.
+  google.protobuf.Timestamp from = 3;
+  google.protobuf.Timestamp to = 4;
+}
+
+message FreeBusyResponse {
+  // James's busy blocks across every account, merged, leaving out events
+  // he declined, transparent events and cancelled ones.
+  repeated BusyBlock self_busy = 1;
+  repeated PersonFreeBusy people = 2;
+}
+
+message RespondRequest {
+  // A ce_ ref. One with @<recurrence ID> answers that instance only.
+  string ref = 1;
+  // accept, decline or tentative.
+  string response = 2;
+  // Sent to the organizer with the reply.
+  string comment = 3;
+  // 1 to 128 of A-Z a-z 0-9 . _ : -. A repeat with the same key does not
+  // reply twice.
+  string idempotency_key = 4;
+}
+
+message RespondResponse {
+  // The event after the reply. Unset when held.
+  CalendarEvent event = 1;
+  // Set when the policy held the reply.
+  CalendarHeld held = 2;
+  // store or email.
+  string via = 3;
+  // email: the sent REPLY message, when the server stored a copy.
+  string sent_ref = 4;
+}
+
+message CreateEventRequest {
+  string account = 1;
+  // Empty means the account's default calendar.
+  string calendar_id = 2;
+  string title = 3;
+  // start is before end. An all-day event (all_day set) gives 00:00 UTC of
+  // its first date and 00:00 UTC of the day after its last date, end
+  // exclusive, exactly as CalendarEvent carries them. The daemon never
+  // shifts them into a zone. A client reads the dates the user typed in its
+  // own zone and sends those dates as UTC midnights.
+  google.protobuf.Timestamp start = 4;
+  google.protobuf.Timestamp end = 5;
+  // IANA zone of a timed event. Empty means the [calendar] timezone. It is
+  // ignored for the dates of an all-day event.
+  string time_zone = 6;
+  bool all_day = 7;
+  string location = 8;
+  string description = 9;
+  // Attendee addresses.
+  repeated string attendees = 10;
+  // An RRULE value, such as FREQ=WEEKLY;BYDAY=MO.
+  string recurrence_rule = 11;
+  // 1 to 128 of A-Z a-z 0-9 . _ : -. Required. A repeat with the same key
+  // returns the event already created.
+  string idempotency_key = 12;
+}
+
+message CreateEventResponse {
+  // The new event, or the held draft event.
+  CalendarEvent event = 1;
+  // Set when the policy held the invitations.
+  CalendarHeld held = 2;
+}
+
+message UpdateEventRequest {
+  // A ce_ ref. One with @<recurrence ID> changes that instance only.
+  string ref = 1;
+  // The etag the caller read. A changed event is refused with
+  // EVENT_CONFLICT.
+  string etag = 2;
+  // title, start, end, time_zone, all_day, location, description,
+  // attendees or recurrence_rule. Other paths are refused.
+  google.protobuf.FieldMask update_mask = 3;
+  string title = 4;
+  // As in CreateEventRequest: for an all-day event, after the change or
+  // with all_day set, 00:00 UTC of the first date and of the day after the
+  // last date, end exclusive. The daemon never shifts them into a zone.
+  google.protobuf.Timestamp start = 5;
+  google.protobuf.Timestamp end = 6;
+  // IANA zone of a timed event. It is ignored for all-day dates.
+  string time_zone = 7;
+  bool all_day = 8;
+  string location = 9;
+  string description = 10;
+  // The whole new attendee list.
+  repeated string attendees = 11;
+  // Empty with recurrence_rule in update_mask removes the recurrence.
+  string recurrence_rule = 12;
+}
+
+message UpdateEventResponse {
+  // The event after the change. Unset when held.
+  CalendarEvent event = 1;
+  // Set when the policy held the change, which was not applied.
+  CalendarHeld held = 2;
+}
+
+message CancelEventRequest {
+  // A ce_ ref. One with @<recurrence ID> cancels that instance only.
+  string ref = 1;
+  // The etag the caller read. A changed event is refused with
+  // EVENT_CONFLICT.
+  string etag = 2;
+}
+
+message CancelEventResponse {
+  bool cancelled = 1;
+  // Set when the policy held the cancel, which was not applied.
+  CalendarHeld held = 2;
+}

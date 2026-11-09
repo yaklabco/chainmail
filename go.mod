@@ -6,10 +6,12 @@ require (
 	connectrpc.com/connect v1.21.1
 	filippo.io/age v1.3.2
 	github.com/charmbracelet/fang v1.0.0
+	github.com/emersion/go-ical v0.0.0-20250609112844-439c63cef608
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/emersion/go-message v0.18.2
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
 	github.com/emersion/go-smtp v0.25.0
+	github.com/emersion/go-webdav v0.7.0
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/modelcontextprotocol/go-sdk v1.8.0
@@ -19,6 +21,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
+	github.com/teambition/rrule-go v1.8.2
 	github.com/yaklabco/stave v0.17.6
 	github.com/yuin/goldmark v1.8.7
 	golang.org/x/net v0.62.0

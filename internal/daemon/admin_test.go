@@ -559,3 +559,53 @@ func TestReadAuditFiltersByClient(t *testing.T) {
 		}
 	}
 }
+
+// issuerConfig is a custom account logging in through the issuer client kc.
+func issuerConfig(issuer string) string {
+	return `
+[oauth_clients.kc]
+client_id = "chainmail"
+issuer = "` + issuer + `"
+scopes = ["openid", "offline_access"]
+
+[accounts.mw]
+provider = "custom"
+address = "james@example.org"
+auth = "oauth2"
+oauth_client = "kc"
+imap = { host = "127.0.0.1", port = 993 }
+smtp = { host = "127.0.0.1", port = 465 }
+`
+}
+
+// A public issuer client logs in with no client secret in the vault, and its
+// accounts report a login, not a secret, as what they need. Its secret
+// may still be set, though chainmail never sends it.
+func TestOAuthLoginWithPublicIssuerClient(t *testing.T) {
+	t.Parallel()
+	o := oauthtest.StartWith(t, oauthtest.Options{Public: true})
+	h := daemontest.Start(t, issuerConfig(o.Issuer()), daemontest.Options{})
+	list, err := h.Client.Account.ListAccounts(t.Context(), connect.NewRequest(&chainmailv1.ListAccountsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accts := list.Msg.GetAccounts(); len(accts) != 1 || accts[0].GetAuthState() != chainmailv1.AuthState_AUTH_STATE_REQUIRED ||
+		accts[0].GetAuthDetail() != "run: chainmail auth login mw" {
+		t.Errorf("accounts = %+v, want mw needing a login", accts)
+	}
+	begin, err := h.Client.Admin.BeginAuthLogin(t.Context(), connect.NewRequest(&chainmailv1.BeginAuthLoginRequest{Account: "mw"}))
+	if err != nil {
+		t.Fatalf("BeginAuthLogin: %v", err)
+	}
+	if !strings.HasPrefix(begin.Msg.GetConsentUrl(), o.Issuer()+"/auth?") {
+		t.Errorf("consent URL = %q, want the discovered endpoint", begin.Msg.GetConsentUrl())
+	}
+	redirect := oauthtest.RedirectFor(t, begin.Msg.GetConsentUrl(), oauthtest.Code)
+	if _, err := h.Client.Admin.FinishAuthLogin(t.Context(), connect.NewRequest(&chainmailv1.FinishAuthLoginRequest{Account: "mw", RedirectUrl: redirect})); err != nil {
+		t.Fatalf("FinishAuthLogin: %v", err)
+	}
+	if rt, err := h.Vault.Get(auth.RefreshTokenSecret("mw")); err != nil || string(rt) != oauthtest.RefreshToken {
+		t.Errorf("refresh token = %q, %v", rt, err)
+	}
+	setSecret(t, h, "oauth_clients/kc", "a-confidential-secret")
+}

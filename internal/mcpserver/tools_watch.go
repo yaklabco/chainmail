@@ -30,9 +30,12 @@ const (
 var reservedGroupPrefixes = []string{"cache.", "rules."}
 
 // eventKinds are the event kinds the daemon records and read_events filters
-// on. item, item_mail, rule and the three due kinds are opt-in: an empty
-// kinds list leaves them out.
-var eventKinds = []string{"new", "flags", "expunged", "status", "gap", "item", "item_mail", "rule", "item_due_soon", "item_due", "item_overdue"}
+// on. item, item_mail, rule, the three due kinds and the four calendar kinds
+// are opt-in: an empty kinds list leaves them out.
+var eventKinds = []string{
+	"new", "flags", "expunged", "status", "gap", "item", "item_mail", "rule", "item_due_soon", "item_due", "item_overdue",
+	"invite", "event_changed", "event_cancelled", "invite_reply",
+}
 
 const readEventsDescription = `Read mail events from the daemon's event log, oldest first: new mail, flag and label changes, expunged messages, watcher status and gaps. ` +
 	`To wait for mail, call read_events(group: "<name>", wait_seconds: 60) again and again. ` +
@@ -47,7 +50,12 @@ const readEventsDescription = `Read mail events from the daemon's event log, old
 	`Rule and due events are opt-in too: name rule, item_due_soon, item_due or item_overdue in kinds; setting item also brings the due events of those items. ` +
 	`A rule event reports a change to a rule: its change (created, updated, deleted, restored, disabled or enabled), name, revision and actor, and reason all_failed or repeated_failures when chainmail switched the rule off after failures; it never holds rule text. ` +
 	`A due event says a work item reached a due stage at the configured time of day: item_due_soon a few days before its due date, item_due on the day and item_overdue the day after, each once while the item is open. ` +
-	`It carries the item's ID, type, due date, state and parent, never its title: read that with get_item.`
+	`It carries the item's ID, type, due date, state and parent, never its title: read that with get_item. ` +
+	`Calendar events are opt-in too: name invite, event_changed, event_cancelled or invite_reply in kinds. Each carries the event's ce_ ref and a calendar payload, never event text: read the event with get_event. ` +
+	`An invite event is a new invite that waits for James's reply, from a calendar or from mail (with message_ref), with its start, end and organizer address. ` +
+	`An event_changed event names the changed fields, such as start, end, location, recurrence or attendees, never their values, with the new start and end. ` +
+	`An event_cancelled event is an event James attends that its organizer cancelled or deleted, with its start. ` +
+	`An invite_reply event is an attendee's new PARTSTAT on an event James organizes, with the attendee's address. Addresses are untrusted.`
 
 // registerWatchTools adds read_events. It changes no mail, but a read with a
 // group moves the group's acknowledged position, so it is neither read-only
@@ -60,34 +68,35 @@ func (s *Server) registerWatchTools() {
 type readEventsIn struct {
 	Group       string   `json:"group,omitempty" jsonschema:"a consumer group name of lowercase letters, digits, dot, dash and underscore, up to 64 characters, not starting with cache. or rules.; reads after the group's acknowledged event and acknowledges what it returns; not with cursor"`
 	Cursor      *int64   `json:"cursor,omitempty" jsonschema:"next_cursor from an earlier read; reads the events after it; 0 reads from the oldest event kept; not with group"`
-	Kinds       []string `json:"kinds,omitempty" jsonschema:"event kinds to return: new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due, item_overdue; empty means every kind but the opt-in ones (item, item_mail, rule and the three due kinds), unless item is set, when it means item, item_mail, the due kinds, status and gap; status and gap events pass a list that names neither"`
+	Kinds       []string `json:"kinds,omitempty" jsonschema:"event kinds to return: new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due, item_overdue, invite, event_changed, event_cancelled, invite_reply; empty means every kind but the opt-in ones (item, item_mail, rule, the three due kinds and the four calendar kinds), unless item is set, when it means item, item_mail, the due kinds, status and gap; status and gap events pass a list that names neither"`
 	Accounts    []string `json:"accounts,omitempty" jsonschema:"accounts to return events for; empty means every account"`
 	In          string   `json:"in,omitempty" jsonschema:"a folder name or Gmail label, in any case; inbox also matches the Gmail label \\Inbox and sent matches \\Sent"`
-	Item        string   `json:"item,omitempty" jsonschema:"a work item ID: only item, item_mail and due events of that item and every live item below it, plus status and gap; new, flags, expunged and rule events are left out"`
+	Item        string   `json:"item,omitempty" jsonschema:"a work item ID: only item, item_mail and due events of that item and every live item below it, plus status and gap; new, flags, expunged, rule and calendar events are left out"`
 	WaitSeconds int      `json:"wait_seconds,omitempty" jsonschema:"seconds to wait for the first event when none is ready, 0 to 60; default 0 returns at once"`
 	Limit       int      `json:"limit,omitempty" jsonschema:"events per read, 1 to 200; default 50"`
 }
 
 type eventOut struct {
-	ID       int64          `json:"id,omitempty" jsonschema:"the event ID; absent on a trimmed gap, which is made at read time"`
-	At       string         `json:"at,omitempty" jsonschema:"when the event was recorded, in RFC 3339"`
-	Kind     string         `json:"kind" jsonschema:"new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due or item_overdue"`
-	Account  string         `json:"account,omitempty"`
-	Folder   *untrusted     `json:"folder,omitempty" jsonschema:"the folder name as the server has it; untrusted, since the server chose it"`
-	Ref      string         `json:"ref,omitempty" jsonschema:"new, flags, expunged and item_mail: the message's ref for the other tools"`
-	Message  *rowOut        `json:"message,omitempty" jsonschema:"new and item_mail: the message's search row summary; untrusted external content"`
-	Flags    []string       `json:"flags,omitempty" jsonschema:"flags: the current system flags by short name: seen, flagged, answered, draft, deleted"`
-	Keywords []untrusted    `json:"keywords,omitempty" jsonschema:"flags: every other current flag, as the server has it; untrusted"`
-	Labels   []untrusted    `json:"labels,omitempty" jsonschema:"flags: the current Gmail labels; untrusted"`
-	State    string         `json:"state,omitempty" jsonschema:"status: baselined, watching, polling, reconnecting, auth_required or error; catching_up is reserved and not published"`
-	Detail   string         `json:"detail,omitempty" jsonschema:"status: what to do, such as the command James should run"`
-	Reason   string         `json:"reason,omitempty" jsonschema:"gap: trimmed when events were lost, uidvalidity when a folder was reset"`
-	NextID   int64          `json:"next_id,omitempty" jsonschema:"gap: the event ID reading continues from"`
-	Item     *itemChangeOut `json:"item,omitempty" jsonschema:"item: the change to the work item; it never holds item text"`
-	ItemID   string         `json:"item_id,omitempty" jsonschema:"item_mail: the linked work item the new message belongs to"`
-	FromSelf bool           `json:"from_self,omitempty" jsonschema:"item_mail: true when the account's own address sent the message"`
-	Rule     *ruleChangeOut `json:"rule,omitempty" jsonschema:"rule: the change to a rule; it never holds rule text"`
-	Due      *itemDueOut    `json:"due,omitempty" jsonschema:"item_due_soon, item_due and item_overdue: the work item that reached the stage; it never holds item text"`
+	ID       int64              `json:"id,omitempty" jsonschema:"the event ID; absent on a trimmed gap, which is made at read time"`
+	At       string             `json:"at,omitempty" jsonschema:"when the event was recorded, in RFC 3339"`
+	Kind     string             `json:"kind" jsonschema:"new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due, item_overdue, invite, event_changed, event_cancelled or invite_reply"`
+	Account  string             `json:"account,omitempty"`
+	Folder   *untrusted         `json:"folder,omitempty" jsonschema:"the folder name as the server has it; untrusted, since the server chose it"`
+	Ref      string             `json:"ref,omitempty" jsonschema:"new, flags, expunged and item_mail: the message's ref for the other tools; calendar events: the event's ce_ ref"`
+	Message  *rowOut            `json:"message,omitempty" jsonschema:"new and item_mail: the message's search row summary; untrusted external content"`
+	Flags    []string           `json:"flags,omitempty" jsonschema:"flags: the current system flags by short name: seen, flagged, answered, draft, deleted"`
+	Keywords []untrusted        `json:"keywords,omitempty" jsonschema:"flags: every other current flag, as the server has it; untrusted"`
+	Labels   []untrusted        `json:"labels,omitempty" jsonschema:"flags: the current Gmail labels; untrusted"`
+	State    string             `json:"state,omitempty" jsonschema:"status: baselined, watching, polling, reconnecting, auth_required or error; catching_up is reserved and not published"`
+	Detail   string             `json:"detail,omitempty" jsonschema:"status: what to do, such as the command James should run"`
+	Reason   string             `json:"reason,omitempty" jsonschema:"gap: trimmed when events were lost, uidvalidity when a folder was reset"`
+	NextID   int64              `json:"next_id,omitempty" jsonschema:"gap: the event ID reading continues from"`
+	Item     *itemChangeOut     `json:"item,omitempty" jsonschema:"item: the change to the work item; it never holds item text"`
+	ItemID   string             `json:"item_id,omitempty" jsonschema:"item_mail: the linked work item the new message belongs to"`
+	FromSelf bool               `json:"from_self,omitempty" jsonschema:"item_mail: true when the account's own address sent the message"`
+	Rule     *ruleChangeOut     `json:"rule,omitempty" jsonschema:"rule: the change to a rule; it never holds rule text"`
+	Due      *itemDueOut        `json:"due,omitempty" jsonschema:"item_due_soon, item_due and item_overdue: the work item that reached the stage; it never holds item text"`
+	Calendar *calendarChangeOut `json:"calendar,omitempty" jsonschema:"invite, event_changed, event_cancelled and invite_reply: the calendar change; it never holds event text"`
 }
 
 // itemChangeOut is the payload of an item event. It never holds item text.
@@ -118,6 +127,21 @@ type itemDueOut struct {
 	DueDate  string `json:"due_date" jsonschema:"YYYY-MM-DD"`
 	State    string `json:"state" jsonschema:"backlog, in-progress or in-review"`
 	ParentID string `json:"parent_id,omitempty"`
+}
+
+// calendarChangeOut is the payload of a calendar event. It never holds
+// event text: addresses are untrusted, and the rest are refs, IDs, times,
+// field names and PARTSTATs.
+type calendarChangeOut struct {
+	Ref        string     `json:"ref"`
+	MessageRef string     `json:"message_ref,omitempty" jsonschema:"invite from mail: the message the invite came in"`
+	CalendarID string     `json:"calendar_id,omitempty" jsonschema:"absent for an invite known only from mail"`
+	Start      string     `json:"start,omitempty" jsonschema:"invite and event_changed: the start, the new one for event_changed; event_cancelled: the start; in RFC 3339"`
+	End        string     `json:"end,omitempty" jsonschema:"invite and event_changed: the end, the new one for event_changed; in RFC 3339"`
+	Organizer  *untrusted `json:"organizer,omitempty" jsonschema:"invite: the organizer's address; untrusted"`
+	Fields     []string   `json:"fields,omitempty" jsonschema:"event_changed: the changed field names, such as start, end, location, recurrence or attendees, never their values"`
+	Attendee   *untrusted `json:"attendee,omitempty" jsonschema:"invite_reply: the address of the attendee who answered; untrusted"`
+	PartStat   string     `json:"partstat,omitempty" jsonschema:"invite_reply: the attendee's new PARTSTAT, such as ACCEPTED"`
 }
 
 type readEventsOut struct {
@@ -151,7 +175,7 @@ func readEventsRequest(in readEventsIn) (*chainmailv1.ReadEventsRequest, error) 
 	}
 	for _, k := range in.Kinds {
 		if !slices.Contains(eventKinds, k) {
-			return nil, invalidArg("unknown kind %q; kinds are new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due and item_overdue", k)
+			return nil, invalidArg("unknown kind %q; kinds are new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due, item_overdue, invite, event_changed, event_cancelled and invite_reply", k)
 		}
 	}
 	var filter *chainmailv1.WatchFilter
@@ -165,8 +189,8 @@ func readEventsRequest(in readEventsIn) (*chainmailv1.ReadEventsRequest, error) 
 }
 
 // eventFrom shapes one event for agents. Folder names, labels, keywords and
-// the message summary are untrusted; item, rule and due payloads hold no
-// item or rule text; empty fields are left out.
+// the message summary are untrusted; item, rule, due and calendar payloads
+// hold no item, rule or event text; empty fields are left out.
 func eventFrom(e *chainmailv1.WatchEvent) eventOut {
 	flags, keywords := splitFlags(e.GetFlags())
 	out := eventOut{
@@ -190,6 +214,12 @@ func eventFrom(e *chainmailv1.WatchEvent) eventOut {
 	}
 	if d := e.GetDue(); d != nil {
 		out.Due = &itemDueOut{ItemID: d.GetItemId(), Type: d.GetType(), DueDate: d.GetDueDate(), State: d.GetState(), ParentID: d.GetParentId()}
+	}
+	if c := e.GetCalendar(); c != nil {
+		out.Calendar = &calendarChangeOut{
+			Ref: c.GetRef(), MessageRef: c.GetMessageRef(), CalendarID: c.GetCalendarId(), Start: rfc3339(c.GetStart()), End: rfc3339(c.GetEnd()),
+			Organizer: addressPtr(c.GetOrganizer()), Fields: c.GetFields(), Attendee: addressPtr(c.GetAttendee()), PartStat: knownToken(c.GetPartstat(), partStats),
+		}
 	}
 	return out
 }

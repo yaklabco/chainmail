@@ -538,23 +538,52 @@ func (s *Store) FetchMessages(ctx context.Context, refs []ref.Ref) []mailstore.M
 	return out
 }
 
-// StreamPart implements mailstore.Store.
+// StreamPart implements mailstore.Store. A seeded message's parts are its
+// Attachments, by Part, and an appended message's the leaves of its MIME
+// tree, numbered and described as imapstore does.
 func (s *Store) StreamPart(_ context.Context, r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.begin("StreamPart"); err != nil {
 		return mailstore.PartInfo{}, nil, err
 	}
+	return s.streamPartLocked(r, part)
+}
+
+// StreamPartBackground implements mailstore.BackgroundPartStreamer. It is
+// StreamPart made with a background context whatever ctx says: it counts
+// in Calls and BackgroundCalls of "StreamPart", Fail("StreamPart") and
+// FailStreamAfter apply to it, and while SetBusy is on it fails with
+// mailstore.ErrBusy, as imapstore's does when no connection is free for
+// background work.
+func (s *Store) StreamPartBackground(ctx context.Context, r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.beginRead(mailstore.WithBackground(ctx), "StreamPart"); err != nil {
+		return mailstore.PartInfo{}, nil, err
+	}
+	return s.streamPartLocked(r, part)
+}
+
+// streamPartLocked opens part of r. s.mu must be held.
+func (s *Store) streamPartLocked(r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error) {
 	m, err := s.resolveLocked(r)
 	if err != nil {
 		return mailstore.PartInfo{}, nil, err
 	}
 	var info mailstore.PartInfo
 	var data []byte
-	if part == "" {
+	switch {
+	case part == "":
 		data = rawMessage(m, true)
 		info = mailstore.PartInfo{ContentType: "message/rfc822", Size: int64(len(data))}
-	} else {
+	case m.raw != nil:
+		// An appended message has its parts in its MIME tree.
+		var ok bool
+		if info, data, ok = rawPart(m.raw, part); !ok {
+			return mailstore.PartInfo{}, nil, fmt.Errorf("%w: part %s", mailstore.ErrNotFound, part)
+		}
+	default:
 		i := slices.IndexFunc(m.Attachments, func(a Attachment) bool { return a.Part == part })
 		if i < 0 {
 			return mailstore.PartInfo{}, nil, fmt.Errorf("%w: part %s", mailstore.ErrNotFound, part)

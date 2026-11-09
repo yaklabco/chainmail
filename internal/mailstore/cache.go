@@ -2,6 +2,7 @@ package mailstore
 
 import (
 	"context"
+	"io"
 
 	"github.com/yaklabco/chainmail/internal/ref"
 )
@@ -26,6 +27,28 @@ type Header struct {
 	// Attachments are the attachment parts, as Message has them. They are
 	// nil when Summary.AttachmentsUnknown is set.
 	Attachments []Attachment
+	// CalendarParts are the text/calendar and application/ics leaves, in
+	// part order, whether the message shows them inline or attaches them,
+	// as an invite carries its iCalendar data. They are nil when
+	// Summary.AttachmentsUnknown is set. StreamPart opens each by its Part.
+	CalendarParts []CalendarPart
+}
+
+// CalendarPart is one text/calendar or application/ics leaf of a message,
+// read from its body structure. Every field comes from the message's
+// sender: Method and Charset are untrusted, and Size is what the server
+// reports.
+type CalendarPart struct {
+	// Part is the IMAP section number, such as "2" or "1.2".
+	Part string
+	// Method is the media type's method parameter, upper-cased, such as
+	// "REQUEST". It is empty when the part has none.
+	Method string
+	// Charset is the media type's charset parameter, lower-cased. It is
+	// empty when the part has none.
+	Charset string
+	// Size is the encoded size the server reports.
+	Size int64
 }
 
 // HeaderFetcher is implemented by stores that can fetch headers for the
@@ -58,6 +81,18 @@ type Scoper interface {
 	// with Bounds nil, in the order Search reports them, and the same
 	// errors.
 	SearchFolders(ctx context.Context, in string) ([]string, error)
+}
+
+// BackgroundPartStreamer is implemented by stores that can open a part for
+// background work, as the cache builder reads invite parts.
+type BackgroundPartStreamer interface {
+	// StreamPartBackground is StreamPart admitted as background work,
+	// whatever ctx says: it takes an idle connection only when no
+	// foreground call waits for one, and otherwise fails at once with
+	// ErrBusy instead of waiting. The reader holds its connection until it
+	// is closed, so the caller reads it under a deadline and closes it
+	// promptly.
+	StreamPartBackground(ctx context.Context, r ref.Ref, part string) (PartInfo, io.ReadCloser, error)
 }
 
 // ThreadFinder is implemented by stores that can find a thread's messages

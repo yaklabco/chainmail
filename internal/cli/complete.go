@@ -478,6 +478,7 @@ func (cp *completer) specs() map[string]compSpec {
 	}
 	maps.Copy(specs, cp.itemSpecs())
 	maps.Copy(specs, cp.ruleSpecs())
+	maps.Copy(specs, cp.calendarSpecs())
 	return specs
 }
 

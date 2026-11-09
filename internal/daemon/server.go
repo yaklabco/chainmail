@@ -23,6 +23,8 @@ import (
 	"github.com/yaklabco/chainmail/internal/audit"
 	"github.com/yaklabco/chainmail/internal/auth"
 	"github.com/yaklabco/chainmail/internal/cache"
+	"github.com/yaklabco/chainmail/internal/calcache"
+	"github.com/yaklabco/chainmail/internal/calstore"
 	"github.com/yaklabco/chainmail/internal/config"
 	"github.com/yaklabco/chainmail/internal/idempotency"
 	"github.com/yaklabco/chainmail/internal/items"
@@ -81,6 +83,18 @@ type Options struct {
 	// daemontest sets it unless a test asks for the cache, so tests that
 	// count mail store calls keep the server path.
 	DisableCache bool
+	// NewCalendarStore builds the calendar store of an account whose
+	// calendar store is not none, once, in New. Nil means the real backend:
+	// calstore/google or calstore/caldav over the account's credentials.
+	// Returning nil gives the account no store. Tests pass calstore/fake.
+	NewCalendarStore func(config.ResolvedAccount) calstore.Store
+	// DisableCalendar runs without calendars whatever the config says: no
+	// account has a calendar store, calendar.db is not opened and nothing
+	// syncs. daemontest sets it unless a test asks for calendars.
+	DisableCalendar bool
+	// CalendarPoll replaces the [calendar] poll interval. Zero keeps the
+	// config's. Tests shorten it.
+	CalendarPoll time.Duration
 }
 
 const (
@@ -222,6 +236,25 @@ type Server struct {
 	// joins it, with the scheduled run it is in. drain calls it before it
 	// closes the mail stores.
 	ruleScheduler schedulerStop
+	// calcache is calendar.db, or nil when calendars are disabled, there is
+	// no cache directory, or it did not open. Serve opens it before any
+	// handler, cache worker or syncer runs, and closes it after all of
+	// them have stopped.
+	calcache *calcache.Store
+	// invites is the invite hook over calcache that the cache workers and
+	// the invite retry loop share, built on first use (serverInviteHook).
+	// Guarded by invitesMu.
+	invitesMu sync.Mutex
+	invites   *inviteHook
+	// calendars holds every configured account's calendar runtime, by
+	// account. New fills it with the stores and Serve adds the syncers
+	// before any handler or cache worker runs; it never changes after.
+	calendars map[string]*calAccount
+	// calSettings is the [calendar] table, resolved.
+	calSettings config.CalendarSettings
+	// calClock is the time of the calendar syncers: Options.Now and
+	// time.After. Internal tests replace it before Serve.
+	calClock watch.Clock
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -292,6 +325,8 @@ func New(opts Options) (*Server, error) {
 	if err := s.openSendState(); err != nil {
 		return nil, err
 	}
+	s.calClock = daemonClock{now: opts.Now}
+	s.buildCalendars()
 	s.compose = newComposeService(s)
 	mux := http.NewServeMux()
 	handlerOpts := connect.WithReadMaxBytes(maxRequestBytes)
@@ -307,6 +342,7 @@ func New(opts Options) (*Server, error) {
 	mux.Handle(chainmailv1connect.NewCacheServiceHandler(&cacheService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewItemsServiceHandler(&itemsService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewRulesServiceHandler(&rulesService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
+	mux.Handle(chainmailv1connect.NewCalendarServiceHandler(&calendarService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
@@ -358,6 +394,11 @@ func (s *Server) Serve(ctx context.Context) error {
 	// returns.
 	s.openCache(base)
 	defer s.closeCache()
+	// calendar.db opens beside it, before the cache workers whose invite
+	// hook writes to it and the syncers, and closes before cache.db, after
+	// both have stopped.
+	s.openCalendar(base)
+	defer s.closeCalendar()
 	// Supervisors start once sends are recovered, on base, so a shutdown
 	// cancels them with the requests. drain joins them. They start before
 	// the background loops, since the rule scheduler among those reads

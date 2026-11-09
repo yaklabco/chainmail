@@ -98,8 +98,9 @@ var _ chainmailv1connect.CacheServiceHandler = (*cacheService)(nil)
 
 // GetCacheStatus implements chainmailv1connect.CacheServiceHandler. It
 // reports the cache of every account, or of those named, and the file's
-// size against max_size. Like GetWatchStatus it is read-only, returns no
-// message content and is deliberately not audited.
+// size against max_size, with the calendar cache of each of those accounts
+// that has a calendar store. Like GetWatchStatus it is read-only, returns
+// no message or event content and is deliberately not audited.
 func (c *cacheService) GetCacheStatus(ctx context.Context, req *connect.Request[chainmailv1.GetCacheStatusRequest]) (*connect.Response[chainmailv1.GetCacheStatusResponse], error) {
 	accts, err := c.s.resolveAccounts(req.Msg.GetAccounts())
 	if err != nil {
@@ -110,6 +111,7 @@ func (c *cacheService) GetCacheStatus(ctx context.Context, req *connect.Request[
 	resp := &chainmailv1.GetCacheStatusResponse{
 		MaxSizeBytes: c.s.opts.Config.CacheMaxSize(),
 		Accounts:     c.s.cacheStatuses(ctx, accts, true),
+		Calendars:    c.s.calendarStatuses(ctx, accts),
 	}
 	if c.s.cache != nil {
 		size, err := c.s.cache.SizeBytes(ctx)
@@ -273,6 +275,13 @@ func (s *Server) cacheAccountOptions(acct config.ResolvedAccount) cache.AccountO
 		Clock:   s.cacheClock,
 		Logger:  s.opts.Logger,
 		OnError: s.noteCacheErr,
+		// Invite detection needs calendar.db, which Serve opens before the
+		// cache workers start; without it calendarInviteHook returns nil
+		// and the worker reads no calendar part. The parts its bounded
+		// step leaves unread are queued in calendar.db for the invite
+		// retry loop.
+		OnInvites:         s.calendarInviteHook(s.calcache, s.pokeCalendar),
+		OnDeferredInvites: s.calendarDeferredInvites(s.calcache, s.pokeCalendar),
 	}
 }
 

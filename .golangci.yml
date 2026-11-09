@@ -4,6 +4,7 @@ run:
     - stave
     - integration
     - live
+    - caldav
 linters:
   default: standard
   enable:

@@ -182,6 +182,27 @@ func (a *Account) retryBusy(ctx context.Context, f func() error) error {
 	}
 }
 
+// headerBatch is what a header fetch read.
+type headerBatch struct {
+	rows []Row
+	// unreadable are the UIDs whose headers could not be read.
+	unreadable []uint32
+	// invites are the rows' calendar parts to read for invites, one per
+	// message at most (inviteOf), and tooLarge counts the messages whose
+	// invite parts are all over calendar.MaxICSBytes. Only the builder
+	// reads them, for new mail.
+	invites  []inviteCandidate
+	tooLarge int
+}
+
+// add appends what o read to b.
+func (b *headerBatch) add(o headerBatch) {
+	b.rows = append(b.rows, o.rows...)
+	b.unreadable = append(b.unreadable, o.unreadable...)
+	b.invites = append(b.invites, o.invites...)
+	b.tooLarge += o.tooLarge
+}
+
 // fetchHeaders fetches the headers of uids in src as cache rows, on a
 // background context, retrying while the pool is busy. UIDs the folder no
 // longer holds are left out. Every header received counts 2048 bytes
@@ -189,51 +210,52 @@ func (a *Account) retryBusy(ctx context.Context, f func() error) error {
 // a fetch whose result is discarded is still accounted for. The UIDs of a
 // *mailstore.UnreadableError come back as unreadable beside the rows read,
 // with no error, so the caller records them and moves on.
-func (a *Account) fetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32) ([]Row, []uint32, error) {
-	var (
-		rows       []Row
-		unreadable []uint32
-	)
+func (a *Account) fetchHeaders(ctx context.Context, src mailstore.Source, uids []uint32) (headerBatch, error) {
+	var got headerBatch
 	err := a.retryBusy(ctx, func() error {
 		var err error
-		rows, unreadable, err = a.fetchHeadersOnce(ctx, src, uids)
+		got, err = a.fetchHeadersOnce(ctx, src, uids)
 		return err
 	})
-	return rows, unreadable, err
+	return got, err
 }
 
 // fetchHeadersOnce is one attempt of fetchHeaders, with no retry: it fails
 // with mailstore.ErrBusy when the pool is busy. A mailstore.ErrMalformed it
 // returns is plain: the store could not isolate the messages it could not
 // read, and nothing it read is kept.
-func (a *Account) fetchHeadersOnce(ctx context.Context, src mailstore.Source, uids []uint32) ([]Row, []uint32, error) {
-	var (
-		rows       []Row
-		unreadable []uint32
-	)
+func (a *Account) fetchHeadersOnce(ctx context.Context, src mailstore.Source, uids []uint32) (headerBatch, error) {
+	var got headerBatch
 	err := a.withMail(ctx, func(bg context.Context, st MailStore) error {
 		hs, err := st.FetchHeaders(bg, src, uids)
 		if ue, ok := errors.AsType[*mailstore.UnreadableError](err); ok {
-			unreadable, err = ue.UIDs, nil
+			got.unreadable, err = ue.UIDs, nil
 		}
 		if err != nil {
 			return err
 		}
-		rows = make([]Row, len(hs))
+		got.rows = make([]Row, len(hs))
 		for i, h := range hs {
-			rows[i] = RowFromHeader(h)
+			got.rows[i] = RowFromHeader(h)
+			c, ok, tooLarge := inviteOf(h)
+			if ok {
+				got.invites = append(got.invites, c)
+			}
+			if tooLarge {
+				got.tooLarge++
+			}
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, nil, err
+		return headerBatch{}, err
 	}
-	if len(rows) > 0 {
-		if _, err := a.o.Store.AddBudget(ctx, a.name, a.day(), int64(len(rows))*headerBudgetBytes); err != nil {
-			return nil, nil, err
+	if len(got.rows) > 0 {
+		if _, err := a.o.Store.AddBudget(ctx, a.name, a.day(), int64(len(got.rows))*headerBudgetBytes); err != nil {
+			return headerBatch{}, err
 		}
 	}
-	return rows, unreadable, nil
+	return got, nil
 }
 
 // fetchIsolating is fetchHeaders that also copes with a plain
@@ -242,20 +264,21 @@ func (a *Account) fetchHeadersOnce(ctx context.Context, src mailstore.Source, ui
 // turn, until the store isolates them. A plain ErrMalformed from a fetch
 // of mailstore.IsolatedBatch UIDs or fewer, which the store always
 // isolates, is a fault in the folder and is returned.
-func (a *Account) fetchIsolating(ctx context.Context, src mailstore.Source, uids []uint32) ([]Row, []uint32, error) {
-	rows, unreadable, err := a.fetchHeaders(ctx, src, uids)
+func (a *Account) fetchIsolating(ctx context.Context, src mailstore.Source, uids []uint32) (headerBatch, error) {
+	got, err := a.fetchHeaders(ctx, src, uids)
 	if !errors.Is(err, mailstore.ErrMalformed) || len(uids) <= mailstore.IsolatedBatch {
-		return rows, unreadable, err
+		return got, err
 	}
+	got = headerBatch{}
 	mid := len(uids) / 2
 	for _, half := range [][]uint32{uids[:mid], uids[mid:]} {
-		r, u, err := a.fetchIsolating(ctx, src, half)
+		h, err := a.fetchIsolating(ctx, src, half)
 		if err != nil {
-			return nil, nil, err
+			return headerBatch{}, err
 		}
-		rows, unreadable = append(rows, r...), append(unreadable, u...)
+		got.add(h)
 	}
-	return rows, unreadable, nil
+	return got, nil
 }
 
 // track records a baseline for each folder the account syncs that the

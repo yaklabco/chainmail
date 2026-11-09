@@ -457,3 +457,35 @@ func TestByteSize(t *testing.T) {
 		}
 	}
 }
+
+// cache status adds one line per account's calendars after the mail cache,
+// with the state, last sync, counts and the last error's reason.
+func TestCacheStatusCalendars(t *testing.T) {
+	t.Parallel()
+	f := &fakeCache{status: func(*chainmailv1.GetCacheStatusRequest) (*chainmailv1.GetCacheStatusResponse, error) {
+		r := &chainmailv1.GetCacheStatusResponse{
+			SizeBytes: 1 << 20, MaxSizeBytes: 2 << 30,
+			Accounts: []*chainmailv1.AccountCacheStatus{{Account: "gm", Enabled: true, State: "ready", BudgetBytes: 1 << 30}},
+			Calendars: []*chainmailv1.AccountCalendarStatus{
+				{Account: "gm", State: "ready", LastSyncAt: timestamppb.New(cacheAt.Add(-time.Minute)), Calendars: 3, Events: 412},
+				{Account: "mailwright", State: "auth_required", LastError: "AUTH_REQUIRED"},
+				{Account: "odd\x1b[2J", State: "syncing"},
+			},
+		}
+		return r, nil
+	}}
+	socket := startFakeCache(t, f)
+	for _, tt := range []struct{ output, golden string }{
+		{output: "json", golden: "cache_status_calendars_json"},
+		{output: "table", golden: "cache_status_calendars_table"},
+	} {
+		t.Run(tt.golden, func(t *testing.T) {
+			t.Parallel()
+			got := runCLI(t, Env{}, "--socket", socket, "--output", tt.output, "cache", "status")
+			if got.code != 0 {
+				t.Fatalf("cache status: %+v", got)
+			}
+			golden(t, tt.golden, got.stdout)
+		})
+	}
+}

@@ -48,6 +48,19 @@ type Endpoint struct {
 	Host     string
 	Port     int
 	Security Security
+	// ServerName is the name TLS sends for SNI and verifies the server's
+	// certificate against, for a Host the certificate does not name, such
+	// as a load balancer reached over a private network. Empty means Host.
+	ServerName string
+}
+
+// TLSServerName returns the name the TLS handshake uses: ServerName when
+// set, else Host.
+func (e Endpoint) TLSServerName() string {
+	if e.ServerName != "" {
+		return e.ServerName
+	}
+	return e.Host
 }
 
 // Addr returns host:port, bracketing IPv6 hosts.
@@ -91,11 +104,38 @@ type Preset struct {
 	MaxMessageSize int64
 	// Gmail is set for providers that speak Gmail's X-GM-EXT-1 extensions.
 	Gmail bool
+	// IssuerOAuth2 is set for providers that accept oauth2 through an OAuth
+	// client with an OIDC issuer, whose endpoints come from discovery. Such
+	// a preset has no OAuth2 endpoints of its own.
+	IssuerOAuth2 bool
 }
 
 // SupportsAuth reports whether p accepts method m.
 func (p Preset) SupportsAuth(m AuthMethod) bool {
 	return slices.Contains(p.AuthMethods, m)
+}
+
+// AcceptsAuth reports whether p accepts method m for an account whose OAuth
+// client has an OIDC issuer (issuer true) or has none. A preset with its own
+// OAuth2 endpoints takes only clients without an issuer; one with
+// IssuerOAuth2 takes oauth2 only through a client with one.
+func (p Preset) AcceptsAuth(m AuthMethod, issuer bool) bool {
+	if m == AuthOAuth2 {
+		if issuer {
+			return p.IssuerOAuth2
+		}
+		return p.OAuth2 != nil && p.SupportsAuth(m)
+	}
+	return p.SupportsAuth(m)
+}
+
+// GoogleCalendarScopes are the OAuth2 scopes a Google account with a google
+// calendar store adds to the preset's mail scope: events read and write,
+// the calendar list read only, and free/busy queries.
+var GoogleCalendarScopes = []string{
+	"https://www.googleapis.com/auth/calendar.events",
+	"https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+	"https://www.googleapis.com/auth/calendar.freebusy",
 }
 
 var googleOAuth2 = OAuth2{
@@ -146,6 +186,7 @@ var presets = map[string]Preset{
 	},
 	"custom": {
 		AuthMethods:    []AuthMethod{AuthPassword},
+		IssuerOAuth2:   true,
 		MaxConnections: 3,
 		DefaultPool:    3,
 		MaxMessageSize: 25 << 20,

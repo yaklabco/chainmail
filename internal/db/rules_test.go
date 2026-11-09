@@ -114,29 +114,7 @@ func TestRulesMigrationKeepsTheLog(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			conn, err := OpenState(t.Context(), path)
-			if err != nil {
-				t.Fatalf("OpenState: %v", err)
-			}
-			t.Cleanup(func() { _ = conn.Close() }) // a close error at test end changes nothing
-			var version int
-			if err := conn.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil || version != 6 {
-				t.Errorf("user_version = %d, %v, want 6", version, err)
-			}
-			var tail int64
-			if err := conn.QueryRowContext(t.Context(), "SELECT seq FROM sqlite_sequence WHERE name = 'events'").Scan(&tail); err != nil || tail != 57 {
-				t.Errorf("events sequence = %d, %v, want 57", tail, err)
-			}
-			want := kept
-			if tt.trimmed {
-				want = nil
-			}
-			if got := storedEvents(t, conn); !slices.Equal(got, want) {
-				t.Errorf("events =\n%q\nwant\n%q", got, want)
-			}
-			if got := queryStrings(t, conn, "SELECT name || ' ' || acked_id FROM event_groups ORDER BY name"); !slices.Equal(got, wantGroups) {
-				t.Errorf("groups = %q, want %q", got, wantGroups)
-			}
+			conn := reopenMigrated(t, path, tt.trimmed, kept, wantGroups)
 			// The new kinds first, then every older kind: all accepted, and
 			// the IDs continue from the carried-over sequence.
 			for i, kind := range []string{

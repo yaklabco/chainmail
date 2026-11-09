@@ -118,13 +118,15 @@ func absent(uids []uint32, got map[uint32]*imapclient.FetchMessageBuffer) []uint
 
 // header is the Header of the message in b, read in folder under
 // uidValidity: the summary FetchSummaries gives, and Cc, Bcc, Message-ID
-// and In-Reply-To from the envelope, References from its header and the
-// attachments from its body structure, as FetchMessages reads them.
+// and In-Reply-To from the envelope, References from its header, and the
+// attachments, as FetchMessages reads them, and the calendar parts from
+// its body structure.
 func (s *Store) header(folder string, uidValidity uint32, b *imapclient.FetchMessageBuffer) mailstore.Header {
 	h := mailstore.Header{
-		Summary:     s.summary(folder, uidValidity, b),
-		References:  msgIDList(b.FindBodySection(referencesSection), "References"),
-		Attachments: attachmentsOf(b.BodyStructure),
+		Summary:       s.summary(folder, uidValidity, b),
+		References:    msgIDList(b.FindBodySection(referencesSection), "References"),
+		Attachments:   attachmentsOf(b.BodyStructure),
+		CalendarParts: calendarPartsOf(b.BodyStructure),
 	}
 	if env := b.Envelope; env != nil {
 		h.Cc, h.Bcc, h.MessageID, h.InReplyTo = addresses(env.Cc), addresses(env.Bcc), env.MessageID, env.InReplyTo

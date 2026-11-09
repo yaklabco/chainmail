@@ -148,3 +148,68 @@ func TestRebuildSkipsMalformedHeaderLines(t *testing.T) {
 		t.Errorf("References = %q, want [r1@x] despite the malformed lines", ids)
 	}
 }
+
+// inviteStructure is how Gmail sends an invite: the text, HTML and
+// text/calendar alternatives, then the same data as an application/ics
+// attachment.
+func inviteStructure() imap.BodyStructure {
+	return &imap.BodyStructureMultiPart{Subtype: "mixed", Children: []imap.BodyStructure{
+		&imap.BodyStructureMultiPart{Subtype: "alternative", Children: []imap.BodyStructure{
+			&imap.BodyStructureSinglePart{Type: "text", Subtype: "plain", Params: map[string]string{"charset": "UTF-8"}, Size: 10},
+			&imap.BodyStructureSinglePart{Type: "text", Subtype: "html", Params: map[string]string{"charset": "UTF-8"}, Size: 20},
+			&imap.BodyStructureSinglePart{Type: "TEXT", Subtype: "Calendar", Params: map[string]string{"CHARSET": "UTF-8", "Method": "request"}, Encoding: "7bit", Size: 1234},
+		}},
+		&imap.BodyStructureSinglePart{
+			Type: "application", Subtype: "ics", Params: map[string]string{"name": "invite.ics"}, Encoding: "base64", Size: 1680,
+			Extended: &imap.BodyStructureSinglePartExt{Disposition: &imap.BodyStructureDisposition{
+				Value: "attachment", Params: map[string]string{"filename": "invite.ics"},
+			}},
+		},
+	}}
+}
+
+func TestCalendarPartsOf(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		bs   imap.BodyStructure
+		want []mailstore.CalendarPart
+	}{
+		{"gmail invite", inviteStructure(), []mailstore.CalendarPart{
+			{Part: "1.3", Method: "REQUEST", Charset: "utf-8", Size: 1234},
+			{Part: "2", Size: 1680},
+		}},
+		{"single calendar part", &imap.BodyStructureSinglePart{
+			Type: "text", Subtype: "calendar", Params: map[string]string{"method": " CANCEL "}, Size: 99,
+		}, []mailstore.CalendarPart{{Part: "1", Method: "CANCEL", Size: 99}}},
+		{"no calendar parts", sampleStructure(), nil},
+		// A forwarded invite is the attached message's, not this one's:
+		// only the sibling calendar part is listed.
+		{"attached message with an invite", &imap.BodyStructureMultiPart{Subtype: "mixed", Children: []imap.BodyStructure{
+			&imap.BodyStructureSinglePart{Type: "text", Subtype: "plain", Size: 10},
+			&imap.BodyStructureSinglePart{Type: "text", Subtype: "calendar", Params: map[string]string{"method": "REQUEST"}, Size: 300},
+			&imap.BodyStructureSinglePart{Type: "message", Subtype: "rfc822", Size: 2000, MessageRFC822: &imap.BodyStructureMessageRFC822{
+				BodyStructure: &imap.BodyStructureMultiPart{Subtype: "alternative", Children: []imap.BodyStructure{
+					&imap.BodyStructureSinglePart{Type: "text", Subtype: "plain", Size: 10},
+					&imap.BodyStructureSinglePart{Type: "text", Subtype: "calendar", Params: map[string]string{"method": "REQUEST"}, Size: 400},
+				}},
+			}},
+		}}, []mailstore.CalendarPart{{Part: "2", Method: "REQUEST", Size: 300}}},
+		{"plain text", &imap.BodyStructureSinglePart{Type: "text", Subtype: "plain", Size: 5}, nil},
+		{"no structure", nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := calendarPartsOf(tt.bs); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("calendarPartsOf = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+	// The attachment list is unchanged: the inline alternative is not an
+	// attachment, and the .ics file is.
+	want := []mailstore.Attachment{{Part: "2", Filename: "invite.ics", ContentType: "application/ics", Size: 1680}}
+	if got := attachmentsOf(inviteStructure()); !reflect.DeepEqual(got, want) {
+		t.Errorf("attachmentsOf = %+v, want %+v", got, want)
+	}
+}

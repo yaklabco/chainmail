@@ -40,6 +40,21 @@ const (
 	// cannot answer completely yet for the account, such as item: while
 	// the cache is backfilling or stale. Trying again later can succeed.
 	ReasonCacheNotReady = "CACHE_NOT_READY"
+	// ReasonNotOrganizer means a calendar change needs the event's
+	// organizer: only the organizer may update or cancel an event that has
+	// other attendees. It is sent with FailedPrecondition.
+	ReasonNotOrganizer = "NOT_ORGANIZER"
+	// ReasonCalendarReadOnly means the calendar may be read but not
+	// written. It is sent with PermissionDenied.
+	ReasonCalendarReadOnly = "CALENDAR_READ_ONLY"
+	// ReasonNoCalendarStore means the account has no calendar store
+	// (store = "none"), so the call has no calendar to read or write. It is
+	// sent with FailedPrecondition.
+	ReasonNoCalendarStore = "NO_CALENDAR_STORE"
+	// ReasonEventConflict means the event changed since the caller read
+	// it: the etag passed no longer matches. Read it again and retry. It
+	// is sent with Aborted.
+	ReasonEventConflict = "EVENT_CONFLICT"
 )
 
 // CLI exit codes.
@@ -59,9 +74,9 @@ const (
 // ExitCode maps an error reason to the CLI exit code.
 func ExitCode(reason string) int {
 	switch reason {
-	case ReasonUsage, ReasonInvalidArgument:
+	case ReasonUsage, ReasonInvalidArgument, ReasonNoCalendarStore:
 		return ExitUsage
-	case ReasonPolicyDenied, ReasonForbidden:
+	case ReasonPolicyDenied, ReasonForbidden, ReasonNotOrganizer, ReasonCalendarReadOnly:
 		return ExitDenied
 	case ReasonHeld:
 		return ExitHeld
@@ -69,7 +84,7 @@ func ExitCode(reason string) int {
 		return ExitAuth
 	case ReasonNotFound, ReasonStaleRef:
 		return ExitNotFound
-	case ReasonServerUnavailable, ReasonTimeout, ReasonDaemonUnreachable, ReasonCacheNotReady:
+	case ReasonServerUnavailable, ReasonTimeout, ReasonDaemonUnreachable, ReasonCacheNotReady, ReasonEventConflict:
 		return ExitUnavailable
 	case ReasonSendOutcomeUnknown:
 		return ExitSendUnknown

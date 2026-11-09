@@ -64,6 +64,16 @@ var toolRPC = map[string]string{
 	"restore_rule":        chainmailv1connect.RulesServiceRestoreRuleProcedure,
 	"dry_run_rule":        chainmailv1connect.RulesServiceDryRunRuleProcedure,
 	"run_rule":            chainmailv1connect.RulesServiceRunRuleProcedure,
+	"list_calendars":      chainmailv1connect.CalendarServiceListCalendarsProcedure,
+	"agenda":              chainmailv1connect.CalendarServiceAgendaProcedure,
+	"get_event":           chainmailv1connect.CalendarServiceGetEventProcedure,
+	"list_invites":        chainmailv1connect.CalendarServiceListInvitesProcedure,
+	"get_invite":          chainmailv1connect.CalendarServiceGetInviteProcedure,
+	"free_busy":           chainmailv1connect.CalendarServiceFreeBusyProcedure,
+	"rsvp":                chainmailv1connect.CalendarServiceRespondProcedure,
+	"create_event":        chainmailv1connect.CalendarServiceCreateEventProcedure,
+	"update_event":        chainmailv1connect.CalendarServiceUpdateEventProcedure,
+	"cancel_event":        chainmailv1connect.CalendarServiceCancelEventProcedure,
 }
 
 // leftOut lists agent-facing RPCs with no tool, and why (spec section 4).
@@ -101,6 +111,7 @@ var agentServices = []protoreflect.ServiceDescriptor{
 	chainmailv1.File_chainmail_v1_cache_proto.Services().ByName("CacheService"),
 	chainmailv1.File_chainmail_v1_items_proto.Services().ByName("ItemsService"),
 	chainmailv1.File_chainmail_v1_rules_proto.Services().ByName("RulesService"),
+	chainmailv1.File_chainmail_v1_calendar_proto.Services().ByName("CalendarService"),
 }
 
 func procedure(sd protoreflect.ServiceDescriptor, md protoreflect.MethodDescriptor) string {
@@ -267,6 +278,27 @@ func coverageSamples(file string) map[string][]map[string]any {
 		"restore_rule":   {{"rule": "ru_a"}},
 		"dry_run_rule":   {{"rule": "r", "trigger": "new", "account": "work"}, {"definition": ruleDef}},
 		"run_rule":       {{"rule": "r", "max": 5, "account": "work"}},
+		"list_calendars": {{"accounts": []string{"work"}}},
+		"agenda": {{
+			"accounts": []string{"work"}, "calendars": []string{"primary"}, "from": "2026-11-09T00:00:00Z", "to": "2026-11-16T00:00:00Z",
+			"include_declined": true,
+		}},
+		"get_event":    {{"ref": testEventRef}},
+		"list_invites": {{"accounts": []string{"work"}}},
+		"get_invite":   {{"ref": testEventRef}},
+		"free_busy":    {{"account": "work", "people": []string{"ann@x.test"}, "from": "2026-11-09T00:00:00Z", "to": "2026-11-16T00:00:00Z"}},
+		"rsvp":         {{"ref": testEventRef, "response": "accept", "comment": "c", "idempotency_key": "k"}},
+		"create_event": {{
+			"account": "work", "calendar_id": "primary", "title": "t", "start": "2026-11-10T15:00:00Z", "end": "2026-11-10T16:00:00Z",
+			"time_zone": "Europe/London", "all_day": true, "location": "l", "description": "d", "attendees": []string{"ann@x.test"},
+			"recurrence_rule": "FREQ=WEEKLY", "idempotency_key": "k",
+		}},
+		"update_event": {{
+			"ref": testEventRef, "etag": "e1", "title": "t", "start": "2026-11-10T15:00:00Z", "end": "2026-11-10T16:00:00Z",
+			"time_zone": "Europe/London", "all_day": true, "location": "l", "description": "d", "attendees": []string{"ann@x.test"},
+			"recurrence_rule": "FREQ=WEEKLY",
+		}},
+		"cancel_event": {{"ref": testEventRef, "etag": "e1"}},
 	}
 }
 

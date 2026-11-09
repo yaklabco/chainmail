@@ -53,8 +53,8 @@ const (
 var (
 	errGroupName = &argError{msg: "invalid group name", hint: groupHint}
 	errWatchKind = &argError{
-		msg:  "kinds must be new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due or item_overdue",
-		hint: "leave kinds empty for every kind but item, item_mail, rule, item_due_soon, item_due and item_overdue",
+		msg:  "kinds must be new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due, item_overdue, invite, event_changed, event_cancelled or invite_reply",
+		hint: "leave kinds empty for every kind but item, item_mail, rule, item_due_soon, item_due, item_overdue, invite, event_changed, event_cancelled and invite_reply",
 	}
 	errReadWait  = &argError{msg: "wait_seconds must be 0 to 60", hint: "0 returns at once"}
 	errReadLimit = &argError{msg: "limit must be 0 to 200", hint: "0 means 50"}
@@ -63,17 +63,21 @@ var (
 
 // kindNames maps the API's event kind names to the log's.
 var kindNames = map[string]watch.Kind{
-	string(watch.KindNew):         watch.KindNew,
-	string(watch.KindFlags):       watch.KindFlags,
-	string(watch.KindExpunged):    watch.KindExpunged,
-	string(watch.KindStatus):      watch.KindStatus,
-	string(watch.KindGap):         watch.KindGap,
-	string(watch.KindItem):        watch.KindItem,
-	string(watch.KindItemMail):    watch.KindItemMail,
-	string(watch.KindRule):        watch.KindRule,
-	string(watch.KindItemDueSoon): watch.KindItemDueSoon,
-	string(watch.KindItemDue):     watch.KindItemDue,
-	string(watch.KindItemOverdue): watch.KindItemOverdue,
+	string(watch.KindNew):            watch.KindNew,
+	string(watch.KindFlags):          watch.KindFlags,
+	string(watch.KindExpunged):       watch.KindExpunged,
+	string(watch.KindStatus):         watch.KindStatus,
+	string(watch.KindGap):            watch.KindGap,
+	string(watch.KindItem):           watch.KindItem,
+	string(watch.KindItemMail):       watch.KindItemMail,
+	string(watch.KindRule):           watch.KindRule,
+	string(watch.KindItemDueSoon):    watch.KindItemDueSoon,
+	string(watch.KindItemDue):        watch.KindItemDue,
+	string(watch.KindItemOverdue):    watch.KindItemOverdue,
+	string(watch.KindInvite):         watch.KindInvite,
+	string(watch.KindEventChanged):   watch.KindEventChanged,
+	string(watch.KindEventCancelled): watch.KindEventCancelled,
+	string(watch.KindInviteReply):    watch.KindInviteReply,
 }
 
 // watchService implements chainmailv1connect.WatchServiceHandler.

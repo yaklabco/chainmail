@@ -15,7 +15,7 @@
           pname = "chainmail";
           inherit version;
           src = ./.;
-          vendorHash = "sha256-crow6bZNRrYX6PdhV6yPkE/ob5+7gWBfCv7GHxAqh/E=";
+          vendorHash = "sha256-/xOLisYDYai7TH36utvqFHJUlg+NGSLQQ4TbxiD4rVU=";
           subPackages = [ "cmd/chainmail" ];
           env.CGO_ENABLED = 0;
           ldflags = [ "-s" "-w" "-X github.com/yaklabco/chainmail/internal/version.Version=${version}" ];

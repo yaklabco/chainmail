@@ -61,7 +61,7 @@ func TestCompleteStatic(t *testing.T) {
 		{name: "output", args: []string{"version", "--output", ""}, want: []string{"json", "table"}, dir: cobra.ShellCompDirectiveNoFileComp},
 		{name: "output prefix", args: []string{"version", "--output", "t"}, want: []string{"table"}, dir: cobra.ShellCompDirectiveNoFileComp},
 		{name: "shells", args: []string{"completion", ""}, want: []string{"bash", "zsh", "fish", "powershell"}, dir: cobra.ShellCompDirectiveNoFileComp},
-		{name: "kinds", args: []string{"watch", "--kind", ""}, want: []string{"new", "flags", "expunged", "status", "gap", "item", "item_mail", "rule", "item_due_soon", "item_due", "item_overdue"}, dir: cobra.ShellCompDirectiveNoFileComp | cobra.ShellCompDirectiveNoSpace},
+		{name: "kinds", args: []string{"watch", "--kind", ""}, want: []string{"new", "flags", "expunged", "status", "gap", "item", "item_mail", "rule", "item_due_soon", "item_due", "item_overdue", "invite", "event_changed", "event_cancelled", "invite_reply"}, dir: cobra.ShellCompDirectiveNoFileComp | cobra.ShellCompDirectiveNoSpace},
 		{name: "second kind", args: []string{"watch", "--kind", "new,f"}, want: []string{"new,flags"}, dir: cobra.ShellCompDirectiveNoFileComp | cobra.ShellCompDirectiveNoSpace},
 		{name: "system flags", args: []string{"flags", "x", "--add", `\S`}, want: []string{`\Seen`}, dir: cobra.ShellCompDirectiveNoFileComp},
 		{name: "audit since", args: []string{"audit", "--since", ""}, want: []string{"1h", "24h", "168h"}, dir: cobra.ShellCompDirectiveNoFileComp},

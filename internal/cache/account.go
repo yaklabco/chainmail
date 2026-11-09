@@ -55,6 +55,25 @@ type AccountOptions struct {
 	// EvictorOptions.OnError does, so the daemon can turn the cache off on
 	// a full disk at once. Nil drops them after logging.
 	OnError func(err error)
+	// OnInvites, when set, receives the invites the builder finds in new
+	// mail (not in backfilled mail): calendar parts with method REQUEST,
+	// UPDATE or CANCEL and at most calendar.MaxICSBytes, read once their
+	// messages are stored, as background work, at most 20 parts in 30
+	// seconds per segment. The builder calls it with no lock held and
+	// outside any cache.db transaction, and waits for it to return. Nil
+	// means no part is read.
+	OnInvites func(ctx context.Context, invites []FoundInvite)
+	// OnDeferredInvites, when set with OnInvites, receives the invite
+	// parts of a segment the builder's bounded invite step did not read:
+	// past the per-segment cap, after the step's deadline (a busy pool
+	// included), or after a stream failure that may pass. The receiver
+	// queues them and reads each later with Account.ReadInvite. It is
+	// called as OnInvites is, after it, before the segment is
+	// acknowledged. An error means the parts were not queued: the step
+	// fails, the segment is not acknowledged, and after the step's backoff
+	// the same segment is applied again, OnInvites included, so both must
+	// be idempotent. Nil means those parts are skipped.
+	OnDeferredInvites func(ctx context.Context, cands []InviteCandidate) error
 	// Started is when the daemon began this run, taken before any
 	// supervisor starts. A folder is fresh only once a pass at or after it
 	// has synced the folder. Zero means NewAccount's time on Clock.
@@ -81,9 +100,15 @@ type Account struct {
 	// discarded instead of written over a drop.
 	wmu   chan struct{}
 	epoch atomic.Uint64
-	// keepTimeout bounds the read path's bookkeeping after a download,
-	// keepReadTimeout unless a test shortens it.
+	// keepTimeout bounds the read path's bookkeeping after a download and
+	// the budget charge of an invite part, keepReadTimeout unless a test
+	// shortens it.
 	keepTimeout time.Duration
+	// inviteTimeout bounds the builder's invite step for one segment and
+	// inviteCap the invite parts it reads, inviteStepTimeout and
+	// maxInvitesPerSegment unless a test changes them.
+	inviteTimeout time.Duration
+	inviteCap     int
 	// inflight is the backfill batch being fetched with wmu released, or
 	// nil. The builder notes in it every flags or expunged change it
 	// applies to the batch's folder, and commitBatch fetches the batch
@@ -177,7 +202,9 @@ func NewAccount(o AccountOptions) *Account {
 		wmu:          make(chan struct{}, 1),
 		appliedCh:    make(chan struct{}),
 
-		keepTimeout: keepReadTimeout,
+		keepTimeout:   keepReadTimeout,
+		inviteTimeout: inviteStepTimeout,
+		inviteCap:     maxInvitesPerSegment,
 	}
 	if a.clock == nil {
 		a.clock = systemClock{}
