@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -21,8 +22,12 @@ import (
 // Default runs the full local check.
 var Default = Check
 
-// Prereq groups the prerequisite targets
+// Prereq groups the targets that provide the build tools.
 type Prereq st.Namespace
+
+// buildTools are the tools the targets run. The Nix dev shell and the
+// Brewfile both provide all of them.
+var buildTools = []string{"go", "buf", "golangci-lint", "goreleaser"}
 
 // Default is the default target for the prereq namespace.
 func (Prereq) Default() error {
@@ -31,9 +36,19 @@ func (Prereq) Default() error {
 	return nil
 }
 
-// All runs all prerequisite targets.
+// All makes sure the build tools are on PATH. It does nothing when they
+// already are, whether they came from the Nix dev shell, Homebrew or both.
+// Otherwise it installs them from the Brewfile when Homebrew is installed,
+// and fails naming both ways to get them when it is not.
 func (Prereq) All() error {
-	st.Deps(Prereq.Brew)
+	_, brewErr := exec.LookPath("brew")
+	runBrew, err := prereqPlan(missingTools(exec.LookPath, buildTools), brewErr == nil)
+	if err != nil {
+		return err
+	}
+	if runBrew {
+		st.Deps(Prereq.Brew)
+	}
 
 	return nil
 }
@@ -41,6 +56,31 @@ func (Prereq) All() error {
 // Brew installs tools from Brewfile via Homebrew
 func (Prereq) Brew() error {
 	return sh.Run("brew", "bundle", "--file=Brewfile")
+}
+
+// missingTools returns the tools lookPath cannot find, in order.
+func missingTools(lookPath func(string) (string, error), tools []string) []string {
+	var missing []string
+	for _, tool := range tools {
+		if _, err := lookPath(tool); err != nil {
+			missing = append(missing, tool)
+		}
+	}
+	return missing
+}
+
+// prereqPlan decides how Prereq.All provides the missing tools: from the
+// Brewfile when Homebrew is installed, or not at all, with an error that
+// names both setups.
+func prereqPlan(missing []string, haveBrew bool) (runBrew bool, err error) {
+	if len(missing) == 0 {
+		return false, nil
+	}
+	if haveBrew {
+		return true, nil
+	}
+	return false, fmt.Errorf("build tools not on PATH: %s. Run stave from the Nix dev shell (nix develop), "+
+		"or install Homebrew and run stave prereq:brew", strings.Join(missing, ", "))
 }
 
 // Check runs everything CI runs: generated code check, lint, changelog

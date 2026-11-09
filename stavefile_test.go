@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -369,6 +370,98 @@ func TestCalDAVTestArgsCapParallelism(t *testing.T) {
 	for _, want := range []string{"-p " + parallelism(), "-parallel " + parallelism(), "-tags caldav", "-timeout 15m"} {
 		if !strings.Contains(" "+args+" ", " "+want+" ") {
 			t.Errorf("go %s lacks %q", args, want)
+		}
+	}
+}
+
+// TestMissingToolsListsOnlyToolsNotOnPath: a tool the lookup finds is not
+// missing, wherever it came from.
+func TestMissingToolsListsOnlyToolsNotOnPath(t *testing.T) {
+	onPath := map[string]bool{"go": true, "golangci-lint": true}
+	lookPath := func(name string) (string, error) {
+		if onPath[name] {
+			return "/bin/" + name, nil
+		}
+		return "", exec.ErrNotFound
+	}
+	got := missingTools(lookPath, []string{"go", "buf", "golangci-lint", "goreleaser"})
+	if want := []string{"buf", "goreleaser"}; !slices.Equal(got, want) {
+		t.Errorf("missingTools = %q, want %q", got, want)
+	}
+}
+
+// TestPrereqPlan: tools already on PATH need nothing, whether or not
+// Homebrew is installed. Missing tools come from the Brewfile when Homebrew
+// is installed. Without it the error names the tools and both ways to get
+// them.
+func TestPrereqPlan(t *testing.T) {
+	tests := []struct {
+		name     string
+		missing  []string
+		haveBrew bool
+		wantBrew bool
+		wantErr  []string
+	}{
+		{name: "all on path with brew", missing: nil, haveBrew: true},
+		{name: "all on path without brew", missing: nil, haveBrew: false},
+		{name: "missing with brew", missing: []string{"buf"}, haveBrew: true, wantBrew: true},
+		{
+			name:     "missing without brew",
+			missing:  []string{"buf", "goreleaser"},
+			haveBrew: false,
+			wantErr:  []string{"buf", "goreleaser", "nix develop", "stave prereq:brew"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runBrew, err := prereqPlan(tt.missing, tt.haveBrew)
+			if runBrew != tt.wantBrew {
+				t.Errorf("runBrew = %v, want %v", runBrew, tt.wantBrew)
+			}
+			if len(tt.wantErr) == 0 {
+				if err != nil {
+					t.Fatalf("err = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("err = nil, want an error")
+			}
+			for _, want := range tt.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("err %q lacks %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildToolsComeFromBothSetups: the Brewfile and the Nix dev shell each
+// provide every tool Prereq.All checks for, so either one is enough.
+func TestBuildToolsComeFromBothSetups(t *testing.T) {
+	brewfile, err := os.ReadFile("Brewfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	flake, err := os.ReadFile("flake.nix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var devShell []string
+	for line := range strings.Lines(string(flake)) {
+		if _, list, ok := strings.Cut(line, "packages = with pkgs; ["); ok {
+			devShell = strings.Fields(strings.TrimSuffix(strings.TrimSpace(list), "];"))
+		}
+	}
+	if devShell == nil {
+		t.Fatal("flake.nix has no dev shell packages line")
+	}
+	for _, tool := range buildTools {
+		if !strings.Contains(string(brewfile), "brew \""+tool+"\"\n") {
+			t.Errorf("Brewfile does not install %s", tool)
+		}
+		if !slices.Contains(devShell, tool) {
+			t.Errorf("Nix dev shell %q lacks %s", devShell, tool)
 		}
 	}
 }
