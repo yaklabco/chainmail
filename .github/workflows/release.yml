@@ -2,6 +2,8 @@ name: release
 # Cuts a release: the next version from the commits since the last tag, its
 # notes from that version's CHANGELOG.md section. Run it from main once the
 # changelog for the version is merged.
+env:
+  HOMEBREW_NO_ANALYTICS: "1"
 on:
   workflow_dispatch:
 concurrency:
@@ -32,6 +34,43 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+      - name: Cache Homebrew downloads
+        id: brew_dl
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/Homebrew
+          key: brew-cache-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-cache-${{ runner.os }}-
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@main
+      - name: Detect Homebrew prefix
+        id: brew
+        run: echo "prefix=$(brew --prefix)" >> "$GITHUB_OUTPUT"
+      - name: Cache Homebrew installation
+        id: brew_install
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ steps.brew.outputs.prefix }}/Cellar
+            ${{ steps.brew.outputs.prefix }}/opt
+            ${{ steps.brew.outputs.prefix }}/bin
+            ${{ steps.brew.outputs.prefix }}/sbin
+            ${{ steps.brew.outputs.prefix }}/lib
+            ${{ steps.brew.outputs.prefix }}/include
+            ${{ steps.brew.outputs.prefix }}/share
+            ${{ steps.brew.outputs.prefix }}/etc
+            ${{ steps.brew.outputs.prefix }}/var
+            ${{ steps.brew.outputs.prefix }}/Homebrew/Library/Taps
+          key: brew-install-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-install-${{ runner.os }}-
+      - name: Install Homebrew tools (only if cache miss)
+        if: steps.brew_install.outputs.cache-hit != 'true'
+        run: |
+          brew upgrade go >& /dev/null || brew install go
+          brew bundle --file=Brewfile
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod

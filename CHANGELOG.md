@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tls_server_name` on an account's `imap` and `smtp` tables, for a server reached through a host name its certificate does not hold, such as an internal load balancer.
 - The error reasons `NOT_ORGANIZER` and `CALENDAR_READ_ONLY` (exit 3), `NO_CALENDAR_STORE` (exit 2) and `EVENT_CONFLICT` (exit 7).
 - `stave test:caldav`, which runs the CalDAV store tests against the Mailwright image `CHAINMAIL_MAILWRIGHT_IMAGE` names. CI does not run it.
+- A `Brewfile` and `stave prereq:brew`, which install the build tools with Homebrew, as the Nix dev shell does. Every stave target first checks that go, buf, golangci-lint and goreleaser are on PATH, from either setup or both. When one is missing, stave installs the Brewfile if Homebrew is installed, and otherwise says to use `nix develop` or Homebrew.
 
 ### Changed
 

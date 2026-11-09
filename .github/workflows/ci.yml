@@ -1,4 +1,6 @@
 name: ci
+env:
+  HOMEBREW_NO_ANALYTICS: "1"
 on:
   push:
     branches: [main]
@@ -8,6 +10,43 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Cache Homebrew downloads
+        id: brew_dl
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/Homebrew
+          key: brew-cache-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-cache-${{ runner.os }}-
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@main
+      - name: Detect Homebrew prefix
+        id: brew
+        run: echo "prefix=$(brew --prefix)" >> "$GITHUB_OUTPUT"
+      - name: Cache Homebrew installation
+        id: brew_install
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ steps.brew.outputs.prefix }}/Cellar
+            ${{ steps.brew.outputs.prefix }}/opt
+            ${{ steps.brew.outputs.prefix }}/bin
+            ${{ steps.brew.outputs.prefix }}/sbin
+            ${{ steps.brew.outputs.prefix }}/lib
+            ${{ steps.brew.outputs.prefix }}/include
+            ${{ steps.brew.outputs.prefix }}/share
+            ${{ steps.brew.outputs.prefix }}/etc
+            ${{ steps.brew.outputs.prefix }}/var
+            ${{ steps.brew.outputs.prefix }}/Homebrew/Library/Taps
+          key: brew-install-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-install-${{ runner.os }}-
+      - name: Install Homebrew tools (only if cache miss)
+        if: steps.brew_install.outputs.cache-hit != 'true'
+        run: |
+          brew upgrade go >& /dev/null || brew install go
+          brew bundle --file=Brewfile
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -37,6 +76,43 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Cache Homebrew downloads
+        id: brew_dl
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/Homebrew
+          key: brew-cache-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-cache-${{ runner.os }}-
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@main
+      - name: Detect Homebrew prefix
+        id: brew
+        run: echo "prefix=$(brew --prefix)" >> "$GITHUB_OUTPUT"
+      - name: Cache Homebrew installation
+        id: brew_install
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ steps.brew.outputs.prefix }}/Cellar
+            ${{ steps.brew.outputs.prefix }}/opt
+            ${{ steps.brew.outputs.prefix }}/bin
+            ${{ steps.brew.outputs.prefix }}/sbin
+            ${{ steps.brew.outputs.prefix }}/lib
+            ${{ steps.brew.outputs.prefix }}/include
+            ${{ steps.brew.outputs.prefix }}/share
+            ${{ steps.brew.outputs.prefix }}/etc
+            ${{ steps.brew.outputs.prefix }}/var
+            ${{ steps.brew.outputs.prefix }}/Homebrew/Library/Taps
+          key: brew-install-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-install-${{ runner.os }}-
+      - name: Install Homebrew tools (only if cache miss)
+        if: steps.brew_install.outputs.cache-hit != 'true'
+        run: |
+          brew upgrade go >& /dev/null || brew install go
+          brew bundle --file=Brewfile
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -46,6 +122,43 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Cache Homebrew downloads
+        id: brew_dl
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/Homebrew
+          key: brew-cache-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-cache-${{ runner.os }}-
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@main
+      - name: Detect Homebrew prefix
+        id: brew
+        run: echo "prefix=$(brew --prefix)" >> "$GITHUB_OUTPUT"
+      - name: Cache Homebrew installation
+        id: brew_install
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ steps.brew.outputs.prefix }}/Cellar
+            ${{ steps.brew.outputs.prefix }}/opt
+            ${{ steps.brew.outputs.prefix }}/bin
+            ${{ steps.brew.outputs.prefix }}/sbin
+            ${{ steps.brew.outputs.prefix }}/lib
+            ${{ steps.brew.outputs.prefix }}/include
+            ${{ steps.brew.outputs.prefix }}/share
+            ${{ steps.brew.outputs.prefix }}/etc
+            ${{ steps.brew.outputs.prefix }}/var
+            ${{ steps.brew.outputs.prefix }}/Homebrew/Library/Taps
+          key: brew-install-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-install-${{ runner.os }}-
+      - name: Install Homebrew tools (only if cache miss)
+        if: steps.brew_install.outputs.cache-hit != 'true'
+        run: |
+          brew upgrade go >& /dev/null || brew install go
+          brew bundle --file=Brewfile
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -57,6 +170,43 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Cache Homebrew downloads
+        id: brew_dl
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/Homebrew
+          key: brew-cache-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-cache-${{ runner.os }}-
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@main
+      - name: Detect Homebrew prefix
+        id: brew
+        run: echo "prefix=$(brew --prefix)" >> "$GITHUB_OUTPUT"
+      - name: Cache Homebrew installation
+        id: brew_install
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ steps.brew.outputs.prefix }}/Cellar
+            ${{ steps.brew.outputs.prefix }}/opt
+            ${{ steps.brew.outputs.prefix }}/bin
+            ${{ steps.brew.outputs.prefix }}/sbin
+            ${{ steps.brew.outputs.prefix }}/lib
+            ${{ steps.brew.outputs.prefix }}/include
+            ${{ steps.brew.outputs.prefix }}/share
+            ${{ steps.brew.outputs.prefix }}/etc
+            ${{ steps.brew.outputs.prefix }}/var
+            ${{ steps.brew.outputs.prefix }}/Homebrew/Library/Taps
+          key: brew-install-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-install-${{ runner.os }}-
+      - name: Install Homebrew tools (only if cache miss)
+        if: steps.brew_install.outputs.cache-hit != 'true'
+        run: |
+          brew upgrade go >& /dev/null || brew install go
+          brew bundle --file=Brewfile
       - uses: cachix/install-nix-action@v31.11.3
       - run: nix build .#default --print-build-logs
   release-config:
@@ -74,6 +224,43 @@ jobs:
           # The next version comes from the commits since the last tag.
           fetch-depth: 0
           fetch-tags: true
+      - name: Cache Homebrew downloads
+        id: brew_dl
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/Homebrew
+          key: brew-cache-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-cache-${{ runner.os }}-
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@main
+      - name: Detect Homebrew prefix
+        id: brew
+        run: echo "prefix=$(brew --prefix)" >> "$GITHUB_OUTPUT"
+      - name: Cache Homebrew installation
+        id: brew_install
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ steps.brew.outputs.prefix }}/Cellar
+            ${{ steps.brew.outputs.prefix }}/opt
+            ${{ steps.brew.outputs.prefix }}/bin
+            ${{ steps.brew.outputs.prefix }}/sbin
+            ${{ steps.brew.outputs.prefix }}/lib
+            ${{ steps.brew.outputs.prefix }}/include
+            ${{ steps.brew.outputs.prefix }}/share
+            ${{ steps.brew.outputs.prefix }}/etc
+            ${{ steps.brew.outputs.prefix }}/var
+            ${{ steps.brew.outputs.prefix }}/Homebrew/Library/Taps
+          key: brew-install-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-install-${{ runner.os }}-
+      - name: Install Homebrew tools (only if cache miss)
+        if: steps.brew_install.outputs.cache-hit != 'true'
+        run: |
+          brew upgrade go >& /dev/null || brew install go
+          brew bundle --file=Brewfile
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -93,6 +280,43 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Cache Homebrew downloads
+        id: brew_dl
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/Homebrew
+          key: brew-cache-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-cache-${{ runner.os }}-
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@main
+      - name: Detect Homebrew prefix
+        id: brew
+        run: echo "prefix=$(brew --prefix)" >> "$GITHUB_OUTPUT"
+      - name: Cache Homebrew installation
+        id: brew_install
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ steps.brew.outputs.prefix }}/Cellar
+            ${{ steps.brew.outputs.prefix }}/opt
+            ${{ steps.brew.outputs.prefix }}/bin
+            ${{ steps.brew.outputs.prefix }}/sbin
+            ${{ steps.brew.outputs.prefix }}/lib
+            ${{ steps.brew.outputs.prefix }}/include
+            ${{ steps.brew.outputs.prefix }}/share
+            ${{ steps.brew.outputs.prefix }}/etc
+            ${{ steps.brew.outputs.prefix }}/var
+            ${{ steps.brew.outputs.prefix }}/Homebrew/Library/Taps
+          key: brew-install-${{ runner.os }}-${{ hashFiles('Brewfile') }}
+          restore-keys: |
+            brew-install-${{ runner.os }}-
+      - name: Install Homebrew tools (only if cache miss)
+        if: steps.brew_install.outputs.cache-hit != 'true'
+        run: |
+          brew upgrade go >& /dev/null || brew install go
+          brew bundle --file=Brewfile
       - run: sudo apt-get update && sudo apt-get install -y fish
       - run: scripts/check-doc-shell_test.sh
       - run: scripts/check-doc-shell.sh README.md

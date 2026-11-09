@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -21,19 +22,85 @@ import (
 // Default runs the full local check.
 var Default = Check
 
+// Prereq groups the targets that provide the build tools.
+type Prereq st.Namespace
+
+// buildTools are the tools the targets run. The Nix dev shell and the
+// Brewfile both provide all of them.
+var buildTools = []string{"go", "buf", "golangci-lint", "goreleaser"}
+
+// Default is the default target for the prereq namespace.
+func (Prereq) Default() error {
+	st.Deps(Prereq.All)
+
+	return nil
+}
+
+// All makes sure the build tools are on PATH. It does nothing when they
+// already are, whether they came from the Nix dev shell, Homebrew or both.
+// Otherwise it installs them from the Brewfile when Homebrew is installed,
+// and fails naming both ways to get them when it is not.
+func (Prereq) All() error {
+	_, brewErr := exec.LookPath("brew")
+	runBrew, err := prereqPlan(missingTools(exec.LookPath, buildTools), brewErr == nil)
+	if err != nil {
+		return err
+	}
+	if runBrew {
+		st.Deps(Prereq.Brew)
+	}
+
+	return nil
+}
+
+// Brew installs tools from Brewfile via Homebrew
+func (Prereq) Brew() error {
+	return sh.Run("brew", "bundle", "--file=Brewfile")
+}
+
+// missingTools returns the tools lookPath cannot find, in order.
+func missingTools(lookPath func(string) (string, error), tools []string) []string {
+	var missing []string
+	for _, tool := range tools {
+		if _, err := lookPath(tool); err != nil {
+			missing = append(missing, tool)
+		}
+	}
+	return missing
+}
+
+// prereqPlan decides how Prereq.All provides the missing tools: from the
+// Brewfile when Homebrew is installed, or not at all, with an error that
+// names both setups.
+func prereqPlan(missing []string, haveBrew bool) (runBrew bool, err error) {
+	if len(missing) == 0 {
+		return false, nil
+	}
+	if haveBrew {
+		return true, nil
+	}
+	return false, fmt.Errorf("build tools not on PATH: %s. Run stave from the Nix dev shell (nix develop), "+
+		"or install Homebrew and run stave prereq:brew", strings.Join(missing, ", "))
+}
+
 // Check runs everything CI runs: generated code check, lint, changelog
 // validation, tests and build.
 func Check() {
+	st.Deps(Prereq.All)
 	st.SerialDeps(GenerateCheck, Lint, Changelog, Test.Unit, Test.Stavefile, Build)
 }
 
 // Generate regenerates Protobuf and Connect code into gen/.
 func Generate() error {
+	st.Deps(Prereq.All)
+
 	return sh.RunV("buf", "generate")
 }
 
 // GenerateCheck fails if gen/ is out of date with proto/.
 func GenerateCheck() error {
+	st.Deps(Prereq.All)
+
 	st.Deps(Generate)
 	if err := sh.RunV("git", "diff", "--exit-code", "--", "gen"); err != nil {
 		return err
@@ -50,6 +117,8 @@ func GenerateCheck() error {
 
 // Lint runs buf lint and golangci-lint.
 func Lint() error {
+	st.Deps(Prereq.All)
+
 	if err := sh.RunV("buf", "lint"); err != nil {
 		return err
 	}
@@ -61,6 +130,8 @@ type Test st.Namespace
 
 // Unit runs unit and component tests with the race detector.
 func (Test) Unit() error {
+	st.Deps(Prereq.All)
+
 	return sh.RunV("go", "test", "-race", "-p", parallelism(), "./...")
 }
 
@@ -68,6 +139,8 @@ func (Test) Unit() error {
 // Release makes before it tags. The stave build tag keeps them out of
 // Test.Unit.
 func (Test) Stavefile() error {
+	st.Deps(Prereq.All)
+
 	return sh.RunV("go", "test", "-race", "-tags", "stave", "-count=1", ".")
 }
 
@@ -76,6 +149,8 @@ func (Test) Stavefile() error {
 // search to catch up, so a full run takes far longer than go test's default
 // 10 minute timeout.
 func (Test) Live() error {
+	st.Deps(Prereq.All)
+
 	return sh.RunV("go", "test", "-tags", "live", "-count=1", "-timeout", "120m", "-v", "./internal/live/")
 }
 
@@ -84,6 +159,8 @@ func (Test) Live() error {
 // the MCP server run as chainmail mcp against Dovecot. Each test binary
 // starts and removes its own container.
 func (Test) Integration() error {
+	st.Deps(Prereq.All)
+
 	return sh.RunV("go", "test", "-race", "-tags", "integration", "-count=1", "-timeout", "15m",
 		"-p", parallelism(), "-parallel", parallelism(), "./internal/mailstore/imapstore/", "./internal/daemon/", "./internal/mcpserver/")
 }
@@ -94,6 +171,8 @@ func (Test) Integration() error {
 // which only incus can reach, so CI does not run this suite. Without the
 // variable the container tests skip.
 func (Test) CalDAV() error {
+	st.Deps(Prereq.All)
+
 	return sh.RunV("go", calDAVTestArgs()...)
 }
 
@@ -108,6 +187,8 @@ func calDAVTestArgs() []string {
 
 // Build compiles bin/chainmail without cgo.
 func Build() error {
+	st.Deps(Prereq.All)
+
 	return sh.RunWithV(map[string]string{"CGO_ENABLED": "0"}, "",
 		"go", "build", "-trimpath", "-ldflags", ldflags(), "-o", "bin/chainmail", "./cmd/chainmail")
 }
@@ -144,6 +225,8 @@ var (
 
 // Changelog validates CHANGELOG.md against the Keep a Changelog format.
 func Changelog() error {
+	st.Deps(Prereq.All)
+
 	if err := validateChangelog(changelogFile); err != nil {
 		return err
 	}
@@ -159,6 +242,8 @@ func Changelog() error {
 // Every check runs before the tag is created. A pushed tag whose release
 // goreleaser cannot publish blocks every later run until it is deleted.
 func Release() error {
+	st.Deps(Prereq.All)
+
 	if err := checkReleaseEnv(); err != nil {
 		return err
 	}
@@ -212,6 +297,8 @@ func checkReleaseEnv() error {
 // Snapshot builds the release archives and the Cask into dist/ as Release
 // would, without tagging, pushing or publishing anything.
 func Snapshot() error {
+	st.Deps(Prereq.All)
+
 	tag, err := nextReleaseTag()
 	if err != nil {
 		return err
