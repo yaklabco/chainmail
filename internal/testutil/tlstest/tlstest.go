@@ -17,7 +17,8 @@ import (
 	"time"
 )
 
-// CA is a self-signed certificate for 127.0.0.1 and localhost, and a pool that trusts it.
+// CA is a self-signed server certificate, for 127.0.0.1 and localhost unless
+// made by NewFor, and a pool that trusts it.
 type CA struct {
 	Server *tls.Config
 	Pool   *x509.CertPool
@@ -33,8 +34,25 @@ func New(t testing.TB) *CA {
 	return ca
 }
 
+// NewFor makes a fresh CA for one test whose certificate names only the
+// given DNS names, not 127.0.0.1 or localhost. A client dialing the test
+// server by address must then verify one of names instead.
+func NewFor(t testing.TB, names ...string) *CA {
+	t.Helper()
+	ca, err := newCA(nil, names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ca
+}
+
 // NewCA makes a fresh CA, for callers without a testing.TB such as TestMain.
 func NewCA() (*CA, error) {
+	return newCA([]net.IP{net.IPv4(127, 0, 0, 1)}, []string{"localhost"})
+}
+
+// newCA makes a self-signed certificate for ips and names.
+func newCA(ips []net.IP, names []string) (*CA, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generating key: %w", err)
@@ -48,8 +66,8 @@ func NewCA() (*CA, error) {
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  true,
-		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},
-		DNSNames:              []string{"localhost"},
+		IPAddresses:           ips,
+		DNSNames:              names,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {

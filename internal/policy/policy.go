@@ -112,6 +112,15 @@ func (p *Policy) allows(perAccount allowSet, addr string) bool {
 	return own || p.global.allows(addr) || perAccount.allows(addr)
 }
 
+// IsOwn reports whether addr is the address of any configured account, the
+// set CheckSend always allows. The match is exact but for case: addr is a
+// bare address, so a caller strips a mailto: scheme and white space first,
+// and a *@domain pattern never matches.
+func (p *Policy) IsOwn(addr string) bool {
+	_, own := p.own[strings.ToLower(addr)]
+	return own
+}
+
 // AllowExpunge reports whether expunging messages is allowed.
 func (p *Policy) AllowExpunge() bool { return p.allowExpunge }
 

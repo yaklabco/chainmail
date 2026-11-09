@@ -508,6 +508,12 @@ func TestWatchFlagsPassThrough(t *testing.T) {
 			position: "live",
 			filter:   &chainmailv1.WatchFilter{Kinds: []string{"item", "item_mail"}, Item: "it_task1"},
 		},
+		{
+			name:     "rule and due kinds",
+			args:     []string{"--kind", "rule,item_due_soon,item_due,item_overdue"},
+			position: "live",
+			filter:   &chainmailv1.WatchFilter{Kinds: []string{"rule", "item_due_soon", "item_due", "item_overdue"}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1323,8 +1329,11 @@ func TestWatchHelpSaysItemKindsAreOptIn(t *testing.T) {
 	help := strings.Join(strings.Fields(got.stdout), " ")
 	for _, want := range []string{
 		"come when --kind names them or --item is given",
+		"rule, a change to a rule, comes only when --kind names it",
 		"--item string",
-		"(default: all but item and item_mail; with --item: item, item_mail, status and gap)",
+		"(default: all but the opt-in kinds item, item_mail, rule, the item_due kinds and the calendar kinds; with --item: the item kinds, status and gap)",
+		"Calendar events come only when --kind names them",
+		"leaves out new, flags, expunged, rule and calendar events",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("watch help lacks %q:\n%s", want, got.stdout)

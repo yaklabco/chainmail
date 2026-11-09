@@ -17,7 +17,8 @@ import (
 const cacheHelp = `The daemon keeps a local cache of every synced folder: headers for all
 of it, and bodies for a recent window plus mail read recently. Searches use
 it when it can answer completely and is fresh. These commands show how far
-it has got and maintain it.`
+it has got and maintain it. cache status also shows how far each
+account's calendar sync has got.`
 
 // newCacheCmd builds chainmail cache and its status, rebuild and evict
 // subcommands.
@@ -32,7 +33,7 @@ func newCacheStatusCmd(ctx context.Context, env Env, g *globals) *cobra.Command 
 	var accounts []string
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show each account's cache state, backfill progress, bodies and budget",
+		Short: "Show each account's cache state, backfill progress, bodies, budget and calendar sync",
 		Args:  exactArgs(0),
 		RunE: func(_ *cobra.Command, _ []string) error {
 			c := g.client(env)
@@ -163,8 +164,9 @@ func rebuildText(w io.Writer, out rebuildOutput) error {
 	return writeString(w, b.String())
 }
 
-// cacheStatusTable prints the cache file's size, one line per account, and
-// one line per cached folder when any account has one.
+// cacheStatusTable prints the cache file's size, one line per account, one
+// line per cached folder when any account has one, and one line per
+// account's calendars when any account has a calendar store.
 func cacheStatusTable(w io.Writer, loc *time.Location, r *chainmailv1.GetCacheStatusResponse) error {
 	tw := newTable(w)
 	_, _ = fmt.Fprintf(tw, "size\t%s of %s\n", byteSize(r.GetSizeBytes()), byteSize(r.GetMaxSizeBytes()))
@@ -181,13 +183,35 @@ func cacheStatusTable(w io.Writer, loc *time.Location, r *chainmailv1.GetCacheSt
 	for _, a := range r.GetAccounts() {
 		folders = folders || len(a.GetFolders()) > 0
 	}
-	if !folders {
+	if folders {
+		if err := writeString(w, "\n"); err != nil {
+			return err
+		}
+		if err := cacheFoldersTable(w, loc, r.GetAccounts()); err != nil {
+			return err
+		}
+	}
+	if len(r.GetCalendars()) == 0 {
 		return nil
 	}
 	if err := writeString(w, "\n"); err != nil {
 		return err
 	}
-	return cacheFoldersTable(w, loc, r.GetAccounts())
+	return cacheCalendarsTable(w, loc, r.GetCalendars())
+}
+
+// cacheCalendarsTable prints one line per account with a calendar store:
+// the calendar sync state, its last sync, how many calendars and events
+// it holds, and the reason of its last error.
+func cacheCalendarsTable(w io.Writer, loc *time.Location, calendars []*chainmailv1.AccountCalendarStatus) error {
+	tw := newTable(w)
+	_, _ = fmt.Fprintln(tw, "ACCOUNT\tCALENDAR STATE\tLAST SYNC\tCALENDARS\tEVENTS\tERROR")
+	for _, c := range calendars {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%s\n",
+			termText(c.GetAccount()), orDash(termText(c.GetState())), orDash(shortDate(c.GetLastSyncAt(), loc)),
+			c.GetCalendars(), c.GetEvents(), orDash(termText(c.GetLastError())))
+	}
+	return tw.Flush()
 }
 
 // cacheAccountsTable prints one line per account: whether its cache is

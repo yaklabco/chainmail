@@ -22,12 +22,13 @@ func TestOpenStateCreatesSchema(t *testing.T) {
 	if err := conn.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 5 {
-		t.Errorf("user_version = %d, want 5", version)
+	if version != 7 {
+		t.Errorf("user_version = %d, want 7", version)
 	}
 	for _, table := range []string{
 		"audit", "idempotency", "account_limits", "sync_folders", "sync_uids", "events", "event_groups",
 		"items", "item_revision", "item_criteria", "item_blockers", "item_links", "item_mail_seen", "item_requests",
+		"rules", "rule_revisions", "rule_runs", "rule_applied", "item_due_sent",
 	} {
 		var name string
 		if err := conn.QueryRowContext(t.Context(), "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&name); err != nil {
@@ -37,6 +38,8 @@ func TestOpenStateCreatesSchema(t *testing.T) {
 	for _, index := range []string{
 		"events_at", "items_by_parent", "items_by_revision", "item_criteria_by_item",
 		"item_blockers_by_blocker", "item_links_by_thread", "item_mail_seen_at", "item_requests_at",
+		"rules_live_name", "rules_by_priority", "rules_by_next_run", "rule_runs_by_rule", "rule_runs_started",
+		"rule_applied_by_key", "items_by_due",
 	} {
 		var name string
 		if err := conn.QueryRowContext(t.Context(), "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?", index).Scan(&name); err != nil {
@@ -184,7 +187,10 @@ func TestWatchTablesCheckValues(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() }) // a close error at test end changes nothing
 	const event = "INSERT INTO events (at, account, kind) VALUES ('t', 'a', ?)"
-	for _, kind := range []string{"new", "flags", "expunged", "status", "gap", "unreadable", "item", "item_mail"} {
+	for _, kind := range []string{
+		"new", "flags", "expunged", "status", "gap", "unreadable", "item", "item_mail",
+		"rule", "item_due_soon", "item_due", "item_overdue", "invite", "event_changed", "event_cancelled", "invite_reply",
+	} {
 		if _, err := conn.ExecContext(t.Context(), event, kind); err != nil {
 			t.Errorf("event kind %q: %v", kind, err)
 		}
@@ -434,8 +440,8 @@ func TestItemsMigrationKeepsTheLog(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = conn.Close() }) // a close error at test end changes nothing
 			var version int
-			if err := conn.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil || version != 5 {
-				t.Errorf("user_version = %d, %v, want 5", version, err)
+			if err := conn.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil || version != 7 {
+				t.Errorf("user_version = %d, %v, want 7", version, err)
 			}
 			var tail int64
 			if err := conn.QueryRowContext(t.Context(), "SELECT seq FROM sqlite_sequence WHERE name = 'events'").Scan(&tail); err != nil || tail != 57 {

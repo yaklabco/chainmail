@@ -47,6 +47,12 @@ type Config struct {
 	Watch        WatchConfig            `toml:"watch"`
 	// Cache is the [cache] table: the local cache of every account.
 	Cache CacheConfig `toml:"cache"`
+	// Rules is the [rules] table: the time zone of rule schedules and when
+	// work item due events fire.
+	Rules RulesConfig `toml:"rules"`
+	// Calendar is the [calendar] table: how the calendar cache syncs and
+	// the zone of all-day values.
+	Calendar CalendarConfig `toml:"calendar"`
 }
 
 // DefaultMaxRecipients is the most recipients a send may have unless
@@ -147,9 +153,17 @@ func (d Daemon) BodyLimitBytes() int {
 }
 
 // OAuthClient is an OAuth2 client registration. Its secret lives in the vault
-// as oauth_clients/<name>.
+// as oauth_clients/<name>. A client with an issuer may be public, with no
+// secret at all.
 type OAuthClient struct {
 	ClientID string `toml:"client_id"`
+	// Issuer is the OIDC issuer URL whose
+	// /.well-known/openid-configuration gives the client's endpoints, such
+	// as a Keycloak realm. Empty for clients of a preset with its own
+	// endpoints, such as Google's.
+	Issuer string `toml:"issuer"`
+	// Scopes are added to the scopes every account on the client asks for.
+	Scopes []string `toml:"scopes"`
 }
 
 // Account is one mail account as written in the config file.
@@ -183,6 +197,9 @@ type Account struct {
 	// Cache overrides [cache] keys for this account. max_size and dir are
 	// a config error here. Nil means no account table.
 	Cache *CacheConfig `toml:"cache"`
+	// Calendar is the account's calendar table. Nil means no table, which
+	// takes the default store.
+	Calendar *AccountCalendar `toml:"calendar"`
 }
 
 // EndpointOverride replaces a preset's server address.
@@ -190,6 +207,9 @@ type EndpointOverride struct {
 	Host     string `toml:"host"`
 	Port     int    `toml:"port"`
 	Security string `toml:"security"`
+	// ServerName is the TLS server name when the certificate names another
+	// host than Host. Empty means Host.
+	ServerName string `toml:"tls_server_name"`
 }
 
 // ResolvedAccount is an account with its preset and defaults applied.
@@ -230,6 +250,17 @@ type ResolvedAccount struct {
 	SyncPoll time.Duration
 	// SyncEnabled is false when sync.enabled is false.
 	SyncEnabled bool
+	// Calendar is the account's calendar table with Store resolved: google
+	// for a Google preset logging in with oauth2, none otherwise, unless
+	// set.
+	Calendar AccountCalendar
+	// OAuthScopes are the scopes an oauth2 account asks for: the preset's,
+	// then provider.GoogleCalendarScopes when Calendar.Store is google, then
+	// the client's, each once. Nil for other accounts.
+	OAuthScopes []string
+	// OAuthIssuer is the OAuth client's OIDC issuer, "" for clients of a
+	// preset with its own endpoints.
+	OAuthIssuer string
 }
 
 // ValidationError lists every problem found in a config.
@@ -263,7 +294,8 @@ func Load(path string) (*Config, error) {
 
 // Parse decodes config TOML, rejecting unknown keys and values of the wrong
 // type, applies defaults and validates the result. Nothing outside data is
-// read: no environment variable can set or change a key.
+// read but the time zone database that checks [rules] timezone: no
+// environment variable can set or change a key.
 //
 // go-toml's strict decoder gates the input first, refusing unknown keys and
 // values of the wrong type that viper alone would accept or change. Only
@@ -440,8 +472,14 @@ func (c *Config) Account(name string) (ResolvedAccount, error) {
 	if n, err := ParseByteSize(a.MaxMessageSize); err == nil && n > 0 {
 		r.MaxMessageSize = n
 	}
+	r.Calendar = resolveCalendar(a, p)
 	if a.OAuthClient != "" {
-		r.ClientID = c.OAuthClients[a.OAuthClient].ClientID
+		client := c.OAuthClients[a.OAuthClient]
+		r.ClientID = client.ClientID
+		r.OAuthIssuer = client.Issuer
+		if r.Auth == provider.AuthOAuth2 {
+			r.OAuthScopes = oauthScopes(p, r.Calendar.Store, client)
+		}
 	}
 	if !p.Gmail {
 		r.Watch = watchList(a.Watch)
@@ -456,7 +494,7 @@ func override(base provider.Endpoint, o *EndpointOverride) provider.Endpoint {
 		return base
 	}
 	sec, _ := provider.ParseSecurity(o.Security) // Parse rejected invalid values
-	return provider.Endpoint{Host: o.Host, Port: o.Port, Security: sec}
+	return provider.Endpoint{Host: o.Host, Port: o.Port, Security: sec, ServerName: o.ServerName}
 }
 
 func (c *Config) applyDefaults() {
@@ -472,6 +510,8 @@ func (c *Config) applyDefaults() {
 	c.Policy = c.Policy.WithDefaults()
 	c.Watch.applyDefaults()
 	c.Cache.applyDefaults()
+	c.Rules.applyDefaults()
+	c.Calendar.applyDefaults()
 	for name, a := range c.Accounts {
 		if a.Username == "" {
 			a.Username = a.Address
@@ -508,6 +548,7 @@ func (c *Config) validate() error {
 		if c.OAuthClients[name].ClientID == "" {
 			add("%s: client_id is required", where)
 		}
+		validateOAuthClient(where, c.OAuthClients[name], add)
 	}
 	if c.Policy.MaxRecipients < minMaxRecipients || c.Policy.MaxRecipients > maxMaxRecipients {
 		add("policy.max_recipients must be %d to %d", minMaxRecipients, maxMaxRecipients)
@@ -515,6 +556,8 @@ func (c *Config) validate() error {
 	validateSendAllow("policy.send_allow", c.Policy.SendAllow, add)
 	c.Watch.validate(add)
 	c.Cache.validate(add)
+	c.Rules.validate(add)
+	c.Calendar.validate(add)
 	for _, name := range c.AccountNames() {
 		c.validateAccount(name, add)
 	}
@@ -540,21 +583,8 @@ func (c *Config) validateAccount(name string, add func(string, ...any)) {
 	if addr, err := mail.ParseAddress(a.Address); err != nil || addr.Name != "" || addr.Address != a.Address {
 		add("%s: address %q must be a bare email address", where, a.Address)
 	}
-	method := provider.AuthMethod(a.Auth)
-	switch {
-	case a.Auth == "":
-		add("%s: auth is required (provider %s accepts %s)", where, p.Name, joinMethods(p.AuthMethods))
-	case !p.SupportsAuth(method):
-		add("%s: provider %s does not accept auth %q", where, p.Name, a.Auth)
-	case method == provider.AuthOAuth2 && a.OAuthClient == "":
-		add("%s: oauth_client is required for oauth2", where)
-	case method == provider.AuthOAuth2:
-		if _, ok := c.OAuthClients[a.OAuthClient]; !ok {
-			add("%s: oauth_client %q is not defined", where, a.OAuthClient)
-		}
-	case a.OAuthClient != "":
-		add("%s: oauth_client is only valid with oauth2", where)
-	}
+	c.validateAuth(where, a, p, add)
+	validateAccountCalendar(where, a, p, add)
 	if p.Name == "custom" && (a.IMAP == nil || a.SMTP == nil) {
 		add("%s: provider custom needs both imap and smtp", where)
 	}
@@ -573,6 +603,33 @@ func (c *Config) validateAccount(name string, add func(string, ...any)) {
 	validateAccountWatch(where, a, p, add)
 }
 
+// validateAuth reports problems in an account's auth and oauth_client.
+// where is "accounts.<name>". A preset with its own OAuth2 endpoints takes
+// only clients without an issuer. The custom preset takes oauth2 only
+// through a client with one, whose endpoints come from discovery.
+func (c *Config) validateAuth(where string, a Account, p provider.Preset, add func(string, ...any)) {
+	method := provider.AuthMethod(a.Auth)
+	client, defined := c.OAuthClients[a.OAuthClient]
+	switch {
+	case a.Auth == "":
+		add("%s: auth is required (provider %s accepts %s)", where, p.Name, joinMethods(p.AuthMethods))
+	case !p.SupportsAuth(method) && (method != provider.AuthOAuth2 || !p.IssuerOAuth2):
+		add("%s: provider %s does not accept auth %q", where, p.Name, a.Auth)
+	case method == provider.AuthOAuth2 && a.OAuthClient == "":
+		add("%s: oauth_client is required for oauth2", where)
+	case method == provider.AuthOAuth2 && !defined:
+		add("%s: oauth_client %q is not defined", where, a.OAuthClient)
+	case method == provider.AuthOAuth2 && !p.AcceptsAuth(method, client.Issuer != ""):
+		if client.Issuer == "" {
+			add("%s: provider %s accepts auth oauth2 only with an oauth_client that has an issuer", where, p.Name)
+		} else {
+			add("%s: oauth_client %q has an issuer; provider %s uses its own OAuth2 endpoints", where, a.OAuthClient, p.Name)
+		}
+	case method != provider.AuthOAuth2 && a.OAuthClient != "":
+		add("%s: oauth_client is only valid with oauth2", where)
+	}
+}
+
 func validateOverride(where string, o *EndpointOverride, add func(string, ...any)) {
 	if o == nil {
 		return
@@ -585,6 +642,9 @@ func validateOverride(where string, o *EndpointOverride, add func(string, ...any
 	}
 	if _, err := provider.ParseSecurity(o.Security); err != nil {
 		add("%s: %v", where, err)
+	}
+	if o.ServerName != "" && !validHostName(o.ServerName) {
+		add("%s.tls_server_name: %q is not a valid host name", where, o.ServerName)
 	}
 }
 

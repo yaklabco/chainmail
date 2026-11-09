@@ -29,7 +29,7 @@ type fakeCall struct {
 	Msg       proto.Message // the request; nil for UploadAttachment
 }
 
-// fakeDaemon serves the seven agent-facing services on a Unix socket. Each
+// fakeDaemon serves the nine agent-facing services on a Unix socket. Each
 // RPC answers with the func a test set, or CodeUnimplemented when it is nil.
 // Set the funcs before startFake. To change an answer mid-test, close over
 // state the test guards with a mutex or an atomic.
@@ -90,6 +90,28 @@ type fakeDaemon struct {
 	LinkThread    unaryFn[chainmailv1.LinkThreadRequest, chainmailv1.LinkThreadResponse]
 	UnlinkThread  unaryFn[chainmailv1.UnlinkThreadRequest, chainmailv1.UnlinkThreadResponse]
 
+	CreateRule   unaryFn[chainmailv1.CreateRuleRequest, chainmailv1.CreateRuleResponse]
+	UpdateRule   unaryFn[chainmailv1.UpdateRuleRequest, chainmailv1.UpdateRuleResponse]
+	DeleteRule   unaryFn[chainmailv1.DeleteRuleRequest, chainmailv1.DeleteRuleResponse]
+	RestoreRule  unaryFn[chainmailv1.RestoreRuleRequest, chainmailv1.RestoreRuleResponse]
+	GetRule      unaryFn[chainmailv1.GetRuleRequest, chainmailv1.GetRuleResponse]
+	ListRules    unaryFn[chainmailv1.ListRulesRequest, chainmailv1.ListRulesResponse]
+	DryRunRule   unaryFn[chainmailv1.DryRunRuleRequest, chainmailv1.DryRunRuleResponse]
+	RunRule      unaryFn[chainmailv1.RunRuleRequest, chainmailv1.RunRuleResponse]
+	ListRuleRuns unaryFn[chainmailv1.ListRuleRunsRequest, chainmailv1.ListRuleRunsResponse]
+	RulesStatus  unaryFn[chainmailv1.RulesStatusRequest, chainmailv1.RulesStatusResponse]
+
+	ListCalendars unaryFn[chainmailv1.ListCalendarsRequest, chainmailv1.ListCalendarsResponse]
+	Agenda        unaryFn[chainmailv1.AgendaRequest, chainmailv1.AgendaResponse]
+	GetEvent      unaryFn[chainmailv1.GetEventRequest, chainmailv1.GetEventResponse]
+	ListInvites   unaryFn[chainmailv1.ListInvitesRequest, chainmailv1.ListInvitesResponse]
+	GetInvite     unaryFn[chainmailv1.GetInviteRequest, chainmailv1.GetInviteResponse]
+	FreeBusy      unaryFn[chainmailv1.FreeBusyRequest, chainmailv1.FreeBusyResponse]
+	Respond       unaryFn[chainmailv1.RespondRequest, chainmailv1.RespondResponse]
+	CreateEvent   unaryFn[chainmailv1.CreateEventRequest, chainmailv1.CreateEventResponse]
+	UpdateEvent   unaryFn[chainmailv1.UpdateEventRequest, chainmailv1.UpdateEventResponse]
+	CancelEvent   unaryFn[chainmailv1.CancelEventRequest, chainmailv1.CancelEventResponse]
+
 	mu    sync.Mutex
 	calls []fakeCall
 }
@@ -145,6 +167,8 @@ type (
 	fakeWatchSvc    struct{ f *fakeDaemon }
 	fakeCacheSvc    struct{ f *fakeDaemon }
 	fakeItemsSvc    struct{ f *fakeDaemon }
+	fakeRulesSvc    struct{ f *fakeDaemon }
+	fakeCalendarSvc struct{ f *fakeDaemon }
 )
 
 func (a fakeAccountSvc) ListAccounts(ctx context.Context, req *connect.Request[chainmailv1.ListAccountsRequest]) (*connect.Response[chainmailv1.ListAccountsResponse], error) {
@@ -363,6 +387,46 @@ func (i fakeItemsSvc) UnlinkThread(ctx context.Context, req *connect.Request[cha
 	return fakeUnary(ctx, i.f, chainmailv1connect.ItemsServiceUnlinkThreadProcedure, i.f.UnlinkThread, req)
 }
 
+func (r fakeRulesSvc) CreateRule(ctx context.Context, req *connect.Request[chainmailv1.CreateRuleRequest]) (*connect.Response[chainmailv1.CreateRuleResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceCreateRuleProcedure, r.f.CreateRule, req)
+}
+
+func (r fakeRulesSvc) UpdateRule(ctx context.Context, req *connect.Request[chainmailv1.UpdateRuleRequest]) (*connect.Response[chainmailv1.UpdateRuleResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceUpdateRuleProcedure, r.f.UpdateRule, req)
+}
+
+func (r fakeRulesSvc) DeleteRule(ctx context.Context, req *connect.Request[chainmailv1.DeleteRuleRequest]) (*connect.Response[chainmailv1.DeleteRuleResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceDeleteRuleProcedure, r.f.DeleteRule, req)
+}
+
+func (r fakeRulesSvc) RestoreRule(ctx context.Context, req *connect.Request[chainmailv1.RestoreRuleRequest]) (*connect.Response[chainmailv1.RestoreRuleResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceRestoreRuleProcedure, r.f.RestoreRule, req)
+}
+
+func (r fakeRulesSvc) GetRule(ctx context.Context, req *connect.Request[chainmailv1.GetRuleRequest]) (*connect.Response[chainmailv1.GetRuleResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceGetRuleProcedure, r.f.GetRule, req)
+}
+
+func (r fakeRulesSvc) ListRules(ctx context.Context, req *connect.Request[chainmailv1.ListRulesRequest]) (*connect.Response[chainmailv1.ListRulesResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceListRulesProcedure, r.f.ListRules, req)
+}
+
+func (r fakeRulesSvc) DryRunRule(ctx context.Context, req *connect.Request[chainmailv1.DryRunRuleRequest]) (*connect.Response[chainmailv1.DryRunRuleResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceDryRunRuleProcedure, r.f.DryRunRule, req)
+}
+
+func (r fakeRulesSvc) RunRule(ctx context.Context, req *connect.Request[chainmailv1.RunRuleRequest]) (*connect.Response[chainmailv1.RunRuleResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceRunRuleProcedure, r.f.RunRule, req)
+}
+
+func (r fakeRulesSvc) ListRuleRuns(ctx context.Context, req *connect.Request[chainmailv1.ListRuleRunsRequest]) (*connect.Response[chainmailv1.ListRuleRunsResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceListRuleRunsProcedure, r.f.ListRuleRuns, req)
+}
+
+func (r fakeRulesSvc) RulesStatus(ctx context.Context, req *connect.Request[chainmailv1.RulesStatusRequest]) (*connect.Response[chainmailv1.RulesStatusResponse], error) {
+	return fakeUnary(ctx, r.f, chainmailv1connect.RulesServiceRulesStatusProcedure, r.f.RulesStatus, req)
+}
+
 // startFake serves f until the test ends and sets f.Socket. The socket
 // lives under a short os.MkdirTemp path: Unix socket paths stop at 108 bytes.
 func startFake(t *testing.T, f *fakeDaemon) {
@@ -385,6 +449,8 @@ func startFake(t *testing.T, f *fakeDaemon) {
 	mux.Handle(chainmailv1connect.NewWatchServiceHandler(fakeWatchSvc{f: f}))
 	mux.Handle(chainmailv1connect.NewCacheServiceHandler(fakeCacheSvc{f: f}))
 	mux.Handle(chainmailv1connect.NewItemsServiceHandler(fakeItemsSvc{f: f}))
+	mux.Handle(chainmailv1connect.NewRulesServiceHandler(fakeRulesSvc{f: f}))
+	mux.Handle(chainmailv1connect.NewCalendarServiceHandler(fakeCalendarSvc{f: f}))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
@@ -397,4 +463,44 @@ func startFake(t *testing.T, f *fakeDaemon) {
 			t.Errorf("fake daemon: %v", err)
 		}
 	})
+}
+
+func (c fakeCalendarSvc) ListCalendars(ctx context.Context, req *connect.Request[chainmailv1.ListCalendarsRequest]) (*connect.Response[chainmailv1.ListCalendarsResponse], error) {
+	return fakeUnary(ctx, c.f, chainmailv1connect.CalendarServiceListCalendarsProcedure, c.f.ListCalendars, req)
+}
+
+func (c fakeCalendarSvc) Agenda(ctx context.Context, req *connect.Request[chainmailv1.AgendaRequest]) (*connect.Response[chainmailv1.AgendaResponse], error) {
+	return fakeUnary(ctx, c.f, chainmailv1connect.CalendarServiceAgendaProcedure, c.f.Agenda, req)
+}
+
+func (c fakeCalendarSvc) GetEvent(ctx context.Context, req *connect.Request[chainmailv1.GetEventRequest]) (*connect.Response[chainmailv1.GetEventResponse], error) {
+	return fakeUnary(ctx, c.f, chainmailv1connect.CalendarServiceGetEventProcedure, c.f.GetEvent, req)
+}
+
+func (c fakeCalendarSvc) ListInvites(ctx context.Context, req *connect.Request[chainmailv1.ListInvitesRequest]) (*connect.Response[chainmailv1.ListInvitesResponse], error) {
+	return fakeUnary(ctx, c.f, chainmailv1connect.CalendarServiceListInvitesProcedure, c.f.ListInvites, req)
+}
+
+func (c fakeCalendarSvc) GetInvite(ctx context.Context, req *connect.Request[chainmailv1.GetInviteRequest]) (*connect.Response[chainmailv1.GetInviteResponse], error) {
+	return fakeUnary(ctx, c.f, chainmailv1connect.CalendarServiceGetInviteProcedure, c.f.GetInvite, req)
+}
+
+func (c fakeCalendarSvc) FreeBusy(ctx context.Context, req *connect.Request[chainmailv1.FreeBusyRequest]) (*connect.Response[chainmailv1.FreeBusyResponse], error) {
+	return fakeUnary(ctx, c.f, chainmailv1connect.CalendarServiceFreeBusyProcedure, c.f.FreeBusy, req)
+}
+
+func (c fakeCalendarSvc) Respond(ctx context.Context, req *connect.Request[chainmailv1.RespondRequest]) (*connect.Response[chainmailv1.RespondResponse], error) {
+	return fakeUnary(ctx, c.f, chainmailv1connect.CalendarServiceRespondProcedure, c.f.Respond, req)
+}
+
+func (c fakeCalendarSvc) CreateEvent(ctx context.Context, req *connect.Request[chainmailv1.CreateEventRequest]) (*connect.Response[chainmailv1.CreateEventResponse], error) {
+	return fakeUnary(ctx, c.f, chainmailv1connect.CalendarServiceCreateEventProcedure, c.f.CreateEvent, req)
+}
+
+func (c fakeCalendarSvc) UpdateEvent(ctx context.Context, req *connect.Request[chainmailv1.UpdateEventRequest]) (*connect.Response[chainmailv1.UpdateEventResponse], error) {
+	return fakeUnary(ctx, c.f, chainmailv1connect.CalendarServiceUpdateEventProcedure, c.f.UpdateEvent, req)
+}
+
+func (c fakeCalendarSvc) CancelEvent(ctx context.Context, req *connect.Request[chainmailv1.CancelEventRequest]) (*connect.Response[chainmailv1.CancelEventResponse], error) {
+	return fakeUnary(ctx, c.f, chainmailv1connect.CalendarServiceCancelEventProcedure, c.f.CancelEvent, req)
 }

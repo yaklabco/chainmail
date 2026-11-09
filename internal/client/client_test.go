@@ -114,3 +114,42 @@ func TestComposeAcceptsLargeResponses(t *testing.T) {
 		t.Errorf("raw = %d bytes, want %d", got, size)
 	}
 }
+
+// stubAudit answers ReadAudit with one row that echoes the request's
+// client, account and action filters, so a test can see them arrive.
+type stubAudit struct {
+	chainmailv1connect.UnimplementedAdminServiceHandler
+	headers chan<- string
+}
+
+func (s stubAudit) ReadAudit(_ context.Context, req *connect.Request[chainmailv1.ReadAuditRequest]) (*connect.Response[chainmailv1.ReadAuditResponse], error) {
+	s.headers <- req.Header().Get(api.HeaderClient)
+	m := req.Msg
+	return connect.NewResponse(&chainmailv1.ReadAuditResponse{
+		Entries: []*chainmailv1.AuditEntry{{Id: 9, Client: m.GetClient(), Account: m.GetAccount(), Action: m.GetAction()}},
+	}), nil
+}
+
+// TestReadAuditCarriesTheClientFilter checks that ReadAuditRequest.client
+// reaches the daemon beside the other filters.
+func TestReadAuditCarriesTheClientFilter(t *testing.T) {
+	t.Parallel()
+	headers := make(chan string, 1)
+	mux := http.NewServeMux()
+	mux.Handle(chainmailv1connect.NewAdminServiceHandler(stubAudit{headers: headers}))
+	c := New(serveUnix(t, &http.Server{Handler: mux}), "test")
+	defer c.Close()
+	resp, err := c.Admin.ReadAudit(t.Context(), connect.NewRequest(&chainmailv1.ReadAuditRequest{
+		Client: "rule", Account: "work", Action: "move",
+	}))
+	if err != nil {
+		t.Fatalf("ReadAudit: %v", err)
+	}
+	if got := <-headers; got != "test" {
+		t.Errorf("%s = %q, want test", api.HeaderClient, got)
+	}
+	entries := resp.Msg.GetEntries()
+	if len(entries) != 1 || entries[0].GetClient() != "rule" || entries[0].GetAccount() != "work" || entries[0].GetAction() != "move" {
+		t.Errorf("entries = %v, want one row echoing client rule, account work, action move", entries)
+	}
+}

@@ -55,6 +55,25 @@ type AccountOptions struct {
 	// EvictorOptions.OnError does, so the daemon can turn the cache off on
 	// a full disk at once. Nil drops them after logging.
 	OnError func(err error)
+	// OnInvites, when set, receives the invites the builder finds in new
+	// mail (not in backfilled mail): calendar parts with method REQUEST,
+	// UPDATE or CANCEL and at most calendar.MaxICSBytes, read once their
+	// messages are stored, as background work, at most 20 parts in 30
+	// seconds per segment. The builder calls it with no lock held and
+	// outside any cache.db transaction, and waits for it to return. Nil
+	// means no part is read.
+	OnInvites func(ctx context.Context, invites []FoundInvite)
+	// OnDeferredInvites, when set with OnInvites, receives the invite
+	// parts of a segment the builder's bounded invite step did not read:
+	// past the per-segment cap, after the step's deadline (a busy pool
+	// included), or after a stream failure that may pass. The receiver
+	// queues them and reads each later with Account.ReadInvite. It is
+	// called as OnInvites is, after it, before the segment is
+	// acknowledged. An error means the parts were not queued: the step
+	// fails, the segment is not acknowledged, and after the step's backoff
+	// the same segment is applied again, OnInvites included, so both must
+	// be idempotent. Nil means those parts are skipped.
+	OnDeferredInvites func(ctx context.Context, cands []InviteCandidate) error
 	// Started is when the daemon began this run, taken before any
 	// supervisor starts. A folder is fresh only once a pass at or after it
 	// has synced the folder. Zero means NewAccount's time on Clock.
@@ -81,9 +100,15 @@ type Account struct {
 	// discarded instead of written over a drop.
 	wmu   chan struct{}
 	epoch atomic.Uint64
-	// keepTimeout bounds the read path's bookkeeping after a download,
-	// keepReadTimeout unless a test shortens it.
+	// keepTimeout bounds the read path's bookkeeping after a download and
+	// the budget charge of an invite part, keepReadTimeout unless a test
+	// shortens it.
 	keepTimeout time.Duration
+	// inviteTimeout bounds the builder's invite step for one segment and
+	// inviteCap the invite parts it reads, inviteStepTimeout and
+	// maxInvitesPerSegment unless a test changes them.
+	inviteTimeout time.Duration
+	inviteCap     int
 	// inflight is the backfill batch being fetched with wmu released, or
 	// nil. The builder notes in it every flags or expunged change it
 	// applies to the batch's folder, and commitBatch fetches the batch
@@ -98,8 +123,12 @@ type Account struct {
 	reads   map[*readGuard]struct{}
 
 	// applied is the builder's acknowledged event ID, -1 until the builder
-	// has opened its group.
-	applied atomic.Int64
+	// has opened its group. Only setApplied moves it, outside tests.
+	// appliedCh is closed and replaced, under appliedMu, each time it
+	// moves, so every AppliedChanged waiter wakes at once.
+	applied   atomic.Int64
+	appliedMu sync.Mutex
+	appliedCh chan struct{}
 	// reread is whether the builder has read the messages recorded as
 	// unreadable again in this run. rereadQueue holds the batches still to
 	// read, once rereadLoaded. Only the builder uses them.
@@ -171,8 +200,11 @@ func NewAccount(o AccountOptions) *Account {
 		wake:         make(chan struct{}, 1),
 		prefetchWake: make(chan struct{}, 1),
 		wmu:          make(chan struct{}, 1),
+		appliedCh:    make(chan struct{}),
 
-		keepTimeout: keepReadTimeout,
+		keepTimeout:   keepReadTimeout,
+		inviteTimeout: inviteStepTimeout,
+		inviteCap:     maxInvitesPerSegment,
 	}
 	if a.clock == nil {
 		a.clock = systemClock{}
@@ -209,6 +241,45 @@ func (a *Account) Run(ctx context.Context) {
 
 // settings reads the account's cache settings now.
 func (a *Account) settings() config.CacheSettings { return a.o.Settings() }
+
+// Applied returns the event ID the builder has applied to cache.db and
+// acknowledged, or -1 until the builder has opened its group. The
+// builder acknowledges the highest ID it examined, past other accounts'
+// events and the kinds it does not apply, so a healthy builder's
+// position passes every ID in the log and a caller may compare it with
+// any event ID.
+func (a *Account) Applied() int64 { return a.applied.Load() }
+
+// AppliedChanged returns a channel that is closed the next time Applied
+// moves. A waiter takes the channel before it reads Applied, so a move
+// between the two still wakes it.
+func (a *Account) AppliedChanged() <-chan struct{} {
+	a.appliedMu.Lock()
+	defer a.appliedMu.Unlock()
+	return a.appliedCh
+}
+
+// setApplied records the builder's position. When it moved, it closes the
+// channel AppliedChanged handed out and replaces it, after the store, so a
+// woken waiter reads the new position.
+func (a *Account) setApplied(n int64) {
+	a.appliedMu.Lock()
+	defer a.appliedMu.Unlock()
+	if a.applied.Swap(n) == n {
+		return
+	}
+	close(a.appliedCh)
+	a.appliedCh = make(chan struct{})
+}
+
+// PrefetchesBodies reports whether the account's cache is enabled with a
+// body window (prefetch_bodies above 0), read from the settings now.
+// Without one the prefetcher never fetches a body, so a caller waiting
+// for one would wait in vain.
+func (a *Account) PrefetchesBodies() bool {
+	set := a.settings()
+	return set.Enabled && set.PrefetchBodies > 0
+}
 
 // day is the current budget day, the UTC date.
 func (a *Account) day() string { return a.clock.Now().UTC().Format(time.DateOnly) }

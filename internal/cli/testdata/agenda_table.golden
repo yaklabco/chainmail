@@ -1,0 +1,5 @@
+WHEN                                                           ACCOUNT  STATUS     ME            REF                                             SUMMARY
+Tue 2026-11-10 09:00-09:30 EST (15:00-15:30 CET Europe/Paris)  work     confirmed  accepted      ce_01jcb7m2k9r8q3v4w5x6y7z8a9@20261110T140000Z  Stand[2Jup
+Wed 2026-11-11 to Fri 2026-11-13, all day                      home     confirmed  organizer     ce_01jcb7m2k9r8q3v4w5x6y7z8b0                   Offsite
+Thu 2026-11-12 22:00 to Fri 2026-11-13 01:00 EST               work     cancelled  needs-action  ce_01jcb7m2k9r8q3v4w5x6y7z8c1                   Late call
+some instances are left out: a series repeats more than 1000 times in the range, or its rule is not expanded

@@ -543,6 +543,7 @@ var cases = []testCase{
 	{"Thread", both, thread},
 	{"FindThread finds a thread by its key", both, findThread},
 	{"FetchHeaders keeps order, drops gone UIDs and never sets \\Seen", both, fetchHeaders},
+	{"FetchHeaders lists calendar parts, which StreamPart opens", both, calendarParts},
 	{"SearchFolders names the folders Search uses", both, searchFolders},
 }
 
@@ -1656,4 +1657,87 @@ func sortRefs(refs []ref.Ref) {
 	slices.SortFunc(refs, func(a, b ref.Ref) int {
 		return cmp.Or(cmp.Compare(a.Folder, b.Folder), cmp.Compare(a.UID, b.UID))
 	})
+}
+
+// calendarICS is the iCalendar data of calendarInvite, with CRLF line
+// endings and no line break after END:VCALENDAR.
+const calendarICS = "BEGIN:VCALENDAR\r\nPRODID:-//Google Inc//Google Calendar 70.9054//EN\r\nVERSION:2.0\r\n" +
+	"CALSCALE:GREGORIAN\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nDTSTART:20261110T170000Z\r\nDTEND:20261110T173000Z\r\n" +
+	"DTSTAMP:20261108T120000Z\r\nORGANIZER;CN=Olive:mailto:olive@conformance.test\r\nUID:cf-invite@google.com\r\n" +
+	"ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:me@example.test\r\n" +
+	"SEQUENCE:0\r\nSTATUS:CONFIRMED\r\nSUMMARY:Planning\r\nEND:VEVENT\r\nEND:VCALENDAR"
+
+// wrapBase64 is data base64-encoded in lines of 76 characters, CRLF
+// between them and none after the last.
+func wrapBase64(data string) string {
+	enc := base64.StdEncoding.EncodeToString([]byte(data))
+	var lines []string
+	for len(enc) > 76 {
+		lines = append(lines, enc[:76])
+		enc = enc[76:]
+	}
+	return strings.Join(append(lines, enc), "\r\n")
+}
+
+// calendarInvite is an invite as Gmail sends one: multipart/mixed around
+// the text, HTML and text/calendar alternatives, then the same iCalendar
+// data as an application/ics attachment.
+func calendarInvite(m Message) []byte {
+	return []byte("From: olive@conformance.test\r\nTo: me@example.test\r\nSubject: " + m.Subject + "\r\n" +
+		"Date: " + m.Date.Format(time.RFC1123Z) + "\r\nMessage-ID: <" + m.MessageID + ">\r\nMIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/mixed; boundary=\"cf-mixed\"\r\n\r\n" +
+		"--cf-mixed\r\nContent-Type: multipart/alternative; boundary=\"cf-alt\"\r\n\r\n" +
+		"--cf-alt\r\nContent-Type: text/plain; charset=\"UTF-8\"; format=flowed; delsp=yes\r\n\r\nYou have been invited.\r\n" +
+		"--cf-alt\r\nContent-Type: text/html; charset=\"UTF-8\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n<p>You have been invited.</p>\r\n" +
+		"--cf-alt\r\nContent-Type: text/calendar; charset=\"UTF-8\"; method=REQUEST\r\nContent-Transfer-Encoding: 7bit\r\n\r\n" + calendarICS + "\r\n" +
+		"--cf-alt--\r\n\r\n" +
+		"--cf-mixed\r\nContent-Type: application/ics; name=\"invite.ics\"\r\nContent-Disposition: attachment; filename=\"invite.ics\"\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\n" + wrapBase64(calendarICS) + "\r\n--cf-mixed--\r\n")
+}
+
+// calendarParts: FetchHeaders lists an invite's text/calendar alternative
+// and its application/ics attachment, with the method and charset of
+// each, and StreamPart opens both by their part numbers. A message without
+// calendar data lists none.
+func calendarParts(e *env) {
+	hf, ok := e.s.(mailstore.HeaderFetcher)
+	if !ok {
+		e.t.Fatalf("%T does not implement mailstore.HeaderFetcher", e.s)
+	}
+	m := e.msg("CfInvite")
+	if _, err := e.s.Append(e.ctx, pick(e.gmail, GmailAllMail, "INBOX"), nil, m.Date, calendarInvite(m)); err != nil {
+		e.t.Fatalf("Append: %v", err)
+	}
+	e.seed(e.t, e.richMessage("CfNoInvite"))
+	r, plain := e.ref("CfInvite"), e.ref("CfNoInvite")
+	hs, err := hf.FetchHeaders(e.ctx, mailstore.Source{Folder: r.Folder, UIDValidity: r.UIDValidity}, []uint32{r.UID, plain.UID})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if len(hs) != 2 {
+		e.t.Fatalf("FetchHeaders gave %d headers, want 2", len(hs))
+	}
+	want := []mailstore.CalendarPart{
+		{Part: "1.3", Method: "REQUEST", Charset: "utf-8", Size: int64(len(calendarICS))},
+		{Part: "2", Size: int64(len(wrapBase64(calendarICS)))},
+	}
+	if !slices.Equal(hs[0].CalendarParts, want) {
+		e.t.Errorf("calendar parts = %+v, want %+v", hs[0].CalendarParts, want)
+	}
+	if hs[1].CalendarParts != nil {
+		e.t.Errorf("calendar parts of a message without any = %+v, want none", hs[1].CalendarParts)
+	}
+	for _, p := range want {
+		info, rc, err := e.s.StreamPart(e.ctx, r, p.Part)
+		if err != nil {
+			e.t.Errorf("StreamPart(%s): %v", p.Part, err)
+			continue
+		}
+		data, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil || string(data) != calendarICS || (info.ContentType != "text/calendar" && info.ContentType != "application/ics") {
+			e.t.Errorf("StreamPart(%s) = %+v %q, %v; want the iCalendar data", p.Part, info, data, err)
+		}
+	}
+	e.unread("CfInvite")
 }

@@ -23,6 +23,23 @@ const chunkSize = 1 << 20
 // StreamPart implements mailstore.Store. The returned reader holds a pooled
 // connection until it is closed.
 func (s *Store) StreamPart(ctx context.Context, r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error) {
+	// A reader holds its connection until it is closed, so StreamPart
+	// borrows as a foreground call whatever ctx says.
+	return s.streamPart(ctx, r, part, false)
+}
+
+// StreamPartBackground implements mailstore.BackgroundPartStreamer: it is
+// StreamPart borrowing as background work whatever ctx says, so it takes
+// an idle connection no foreground call waits for, or fails at once with
+// mailstore.ErrBusy. The returned reader holds its connection until it is
+// closed.
+func (s *Store) StreamPartBackground(ctx context.Context, r ref.Ref, part string) (mailstore.PartInfo, io.ReadCloser, error) {
+	return s.streamPart(ctx, r, part, true)
+}
+
+// streamPart opens part of r, borrowing as background work when background
+// is set.
+func (s *Store) streamPart(ctx context.Context, r ref.Ref, part string, background bool) (mailstore.PartInfo, io.ReadCloser, error) {
 	if r.Account != s.acct.Name {
 		return mailstore.PartInfo{}, nil, fmt.Errorf("%w: the ref is for account %s", mailstore.ErrNotFound, r.Account)
 	}
@@ -38,7 +55,7 @@ func (s *Store) StreamPart(ctx context.Context, r ref.Ref, part string) (mailsto
 	var pr *partReader
 	err := s.retry(ctx, func() error {
 		var err error
-		info, pr, err = s.tryOpenPart(ctx, r, path)
+		info, pr, err = s.tryOpenPart(ctx, r, path, background)
 		return err
 	})
 	if err != nil {
@@ -47,12 +64,11 @@ func (s *Store) StreamPart(ctx context.Context, r ref.Ref, part string) (mailsto
 	return info, pr, nil
 }
 
-// tryOpenPart borrows a connection and opens the part on it. The reader
-// keeps the connection when that works; otherwise it goes straight back.
-func (s *Store) tryOpenPart(ctx context.Context, r ref.Ref, path []int) (mailstore.PartInfo, *partReader, error) {
-	// A reader holds its connection until it is closed, so StreamPart
-	// borrows as a foreground call whatever ctx says.
-	c, err := s.borrowAs(ctx, r.Folder, false, false)
+// tryOpenPart borrows a connection, as background work when background is
+// set, and opens the part on it. The reader keeps the connection when that
+// works; otherwise it goes straight back.
+func (s *Store) tryOpenPart(ctx context.Context, r ref.Ref, path []int, background bool) (mailstore.PartInfo, *partReader, error) {
+	c, err := s.borrowAs(ctx, r.Folder, false, background)
 	if err != nil {
 		return mailstore.PartInfo{}, nil, err
 	}

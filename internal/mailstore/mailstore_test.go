@@ -55,6 +55,25 @@ func TestMessageIDs(t *testing.T) {
 	}
 }
 
+// A FolderGoneError is ErrNotFound with a plain not-found's text, and is
+// not a FolderNotFoundError, so callers see it as any other NOT_FOUND.
+func TestFolderGoneError(t *testing.T) {
+	t.Parallel()
+	err := fmt.Errorf("moving: %w", &FolderGoneError{Folder: "Projects"})
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("errors.Is(%v, ErrNotFound) = false", err)
+	}
+	if gone, ok := errors.AsType[*FolderGoneError](err); !ok || gone.Folder != "Projects" {
+		t.Errorf("errors.AsType = %+v, %t, want Projects", gone, ok)
+	}
+	if nf, ok := errors.AsType[*FolderNotFoundError](err); ok {
+		t.Errorf("a FolderGoneError reads as a FolderNotFoundError %+v", nf)
+	}
+	if got, want := (&FolderGoneError{Folder: "Projects"}).Error(), `not found: no folder "Projects"`; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
 func TestFolderNotFoundError(t *testing.T) {
 	t.Parallel()
 	err := fmt.Errorf("moving: %w", &FolderNotFoundError{Name: "INBOX.Nope"})

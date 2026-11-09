@@ -61,6 +61,20 @@ func TestToolsListGolden(t *testing.T) {
 // The SP13 item tools change only the daemon's own state, so none is open
 // world; deletes are soft, so none is destructive; create_item and
 // edit_criteria, whose retried add appends again, are not idempotent.
+// The SP8 rule tools keep rules in the daemon's own state, except
+// run_rule. create_rule makes a new rule on each call, so it is not
+// idempotent; update_rule, delete_rule and restore_rule leave the rule as
+// the first call did, and deletes are soft; get_rule, list_rules and
+// dry_run_rule change nothing, and dry_run_rule reads only the local
+// cache, so none of these is open world. run_rule acts on mail servers for
+// real and can trash and forward mail, and a repeat acts on mail that
+// arrived since, so it is destructive, open world and not idempotent.
+// The SP9 calendar tools reach calendar providers, through the cache or
+// directly, so all are open world. The reads change nothing. rsvp sets
+// James's answer, so a repeat leaves it as the first did. create_event is
+// not idempotent, since a call with other input or another key makes
+// another event; a repeat of update_event or cancel_event meets a new etag;
+// and cancel_event deletes or cancels an event, so it is destructive.
 func TestAnnotationsMatchTheSpec(t *testing.T) {
 	t.Parallel()
 	type h struct{ readOnly, destructive, idempotent, openWorld bool }
@@ -85,6 +99,19 @@ func TestAnnotationsMatchTheSpec(t *testing.T) {
 		"edit_criteria": {false, false, false, false}, "tick_criterion": {false, false, true, false},
 		"set_blocker": {false, false, true, false}, "link_thread": {false, false, true, false},
 		"unlink_thread": {false, false, true, false},
+		"create_rule":   {false, false, false, false},
+		"update_rule":   {false, false, true, false},
+		"get_rule":      {true, false, true, false}, "list_rules": {true, false, true, false},
+		"delete_rule": {false, false, true, false}, "restore_rule": {false, false, true, false},
+		"dry_run_rule":   {true, false, true, false},
+		"run_rule":       {false, true, false, true},
+		"list_calendars": {true, false, true, true}, "agenda": {true, false, true, true},
+		"get_event": {true, false, true, true}, "list_invites": {true, false, true, true},
+		"get_invite": {true, false, true, true}, "free_busy": {true, false, true, true},
+		"rsvp":         {false, false, true, true},
+		"create_event": {false, false, false, true},
+		"update_event": {false, false, false, true},
+		"cancel_event": {false, true, false, true},
 	}
 	for name, st := range map[string]struct {
 		policy  *gatePolicy

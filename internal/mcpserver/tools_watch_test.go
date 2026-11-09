@@ -21,6 +21,7 @@ import (
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 	"github.com/yaklabco/chainmail/gen/chainmail/v1/chainmailv1connect"
 	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/watch"
 )
 
 // watchAt is the time every faked event carries.
@@ -76,6 +77,10 @@ func TestReadEventsRequests(t *testing.T) {
 				Limit:  50,
 			},
 		},
+		{name: "rule and due kinds", args: map[string]any{"kinds": []string{"rule", "item_due_soon", "item_due", "item_overdue"}}, want: &chainmailv1.ReadEventsRequest{
+			Filter: &chainmailv1.WatchFilter{Kinds: []string{"rule", "item_due_soon", "item_due", "item_overdue"}}, Limit: 50,
+		}},
+		{name: "a group named like rules but not reserved", args: map[string]any{"group": "rules-digest"}, want: &chainmailv1.ReadEventsRequest{Group: "rules-digest", Limit: 50}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -104,8 +109,12 @@ func TestReadEventsRejectsBadInput(t *testing.T) {
 		{name: "limit above 200", args: map[string]any{"limit": 201}, inMessage: "limit must be 1 to 200"},
 		{name: "unknown kind", args: map[string]any{"kinds": []string{"new", "bounced"}}, inMessage: `unknown kind "bounced"`},
 		{name: "kinds are lowercase", args: map[string]any{"kinds": []string{"New"}}, inMessage: `unknown kind "New"`},
-		{name: "the error names the item kinds", args: map[string]any{"kinds": []string{"items"}}, inMessage: `unknown kind "items"; kinds are new, flags, expunged, status, gap, item and item_mail`},
+		{name: "the error names every kind", args: map[string]any{"kinds": []string{"items"}}, inMessage: `unknown kind "items"; kinds are new, flags, expunged, status, gap, item, item_mail, rule, item_due_soon, item_due, item_overdue, invite, event_changed, event_cancelled and invite_reply`},
 		{name: "cache group", args: map[string]any{"group": "cache.work"}, inMessage: `"cache." are reserved`},
+		{name: "rules group", args: map[string]any{"group": "rules.work"}, inMessage: `"rules." are reserved`},
+		{name: "bare rules prefix", args: map[string]any{"group": "rules."}, inMessage: `"rules." are reserved`},
+		{name: "rule kinds are lowercase", args: map[string]any{"kinds": []string{"Rule"}}, inMessage: `unknown kind "Rule"`},
+		{name: "calendar kinds are lowercase", args: map[string]any{"kinds": []string{"Invite"}}, inMessage: `unknown kind "Invite"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -351,7 +360,7 @@ func TestReadEventsAnnotations(t *testing.T) {
 	case a.ReadOnlyHint || a.IdempotentHint || a.DestructiveHint == nil || *a.DestructiveHint || a.OpenWorldHint == nil || !*a.OpenWorldHint:
 		t.Errorf("hints %+v, want not read-only, not destructive, not idempotent, open world: a group read moves the group", a)
 	}
-	for _, want := range []string{`read_events(group: "<name>", wait_seconds: 60)`, "untrusted", "acknowledges what it returns", "auth_required", "James", "item_mail", "opt-in", "never holds item text"} {
+	for _, want := range []string{`read_events(group: "<name>", wait_seconds: 60)`, "untrusted", "acknowledges what it returns", "auth_required", "James", "item_mail", "opt-in", "never holds item text", "rule", "item_due_soon", "item_overdue", "never holds rule text", "get_item"} {
 		if !strings.Contains(tl.Description, want) {
 			t.Errorf("description lacks %q: %q", want, tl.Description)
 		}
@@ -460,5 +469,199 @@ func TestReadEventsKindsSchema(t *testing.T) {
 	got := inputPropertyDescription(t, "read_events", "kinds")
 	if !strings.Contains(got, "unless item is set") {
 		t.Errorf("kinds description %q does not say item enables item and item_mail when kinds is empty", got)
+	}
+}
+
+// TestReadEventsRuleAndDueEvents checks the rule and due kinds: a rule event
+// carries the change and no rule text, a due event carries the item and no
+// item text, and each leaves out every field of the other kinds.
+func TestReadEventsRuleAndDueEvents(t *testing.T) {
+	t.Parallel()
+	ts := timestamppb.New(watchAt)
+	f := &fakeDaemon{ReadEvents: func(context.Context, *chainmailv1.ReadEventsRequest) (*chainmailv1.ReadEventsResponse, error) {
+		return &chainmailv1.ReadEventsResponse{NextCursor: 303, Events: []*chainmailv1.WatchEvent{
+			{Id: 301, At: ts, Kind: "rule", Rule: &chainmailv1.RuleChange{
+				RuleId: "ru_01jc0stripe", Name: "stripe-receipts", Change: "disabled", Revision: 4, Actor: "1000/rule", Reason: "repeated_failures",
+			}},
+			{Id: 302, At: ts, Kind: "item_due_soon", Due: &chainmailv1.WorkItemDue{
+				ItemId: "it_01jc0task", Type: "task", DueDate: "2026-11-04", State: "in-progress", ParentId: "it_admin_work",
+			}},
+			{Id: 303, At: ts, Kind: "item_overdue", Due: &chainmailv1.WorkItemDue{
+				ItemId: "it_01jc0epic", Type: "epic", DueDate: "2026-11-01", State: "backlog",
+			}},
+		}}, nil
+	}}
+	e := newTestEnv(t, f, latest)
+	res := e.call(t, "read_events", map[string]any{"group": "agent", "kinds": []string{"rule", "item_due_soon", "item_due", "item_overdue"}})
+	wantOK(t, res)
+
+	var out readEventsOut
+	decode(t, res, &out)
+	const at = "2026-11-02T09:30:00Z"
+	want := readEventsOut{NextCursor: 303, Events: []eventOut{
+		{ID: 301, At: at, Kind: "rule", Rule: &ruleChangeOut{
+			RuleID: "ru_01jc0stripe", Name: "stripe-receipts", Change: "disabled", Revision: 4, Actor: "1000/rule", Reason: "repeated_failures",
+		}},
+		{ID: 302, At: at, Kind: "item_due_soon", Due: &itemDueOut{ItemID: "it_01jc0task", Type: "task", DueDate: "2026-11-04", State: "in-progress", ParentID: "it_admin_work"}},
+		{ID: 303, At: at, Kind: "item_overdue", Due: &itemDueOut{ItemID: "it_01jc0epic", Type: "epic", DueDate: "2026-11-01", State: "backlog"}},
+	}}
+	if !reflect.DeepEqual(out, want) {
+		t.Errorf("output =\n%+v\nwant\n%+v", out, want)
+	}
+
+	var raw struct {
+		Events []map[string]any `json:"events"`
+	}
+	decode(t, res, &raw)
+	wantKeys := [][]string{
+		{"at", "id", "kind", "rule"},
+		{"at", "due", "id", "kind"},
+		{"at", "due", "id", "kind"},
+	}
+	if len(raw.Events) != len(wantKeys) {
+		t.Fatalf("%d events, want %d", len(raw.Events), len(wantKeys))
+	}
+	for i, keys := range wantKeys {
+		if got := slices.Sorted(maps.Keys(raw.Events[i])); !slices.Equal(got, keys) {
+			t.Errorf("event %d keys = %v, want %v", i, got, keys)
+		}
+	}
+	due, _ := raw.Events[2]["due"].(map[string]any)
+	if got, want := slices.Sorted(maps.Keys(due)), []string{"due_date", "item_id", "state", "type"}; !slices.Equal(got, want) {
+		t.Errorf("a due event without a parent has keys %v, want %v", got, want)
+	}
+	if text := textOf(res); !strings.HasPrefix(text, "3 events, next_cursor 303; group agent has acknowledged them") {
+		t.Errorf("summary = %q", text)
+	}
+}
+
+// TestReadEventsInputsDescribeTheNewKinds checks the input schema names the
+// new kinds, the reserved rules. prefix and the due events an item filter
+// brings.
+func TestReadEventsInputsDescribeTheNewKinds(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct{ prop, want string }{
+		{prop: "kinds", want: "item_overdue"},
+		{prop: "kinds", want: "unless item is set"},
+		{prop: "group", want: "rules."},
+		{prop: "item", want: "due events"},
+	} {
+		if got := inputPropertyDescription(t, "read_events", c.prop); !strings.Contains(got, c.want) {
+			t.Errorf("%s description %q lacks %q", c.prop, got, c.want)
+		}
+	}
+}
+
+// TestEventKindsMatchTheLog ties read_events' kind list to the kinds the
+// event log records. mcpserver does not import internal/watch outside
+// tests, which would pull in SQLite.
+func TestEventKindsMatchTheLog(t *testing.T) {
+	t.Parallel()
+	want := []watch.Kind{
+		watch.KindNew, watch.KindFlags, watch.KindExpunged, watch.KindStatus, watch.KindGap, watch.KindItem, watch.KindItemMail,
+		watch.KindRule, watch.KindItemDueSoon, watch.KindItemDue, watch.KindItemOverdue,
+		watch.KindInvite, watch.KindEventChanged, watch.KindEventCancelled, watch.KindInviteReply,
+	}
+	if len(eventKinds) != len(want) {
+		t.Fatalf("eventKinds = %v, want %d kinds", eventKinds, len(want))
+	}
+	for i, k := range want {
+		if eventKinds[i] != string(k) {
+			t.Errorf("eventKinds[%d] = %q, want %q", i, eventKinds[i], k)
+		}
+	}
+}
+
+// TestReadEventsCalendarEvents checks the four calendar kinds: each carries
+// its calendar payload, with addresses untrusted and no event text, and
+// leaves out every field of the other kinds.
+func TestReadEventsCalendarEvents(t *testing.T) {
+	t.Parallel()
+	ts := timestamppb.New(watchAt)
+	start := timestamppb.New(time.Date(2026, 11, 10, 15, 0, 0, 0, time.UTC))
+	end := timestamppb.New(time.Date(2026, 11, 10, 16, 0, 0, 0, time.UTC))
+	const ref = "ce_0123456789abcdefghjkmnpqrs"
+	f := &fakeDaemon{ReadEvents: func(context.Context, *chainmailv1.ReadEventsRequest) (*chainmailv1.ReadEventsResponse, error) {
+		return &chainmailv1.ReadEventsResponse{NextCursor: 404, Events: []*chainmailv1.WatchEvent{
+			{Id: 401, At: ts, Kind: "invite", Account: "work", Ref: ref, Calendar: &chainmailv1.CalendarChange{
+				Ref: ref, MessageRef: testRef, CalendarId: "primary", Start: start, End: end,
+				Organizer: &chainmailv1.Address{Email: readU("org@x.test")},
+			}},
+			{Id: 402, At: ts, Kind: "event_changed", Account: "work", Ref: ref, Calendar: &chainmailv1.CalendarChange{
+				Ref: ref, CalendarId: "primary", Start: start, End: end, Fields: []string{"start", "end"},
+			}},
+			{Id: 403, At: ts, Kind: "event_cancelled", Account: "work", Ref: ref, Calendar: &chainmailv1.CalendarChange{
+				Ref: ref, CalendarId: "primary", Start: start,
+			}},
+			{Id: 404, At: ts, Kind: "invite_reply", Account: "work", Ref: ref, Calendar: &chainmailv1.CalendarChange{
+				Ref: ref, CalendarId: "primary", Attendee: &chainmailv1.Address{Email: readU("ann@x.test")}, Partstat: "ACCEPTED",
+			}},
+		}}, nil
+	}}
+	e := newTestEnv(t, f, latest)
+	res := e.call(t, "read_events", map[string]any{"group": "agent", "kinds": []string{"invite", "event_changed", "event_cancelled", "invite_reply"}})
+	wantOK(t, res)
+	if got := e.fake.lastCall(t, chainmailv1connect.WatchServiceReadEventsProcedure).Msg.(*chainmailv1.ReadEventsRequest).GetFilter().GetKinds(); !slices.Equal(got, []string{"invite", "event_changed", "event_cancelled", "invite_reply"}) {
+		t.Errorf("filter kinds = %v", got)
+	}
+
+	var out readEventsOut
+	decode(t, res, &out)
+	const at = "2026-11-02T09:30:00Z"
+	const s, en = "2026-11-10T15:00:00Z", "2026-11-10T16:00:00Z"
+	want := readEventsOut{NextCursor: 404, Events: []eventOut{
+		{ID: 401, At: at, Kind: "invite", Account: "work", Ref: ref, Calendar: &calendarChangeOut{
+			Ref: ref, MessageRef: testRef, CalendarID: "primary", Start: s, End: en, Organizer: serverNamePtr("org@x.test"),
+		}},
+		{ID: 402, At: at, Kind: "event_changed", Account: "work", Ref: ref, Calendar: &calendarChangeOut{
+			Ref: ref, CalendarID: "primary", Start: s, End: en, Fields: []string{"start", "end"},
+		}},
+		{ID: 403, At: at, Kind: "event_cancelled", Account: "work", Ref: ref, Calendar: &calendarChangeOut{Ref: ref, CalendarID: "primary", Start: s}},
+		{ID: 404, At: at, Kind: "invite_reply", Account: "work", Ref: ref, Calendar: &calendarChangeOut{
+			Ref: ref, CalendarID: "primary", Attendee: serverNamePtr("ann@x.test"), PartStat: "ACCEPTED",
+		}},
+	}}
+	if !reflect.DeepEqual(out, want) {
+		t.Errorf("output =\n%+v\nwant\n%+v", out, want)
+	}
+
+	var raw struct {
+		Events []map[string]any `json:"events"`
+	}
+	decode(t, res, &raw)
+	for i, ev := range raw.Events {
+		if got, want := slices.Sorted(maps.Keys(ev)), []string{"account", "at", "calendar", "id", "kind", "ref"}; !slices.Equal(got, want) {
+			t.Errorf("event %d keys = %v, want %v", i, got, want)
+		}
+	}
+	cancelled, _ := raw.Events[2]["calendar"].(map[string]any)
+	if got, want := slices.Sorted(maps.Keys(cancelled)), []string{"calendar_id", "ref", "start"}; !slices.Equal(got, want) {
+		t.Errorf("an event_cancelled payload has keys %v, want %v", got, want)
+	}
+	if n := readWrappedOnly(t, res.StructuredContent, "@x.test"); n != 2 {
+		t.Errorf("%d enveloped addresses, want the organizer and the attendee", n)
+	}
+	if text := textOf(res); !strings.HasPrefix(text, "4 events, next_cursor 404; group agent has acknowledged them") {
+		t.Errorf("summary = %q", text)
+	}
+}
+
+// TestReadEventsDescribesTheCalendarKinds checks the description and the
+// input schema name the four calendar kinds and say they are opt-in.
+func TestReadEventsDescribesTheCalendarKinds(t *testing.T) {
+	t.Parallel()
+	for _, k := range []string{"invite", "event_changed", "event_cancelled", "invite_reply"} {
+		if !strings.Contains(readEventsDescription, k) {
+			t.Errorf("description lacks %q", k)
+		}
+		if got := inputPropertyDescription(t, "read_events", "kinds"); !strings.Contains(got, k) {
+			t.Errorf("kinds description %q lacks %q", got, k)
+		}
+	}
+	if !strings.Contains(readEventsDescription, "Calendar events are opt-in") {
+		t.Errorf("description does not say calendar events are opt-in: %q", readEventsDescription)
+	}
+	if got := inputPropertyDescription(t, "read_events", "item"); !strings.Contains(got, "calendar") {
+		t.Errorf("item description %q does not say it leaves out calendar events", got)
 	}
 }

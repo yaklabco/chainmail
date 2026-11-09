@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"sync"
 	"sync/atomic"
@@ -22,12 +23,15 @@ import (
 	"github.com/yaklabco/chainmail/internal/audit"
 	"github.com/yaklabco/chainmail/internal/auth"
 	"github.com/yaklabco/chainmail/internal/cache"
+	"github.com/yaklabco/chainmail/internal/calcache"
+	"github.com/yaklabco/chainmail/internal/calstore"
 	"github.com/yaklabco/chainmail/internal/config"
 	"github.com/yaklabco/chainmail/internal/idempotency"
 	"github.com/yaklabco/chainmail/internal/items"
 	"github.com/yaklabco/chainmail/internal/mailstore"
 	"github.com/yaklabco/chainmail/internal/mailstore/imapstore"
 	"github.com/yaklabco/chainmail/internal/policy"
+	"github.com/yaklabco/chainmail/internal/rules"
 	"github.com/yaklabco/chainmail/internal/upload"
 	"github.com/yaklabco/chainmail/internal/vault"
 	"github.com/yaklabco/chainmail/internal/watch"
@@ -79,6 +83,18 @@ type Options struct {
 	// daemontest sets it unless a test asks for the cache, so tests that
 	// count mail store calls keep the server path.
 	DisableCache bool
+	// NewCalendarStore builds the calendar store of an account whose
+	// calendar store is not none, once, in New. Nil means the real backend:
+	// calstore/google or calstore/caldav over the account's credentials.
+	// Returning nil gives the account no store. Tests pass calstore/fake.
+	NewCalendarStore func(config.ResolvedAccount) calstore.Store
+	// DisableCalendar runs without calendars whatever the config says: no
+	// account has a calendar store, calendar.db is not opened and nothing
+	// syncs. daemontest sets it unless a test asks for calendars.
+	DisableCalendar bool
+	// CalendarPoll replaces the [calendar] poll interval. Zero keeps the
+	// config's. Tests shorten it.
+	CalendarPoll time.Duration
 }
 
 const (
@@ -191,6 +207,54 @@ type Server struct {
 	// itemThreads resolves item: search terms into thread keys. Nil when
 	// the daemon has no item store, which makes item: an invalid argument.
 	itemThreads itemResolver
+	// rules keeps the rule definitions, their revisions and runs, and the
+	// act-once table in state.db, and appends rule events to watchLog.
+	rules *rules.Store
+	// rulesClock is the time of the rule runners' waits, the rule
+	// scheduler and the due checker: Options.Now and time.After. Internal
+	// tests replace it before a runner is made or a loop starts.
+	rulesClock watch.Clock
+	// ruleApplied reads the rules' act-once table, for the skipped count
+	// of a dry-run. Nil until the rule store is built, which makes every
+	// dry-run skip nothing.
+	ruleApplied appliedLookup
+	// dueChecker writes the item due events: at each due time, once at
+	// start-up, and inside every items write that changes a due date,
+	// state or deletion, through the items store's due hook.
+	dueChecker *rules.DueChecker
+	// ruleRunners are the rule runners of the accounts with a cache
+	// worker, by account. startWatch fills it before startBackground starts
+	// the rule scheduler and before any handler runs, and it never changes
+	// after. An account without a runner acts on no rule: its scheduled and
+	// manual runs are recorded as cache_not_ready with the reason
+	// cache_disabled.
+	ruleRunners map[string]*ruleRunner
+	// rulesWake wakes the rule scheduler after a rule change so it plans
+	// again. It holds at most one wakeup.
+	rulesWake chan struct{}
+	// ruleScheduler stops the rule scheduler that startBackground runs and
+	// joins it, with the scheduled run it is in. drain calls it before it
+	// closes the mail stores.
+	ruleScheduler schedulerStop
+	// calcache is calendar.db, or nil when calendars are disabled, there is
+	// no cache directory, or it did not open. Serve opens it before any
+	// handler, cache worker or syncer runs, and closes it after all of
+	// them have stopped.
+	calcache *calcache.Store
+	// invites is the invite hook over calcache that the cache workers and
+	// the invite retry loop share, built on first use (serverInviteHook).
+	// Guarded by invitesMu.
+	invitesMu sync.Mutex
+	invites   *inviteHook
+	// calendars holds every configured account's calendar runtime, by
+	// account. New fills it with the stores and Serve adds the syncers
+	// before any handler or cache worker runs; it never changes after.
+	calendars map[string]*calAccount
+	// calSettings is the [calendar] table, resolved.
+	calSettings config.CalendarSettings
+	// calClock is the time of the calendar syncers: Options.Now and
+	// time.After. Internal tests replace it before Serve.
+	calClock watch.Clock
 }
 
 // New wires up a Server. Call Serve to run it.
@@ -244,9 +308,25 @@ func New(opts Options) (*Server, error) {
 	s.items = items.NewStore(opts.StateDB, s.watchLog, opts.Now)
 	// item: searches resolve item IDs to thread keys through the store.
 	s.itemThreads = s.items
+	// Rules live in state.db beside the items. at schedules and due times
+	// follow the [rules] time zone.
+	rs := opts.Config.RulesSettings()
+	s.rules = rules.NewStore(rules.StoreOptions{DB: opts.StateDB, Log: s.watchLog, Now: opts.Now, Location: rs.Location})
+	s.ruleApplied = s.rules
+	s.dueChecker = rules.NewDueChecker(opts.StateDB, s.watchLog, opts.Now, rules.DueSettings{
+		Location: rs.Location, At: rules.ClockTime{Hour: rs.DueHour, Minute: rs.DueMinute}, SoonDays: rs.DueSoonDays,
+	})
+	// Every items write that changes a due date, state or deletion checks
+	// its items' due stages in its own transaction.
+	s.items.SetDueHook(s.dueChecker.Hook)
+	s.dueChecker.SetLogger(opts.Logger)
+	s.rulesClock = daemonClock{now: opts.Now}
+	s.rulesWake = make(chan struct{}, 1)
 	if err := s.openSendState(); err != nil {
 		return nil, err
 	}
+	s.calClock = daemonClock{now: opts.Now}
+	s.buildCalendars()
 	s.compose = newComposeService(s)
 	mux := http.NewServeMux()
 	handlerOpts := connect.WithReadMaxBytes(maxRequestBytes)
@@ -261,6 +341,8 @@ func New(opts Options) (*Server, error) {
 	mux.Handle(chainmailv1connect.NewWatchServiceHandler(&watchService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewCacheServiceHandler(&cacheService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	mux.Handle(chainmailv1connect.NewItemsServiceHandler(&itemsService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
+	mux.Handle(chainmailv1connect.NewRulesServiceHandler(&rulesService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
+	mux.Handle(chainmailv1connect.NewCalendarServiceHandler(&calendarService{s: s}, handlerOpts, connect.WithSendMaxBytes(maxResponseBytes)))
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
@@ -312,10 +394,22 @@ func (s *Server) Serve(ctx context.Context) error {
 	// returns.
 	s.openCache(base)
 	defer s.closeCache()
-	defer s.startBackground(base)()
+	// calendar.db opens beside it, before the cache workers whose invite
+	// hook writes to it and the syncers, and closes before cache.db, after
+	// both have stopped.
+	s.openCalendar(base)
+	defer s.closeCalendar()
 	// Supervisors start once sends are recovered, on base, so a shutdown
-	// cancels them with the requests. drain joins them.
+	// cancels them with the requests. drain joins them. They start before
+	// the background loops, since the rule scheduler among those reads
+	// the rule runners startWatch records.
 	s.startWatch(base)
+	// The background loops stop and are joined when Serve returns, after
+	// drain and before closeCache, so none outlives state.db, which the
+	// caller closes after Serve. The rule scheduler among them is stopped
+	// and joined sooner, by drain before it closes the mail stores, since
+	// its runs use them.
+	defer s.startBackground(base)()
 	s.httpSrv.BaseContext = func(net.Listener) context.Context { return base }
 	errc := make(chan error, 1)
 	go func() { errc <- s.httpSrv.Serve(s.opts.Listener) }()
@@ -348,13 +442,18 @@ func (s *Server) Serve(ctx context.Context) error {
 	return err
 }
 
-// drain waits for every handler to return, stops the supervisors, the
-// cache workers and the background probes, then logs out of the mail
-// servers. The supervisors and workers stop first, closing their watch
-// connections within watch.ShutdownLogout, so none holds a store closeAll
-// is closing. Each store logs out within 5 seconds, all in parallel.
+// drain waits for every handler to return, stops the rule scheduler and
+// waits for the scheduled run it is in, stops the supervisors, the cache
+// workers and the background probes, then logs out of the mail servers.
+// The scheduler, the supervisors and the workers stop first, the workers
+// closing their watch connections within watch.ShutdownLogout, so none
+// holds a store closeAll is closing or opens one after it: a scheduled
+// forward whose SMTP send is under way finishes it, and writes its Sent
+// copy, before drain goes on. Each store logs out within 5 seconds, all
+// in parallel.
 func (s *Server) drain() {
 	s.handlers.wait()
+	s.ruleScheduler.stop()
 	s.stopWatch()
 	s.lim.stop()
 	if err := s.stores.closeAll(); err != nil {
@@ -400,7 +499,9 @@ type caller struct {
 
 // callerOf identifies who sent a request. The middleware refuses requests
 // without a peer, so a missing one here is a wiring bug, and the request
-// fails rather than being audited as uid 0.
+// fails rather than being audited as uid 0. A peer that names one of the
+// daemon's own client kinds, rule or daemon, is recorded as invalidTarget,
+// so the audit log tells the daemon's actions from a client's.
 func callerOf(ctx context.Context, h http.Header) (caller, error) {
 	p, ok := PeerFromContext(ctx)
 	if !ok {
@@ -410,7 +511,7 @@ func callerOf(ctx context.Context, h http.Header) (caller, error) {
 	switch {
 	case c.client == "":
 		c.client = "unknown"
-	case !clientKindRE.MatchString(c.client):
+	case !clientKindRE.MatchString(c.client), c.client == ruleClient, c.client == daemonClient:
 		c.client = invalidTarget
 	}
 	return c, nil
@@ -420,6 +521,16 @@ func callerOf(ctx context.Context, h http.Header) (caller, error) {
 // "cli" or "mcp". The kind is self-reported, so anything else is recorded
 // as invalidTarget. The peer's uid is the authoritative identity.
 var clientKindRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
+
+// ruleClient is the audit client of the actions rules take.
+const ruleClient = "rule"
+
+// ruleCaller is who a rule's actions run as: the daemon's own uid, as its
+// background probe records, with client kind rule. No socket peer can
+// claim the kind, so audit --client rule shows only rule actions.
+func ruleCaller() caller {
+	return caller{uid: uint32(os.Getuid()), client: ruleClient}
+}
 
 // record writes an audit entry for an action that has run, then returns the
 // action's own error as a Connect error. If e.Result is empty it is derived
@@ -451,4 +562,28 @@ func (s *Server) record(ctx context.Context, c caller, e audit.Entry, actionErr 
 		return cerr
 	}
 	return nil
+}
+
+// auditedCall runs one audited call the way the items and rules handlers
+// do: it identifies the caller, gives the call timeout unless the client
+// set an earlier deadline, and runs run, which sets the audit entry's
+// targets as it validates and returns the response and the action's
+// error. It then records the entry, so refusals are audited too, and
+// returns the response or the action's Connect error. itemCall and
+// ruleCall wrap it, so an audit or deadline change applies to both.
+func auditedCall[Req, Resp any](ctx context.Context, s *Server, req *connect.Request[Req], action string, timeout time.Duration,
+	run func(ctx context.Context, c caller, entry *audit.Entry) (*Resp, error),
+) (*connect.Response[Resp], error) {
+	c, err := callerOf(ctx, req.Header())
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := withDeadline(ctx, timeout)
+	defer cancel()
+	entry := audit.Entry{Action: action}
+	resp, runErr := run(ctx, c, &entry)
+	if err := s.record(ctx, c, entry, runErr); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(resp), nil
 }

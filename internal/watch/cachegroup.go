@@ -1,7 +1,5 @@
 package watch
 
-import "strings"
-
 // cacheGroupPrefix starts every group name the daemon's cache reads the log
 // through. Clients can never use such a name: ValidGroupName refuses it.
 const cacheGroupPrefix = "cache."
@@ -20,24 +18,5 @@ func CacheGroup(account string) string {
 // be longer than ValidGroupName allows, since account names reach 63
 // characters.
 func IsCacheGroup(name string) bool {
-	account, ok := strings.CutPrefix(name, cacheGroupPrefix)
-	if !ok || account == "" || len(account) > maxAccountName {
-		return false
-	}
-	for i := range len(account) {
-		c := account[i]
-		switch {
-		case 'a' <= c && c <= 'z', '0' <= c && c <= '9':
-		case i > 0 && c == '-':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-// logGroupName reports whether the Log takes name as a group: a client
-// group or one of the cache's.
-func logGroupName(name string) bool {
-	return ValidGroupName(name) || IsCacheGroup(name)
+	return isAccountGroup(name, cacheGroupPrefix)
 }

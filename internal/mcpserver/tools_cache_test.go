@@ -76,7 +76,7 @@ func TestCacheStatusOutput(t *testing.T) {
 			}},
 		},
 		{Account: "old", State: "disabled", BudgetBytes: 1 << 30, LastError: "AUTH_REQUIRED", Folders: []cacheFolderOut{}},
-	}}
+	}, Calendars: []cacheCalendarOut{}}
 	if !reflect.DeepEqual(out, want) {
 		t.Errorf("cache_status =\n%+v\nwant\n%+v", out, want)
 	}
@@ -146,4 +146,51 @@ func TestCacheStatusAnnotations(t *testing.T) {
 			t.Errorf("operator action %s is a tool", tool.Name)
 		}
 	}
+}
+
+// TestCacheStatusCalendarLines checks each account's calendar cache line
+// reaches agents, and the description says what it means.
+func TestCacheStatusCalendarLines(t *testing.T) {
+	t.Parallel()
+	f := &fakeDaemon{GetCacheStatus: func(context.Context, *chainmailv1.GetCacheStatusRequest) (*chainmailv1.GetCacheStatusResponse, error) {
+		return &chainmailv1.GetCacheStatusResponse{SizeBytes: 1, MaxSizeBytes: 2, Calendars: []*chainmailv1.AccountCalendarStatus{
+			{Account: "work", State: "ready", LastSyncAt: timestamppb.New(cacheAt), Calendars: 3, Events: 120},
+			{Account: "home", State: "auth_required", LastError: "AUTH_REQUIRED"},
+		}}, nil
+	}}
+	e := newTestEnv(t, f, latest)
+	res := e.call(t, "cache_status", nil)
+	wantOK(t, res)
+	var out cacheStatusOut
+	decode(t, res, &out)
+	want := []cacheCalendarOut{
+		{Account: "work", State: "ready", LastSyncAt: "2026-11-02T09:00:00Z", Calendars: 3, Events: 120},
+		{Account: "home", State: "auth_required", LastError: "AUTH_REQUIRED"},
+	}
+	if !reflect.DeepEqual(out.Calendars, want) || out.Accounts == nil || len(out.Accounts) != 0 {
+		t.Errorf("cache_status = %+v, want calendars %+v and no mail accounts", out, want)
+	}
+	if text := textOf(res); !strings.HasPrefix(text, "cache of 0 accounts: 1 of 2 bytes; calendar accounts 2\n") {
+		t.Errorf("text = %q", text)
+	}
+	tl := listedTool(t, e, "cache_status")
+	for _, want := range []string{"calendar", "auth_required", "CACHE_NOT_READY"} {
+		if !strings.Contains(tl.Description, want) {
+			t.Errorf("description lacks %q: %q", want, tl.Description)
+		}
+	}
+}
+
+// listedTool returns the tool tools/list lists as name, or fails the test.
+func listedTool(t *testing.T, e *testEnv, name string) *mcp.Tool {
+	t.Helper()
+	res, err := e.cs.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(res.Tools, func(tl *mcp.Tool) bool { return tl.Name == name })
+	if i < 0 {
+		t.Fatalf("%s is not listed", name)
+	}
+	return res.Tools[i]
 }

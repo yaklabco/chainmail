@@ -179,7 +179,14 @@ func TestSelectFolderTracksMode(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("selects = %q, want %q", got, want)
 	}
-	if err := c.SelectFolder(t.Context(), "Nope", true); !errors.Is(err, mailstore.ErrNotFound) || c.Selected() != "" || c.Writable() {
+	err := c.SelectFolder(t.Context(), "Nope", true)
+	if !errors.Is(err, mailstore.ErrNotFound) || c.Selected() != "" || c.Writable() {
 		t.Errorf("SELECT Nope: err %v, selected %q, writable %t; want ErrNotFound and nothing open", err, c.Selected(), c.Writable())
+	}
+	// The failure names the folder it could not open, so a caller can tell
+	// a ref's own folder gone from another missing folder, with the text a
+	// plain not-found has.
+	if gone, ok := errors.AsType[*mailstore.FolderGoneError](err); !ok || gone.Folder != "Nope" || err.Error() != `not found: no folder "Nope"` {
+		t.Errorf("SELECT Nope: err %v (%+v, %t), want a FolderGoneError for Nope", err, gone, ok)
 	}
 }

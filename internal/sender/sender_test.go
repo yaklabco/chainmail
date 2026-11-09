@@ -386,3 +386,29 @@ func serveNoSTARTTLS(conn net.Conn) []string {
 		}
 	}
 }
+
+// An endpoint with a TLS server name verifies the certificate against that
+// name, not the host dialed.
+func TestProbeVerifiesTLSServerName(t *testing.T) {
+	t.Parallel()
+	for _, sec := range []provider.Security{provider.SecurityTLS, provider.SecurityStartTLS} {
+		t.Run(sec.String(), func(t *testing.T) {
+			t.Parallel()
+			ca := tlstest.NewFor(t, "mail.example.test")
+			ep := smtptest.Start(t, ca, sec, user)
+			if err := Probe(t.Context(), ep, creds(provider.AuthPassword, "pw"), DialOptions{RootCAs: ca.Pool}); err == nil {
+				t.Fatal("Probe by address succeeded against a certificate for another name")
+			}
+			ep.ServerName = "mail.example.test"
+			if err := Probe(t.Context(), ep, creds(provider.AuthPassword, "pw"), DialOptions{RootCAs: ca.Pool}); err != nil {
+				t.Fatalf("Probe with server name: %v", err)
+			}
+			ep.ServerName = "other.example.test"
+			err := Probe(t.Context(), ep, creds(provider.AuthPassword, "pw"), DialOptions{RootCAs: ca.Pool})
+			var hostErr x509.HostnameError
+			if !errors.As(err, &hostErr) {
+				t.Errorf("Probe with the wrong server name: err = %v, want x509.HostnameError", err)
+			}
+		})
+	}
+}

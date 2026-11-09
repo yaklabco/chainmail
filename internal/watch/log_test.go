@@ -368,3 +368,186 @@ func TestReadItemKinds(t *testing.T) {
 		})
 	}
 }
+
+// rule and due events survive Publish and Read with every field intact.
+// None has an account, folder or ref.
+func TestRuleAndDuePayloadRoundTrip(t *testing.T) {
+	t.Parallel()
+	l, _, _ := newLog(t)
+	at := time.Date(2026, 11, 7, 8, 0, 0, 123456789, time.UTC)
+	in := []Event{
+		{At: at, Kind: KindRule, Rule: &RuleChange{RuleID: "ru_01", Name: "receipts", Change: "created", Revision: 1, Actor: "1000/cli"}},
+		{At: at, Kind: KindRule, Rule: &RuleChange{RuleID: "ru_01", Name: "receipts", Change: "disabled", Revision: 4, Actor: "1000/rule", Reason: "all_failed"}},
+		{At: at, Kind: KindItemDueSoon, Due: &ItemDue{ItemID: "it_01", Type: "task", DueDate: "2026-11-09", State: "backlog", ParentID: "it_admin_work"}},
+		{At: at, Kind: KindItemDue, Due: &ItemDue{ItemID: "it_02", Type: "story", DueDate: "2026-11-07", State: "in-progress"}},
+		{At: at, Kind: KindItemOverdue, Due: &ItemDue{ItemID: "it_03", Type: "bug", DueDate: "2026-11-01", State: "in-review", ParentID: "it_01"}},
+	}
+	stored := publish(t, l, in...)
+	page, err := l.Read(t.Context(), Query{Filter: Filter{Kinds: []Kind{KindRule, KindItemDueSoon, KindItemDue, KindItemOverdue}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != len(stored) {
+		t.Fatalf("read %d events, want %d", len(page.Events), len(stored))
+	}
+	for i, got := range page.Events {
+		if !reflect.DeepEqual(got, stored[i]) {
+			t.Errorf("event %d:\n got %+v\nwant %+v", i, got, stored[i])
+		}
+		if got.Account != "" || got.Folder != "" || got.Ref != "" {
+			t.Errorf("event %d has account %q, folder %q, ref %q, want none", i, got.Account, got.Folder, got.Ref)
+		}
+	}
+}
+
+// A reader that names no kinds, and the cache's internal reader, never sees
+// the rule and due kinds and still moves past them. Named kinds see them; an
+// item filter sees its items' due events and no rule events.
+func TestReadOptInKinds(t *testing.T) {
+	t.Parallel()
+	l, _, _ := newLog(t)
+	at := time.Date(2026, 11, 7, 8, 0, 0, 0, time.UTC)
+	stored := publish(t, l,
+		Event{At: at, Kind: KindNew, Account: "a", Folder: "INBOX", Ref: "cm:a:INBOX:7:1", Message: &Message{Subject: "hi"}},
+		Event{At: at, Kind: KindRule, Rule: &RuleChange{RuleID: "ru_a", Name: "receipts", Change: "created", Revision: 1, Actor: "1000/cli"}},
+		Event{At: at, Kind: KindItemDueSoon, Due: &ItemDue{ItemID: "it_a", Type: "task", DueDate: "2026-11-09", State: "backlog"}},
+		Event{At: at, Kind: KindItemDue, Due: &ItemDue{ItemID: "it_b", Type: "epic", DueDate: "2026-11-07", State: "backlog"}},
+		Event{At: at, Kind: KindItemOverdue, Due: &ItemDue{ItemID: "it_a", Type: "task", DueDate: "2026-11-01", State: "in-review"}},
+		Event{At: at, Kind: KindItem, Item: &ItemChange{ItemID: "it_a", Type: "task", Revision: 2, Op: "updated"}},
+		Event{At: at, Kind: KindStatus, Account: "a", Folder: "INBOX", State: StateWatching},
+	)
+	last := stored[len(stored)-1].ID
+	dueKinds := []Kind{KindItemDueSoon, KindItemDue, KindItemOverdue}
+	tests := []struct {
+		name string
+		f    Filter
+		want []int // indexes into stored
+	}{
+		{"api reader with no kinds", Filter{}, []int{0, 6}},
+		{"api reader for the account", Filter{Accounts: []string{"a"}}, []int{0, 6}},
+		{"cache reader", Filter{Accounts: []string{"a"}, Internal: true}, []int{0, 6}},
+		{"internal reader", Filter{Internal: true}, []int{0, 6}},
+		{"rule named", Filter{Kinds: []Kind{KindRule}}, []int{1, 6}},
+		{"due kinds named", Filter{Kinds: dueKinds}, []int{2, 3, 4, 6}},
+		// The due events have no folder and the status event is a control
+		// event, so In drops none of them.
+		{"due kinds named with in", Filter{Kinds: dueKinds, In: "Archive"}, []int{2, 3, 4, 6}},
+		{"item filter", Filter{Items: map[string]bool{"it_a": true}}, []int{2, 4, 5, 6}},
+		{"item filter and the rule kind", Filter{Kinds: []Kind{KindRule}, Items: map[string]bool{"it_a": true}}, []int{6}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var want []int64
+			for _, i := range tt.want {
+				want = append(want, stored[i].ID)
+			}
+			got, next := readIDs(t, l, Query{Filter: tt.f})
+			if !slices.Equal(got, want) || next != last {
+				t.Errorf("Read(%+v) = %v next %d, want %v next %d", tt.f, got, next, want, last)
+			}
+		})
+	}
+}
+
+// The calendar kinds survive Publish and Read with every field intact.
+// Each carries its account and its ce_ ref, and no folder.
+func TestCalendarPayloadRoundTrip(t *testing.T) {
+	t.Parallel()
+	l, _, _ := newLog(t)
+	at := time.Date(2026, 11, 8, 9, 0, 0, 123456789, time.UTC)
+	ref := "ce_0123456789abcdefghjkmnpqrs"
+	in := []Event{
+		{At: at, Kind: KindInvite, Account: "work", Ref: ref, Calendar: &CalendarChange{
+			Ref: ref, CalendarID: "primary", Start: "2026-11-10T17:00:00Z", End: "2026-11-10T17:30:00Z", Organizer: "ann@example.com",
+		}},
+		{At: at, Kind: KindInvite, Account: "home", Ref: ref, Calendar: &CalendarChange{
+			Ref: ref, MessageRef: "cm:home:INBOX:7:12", Start: "2026-11-10T17:00:00Z", End: "2026-11-10T17:30:00Z", Organizer: "ann@example.com",
+		}},
+		{At: at, Kind: KindEventChanged, Account: "work", Ref: ref + "@20261110T170000Z", Calendar: &CalendarChange{
+			Ref: ref + "@20261110T170000Z", CalendarID: "primary", Start: "2026-11-10T18:00:00Z", End: "2026-11-10T18:30:00Z", Fields: []string{"start", "end"},
+		}},
+		{At: at, Kind: KindEventCancelled, Account: "work", Ref: ref, Calendar: &CalendarChange{Ref: ref, CalendarID: "primary"}},
+		{At: at, Kind: KindInviteReply, Account: "work", Ref: ref, Calendar: &CalendarChange{
+			Ref: ref, CalendarID: "primary", Attendee: "bob@example.com", PartStat: "TENTATIVE",
+		}},
+	}
+	stored := publish(t, l, in...)
+	page, err := l.Read(t.Context(), Query{Filter: Filter{Kinds: []Kind{KindInvite, KindEventChanged, KindEventCancelled, KindInviteReply}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != len(stored) {
+		t.Fatalf("read %d events, want %d", len(page.Events), len(stored))
+	}
+	for i, got := range page.Events {
+		if !reflect.DeepEqual(got, stored[i]) {
+			t.Errorf("event %d:\n got %+v\nwant %+v", i, got, stored[i])
+		}
+		if got.Account == "" || got.Folder != "" || got.Ref == "" {
+			t.Errorf("event %d has account %q, folder %q, ref %q, want an account, no folder and a ref", i, got.Account, got.Folder, got.Ref)
+		}
+	}
+}
+
+// Publish refuses a calendar event with no change and writes nothing.
+func TestPublishRefusesCalendarEventWithoutChange(t *testing.T) {
+	t.Parallel()
+	l, _, _ := newLog(t)
+	for _, kind := range []Kind{KindInvite, KindEventChanged, KindEventCancelled, KindInviteReply} {
+		err := l.Publish(t.Context(), Event{Kind: kind, Account: "work", Ref: "ce_0123456789abcdefghjkmnpqrs"})
+		if err == nil || !strings.Contains(err.Error(), "has no calendar change") {
+			t.Errorf("Publish %s without a change: err = %v, want a refusal", kind, err)
+		}
+	}
+	if tail, err := l.Tail(t.Context()); err != nil || tail != 0 {
+		t.Errorf("tail = %d, %v, want 0", tail, err)
+	}
+}
+
+// A reader that names no kinds, and the cache's internal reader, never sees
+// the calendar kinds and still moves past them. Named kinds see them for
+// the accounts asked for; an item filter drops them.
+func TestReadCalendarKinds(t *testing.T) {
+	t.Parallel()
+	l, _, _ := newLog(t)
+	at := time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)
+	ref := "ce_0123456789abcdefghjkmnpqrs"
+	stored := publish(t, l,
+		Event{At: at, Kind: KindNew, Account: "a", Folder: "INBOX", Ref: "cm:a:INBOX:7:1", Message: &Message{Subject: "hi"}},
+		Event{At: at, Kind: KindInvite, Account: "a", Ref: ref, Calendar: &CalendarChange{Ref: ref}},
+		Event{At: at, Kind: KindEventChanged, Account: "b", Ref: ref, Calendar: &CalendarChange{Ref: ref, Fields: []string{"start"}}},
+		Event{At: at, Kind: KindEventCancelled, Account: "a", Ref: ref, Calendar: &CalendarChange{Ref: ref}},
+		Event{At: at, Kind: KindInviteReply, Account: "a", Ref: ref, Calendar: &CalendarChange{Ref: ref, Attendee: "bob@example.com", PartStat: "ACCEPTED"}},
+		Event{At: at, Kind: KindStatus, Account: "a", Folder: "INBOX", State: StateWatching},
+	)
+	last := stored[len(stored)-1].ID
+	calKinds := []Kind{KindInvite, KindEventChanged, KindEventCancelled, KindInviteReply}
+	tests := []struct {
+		name string
+		f    Filter
+		want []int // indexes into stored
+	}{
+		{"api reader with no kinds", Filter{}, []int{0, 5}},
+		{"api reader for the account", Filter{Accounts: []string{"a"}}, []int{0, 5}},
+		{"cache reader", Filter{Accounts: []string{"a"}, Internal: true}, []int{0, 5}},
+		{"internal reader", Filter{Internal: true}, []int{0, 5}},
+		{"calendar kinds named", Filter{Kinds: calKinds}, []int{1, 2, 3, 4, 5}},
+		{"calendar kinds named for one account", Filter{Kinds: calKinds, Accounts: []string{"a"}}, []int{1, 3, 4, 5}},
+		{"invite named", Filter{Kinds: []Kind{KindInvite}}, []int{1, 5}},
+		{"calendar kinds named with in", Filter{Kinds: calKinds, In: "Archive"}, []int{1, 2, 3, 4, 5}},
+		{"item filter", Filter{Items: map[string]bool{"it_a": true}}, []int{5}},
+		{"item filter and the calendar kinds", Filter{Kinds: calKinds, Items: map[string]bool{"it_a": true}}, []int{5}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var want []int64
+			for _, i := range tt.want {
+				want = append(want, stored[i].ID)
+			}
+			got, next := readIDs(t, l, Query{Filter: tt.f})
+			if !slices.Equal(got, want) || next != last {
+				t.Errorf("Read(%+v) = %v next %d, want %v next %d", tt.f, got, next, want, last)
+			}
+		})
+	}
+}

@@ -506,3 +506,106 @@ func TestReadAuditRejectsInvalidSince(t *testing.T) {
 		t.Errorf("err = %v, want INVALID_ARGUMENT", err)
 	}
 }
+
+// TestReadAuditFiltersByClient checks the client filter alone, with an
+// action filter and across pages, and that a value that cannot be a client
+// kind is refused with fixed text.
+func TestReadAuditFiltersByClient(t *testing.T) {
+	t.Parallel()
+	h := daemontest.Start(t, hostingerConfig, daemontest.Options{})
+	seedAudit(t, h,
+		audit.Entry{Client: "cli", Action: "a"},
+		audit.Entry{Client: "rule", Action: "b"},
+		audit.Entry{Client: "rule", Action: "c"},
+		audit.Entry{Client: "mcp", Action: "d"},
+	)
+	actionsOf := func(req *chainmailv1.ReadAuditRequest) []string {
+		t.Helper()
+		var out []string
+		for {
+			resp, err := readAudit(t, h, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range resp.GetEntries() {
+				out = append(out, e.GetClient()+":"+e.GetAction())
+			}
+			if resp.GetNextBeforeId() == 0 {
+				return out
+			}
+			req.BeforeId = resp.GetNextBeforeId()
+		}
+	}
+	tests := []struct {
+		name string
+		req  *chainmailv1.ReadAuditRequest
+		want []string
+	}{
+		{name: "client", req: &chainmailv1.ReadAuditRequest{Client: "rule"}, want: []string{"rule:c", "rule:b"}},
+		{name: "client and action", req: &chainmailv1.ReadAuditRequest{Client: "rule", Action: "b"}, want: []string{"rule:b"}},
+		{name: "paged", req: &chainmailv1.ReadAuditRequest{Client: "rule", Limit: 1}, want: []string{"rule:c", "rule:b"}},
+		{name: "every client", req: &chainmailv1.ReadAuditRequest{}, want: []string{"mcp:d", "rule:c", "rule:b", "cli:a"}},
+	}
+	for _, tt := range tests {
+		if got := actionsOf(tt.req); !slices.Equal(got, tt.want) {
+			t.Errorf("%s: %v, want %v", tt.name, got, tt.want)
+		}
+	}
+	for _, client := range []string{"Rule", "bad kind", strings.Repeat("a", 33), "(invalid)"} {
+		_, err := readAudit(t, h, &chainmailv1.ReadAuditRequest{Client: client})
+		var cerr *connect.Error
+		if reasonOf(err) != api.ReasonInvalidArgument || !errors.As(err, &cerr) || cerr.Message() != "invalid client kind" {
+			t.Errorf("client %.20q: %v, want INVALID_ARGUMENT with fixed text", client, err)
+		}
+	}
+}
+
+// issuerConfig is a custom account logging in through the issuer client kc.
+func issuerConfig(issuer string) string {
+	return `
+[oauth_clients.kc]
+client_id = "chainmail"
+issuer = "` + issuer + `"
+scopes = ["openid", "offline_access"]
+
+[accounts.mw]
+provider = "custom"
+address = "james@example.org"
+auth = "oauth2"
+oauth_client = "kc"
+imap = { host = "127.0.0.1", port = 993 }
+smtp = { host = "127.0.0.1", port = 465 }
+`
+}
+
+// A public issuer client logs in with no client secret in the vault, and its
+// accounts report a login, not a secret, as what they need. Its secret
+// may still be set, though chainmail never sends it.
+func TestOAuthLoginWithPublicIssuerClient(t *testing.T) {
+	t.Parallel()
+	o := oauthtest.StartWith(t, oauthtest.Options{Public: true})
+	h := daemontest.Start(t, issuerConfig(o.Issuer()), daemontest.Options{})
+	list, err := h.Client.Account.ListAccounts(t.Context(), connect.NewRequest(&chainmailv1.ListAccountsRequest{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accts := list.Msg.GetAccounts(); len(accts) != 1 || accts[0].GetAuthState() != chainmailv1.AuthState_AUTH_STATE_REQUIRED ||
+		accts[0].GetAuthDetail() != "run: chainmail auth login mw" {
+		t.Errorf("accounts = %+v, want mw needing a login", accts)
+	}
+	begin, err := h.Client.Admin.BeginAuthLogin(t.Context(), connect.NewRequest(&chainmailv1.BeginAuthLoginRequest{Account: "mw"}))
+	if err != nil {
+		t.Fatalf("BeginAuthLogin: %v", err)
+	}
+	if !strings.HasPrefix(begin.Msg.GetConsentUrl(), o.Issuer()+"/auth?") {
+		t.Errorf("consent URL = %q, want the discovered endpoint", begin.Msg.GetConsentUrl())
+	}
+	redirect := oauthtest.RedirectFor(t, begin.Msg.GetConsentUrl(), oauthtest.Code)
+	if _, err := h.Client.Admin.FinishAuthLogin(t.Context(), connect.NewRequest(&chainmailv1.FinishAuthLoginRequest{Account: "mw", RedirectUrl: redirect})); err != nil {
+		t.Fatalf("FinishAuthLogin: %v", err)
+	}
+	if rt, err := h.Vault.Get(auth.RefreshTokenSecret("mw")); err != nil || string(rt) != oauthtest.RefreshToken {
+		t.Errorf("refresh token = %q, %v", rt, err)
+	}
+	setSecret(t, h, "oauth_clients/kc", "a-confidential-secret")
+}

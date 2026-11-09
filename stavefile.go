@@ -57,19 +57,15 @@ func Generate() error {
 	return sh.RunV("buf", "generate")
 }
 
-// GenerateCheck fails if gen/ is out of date with proto/, or the command
-// reference with the CLI's help.
+// GenerateCheck fails if gen/ is out of date with proto/.
 func GenerateCheck() error {
 	st.Deps(Prereq.All)
 
-	// Serial: buf generate empties gen/ before it rewrites it, and the
-	// chainmail build behind Docs.Commands imports gen/.
-	st.SerialDeps(Generate, Docs.Commands)
-	paths := []string{"gen", commandDocsDir}
-	if err := sh.RunV("git", append([]string{"diff", "--exit-code", "--"}, paths...)...); err != nil {
+	st.Deps(Generate)
+	if err := sh.RunV("git", "diff", "--exit-code", "--", "gen"); err != nil {
 		return err
 	}
-	untracked, err := sh.Output("git", append([]string{"status", "--porcelain", "--"}, paths...)...)
+	untracked, err := sh.Output("git", "status", "--porcelain", "--", "gen")
 	if err != nil {
 		return err
 	}
@@ -77,65 +73,6 @@ func GenerateCheck() error {
 		return errors.New("generated files not committed:\n" + untracked)
 	}
 	return nil
-}
-
-// Docs groups the manual's targets.
-type Docs st.Namespace
-
-// commandDocsDir is where the generated command reference lives.
-const commandDocsDir = "website/docs/reference/commands"
-
-// Commands writes the command reference pages from the CLI's help.
-func (Docs) Commands() error {
-	st.Deps(Prereq.All)
-
-	return sh.RunV("go", "run", "./cmd/chainmail", "docs", commandDocsDir)
-}
-
-// Build builds the manual into website/build, for serving under /docs/.
-func (Docs) Build() error {
-	st.Deps(Prereq.All)
-
-	return bun("website", "build")
-}
-
-// Serve runs the manual locally with live reload at http://localhost:3000/docs/.
-func (Docs) Serve() error {
-	st.Deps(Prereq.All)
-
-	return bun("website", "start")
-}
-
-// Site groups the landing page's targets.
-type Site st.Namespace
-
-// Build builds the landing page into site/dist.
-func (Site) Build() error {
-	st.Deps(Prereq.All)
-
-	return bun("site", "build")
-}
-
-// Serve runs the landing page locally with live reload at http://localhost:4321/.
-func (Site) Serve() error {
-	st.Deps(Prereq.All)
-
-	return bun("site", "dev")
-}
-
-// Pages builds the landing page and the manual into pages-dist, as CI deploys them.
-func Pages() error {
-	st.Deps(Prereq.All)
-
-	return sh.RunV("scripts/build-pages.sh")
-}
-
-// bun installs dir's locked dependencies, then runs one of its package scripts.
-func bun(dir, script string) error {
-	if err := sh.RunWithV(nil, dir, "bun", "install", "--frozen-lockfile"); err != nil {
-		return err
-	}
-	return sh.RunWithV(nil, dir, "bun", "run", script)
 }
 
 // Lint runs buf lint and golangci-lint.
@@ -186,6 +123,26 @@ func (Test) Integration() error {
 
 	return sh.RunV("go", "test", "-race", "-tags", "integration", "-count=1", "-timeout", "15m",
 		"-p", parallelism(), "-parallel", parallelism(), "./internal/mailstore/imapstore/", "./internal/daemon/", "./internal/mcpserver/")
+}
+
+// CalDAV runs the CalDAV store suite against a Mailwright container, plus
+// the container harness's own tests. The image comes from
+// $CHAINMAIL_MAILWRIGHT_IMAGE, best pinned by digest; it is pulled from ECR,
+// which only incus can reach, so CI does not run this suite. Without the
+// variable the container tests skip.
+func (Test) CalDAV() error {
+	st.Deps(Prereq.All)
+
+	return sh.RunV("go", calDAVTestArgs()...)
+}
+
+// calDAVTestArgs is the go command line of Test.CalDAV.
+func calDAVTestArgs() []string {
+	return []string{
+		"test", "-race", "-tags", "caldav", "-count=1", "-timeout", "15m",
+		"-p", parallelism(), "-parallel", parallelism(),
+		"./internal/calstore/caldav/", "./internal/testutil/mailwright/",
+	}
 }
 
 // Build compiles bin/chainmail without cgo.

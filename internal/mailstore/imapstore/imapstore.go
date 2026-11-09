@@ -98,7 +98,7 @@ func Dial(ctx context.Context, ep provider.Endpoint, creds auth.Credentials, opt
 // handshake secures conn and returns a client on it, with unilateral, when
 // set, hearing what the server reports unprompted.
 func handshake(ctx context.Context, conn net.Conn, ep provider.Endpoint, roots *x509.CertPool, unilateral *imapclient.UnilateralDataHandler) (*imapclient.Client, error) {
-	tlsConfig := &tls.Config{ServerName: ep.Host, RootCAs: roots, MinVersion: tls.VersionTLS12}
+	tlsConfig := &tls.Config{ServerName: ep.TLSServerName(), RootCAs: roots, MinVersion: tls.VersionTLS12}
 	switch ep.Security {
 	case provider.SecurityTLS:
 		tlsConn := tls.Client(conn, tlsConfig)

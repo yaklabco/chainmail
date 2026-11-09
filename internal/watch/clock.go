@@ -41,10 +41,12 @@ const (
 // backoffBase is the first reconnect wait, before jitter.
 const backoffBase = time.Second
 
-// backoff is the wait before reconnect attempt n (0-based): 1s doubling,
-// capped at 5 minutes, scaled by 0.8 + 0.4*jitter. A negative n counts as
-// 0, and jitter is clamped to [0, 1].
-func backoff(n int, jitter float64) time.Duration {
+// Backoff is the wait before retry attempt n (0-based), the watcher's
+// reconnect and the rule runner's retry alike: 1s doubling, capped at 5
+// minutes, scaled by 0.8 + 0.4*jitter. A negative n counts as 0, and
+// jitter is clamped to [0, 1]. Callers pass a uniform random jitter, such
+// as rand.Float64().
+func Backoff(n int, jitter float64) time.Duration {
 	d := backoffBase
 	for i := 0; i < n && d < maxBackoff; i++ {
 		d *= 2

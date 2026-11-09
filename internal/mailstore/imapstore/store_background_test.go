@@ -3,6 +3,7 @@ package imapstore
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -230,6 +231,39 @@ func TestStreamPartIgnoresTheBackgroundMark(t *testing.T) {
 	_, rc, err := s.StreamPart(mailstore.WithBackground(t.Context()), r, "")
 	if err != nil {
 		t.Fatalf("background StreamPart with an idle connection = %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Error(err)
+	}
+}
+
+// StreamPartBackground is admitted as background work: on a pool with no
+// connection to spare it fails at once with ErrBusy, with no backoff and
+// no new login, instead of queueing beside foreground calls. With an idle
+// connection it opens the part.
+func TestStreamPartBackgroundIsBusyWhenThePoolIsFull(t *testing.T) {
+	t.Parallel()
+	var _ mailstore.BackgroundPartStreamer = (*Store)(nil)
+	s, logins, backoffs := backgroundStore(t, 1, nil, nil)
+	r, release := holdConn(t, s)
+	before := logins.Load()
+	if _, _, err := s.StreamPartBackground(backgroundCtx(t), r, ""); !errors.Is(err, mailstore.ErrBusy) {
+		t.Errorf("StreamPartBackground on a full pool = %v, want ErrBusy at once", err)
+	}
+	if n := backoffs.Load(); n != 0 {
+		t.Errorf("backoffs = %d, want none", n)
+	}
+	if n := logins.Load(); n != before {
+		t.Errorf("logins = %d, want %d", n, before)
+	}
+	release()
+	_, rc, err := s.StreamPartBackground(t.Context(), r, "")
+	if err != nil {
+		t.Fatalf("StreamPartBackground with an idle connection = %v", err)
+	}
+	data, err := io.ReadAll(rc)
+	if err != nil || string(data) != backgroundRaw {
+		t.Errorf("read %q, %v, want the message", data, err)
 	}
 	if err := rc.Close(); err != nil {
 		t.Error(err)

@@ -62,7 +62,7 @@ func (a *Account) rereadUnreadable(ctx context.Context) error {
 		b := a.rereadQueue[0]
 		if !skip[b.src.Folder] {
 			epoch := a.writeEpoch()
-			rows, unreadable, err := a.fetchIsolating(ctx, b.src, b.uids)
+			got, err := a.fetchIsolating(ctx, b.src, b.uids)
 			switch {
 			case errors.Is(err, mailstore.ErrStaleRef), errors.Is(err, mailstore.ErrNotFound):
 				// Left to the folder's gap or drop.
@@ -78,7 +78,7 @@ func (a *Account) rereadUnreadable(ctx context.Context) error {
 			case err != nil:
 				return err
 			default:
-				if err := a.commitReread(ctx, epoch, b, rows, unreadable); err != nil {
+				if err := a.commitReread(ctx, epoch, b, got.rows, got.unreadable); err != nil {
 					return err
 				}
 			}

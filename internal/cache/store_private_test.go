@@ -106,37 +106,3 @@ func TestOpenRecreatesPrivate(t *testing.T) {
 	wantMode(t, path+"-wal", 0o600, true)
 	wantMode(t, path+"-shm", 0o600, true)
 }
-
-func TestMakePrivateTightensMarker(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(permissiveDir(t), "cache.db")
-	writeMode(t, markerPath(path), nil, 0o644)
-	writeMode(t, path, nil, 0o640)
-	if err := makePrivate(path); err != nil {
-		t.Fatalf("makePrivate: %v", err)
-	}
-	wantMode(t, markerPath(path), 0o600, true)
-	wantMode(t, path, 0o600, true)
-}
-
-func TestMakePrivateCreatesAbsentDatabase(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(permissiveDir(t), "cache.db")
-	if err := makePrivate(path); err != nil {
-		t.Fatalf("makePrivate: %v", err)
-	}
-	wantMode(t, path, 0o600, true)
-	// Nothing else is created: SQLite makes its sidecars itself.
-	for _, p := range []string{path + "-wal", path + "-shm", markerPath(path)} {
-		if _, err := os.Stat(p); !os.IsNotExist(err) {
-			t.Errorf("%s exists after makePrivate: %v", filepath.Base(p), err)
-		}
-	}
-}
-
-func TestMakePrivateMissingDirectory(t *testing.T) {
-	t.Parallel()
-	if err := makePrivate(filepath.Join(t.TempDir(), "absent", "cache.db")); err == nil {
-		t.Fatal("makePrivate in a missing directory succeeded, want an error")
-	}
-}

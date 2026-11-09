@@ -766,3 +766,201 @@ func TestMCPItemsAgainstDovecot(t *testing.T) {
 		}
 	}
 }
+
+// mcpRuleMail is a bill from the vendor the rules test files, with subject
+// and Message-ID <id@example.org>, dated date.
+func mcpRuleMail(subject, id string, date time.Time) string {
+	return "From: Vendor Billing <billing@vendor.example>\r\nTo: rules@example.test\r\nSubject: " + subject + "\r\n" +
+		"Message-ID: <" + id + "@example.org>\r\nDate: " + date.Format(time.RFC1123Z) + "\r\n\r\nYour bill is ready.\r\n"
+}
+
+// mcpRuleOut is a rule in create_rule's structured output, as far as the
+// rules test reads it.
+type mcpRuleOut struct {
+	ID          string                     `json:"id"`
+	Name        string                     `json:"name"`
+	Description struct{ Untrusted string } `json:"description"`
+	Query       struct{ Untrusted string } `json:"query"`
+	Accounts    []string                   `json:"accounts"`
+	Enabled     bool                       `json:"enabled"`
+	Revision    int64                      `json:"revision"`
+}
+
+// mcpRunOut is one run in run_rule's structured output.
+type mcpRunOut struct {
+	ID      int64  `json:"id"`
+	RuleID  string `json:"rule_id"`
+	Account string `json:"account"`
+	Trigger string `json:"trigger"`
+	Matched int64  `json:"matched"`
+	Applied int64  `json:"applied"`
+	Skipped int64  `json:"skipped"`
+	Failed  int64  `json:"failed"`
+	Outcome string `json:"outcome"`
+}
+
+// mcpDryRunOut is dry_run_rule's structured output.
+type mcpDryRunOut struct {
+	Accounts []struct {
+		Account string `json:"account"`
+		Matched int64  `json:"matched"`
+		Skipped int64  `json:"skipped"`
+		Matches []struct {
+			Ref     string                     `json:"ref"`
+			Subject struct{ Untrusted string } `json:"subject"`
+		} `json:"matches"`
+		Actions []struct {
+			Kind string `json:"kind"`
+		} `json:"actions"`
+		Reason string `json:"reason"`
+	} `json:"accounts"`
+}
+
+// TestMCPRulesAgainstDovecot has an agent work with a rule the way spec
+// section 8.3 describes, through the built binary run as chainmail mcp
+// against a daemon whose cache holds a Dovecot mailbox. It dry-runs an
+// unsaved rule first, creates it, runs it with max 1 (capped), dry-runs it
+// by ID (one match the act-once table would skip), and runs it again,
+// which acts on the rest. Rule text comes back wrapped as untrusted. Each
+// call is audited under client kind mcp, each action under client kind
+// rule, and no audit row holds the description, the query's address or a
+// subject.
+func TestMCPRulesAgainstDovecot(t *testing.T) {
+	bin := buildChainmail(t)
+	dove := startDovecot(t)
+	const (
+		user        = "rules@example.test"
+		description = "Flag every vendor bill"
+		query       = "from:billing@vendor.example"
+	)
+	now := time.Now()
+	for i, subject := range []string{"Bill 101", "Bill 102"} {
+		date := now.Add(time.Duration(i-3) * 24 * time.Hour)
+		if _, err := dove.Append(user, "INBOX", mcpRuleMail(subject, fmt.Sprintf("bill%d", i), date), date); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := dove.Append(user, "INBOX", invoice, now); err != nil {
+		t.Fatal(err)
+	}
+	h := daemontest.Start(t, fmt.Sprintf(mcpCacheConfig, user, dove.Endpoint.Port), daemontest.Options{
+		RootCAs: dove.CA.Pool, Watch: true, Cache: true, Secrets: map[string]string{"accounts/dove": dovecot.Password},
+	})
+	waitDoveCache(t, h)
+	s := connectMCP(t, bin, h.Socket)
+
+	definition := map[string]any{
+		"name": "vendor-bills", "description": description, "accounts": []string{"dove"},
+		"query": query, "actions": []map[string]any{{"kind": "flag"}},
+	}
+	dryRun := func(step string, args map[string]any, matched, skipped int64) {
+		t.Helper()
+		var out mcpDryRunOut
+		s.call("dry_run_rule", args, &out)
+		if len(out.Accounts) != 1 {
+			t.Fatalf("%s: dry_run_rule = %+v, want one account", step, out)
+		}
+		a := out.Accounts[0]
+		if a.Account != "dove" || a.Reason != "" || a.Matched != matched || a.Skipped != skipped {
+			t.Errorf("%s: dry run %+v, want dove with %d matched, %d skipped and no reason", step, a, matched, skipped)
+		}
+		var subjects []string
+		for _, m := range a.Matches {
+			subjects = append(subjects, m.Subject.Untrusted)
+		}
+		slices.Sort(subjects)
+		if !slices.Equal(subjects, []string{"Bill 101", "Bill 102"}) {
+			t.Errorf("%s: dry run matches %q, want both bills, subjects wrapped as untrusted", step, subjects)
+		}
+		if len(a.Actions) != 1 || a.Actions[0].Kind != "flag" {
+			t.Errorf("%s: dry run actions %+v, want flag", step, a.Actions)
+		}
+	}
+	runRule := func(step string, args map[string]any) mcpRunOut {
+		t.Helper()
+		var out struct {
+			Runs []mcpRunOut `json:"runs"`
+		}
+		s.call("run_rule", args, &out)
+		if len(out.Runs) != 1 || out.Runs[0].Account != "dove" || out.Runs[0].Trigger != "manual" || out.Runs[0].ID == 0 {
+			t.Fatalf("%s: run_rule = %+v, want one manual run on dove", step, out)
+		}
+		return out.Runs[0]
+	}
+
+	// 1. The agent dry-runs the unsaved rule, as the tool descriptions ask.
+	dryRun("unsaved", map[string]any{"definition": definition, "trigger": "manual"}, 2, 0)
+
+	// 2. It creates the rule. Its description and query come back untrusted.
+	var created struct {
+		Rule mcpRuleOut `json:"rule"`
+	}
+	s.call("create_rule", definition, &created)
+	r := created.Rule
+	if !strings.HasPrefix(r.ID, "ru_") || r.Name != "vendor-bills" || !r.Enabled || r.Revision != 1 || !slices.Equal(r.Accounts, []string{"dove"}) {
+		t.Fatalf("create_rule = %+v, want an enabled rule vendor-bills on dove at revision 1", r)
+	}
+	if r.Description.Untrusted != description || r.Query.Untrusted != query {
+		t.Errorf("create_rule description %q, query %q, want them wrapped as untrusted", r.Description.Untrusted, r.Query.Untrusted)
+	}
+
+	// 3. It runs the rule by name with max 1: one bill, outcome capped.
+	first := runRule("max 1", map[string]any{"rule": "vendor-bills", "max": 1})
+	if first.RuleID != r.ID || first.Applied != 1 || first.Failed != 0 || first.Outcome != "capped" {
+		t.Errorf("run with max 1 = %+v, want 1 applied, outcome capped", first)
+	}
+
+	// 4. A dry run by ID counts the bill already flagged as skipped.
+	dryRun("after one run", map[string]any{"rule": r.ID}, 2, 1)
+
+	// 5. Run again: the other bill, and the first is skipped.
+	second := runRule("again", map[string]any{"rule": r.ID})
+	if second.Applied != 1 || second.Skipped != 1 || second.Failed != 0 || second.Outcome != "ok" {
+		t.Errorf("second run = %+v, want 1 applied, 1 skipped, outcome ok", second)
+	}
+
+	// 6. Both bills are flagged on the server, and nothing else is.
+	resp, err := h.Client.Message.Search(t.Context(), connect.NewRequest(&chainmailv1.SearchRequest{
+		QueryString: "is:starred", Accounts: []string{"dove"}, Limit: 10, Source: "server",
+	}))
+	if err != nil {
+		t.Fatalf("Search is:starred: %v", err)
+	}
+	var flagged []string
+	for _, row := range resp.Msg.GetRows() {
+		flagged = append(flagged, row.GetSubject().GetUntrusted())
+	}
+	slices.Sort(flagged)
+	if !slices.Equal(flagged, []string{"Bill 101", "Bill 102"}) {
+		t.Errorf("flagged on the server: %q, want both bills", flagged)
+	}
+
+	// 7. The audit log.
+	byAction := map[string]int{}
+	actions := 0
+	for _, row := range h.AuditRows(t) {
+		line := fmt.Sprintf("%+v", row)
+		for _, text := range []string{description, "billing@vendor.example", "Bill 10"} {
+			if strings.Contains(line, text) {
+				t.Errorf("audit row %s holds %q", line, text)
+			}
+		}
+		switch row.Client {
+		case "mcp":
+			byAction[row.Action]++
+		case "rule":
+			actions++
+			if row.Action != "flags" || row.Result != "ok" || !strings.Contains(row.Targets, "rule="+r.ID) || !strings.Contains(row.Targets, "run=") {
+				t.Errorf("rule audit row %s, want a flags row naming rule %s and a run", line, r.ID)
+			}
+		}
+	}
+	for action, want := range map[string]int{"rule.dry_run": 2, "rule.create": 1, "rule.run": 2} {
+		if byAction[action] != want {
+			t.Errorf("%d %s rows under client mcp, want %d (rows by action: %v)", byAction[action], action, want, byAction)
+		}
+	}
+	if actions != 2 {
+		t.Errorf("%d audit rows under client rule, want 2, one flags row per bill", actions)
+	}
+}

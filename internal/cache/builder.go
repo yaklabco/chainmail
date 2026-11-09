@@ -79,7 +79,7 @@ func (a *Account) openGroup(ctx context.Context) (int64, error) {
 	if err := a.track(ctx); err != nil {
 		return 0, err
 	}
-	a.applied.Store(acked)
+	a.setApplied(acked)
 	return acked, nil
 }
 
@@ -106,7 +106,7 @@ func (a *Account) build(ctx context.Context, pos int64) (int64, error) {
 	if err := a.o.Log.Ack(ctx, a.group, next); err != nil {
 		return pos, err
 	}
-	a.applied.Store(next)
+	a.setApplied(next)
 	// A folder skipped in error comes back with a status event; wake the
 	// backfill so it looks again.
 	if slices.ContainsFunc(seg, func(e watch.Event) bool { return e.Kind == watch.KindStatus }) {
@@ -209,7 +209,13 @@ func (a *Account) planSegment(ctx context.Context, seg []watch.Event, progress m
 
 // apply applies one segment: it plans against the current progress,
 // fetches new headers with no lock held, then writes under wmu. A drop
-// that ran during the fetch makes it plan and fetch again.
+// that ran during the fetch makes it plan and fetch again. Once the rows
+// are written, it reads the new messages' invite parts, with wmu
+// released, and hands them to OnInvites (readInvites), each with the time
+// of its message's new event. A segment applied again after a failure
+// reads them again: OnInvites must be idempotent. A failure to queue the
+// deferred parts (OnDeferredInvites) fails the segment, which is then
+// applied again.
 func (a *Account) apply(ctx context.Context, seg []watch.Event) error {
 	if len(seg) == 0 {
 		return nil
@@ -232,8 +238,11 @@ func (a *Account) apply(ctx context.Context, seg []watch.Event) error {
 			plan.unreadable[src] = append(plan.unreadable[src], uids...)
 		}
 		done, err := a.commitSegment(ctx, epoch, plan, got.rows)
-		if err != nil || done {
+		if err != nil {
 			return err
+		}
+		if done {
+			return a.readInvites(ctx, got.invites, got.tooLarge, newMailTimes(seg))
 		}
 	}
 }
@@ -246,6 +255,11 @@ type newMail struct {
 	unreadable map[mailstore.Source][]uint32
 	// rewalk lists the folders skipped in error, as segmentPlan.rewalk.
 	rewalk map[string]skipped
+	// invites and tooLarge are the rows' invite parts to read and the
+	// messages whose invite parts are over the limit, as headerBatch has
+	// them.
+	invites  []inviteCandidate
+	tooLarge int
 }
 
 // fetchNew fetches the headers of a segment's new messages, one batch per
@@ -277,16 +291,18 @@ func (a *Account) fetchNew(ctx context.Context, fetch map[string][]uint32, progr
 			continue
 		}
 		src := mailstore.Source{Folder: folder, UIDValidity: progress[folder].UIDValidity}
-		rows, unreadable, err := a.fetchIsolating(ctx, src, fetch[folder])
+		got, err := a.fetchIsolating(ctx, src, fetch[folder])
 		if errors.Is(err, mailstore.ErrStaleRef) {
 			continue
 		}
 		if err != nil {
 			return newMail{}, err
 		}
-		out.rows = append(out.rows, rows...)
-		if len(unreadable) > 0 {
-			out.unreadable[src] = unreadable
+		out.rows = append(out.rows, got.rows...)
+		out.invites = append(out.invites, got.invites...)
+		out.tooLarge += got.tooLarge
+		if len(got.unreadable) > 0 {
+			out.unreadable[src] = got.unreadable
 		}
 	}
 	return out, nil

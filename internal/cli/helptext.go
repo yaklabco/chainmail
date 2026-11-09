@@ -22,7 +22,9 @@ var examples = map[string]string{
   chainmail attachment cm1:work:INBOX:7:42 2 --out - > invoice.pdf`,
 	"chainmail audit": `  chainmail audit
   chainmail audit --since 2h --action send
-  chainmail audit --account work --limit 20`,
+  chainmail audit --account work --limit 20
+  # what rules did today
+  chainmail audit --client rule`,
 	"chainmail auth login":  `  chainmail auth login gmail`,
 	"chainmail cache evict": `  chainmail cache evict`,
 	"chainmail cache rebuild": `  # rebuild every account whose cache is enabled
@@ -30,6 +32,30 @@ var examples = map[string]string{
   chainmail cache rebuild --account work --folder INBOX`,
 	"chainmail cache status": `  chainmail cache status
   chainmail cache status --account work --account gmail --output json`,
+	"chainmail calendars": `  chainmail calendars
+  chainmail calendars --account work --output json`,
+	"chainmail agenda": `  chainmail agenda
+  chainmail agenda --days 1
+  chainmail agenda --account work --from 2026-11-10 --to 2026-11-17 --output json
+  # a working day in another zone
+  chainmail agenda --from "2026-11-10 09:00" --to "2026-11-10 17:00" --tz Europe/London`,
+	"chainmail event": `  chainmail event ce_01jcb7m2k9r8q3v4w5x6y7z8a9
+  # one instance of a recurring series
+  chainmail event ce_01jcb7m2k9r8q3v4w5x6y7z8a9@20261110T140000Z --output json`,
+	"chainmail event create": `  chainmail event create --account work --title "Planning" --start "2026-11-10 09:00" --duration 30m --attendee alice@example.com
+  chainmail event create --title "Offsite" --all-day --start 2026-11-11 --end 2026-11-13
+  chainmail event create --title "Gym" --start "2026-11-10 07:00" --end "2026-11-10 08:00" --rrule "FREQ=WEEKLY;BYDAY=TU" --tz Europe/London`,
+	"chainmail event edit": `  chainmail event edit ce_01jcb7m2k9r8q3v4w5x6y7z8a9 --start "2026-11-10 10:00"
+  # refuse the change if the event changed since it was read
+  chainmail event edit ce_01jcb7m2k9r8q3v4w5x6y7z8a9 --location "Room 5" --etag '"e1"'`,
+	"chainmail event cancel": `  chainmail event cancel ce_01jcb7m2k9r8q3v4w5x6y7z8a9`,
+	"chainmail invites": `  chainmail invites
+  chainmail invites --account work --output json`,
+	"chainmail invite": `  chainmail invite ce_01jcb7m2k9r8q3v4w5x6y7z8a9`,
+	"chainmail rsvp": `  chainmail rsvp ce_01jcb7m2k9r8q3v4w5x6y7z8a9 accept
+  chainmail rsvp ce_01jcb7m2k9r8q3v4w5x6y7z8a9@20261110T140000Z decline --comment "Away that week"`,
+	"chainmail freebusy": `  chainmail freebusy --days 3
+  chainmail freebusy --account work --from 2026-11-10 --to 2026-11-10 alice@example.com bob@example.com`,
 	"chainmail copy": `  chainmail copy cm1:work:INBOX:7:42 --to Receipts`,
 	"chainmail daemon": `  # production runs under systemd; a development daemon runs as you
   chainmail daemon --dev --config ./config.toml --state-dir ./state --vault-key-file ./vault-key`,
@@ -101,6 +127,34 @@ var examples = map[string]string{
 	"chainmail move": `  chainmail move cm1:work:INBOX:7:42 --to Receipts`,
 	"chainmail reply": `  chainmail reply cm1:work:INBOX:7:42 --body "Thanks, paid."
   chainmail reply cm1:work:INBOX:7:42 --all --body-file reply.md --draft`,
+	"chainmail rule create": `  # file Stripe receipts as they arrive
+  chainmail rule create --name receipts --account gmail --query 'from:stripe.com subject:receipt' --on-new --action label=Receipts --action archive
+  # archive read inbox mail older than 30 days, once a day
+  chainmail rule create --name inbox-cleanup --query 'in:inbox is:read older_than:30d' --every 1d --action archive
+  chainmail rule create -f receipts.toml`,
+	"chainmail rule delete":  `  chainmail rule delete receipts`,
+	"chainmail rule disable": `  chainmail rule disable receipts`,
+	"chainmail rule dry-run": `  chainmail rule dry-run receipts
+  # an unsaved rule, against the newest cached mail
+  chainmail rule dry-run -f receipts.toml --trigger new`,
+	"chainmail rule edit": `  chainmail rule edit receipts --priority 10 --stop
+  chainmail rule edit inbox-cleanup --at 07:00
+  # change only the keys the file holds
+  chainmail rule edit receipts -f receipts.toml`,
+	"chainmail rule enable": `  chainmail rule enable receipts`,
+	"chainmail rule list": `  chainmail rule list
+  chainmail rule list --account gmail --disabled`,
+	"chainmail rule restore": `  # find the ID of a deleted rule, then restore it by that ID
+  chainmail rule list --deleted
+  chainmail rule restore ru_01jcb7m2k9r8q3v4w5x6y7z8a9`,
+	"chainmail rule run": `  # work through a backlog 100 messages at a time
+  chainmail rule run inbox-cleanup --max 100`,
+	"chainmail rule runs": `  chainmail rule runs
+  chainmail rule runs receipts --outcome failed`,
+	"chainmail rule status": `  chainmail rule status`,
+	"chainmail rule show": `  chainmail rule show receipts --history
+  # save a rule as a file to edit
+  chainmail rule show receipts --toml > receipts.toml`,
 	"chainmail search": `  chainmail search invoice from:acme newer_than:30d
   chainmail search 'subject:"q3 report" OR has:attachment' --account gmail
   chainmail search is:unread in:inbox --count
@@ -125,7 +179,11 @@ var examples = map[string]string{
   # print everything logged for one inbox, then exit
   chainmail watch --since 0 --account work --in inbox --once
   # changes to an item and the items below it, and new mail on their threads
-  chainmail watch --kind item,item_mail --item it_01jcb7m2k9r8q3v4w5x6y7z8a9`,
+  chainmail watch --kind item,item_mail --item it_01jcb7m2k9r8q3v4w5x6y7z8a9
+  # rule changes, and work items coming due
+  chainmail watch --kind rule,item_due_soon,item_due,item_overdue
+  # new invites, changes to events and replies to events James organizes
+  chainmail watch --group calendar --kind invite,event_changed,event_cancelled,invite_reply`,
 	"chainmail watch groups":        `  chainmail watch groups`,
 	"chainmail watch groups delete": `  chainmail watch groups delete triage`,
 	"chainmail watch status":        `  chainmail watch status`,

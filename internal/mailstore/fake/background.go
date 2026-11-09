@@ -13,9 +13,10 @@ import (
 // do when no connection is free for background work: ListFolders,
 // FetchSummaries and Thread return it, as do FetchHeaders and
 // SearchFolders, FetchMessages gives it in every item, and Search gives it
-// in every source of a search with bounds and as its own error otherwise.
-// StreamPart, the writes and the watch methods ignore it, as imapstore's
-// StreamPart and OpenWatch ignore the mark.
+// in every source of a search with bounds and as its own error otherwise,
+// and StreamPartBackground returns it whatever its context. StreamPart,
+// the writes and the watch methods ignore it, as imapstore's StreamPart
+// and OpenWatch ignore the mark.
 func (s *Store) SetBusy(on bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

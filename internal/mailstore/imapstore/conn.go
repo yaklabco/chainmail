@@ -249,7 +249,8 @@ func (c *conn) SelectFolder(ctx context.Context, folder string, writable bool) e
 
 // selectFolder sends SELECT, or EXAMINE unless writable, with (CONDSTORE)
 // when condStore, even if folder is open already, and returns the answer.
-// It keeps what the answer reports on c.
+// It keeps what the answer reports on c. A folder the server says does
+// not exist is a mailstore.FolderGoneError naming it.
 func (c *conn) selectFolder(ctx context.Context, folder string, writable, condStore bool) (*imap.SelectData, error) {
 	var data *imap.SelectData
 	sent := c.now()
@@ -262,7 +263,7 @@ func (c *conn) selectFolder(ctx context.Context, folder string, writable, condSt
 		// A failed SELECT or EXAMINE leaves no folder open.
 		c.forget()
 		if missingFolder(err) {
-			return nil, fmt.Errorf("%w: no folder %q", mailstore.ErrNotFound, folder)
+			return nil, &mailstore.FolderGoneError{Folder: folder}
 		}
 		return nil, err
 	}

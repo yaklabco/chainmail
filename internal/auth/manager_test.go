@@ -248,7 +248,7 @@ func TestRejectionBeforeFinishLoginIsIgnored(t *testing.T) {
 	f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
 	f.set(t, auth.RefreshTokenSecret("gm"), oauthtest.RefreshToken)
 	old := f.credentials(t, "gm")
-	ch, err := f.m.BeginLogin("gm")
+	ch, err := f.m.BeginLogin(t.Context(), "gm")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +363,7 @@ func TestBeginLogin(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
-	ch, err := f.m.BeginLogin("gm")
+	ch, err := f.m.BeginLogin(t.Context(), "gm")
 	if err != nil {
 		t.Fatalf("BeginLogin: %v", err)
 	}
@@ -397,14 +397,14 @@ func TestBeginLogin(t *testing.T) {
 func TestBeginLoginNeedsClientSecret(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	_, err := f.m.BeginLogin("gm")
+	_, err := f.m.BeginLogin(t.Context(), "gm")
 	requireHint(t, err, "chainmail secret set oauth_clients/g")
 }
 
 func TestBeginLoginRejectsPasswordAccount(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	if _, err := f.m.BeginLogin("host"); !errors.Is(err, auth.ErrNotOAuth) {
+	if _, err := f.m.BeginLogin(t.Context(), "host"); !errors.Is(err, auth.ErrNotOAuth) {
 		t.Errorf("err = %v, want ErrNotOAuth", err)
 	}
 }
@@ -413,7 +413,7 @@ func TestFinishLogin(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
-	ch, err := f.m.BeginLogin("gm")
+	ch, err := f.m.BeginLogin(t.Context(), "gm")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +483,7 @@ func TestFinishLoginErrors(t *testing.T) {
 			f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
 			redirect := ""
 			if tt.begin {
-				ch, err := f.m.BeginLogin("gm")
+				ch, err := f.m.BeginLogin(t.Context(), "gm")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -516,7 +516,7 @@ func TestFinishLoginUsedCodeEndsLogin(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
-	ch, err := f.m.BeginLogin("gm")
+	ch, err := f.m.BeginLogin(t.Context(), "gm")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,7 +535,7 @@ func TestFinishLoginBadClientKeepsLogin(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	f.set(t, auth.ClientSecret("g"), "wrong-client-secret")
-	ch, err := f.m.BeginLogin("gm")
+	ch, err := f.m.BeginLogin(t.Context(), "gm")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -553,7 +553,7 @@ func TestFinishLoginUnparsableURLHidesCode(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
-	if _, err := f.m.BeginLogin("gm"); err != nil {
+	if _, err := f.m.BeginLogin(t.Context(), "gm"); err != nil {
 		t.Fatal(err)
 	}
 	err := f.m.FinishLogin(t.Context(), "gm", "http://%zz/?code="+oauthtest.Code)
@@ -648,7 +648,7 @@ func TestTokenEndpointErrorsHideBodies(t *testing.T) {
 	}
 	requireNoSecrets(t, "refresh error", err.Error(), secrets...)
 
-	ch, err := f.m.BeginLogin("gm")
+	ch, err := f.m.BeginLogin(t.Context(), "gm")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -699,7 +699,7 @@ func TestTokenExchangeOutageIsUnavailable(t *testing.T) {
 	ep, _ := cannedTokenServer(t, http.StatusServiceUnavailable, `{}`)
 	f := newFixtureAt(t, ep)
 	f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
-	ch, err := f.m.BeginLogin("gm")
+	ch, err := f.m.BeginLogin(t.Context(), "gm")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -726,7 +726,7 @@ func TestManagerPrintsNoSecrets(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	f.set(t, auth.ClientSecret("g"), oauthtest.ClientSecret)
-	ch, err := f.m.BeginLogin("gm")
+	ch, err := f.m.BeginLogin(t.Context(), "gm")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -857,7 +857,7 @@ func TestFinishLoginKeepsNewerLogin(t *testing.T) {
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		once.Do(func() {
 			var err error
-			if second, err = m.BeginLogin("gm"); err != nil {
+			if second, err = m.BeginLogin(t.Context(), "gm"); err != nil {
 				t.Errorf("second BeginLogin: %v", err)
 			}
 		})
@@ -865,7 +865,7 @@ func TestFinishLoginKeepsNewerLogin(t *testing.T) {
 	})
 	m = auth.NewManager(cfg, store, auth.WithOAuthEndpoint(srv.Endpoint()),
 		auth.WithHTTPClient(&http.Client{Transport: transport}))
-	first, err := m.BeginLogin("gm")
+	first, err := m.BeginLogin(t.Context(), "gm")
 	if err != nil {
 		t.Fatal(err)
 	}

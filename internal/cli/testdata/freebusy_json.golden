@@ -1,0 +1,1 @@
+{"self_busy":[{"start":"2026-11-10T14:00:00Z","end":"2026-11-10T15:00:00Z"},{"start":"2026-11-11T00:00:00Z","end":"2026-11-12T06:00:00Z"}],"people":[{"person":"alice@example.com","known":true,"busy":[{"start":"2026-11-10T16:00:00Z","end":"2026-11-10T17:00:00Z"}]},{"person":"bob@example.com","known":true,"busy":[]},{"person":"stranger@example.net","known":false,"busy":[]}]}

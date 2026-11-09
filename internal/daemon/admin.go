@@ -70,9 +70,11 @@ func (e *secretNameError) Unwrap() error { return vault.ErrInvalidName }
 var errNULPassword = errors.New("the password contains a NUL byte, which no login can send")
 
 // checkSecret allows the password of a configured password account and the
-// secret of a configured OAuth2 client. Refresh tokens are refused: only a
-// login writes one, after the provider issued it. A password may not hold a
-// NUL byte, which SASL PLAIN uses as its separator.
+// secret of a configured OAuth2 client. A client with an issuer is public:
+// chainmail never reads or sends its secret, but setting one is still
+// accepted, as it always was, and resets the accounts on it. Refresh tokens
+// are refused: only a login writes one, after the provider issued it. A
+// password may not hold a NUL byte, which SASL PLAIN uses as its separator.
 func (s *Server) checkSecret(name string, value []byte) error {
 	kind, rest, _ := strings.Cut(name, "/")
 	cfg := s.opts.Config
@@ -111,7 +113,7 @@ func (a *adminService) BeginAuthLogin(ctx context.Context, req *connect.Request[
 	account, loginErr := accountTarget(req.Msg.GetAccount())
 	var ch auth.Challenge
 	if loginErr == nil {
-		ch, loginErr = a.s.auth.BeginLogin(account)
+		ch, loginErr = a.s.auth.BeginLogin(ctx, account)
 	}
 	if err := a.s.record(ctx, c, audit.Entry{Account: account, Action: "auth.login.begin"}, loginErr); err != nil {
 		return nil, err
@@ -183,6 +185,8 @@ var (
 	// errAuditAccount has fixed text: the name is client-supplied bytes of any size.
 	errAuditAccount = &argError{msg: "unknown account", hint: "leave account empty for all accounts; run: chainmail accounts list"}
 	errAuditSince   = &argError{msg: "since is not a valid time", hint: "send a time between the years 1 and 9999"}
+	// errAuditClient has fixed text: the kind is client-supplied bytes of any size.
+	errAuditClient = &argError{msg: "invalid client kind", hint: "client kinds are lowercase letters, digits, dot, dash and underscore, such as cli, mcp or rule"}
 )
 
 // ReadAudit returns audit rows newest first, paged by before_id. Like
@@ -234,6 +238,9 @@ func (s *Server) auditQuery(req *chainmailv1.ReadAuditRequest) (audit.Query, err
 			return audit.Query{}, errAuditAccount
 		}
 	}
+	if client := req.GetClient(); client != "" && !clientKindRE.MatchString(client) {
+		return audit.Query{}, errAuditClient
+	}
 	since := s.opts.Now().Add(-defaultAuditWindow)
 	if ts := req.GetSince(); ts != nil {
 		if ts.CheckValid() != nil {
@@ -245,6 +252,7 @@ func (s *Server) auditQuery(req *chainmailv1.ReadAuditRequest) (audit.Query, err
 		Since:    since,
 		Account:  req.GetAccount(),
 		Action:   req.GetAction(),
+		Client:   req.GetClient(),
 		Limit:    limit,
 		BeforeID: req.GetBeforeId(),
 	}, nil

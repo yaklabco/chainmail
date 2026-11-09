@@ -236,6 +236,12 @@ type acctRig struct {
 	maxSize atomic.Int64
 	// onError is the OnError of the Accounts newAccount makes; set it, then renew.
 	onError func(error)
+	// onInvites is the OnInvites of the Accounts newAccount makes; set it,
+	// then renew.
+	onInvites func(context.Context, []FoundInvite)
+	// onDeferred is the OnDeferredInvites of the Accounts newAccount
+	// makes; set it, then renew.
+	onDeferred func(context.Context, []InviteCandidate) error
 
 	a      *Account
 	cancel context.CancelFunc
@@ -268,6 +274,7 @@ func (r *acctRig) newAccount() *Account {
 	return NewAccount(AccountOptions{
 		Account: r.acct, Settings: r.cacheSettings, MaxSize: r.maxSize.Load,
 		Store: r.store, Log: r.log, State: r.state, Mail: r.openMail, Clock: r.clock, OnError: r.onError,
+		OnInvites: r.onInvites, OnDeferredInvites: r.onDeferred,
 	})
 }
 

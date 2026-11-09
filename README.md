@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="website/static/img/mascot.png" alt="The chainmail gopher: a Go gopher in a chainmail coif and hauberk, holding a shield with a gold envelope" width="400" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/img/wordmark-dark.svg" />
+    <img src="docs/img/wordmark-light.svg" alt="chainmail" width="360" />
+  </picture>
 </p>
 
 <p align="center">
@@ -88,15 +91,28 @@ The [quick start](https://chainmail.sh/docs/getting-started/quick-start) goes on
 - [MCP](https://chainmail.sh/docs/agents/setup): `chainmail mcp` serves the tools to an AI agent over stdio.
 - [Watching and events](https://chainmail.sh/docs/guide/watching): IMAP IDLE and polling feed a durable event log, and a named group resumes where it stopped.
 - [The local cache](https://chainmail.sh/docs/concepts/cache): `cache.db`, indexed with SQLite FTS5, answers searches and reads when it is complete and fresh.
-- [Work items](https://chainmail.sh/docs/guide/items): a tree of items from objectives down to tasks, with mail threads linked to them.
+- [Work items](https://chainmail.sh/docs/guide/items): a tree of items from objectives down to tasks, with mail threads linked to them and events when they come due.
+- [Rules](https://chainmail.sh/docs/guide/rules): rules in `state.db` label, file, forward and archive mail as it arrives, on a schedule or on demand. They match with the search language against the cache, and each action is audited.
+- [Calendars](https://chainmail.sh/docs/guide/calendars): `calendars`, `agenda`, `event`, `invites`, `invite`, `rsvp` and `freebusy` read calendars and answer invites on Google accounts and CalDAV servers. `event create`, `event edit` and `event cancel` change events under the send policy.
 - [NixOS module](https://chainmail.sh/docs/operations/deploy): runs the daemon as its own system user, with the vault key passed as an encrypted systemd credential.
+
+## Calendars
+
+chainmail reads and answers calendars on Google accounts through the Google Calendar API, and on CalDAV servers such as Mailwright. The daemon syncs them into `calendar.db`, next to `cache.db`, every 5 minutes by default. Ten MCP tools give agents the same calls, such as `agenda`, `rsvp` and `create_event`.
+
+- Each account's `[accounts.<name>.calendar]` table sets `store` to `google`, `caldav` or `none`. A Google account that logs in with OAuth2 defaults to `google`, and every other account defaults to `none`.
+- The cache finds invites in the new mail of every watched account. On an account with store `none`, `chainmail rsvp` answers them with an iCalendar REPLY email to the organizer.
+- A Google account with store `google` asks for three calendar scopes. A token from before calendars lacks them, so mail keeps working and calendar calls fail with `AUTH_REQUIRED` until you run `chainmail auth login <account>`.
+- A Mailwright account uses the `custom` provider with `auth = "oauth2"` and an OAuth client that has an `issuer`, such as a Keycloak realm. Its calendar table sets `store = "caldav"` and the server's `url`.
+- The send policy checks every answer and every change that notifies anyone else. A held answer through the calendar changes nothing, and a held answer by email is saved to Drafts. A new event with an attendee off the allowlist becomes a draft event that invites no one, and you send its invitations from your calendar app.
+- `chainmail watch --kind invite,event_changed,event_cancelled,invite_reply` reports new invites and changes to your events.
 
 ## Documentation
 
 The manual is at [chainmail.sh](https://chainmail.sh).
 
 - [Getting started](https://chainmail.sh/docs/getting-started/install): install, a first daemon, accounts and connecting an agent.
-- [User guide](https://chainmail.sh/docs/guide/reading-and-searching): reading, sending, organizing, items, watching, the audit log and CLI settings.
+- [User guide](https://chainmail.sh/docs/guide/reading-and-searching): reading, sending, organizing, items, rules, calendars, watching, the audit log and CLI settings.
 - [Agents](https://chainmail.sh/docs/agents/setup): setting up an MCP client and working with mail as an agent.
 - [Operations](https://chainmail.sh/docs/operations/deploy): deploying, health checks, auth, upgrades, backups and troubleshooting.
 - [Reference](https://chainmail.sh/docs/reference/configuration): configuration, commands, MCP tools and exit codes.
@@ -109,5 +125,3 @@ chainmail is in active development. Releases are published on [GitHub](https://g
 ## License
 
 chainmail is released under the MIT license. See [LICENSE](LICENSE).
-
-The Go gopher was designed by Renée French and is licensed under CC BY 4.0. The chainmail gopher is a derivative work under the same license.
