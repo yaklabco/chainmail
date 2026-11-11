@@ -417,3 +417,50 @@ func mustResolve(t *testing.T, s *Server) []config.ResolvedAccount {
 	}
 	return accts
 }
+
+// Opening calendar.db recomputes James's role in the rows already stored,
+// with each account's own address, before anything reads them. A daemon
+// that judged James by every account's address stored the mw guest copy
+// of an event gm organizes as one James organizes.
+func TestOpenCalendarRederivesStoredRoles(t *testing.T) {
+	t.Parallel()
+	newStore, _, _ := calendarStores()
+	dir := filepath.Join(t.TempDir(), "cache")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old, err := calcache.Open(t.Context(), filepath.Join(dir, calcache.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := old.SetCalendars(t.Context(), "mw", []calendar.Calendar{{ID: "/cal/", Name: "Work", Primary: true}}, "/cal/"); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().Add(48 * time.Hour).Truncate(time.Hour)
+	ev := calendar.Event{
+		ProviderID: "p1", UID: "cross@x", Start: start, End: start.Add(time.Hour), Status: calendar.StatusConfirmed,
+		Organizer: &calendar.Person{Email: "me@gmail.com"},
+		Attendees: []calendar.Attendee{
+			{Person: calendar.Person{Email: "james@mw.example"}, PartStat: calendar.PartStatNeedsAction},
+			{Person: calendar.Person{Email: "me@gmail.com"}, PartStat: calendar.PartStatAccepted},
+		},
+	}
+	everyAccount := func(addr string) bool { return addr == "me@gmail.com" || addr == "james@mw.example" }
+	if err := old.Apply(t.Context(), "mw", "/cal/", calendar.Changes{Full: true, Upserts: []calendar.Event{ev}}, everyAccount, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, _ := newTestServerOptions(t, calendarConfig, Options{NewCalendarStore: newStore, CacheDir: dir, DisableCache: true})
+	s.openCalendar(t.Context())
+	defer s.closeCalendar()
+	row, err := s.calcache.Event(t.Context(), calendar.EventRef("mw", "/cal/", "p1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.IsOrganizer || row.MyPartStat != calendar.PartStatNeedsAction {
+		t.Errorf("mw guest copy: organizer %v, my partstat %q; want an invite", row.IsOrganizer, row.MyPartStat)
+	}
+}

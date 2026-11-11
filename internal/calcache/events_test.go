@@ -3,6 +3,7 @@ package calcache_test
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -608,5 +609,107 @@ func TestStatsAndReady(t *testing.T) {
 	}
 	if ready, err := s.Ready(ctx, "beta"); err != nil || ready {
 		t.Errorf("Ready(beta) = %v, %v; want false", ready, err)
+	}
+}
+
+// Rederive recomputes MyPartStat and IsOrganizer of an account's stored rows
+// with a new self, so rows a wider self stored are put right without a
+// full sync.
+func TestRederive(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := setup(t)
+	// The alias organizes it and invited James, listed first; the wide self
+	// counts both as James.
+	cross := single("cross", t0, t0.Add(time.Hour))
+	cross.Organizer = &calendar.Person{Email: "j@alias.example"}
+	cross.Attendees = []calendar.Attendee{
+		{Person: calendar.Person{Email: me}, PartStat: calendar.PartStatNeedsAction},
+		{Person: calendar.Person{Email: "j@alias.example"}, PartStat: calendar.PartStatAccepted},
+	}
+	apply(t, s, "work", calendar.Changes{Full: true, Upserts: []calendar.Event{cross, invited("asked", t0, calendar.PartStatNeedsAction)}})
+	row, err := s.Event(ctx, calendar.EventRef("acme", "work", "cross"))
+	if err != nil || !row.IsOrganizer {
+		t.Fatalf("before: %+v, %v; want the wide self's organizer", row, err)
+	}
+
+	alias := func(addr string) bool { return strings.EqualFold(addr, "j@alias.example") }
+	n, err := s.Rederive(ctx, "acme", alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("Rederive changed %d rows, want 2", n)
+	}
+	row, err = s.Event(ctx, calendar.EventRef("acme", "work", "cross"))
+	if err != nil || !row.IsOrganizer || row.MyPartStat != calendar.PartStatAccepted {
+		t.Errorf("cross for the alias = %+v, %v; want organizer, ACCEPTED", row, err)
+	}
+	row, err = s.Event(ctx, calendar.EventRef("acme", "work", "asked"))
+	if err != nil || row.IsOrganizer || row.MyPartStat != "" {
+		t.Errorf("asked for the alias = %+v, %v; want no part stat", row, err)
+	}
+
+	mine := func(addr string) bool { return strings.EqualFold(addr, me) }
+	if _, err := s.Rederive(ctx, "acme", mine); err != nil {
+		t.Fatal(err)
+	}
+	row, err = s.Event(ctx, calendar.EventRef("acme", "work", "cross"))
+	if err != nil || row.IsOrganizer || row.MyPartStat != calendar.PartStatNeedsAction {
+		t.Errorf("cross for James = %+v, %v; want an invite", row, err)
+	}
+	// Nothing to change is no write.
+	if n, err := s.Rederive(ctx, "acme", mine); err != nil || n != 0 {
+		t.Errorf("second Rederive = %d, %v; want 0", n, err)
+	}
+	// An account with no rows changes nothing.
+	if n, err := s.Rederive(ctx, "nobody", alias); err != nil || n != 0 {
+		t.Errorf("Rederive of an empty account = %d, %v", n, err)
+	}
+}
+
+// Rederive keys each write by the whole row: an override of a series gets
+// its own roles, a row with no organizer or attendees has none, and
+// another account's rows keep theirs.
+func TestRederiveOverridesAndOtherAccounts(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s := setup(t)
+	if err := s.SetCalendars(ctx, "beta", []calendar.Calendar{{ID: "work", Name: "Work", Access: calendar.AccessWrite, Primary: true}}, "work"); err != nil {
+		t.Fatal(err)
+	}
+	master := weekly("series", t0)
+	master.Organizer = &calendar.Person{Email: "boss@example.com"}
+	rid := t0.AddDate(0, 0, 7)
+	ov := override(master, rid, time.Hour)
+	ov.Organizer = &calendar.Person{Email: "j@alias.example"}
+	ov.Attendees = []calendar.Attendee{
+		{Person: calendar.Person{Email: me}, PartStat: calendar.PartStatTentative},
+		{Person: calendar.Person{Email: "j@alias.example"}, PartStat: calendar.PartStatAccepted},
+	}
+	ch := calendar.Changes{Full: true, Upserts: []calendar.Event{master, ov, single("bare", t0, t0.Add(time.Hour))}}
+	apply(t, s, "work", ch)
+	if err := s.Apply(ctx, "beta", "work", ch, self, t0); err != nil {
+		t.Fatal(err)
+	}
+
+	mine := func(addr string) bool { return strings.EqualFold(addr, me) }
+	n, err := s.Rederive(ctx, "acme", mine)
+	if err != nil || n != 1 {
+		t.Fatalf("Rederive = %d, %v; want only the override changed", n, err)
+	}
+	ovRef := calendar.InstanceRef(calendar.EventRef("acme", "work", "series"), rid)
+	if row, err := s.Event(ctx, ovRef); err != nil || row.IsOrganizer || row.MyPartStat != calendar.PartStatTentative {
+		t.Errorf("override = %+v, %v; want James's TENTATIVE, not organizer", row, err)
+	}
+	if row, err := s.Event(ctx, calendar.EventRef("acme", "work", "series")); err != nil || row.IsOrganizer || row.MyPartStat != "" {
+		t.Errorf("master = %+v, %v; want no role", row, err)
+	}
+	if row, err := s.Event(ctx, calendar.EventRef("acme", "work", "bare")); err != nil || row.IsOrganizer || row.MyPartStat != "" {
+		t.Errorf("bare = %+v, %v; want no role", row, err)
+	}
+	other := calendar.InstanceRef(calendar.EventRef("beta", "work", "series"), rid)
+	if row, err := s.Event(ctx, other); err != nil || !row.IsOrganizer {
+		t.Errorf("beta's override = %+v, %v; want the roles it was stored with", row, err)
 	}
 }

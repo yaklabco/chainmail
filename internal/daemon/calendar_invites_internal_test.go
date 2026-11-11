@@ -92,13 +92,17 @@ func newInviteRig(t *testing.T) *inviteRig {
 		Publish:   r.publish,
 		Poke:      r.poke,
 		StoreNone: func(account string) bool { return account == "none" },
-		Self:      func(addr string) bool { return strings.EqualFold(addr, "me@example.com") },
+		Self:      func(account, addr string) bool { return strings.EqualFold(addr, rigAddresses[account]) },
 		Now:       r.now,
 		ReadPart:  r.readPart,
 	})
 	r.hook = r.h.onInvites
 	return r
 }
+
+// rigAddresses is each rig account's own address: what the rig's hook
+// knows as James on that account.
+var rigAddresses = map[string]string{"none": "me@example.com", "other": "other@example.com"}
 
 // errPublish is the failure of a publish the rig fails.
 var errPublish = errors.New("publish failed")
@@ -245,6 +249,11 @@ func TestInviteHookPublishesOnlyNewRequestsNeedingAReply(t *testing.T) {
 			rows:  1,
 		},
 		{
+			name:   "another account's address organizes",
+			batch:  [][]cache.FoundInvite{{found("none", "msg-1", "REQUEST", inviteICS("REQUEST", "u1", 0, "other@example.com", "20261110T170000Z", "20261110T173000Z"))}},
+			events: 1, rows: 1,
+		},
+		{
 			name:  "ended",
 			batch: [][]cache.FoundInvite{{found("none", "msg-1", "REQUEST", inviteICS("REQUEST", "u1", 0, "ann@example.com", "20261101T170000Z", "20261101T173000Z"))}},
 			rows:  1,
@@ -365,14 +374,21 @@ url = "https://dav.example.com/"
 		t.Fatal("no hook with a calendar cache")
 	}
 	own := inviteICS("REQUEST", "u2", 0, "me@example.com", "20261110T170000Z", "20261110T173000Z")
+	// dav's address is someone else on host: an invite from dav is one.
+	fromDav := inviteICS("REQUEST", "u4", 0, "dav@example.com", "20261110T170000Z", "20261110T173000Z")
 	hook(t.Context(), []cache.FoundInvite{
 		found("host", "msg-1", "REQUEST", request("u1")),
 		found("host", "msg-2", "REQUEST", own),
 		found("dav", "msg-3", "REQUEST", request("u3")),
+		found("host", "msg-4", "REQUEST", fromDav),
 	})
 	evs := r.events()
-	if len(evs) != 1 || evs[0].Account != "host" || evs[0].Ref != calendar.MailInviteRef("host", "u1") {
-		t.Errorf("events = %+v, want one for host's u1", evs)
+	var refs []string
+	for _, ev := range evs {
+		refs = append(refs, ev.Account+" "+ev.Ref)
+	}
+	if want := []string{"host " + calendar.MailInviteRef("host", "u1"), "host " + calendar.MailInviteRef("host", "u4")}; !slices.Equal(refs, want) {
+		t.Errorf("events = %q, want %q", refs, want)
 	}
 	if p := r.pokesSoFar(); !slices.Equal(p, []string{"host", "dav"}) {
 		t.Errorf("pokes = %q, want [host dav]", p)
@@ -651,10 +667,10 @@ func TestInviteDueWhileAnyEventIsToCome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !r.h.due(inv, inviteNow) {
+	if !r.h.due("host", inv, inviteNow) {
 		t.Error("an invite with an override still to come is not due")
 	}
-	if r.h.due(inv, time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)) {
+	if r.h.due("host", inv, time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)) {
 		t.Error("an invite whose every event has ended is due")
 	}
 }

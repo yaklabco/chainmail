@@ -213,10 +213,11 @@ func (s *Server) newEvent(m *chainmailv1.CreateEventRequest, acct config.Resolve
 	if err != nil {
 		return calendar.Event{}, err
 	}
-	ev.Attendees = s.mergeAttendees(nil, people)
-	if hasOtherAttendees(ev, s.ownAddress) && !slices.ContainsFunc(ev.Attendees, func(a calendar.Attendee) bool { return strings.EqualFold(a.Email, acct.Address) }) {
-		self := calendar.Attendee{Person: *ev.Organizer, PartStat: calendar.PartStatAccepted, Role: "REQ-PARTICIPANT"}
-		ev.Attendees = append([]calendar.Attendee{self}, ev.Attendees...)
+	self := s.selfOf(acct.Name)
+	ev.Attendees = mergeAttendees(self, nil, people)
+	if hasOtherAttendees(ev, self) && !slices.ContainsFunc(ev.Attendees, func(a calendar.Attendee) bool { return strings.EqualFold(a.Email, acct.Address) }) {
+		organizer := calendar.Attendee{Person: *ev.Organizer, PartStat: calendar.PartStatAccepted, Role: "REQ-PARTICIPANT"}
+		ev.Attendees = append([]calendar.Attendee{organizer}, ev.Attendees...)
 	}
 	return ev, nil
 }
@@ -233,7 +234,8 @@ func derivedUID(account, key string) string {
 // create that finds the object already there (a retry after a lost
 // answer) reads it back and returns it.
 func (s *Server) createEvent(ctx context.Context, ca *calAccount, calID string, ev calendar.Event, entry *audit.Entry) (*chainmailv1.CreateEventResponse, error) {
-	notified := s.notified(ev.Attendees)
+	self := s.selfOf(ca.name)
+	notified := notifiedBy(self, ev.Attendees)
 	d := s.policy.CheckSend(ca.name, notified)
 	mode := calendar.NotifySend
 	if len(notified) > 0 && !d.Allowed {
@@ -250,13 +252,13 @@ func (s *Server) createEvent(ctx context.Context, ca *calAccount, calID string, 
 	ref := calendar.EventRef(ca.name, calID, created.ProviderID)
 	entry.Targets = append(entry.Targets, ref)
 	v := eventView{
-		ref: ref, account: ca.name, calendarID: calID, ev: created, myPartStat: selfPartStat(created, s.ownAddress),
+		ref: ref, account: ca.name, calendarID: calID, ev: created, myPartStat: selfPartStat(created, self),
 		isOrganizer: true, rrule: created.RRule, recurring: isSeries(created),
 	}
 	if row, err := s.calcache.Event(ctx, ref); err == nil && (created.ETag == "" || row.Event.ETag == created.ETag) {
 		v = viewOfRow(row)
 	}
-	out := &chainmailv1.CreateEventResponse{Event: eventProto(v, s.ownAddress)}
+	out := &chainmailv1.CreateEventResponse{Event: eventProto(v, self)}
 	if mode == calendar.NotifyNone {
 		heldTargets(entry, len(d.Blocked), d.TooMany)
 		out.Held = &chainmailv1.CalendarHeld{Hint: createHeldHint, Blocked: untrustedList(d.Blocked), TooMany: d.TooMany, EventRef: ref}
@@ -302,12 +304,13 @@ func (s *Server) existingEvent(ctx context.Context, ca *calAccount, calID, uid s
 	return calendar.Event{}, calstore.ErrExists
 }
 
-// notified is who a write to an event with attendees notifies: every
-// attendee but James.
-func (s *Server) notified(attendees []calendar.Attendee) []string {
+// notifiedBy is who a write to an event with attendees notifies: every
+// attendee but James on the account, as self knows him. James's other
+// accounts are notified like any guest.
+func notifiedBy(self func(string) bool, attendees []calendar.Attendee) []string {
 	var out []string
 	for _, a := range attendees {
-		if !s.ownAddress(a.Email) && !slices.ContainsFunc(out, func(o string) bool { return strings.EqualFold(o, a.Email) }) {
+		if !self(a.Email) && !slices.ContainsFunc(out, func(o string) bool { return strings.EqualFold(o, a.Email) }) {
 			out = append(out, a.Email)
 		}
 	}
@@ -418,12 +421,14 @@ func parseAttendees(list []string) ([]calendar.Person, error) {
 
 // mergeAttendees is the attendee list people asks for: an attendee who
 // was already on old keeps his entry (PARTSTAT, role), a new one needs to
-// answer. James's own entries on old are kept even when people leaves them
-// out, so an organizer's own acceptance survives.
-func (s *Server) mergeAttendees(old []calendar.Attendee, people []calendar.Person) []calendar.Attendee {
+// answer. James on the account, as self knows him, has accepted when new,
+// and his entries on old are kept even when people leaves them out, so an
+// organizer's own acceptance survives. James's other accounts are guests
+// who answer like anyone else.
+func mergeAttendees(self func(string) bool, old []calendar.Attendee, people []calendar.Person) []calendar.Attendee {
 	var out []calendar.Attendee
 	for _, a := range old {
-		if s.ownAddress(a.Email) && !slices.ContainsFunc(people, func(p calendar.Person) bool { return strings.EqualFold(p.Email, a.Email) }) {
+		if self(a.Email) && !slices.ContainsFunc(people, func(p calendar.Person) bool { return strings.EqualFold(p.Email, a.Email) }) {
 			out = append(out, a)
 		}
 	}
@@ -433,10 +438,10 @@ func (s *Server) mergeAttendees(old []calendar.Attendee, people []calendar.Perso
 			continue
 		}
 		ps := calendar.PartStatNeedsAction
-		if s.ownAddress(p.Email) {
+		if self(p.Email) {
 			ps = calendar.PartStatAccepted
 		}
-		out = append(out, calendar.Attendee{Person: p, PartStat: ps, Role: "REQ-PARTICIPANT", RSVP: !s.ownAddress(p.Email)})
+		out = append(out, calendar.Attendee{Person: p, PartStat: ps, Role: "REQ-PARTICIPANT", RSVP: !self(p.Email)})
 	}
 	return out
 }
@@ -523,7 +528,7 @@ func (h *calendarService) UpdateEvent(ctx context.Context, req *connect.Request[
 		if err != nil {
 			return nil, err
 		}
-		notified := s.notified(slices.Concat(audience, ev.Attendees, s.removalNotice(res)))
+		notified := notifiedBy(s.selfOf(ca.name), slices.Concat(audience, ev.Attendees, s.removalNotice(res)))
 		if d := s.policy.CheckSend(ca.name, notified); len(notified) > 0 && !d.Allowed {
 			heldTargets(entry, len(d.Blocked), d.TooMany)
 			return &chainmailv1.UpdateEventResponse{Held: &chainmailv1.CalendarHeld{
@@ -536,7 +541,7 @@ func (h *calendarService) UpdateEvent(ctx context.Context, req *connect.Request[
 			return nil, s.editError(ctx, ca, err)
 		}
 		s.syncAfterWrite(ctx, ca)
-		return &chainmailv1.UpdateEventResponse{Event: eventProto(s.writtenView(ctx, res, written), s.ownAddress)}, nil
+		return &chainmailv1.UpdateEventResponse{Event: eventProto(s.writtenView(ctx, res, written), s.selfOf(ca.name))}, nil
 	})
 }
 
@@ -566,7 +571,7 @@ func (h *calendarService) CancelEvent(ctx context.Context, req *connect.Request[
 		if err != nil {
 			return nil, err
 		}
-		notified := s.notified(slices.Concat(audience, s.removalNotice(res)))
+		notified := notifiedBy(s.selfOf(ca.name), slices.Concat(audience, s.removalNotice(res)))
 		if d := s.policy.CheckSend(ca.name, notified); len(notified) > 0 && !d.Allowed {
 			heldTargets(entry, len(d.Blocked), d.TooMany)
 			return &chainmailv1.CancelEventResponse{Held: &chainmailv1.CalendarHeld{
@@ -720,7 +725,7 @@ func (s *Server) removalNotice(res resolvedEvent) []calendar.Attendee {
 		return nil
 	}
 	o := res.organizer()
-	if o == nil || s.ownAddress(o.Email) {
+	if o == nil || s.selfOf(res.row.Account)(o.Email) {
 		return nil
 	}
 	return []calendar.Attendee{{Person: calendar.Person{Email: o.Email}}}
@@ -747,7 +752,7 @@ func (s *Server) writtenView(ctx context.Context, res resolvedEvent, written cal
 		v.rrule, v.recurring = written.RRule, isSeries(written)
 	}
 	if len(written.Attendees) > 0 {
-		v.myPartStat = selfPartStat(written, s.ownAddress)
+		v.myPartStat = selfPartStat(written, s.selfOf(res.row.Account))
 	}
 	return v
 }
@@ -758,7 +763,8 @@ func (s *Server) writtenView(ctx context.Context, res resolvedEvent, written cal
 func (s *Server) mayChange(res resolvedEvent) bool {
 	_, org := res.role()
 	atts, _ := res.attendees()
-	return org || !slices.ContainsFunc(atts, func(a calendar.Attendee) bool { return !s.ownAddress(a.Email) })
+	self := s.selfOf(res.row.Account)
+	return org || !slices.ContainsFunc(atts, func(a calendar.Attendee) bool { return !self(a.Email) })
 }
 
 // eventMaskFields checks an UpdateEvent mask's paths and returns them
@@ -811,7 +817,7 @@ func (s *Server) applyEdit(res resolvedEvent, m *chainmailv1.UpdateEventRequest,
 		if err != nil {
 			return calendar.Event{}, err
 		}
-		ev.Attendees = s.mergeAttendees(old, people)
+		ev.Attendees = mergeAttendees(s.selfOf(res.row.Account), old, people)
 	}
 	if has("recurrence_rule") {
 		if !res.rid.IsZero() || !ev.RecurrenceID.IsZero() {

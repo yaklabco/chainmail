@@ -163,14 +163,14 @@ func (s *Server) rsvpTargetOf(ctx context.Context, ref string) (rsvpTarget, erro
 		return rsvpTarget{}, errNoOrganizer
 	}
 	t.organizer = t.ev.Organizer.Email
-	if s.ownAddress(t.organizer) {
+	if s.selfOf(account)(t.organizer) {
 		return rsvpTarget{}, errOwnEvent
 	}
 	acct, err := s.opts.Config.Account(account)
 	if err != nil {
 		return rsvpTarget{}, err
 	}
-	t.self = s.selfAttendee(t.ev, acct.Address)
+	t.self = selfAttendee(t.ev, acct.Address)
 	if t.self == "" {
 		return rsvpTarget{}, errNotAttendee
 	}
@@ -178,19 +178,15 @@ func (s *Server) rsvpTargetOf(ctx context.Context, ref string) (rsvpTarget, erro
 }
 
 // selfAttendee is James's attendee address on ev: the account's own
-// address when it is listed, else the first of his addresses listed, else
-// "".
-func (s *Server) selfAttendee(ev calendar.Event, address string) string {
-	first := ""
+// address as listed, "" when it is not. Another of his addresses is
+// another account's guest entry, which this account cannot answer for.
+func selfAttendee(ev calendar.Event, address string) string {
 	for _, a := range ev.Attendees {
-		switch {
-		case strings.EqualFold(a.Email, address):
+		if strings.EqualFold(a.Email, address) {
 			return a.Email
-		case first == "" && s.ownAddress(a.Email):
-			first = a.Email
 		}
 	}
-	return first
+	return ""
 }
 
 // respondInStore answers through the account's calendar store. With a
@@ -277,7 +273,7 @@ func (s *Server) answerInStore(ctx context.Context, m *chainmailv1.RespondReques
 		t = again
 	}
 	s.syncAfterWrite(ctx, t.ca)
-	return &chainmailv1.RespondResponse{Via: viaStore, Event: eventProto(s.writtenView(ctx, res, written), s.ownAddress)}, nil
+	return &chainmailv1.RespondResponse{Via: viaStore, Event: eventProto(s.writtenView(ctx, res, written), s.selfOf(t.ca.name))}, nil
 }
 
 // answerableCalendar refuses an answer through the store to an event in a
@@ -355,7 +351,7 @@ func (s *Server) respondByEmail(ctx context.Context, c caller, m *chainmailv1.Re
 	case t.invite != nil:
 		v.ref, v.messageRef, v.rrule, v.recurring = t.invite.Ref, t.invite.MessageRef, t.ev.RRule, isSeries(t.ev)
 	}
-	return &chainmailv1.RespondResponse{Via: viaEmail, SentRef: sent.GetSentRef(), Event: eventProto(v, s.ownAddress)}, nil
+	return &chainmailv1.RespondResponse{Via: viaEmail, SentRef: sent.GetSentRef(), Event: eventProto(v, s.selfOf(t.ca.name))}, nil
 }
 
 // replySpec is the message that carries a REPLY: to the organizer, from

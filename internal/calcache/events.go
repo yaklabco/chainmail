@@ -543,18 +543,12 @@ func encode(account, calID string, ev calendar.Event, self func(string) bool, ra
 			return record{}, fmt.Errorf("encoding an organizer: %w", errStoredRow)
 		}
 		r.organizer = string(b)
-		r.isOrganizer = o.Email != "" && self(o.Email)
 	}
+	var atts []storedAttendee
 	if len(ev.Attendees) > 0 {
-		atts := make([]storedAttendee, 0, len(ev.Attendees))
+		atts = make([]storedAttendee, 0, len(ev.Attendees))
 		for _, a := range ev.Attendees {
 			atts = append(atts, storedAttendee{Email: a.Email, Name: a.Name, PartStat: string(a.PartStat), Role: a.Role, RSVP: a.RSVP})
-			if r.myPartStat == "" && a.Email != "" && self(a.Email) {
-				r.myPartStat = string(a.PartStat)
-				if a.PartStat == "" {
-					r.myPartStat = string(calendar.PartStatNeedsAction) // the RFC 5545 default
-				}
-			}
 		}
 		b, err := json.Marshal(atts)
 		if err != nil {
@@ -562,6 +556,11 @@ func encode(account, calID string, ev calendar.Event, self func(string) bool, ra
 		}
 		r.attendees = string(b)
 	}
+	var orgEmail string
+	if ev.Organizer != nil {
+		orgEmail = ev.Organizer.Email
+	}
+	r.myPartStat, r.isOrganizer = roles(orgEmail, atts, self)
 	var err error
 	if r.rdates, err = encodeTimes(ev.RDates); err != nil {
 		return record{}, err
@@ -570,6 +569,95 @@ func encode(account, calID string, ev calendar.Event, self func(string) bool, ra
 		return record{}, err
 	}
 	return r, nil
+}
+
+// roles is James's PARTSTAT on an event and whether he organizes it, by
+// self: the PARTSTAT of the first attendee self knows ("" when none is),
+// NEEDS-ACTION when that attendee has none (the RFC 5545 default), and
+// whether self knows the organizer.
+func roles(organizer string, atts []storedAttendee, self func(string) bool) (string, bool) {
+	myPartStat := ""
+	for _, a := range atts {
+		if a.Email != "" && self(a.Email) {
+			myPartStat = a.PartStat
+			if myPartStat == "" {
+				myPartStat = string(calendar.PartStatNeedsAction)
+			}
+			break
+		}
+	}
+	return myPartStat, organizer != "" && self(organizer)
+}
+
+// Rederive recomputes MyPartStat and IsOrganizer of every stored row of
+// account with self and writes the rows that change, returning how many.
+// Rows keep what the self of the sync that stored them made of them, so a
+// change in who James is on the account (its address, or how the daemon
+// reads it) needs this to reach the rows no later sync rewrites. A nil
+// self knows no address.
+func (s *Store) Rederive(ctx context.Context, account string, self func(string) bool) (int, error) {
+	if self == nil {
+		self = func(string) bool { return false }
+	}
+	n := 0
+	err := s.inTx(ctx, "rederiving calendar roles", func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx,
+			"SELECT calendar_id, provider_id, recurrence_id, organizer_json, attendees_json, my_partstat, is_organizer FROM cal_events WHERE account = ?",
+			account)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }() // rows.Err below reports read errors
+		type update struct {
+			calID, provider, rid, ps string
+			org                      bool
+		}
+		var updates []update
+		for rows.Next() {
+			var (
+				u                update
+				orgJSON, attJSON string
+				ps               string
+				org              bool
+			)
+			if err := rows.Scan(&u.calID, &u.provider, &u.rid, &orgJSON, &attJSON, &ps, &org); err != nil {
+				return err
+			}
+			var o storedPerson
+			if orgJSON != "" {
+				if err := json.Unmarshal([]byte(orgJSON), &o); err != nil {
+					return errStoredRow
+				}
+			}
+			var atts []storedAttendee
+			if attJSON != "" {
+				if err := json.Unmarshal([]byte(attJSON), &atts); err != nil {
+					return errStoredRow
+				}
+			}
+			u.ps, u.org = roles(o.Email, atts, self)
+			if u.ps != ps || u.org != org {
+				updates = append(updates, u)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		// The connection is single: the reads end before the writes.
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, u := range updates {
+			if _, err := tx.ExecContext(ctx,
+				"UPDATE cal_events SET my_partstat = ?, is_organizer = ? WHERE account = ? AND calendar_id = ? AND provider_id = ? AND recurrence_id = ?",
+				u.ps, boolInt(u.org), account, u.calID, u.provider, u.rid); err != nil {
+				return err
+			}
+		}
+		n = len(updates)
+		return nil
+	})
+	return n, err
 }
 
 func encodeTimes(ts []time.Time) (string, error) {

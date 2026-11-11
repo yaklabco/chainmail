@@ -93,7 +93,7 @@ func (h *calendarService) Agenda(ctx context.Context, req *connect.Request[chain
 			if in.ev.Status == calendar.StatusCancelled || (in.myPartStat == calendar.PartStatDeclined && !m.GetIncludeDeclined()) {
 				continue
 			}
-			out.Events = append(out.Events, eventProto(in, s.ownAddress))
+			out.Events = append(out.Events, eventProto(in, s.selfOf(in.account)))
 		}
 		out.Truncated = truncated
 		entry.Targets = append(entry.Targets, tally("events", len(out.Events)))
@@ -237,7 +237,7 @@ func (h *calendarService) GetEvent(ctx context.Context, req *connect.Request[cha
 		entry.Account = res.row.Account
 		v := viewOfResolved(res)
 		v.messageRef = s.inviteMessageRef(ctx, res.row.Account, res.row.Event.UID)
-		return &chainmailv1.GetEventResponse{Event: eventProto(v, s.ownAddress)}, nil
+		return &chainmailv1.GetEventResponse{Event: eventProto(v, s.selfOf(v.account))}, nil
 	})
 }
 
@@ -363,7 +363,7 @@ func (s *Server) stillAhead(group []calcache.EventRow, row calcache.EventRow, no
 func (s *Server) calendarInvite(res resolvedEvent, messageRefs map[string]string) *chainmailv1.Invite {
 	v := viewOfResolved(res)
 	v.messageRef = messageRefs[res.row.Event.UID]
-	return &chainmailv1.Invite{Event: eventProto(v, s.ownAddress), Source: inviteSourceCalendar, Method: calendar.MethodRequest}
+	return &chainmailv1.Invite{Event: eventProto(v, s.selfOf(v.account)), Source: inviteSourceCalendar, Method: calendar.MethodRequest}
 }
 
 // mailInviteOf is the Invite of a mail invite row, and false when it is not
@@ -374,7 +374,7 @@ func (s *Server) mailInviteOf(r calcache.MailInviteRow) (*chainmailv1.Invite, bo
 	if !ok || ev.Status == calendar.StatusCancelled {
 		return nil, false
 	}
-	if ev.Organizer != nil && s.ownAddress(ev.Organizer.Email) {
+	if ev.Organizer != nil && s.selfOf(r.Account)(ev.Organizer.Email) {
 		return nil, false
 	}
 	now := s.opts.Now()
@@ -413,12 +413,13 @@ func (s *Server) parseMailInvite(r calcache.MailInviteRow) (calendar.Event, []ca
 
 // mailInviteProto is the Invite of a mail invite's event.
 func (s *Server) mailInviteProto(r calcache.MailInviteRow, ev calendar.Event) *chainmailv1.Invite {
+	self := s.selfOf(r.Account)
 	v := eventView{
-		ref: r.Ref, account: r.Account, ev: ev, myPartStat: selfPartStat(ev, s.ownAddress),
-		isOrganizer: ev.Organizer != nil && s.ownAddress(ev.Organizer.Email),
+		ref: r.Ref, account: r.Account, ev: ev, myPartStat: selfPartStat(ev, self),
+		isOrganizer: ev.Organizer != nil && self(ev.Organizer.Email),
 		rrule:       ev.RRule, recurring: isSeries(ev), messageRef: r.MessageRef,
 	}
-	return &chainmailv1.Invite{Event: eventProto(v, s.ownAddress), Source: inviteSourceMail, Method: knownToken(r.Method, inviteMethods)}
+	return &chainmailv1.Invite{Event: eventProto(v, self), Source: inviteSourceMail, Method: knownToken(r.Method, inviteMethods)}
 }
 
 // selfPartStat is the PARTSTAT of James's first attendee entry, "" when he
