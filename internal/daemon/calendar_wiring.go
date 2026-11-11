@@ -120,6 +120,7 @@ func (s *Server) openCalendar(ctx context.Context) {
 		s.opts.Logger.Info("recreated calendar.db; calendars sync in full", "reason", why)
 	}
 	s.calcache = cc
+	s.rederiveRoles(ctx, cc)
 	cs := s.calSettings
 	for _, name := range s.opts.Config.AccountNames() {
 		ca := s.calendars[name]
@@ -135,7 +136,7 @@ func (s *Server) openCalendar(ctx context.Context) {
 			Store:      ca.store,
 			Cache:      cc,
 			Log:        s.watchLog,
-			Self:       s.policy.IsOwn,
+			Self:       s.selfOf(name),
 			Include:    acct.Calendar.Include,
 			Exclude:    acct.Calendar.Exclude,
 			Default:    acct.Calendar.Default,
@@ -144,6 +145,23 @@ func (s *Server) openCalendar(ctx context.Context) {
 			Clock:      s.calClock,
 			Logger:     s.opts.Logger,
 		})
+	}
+}
+
+// rederiveRoles recomputes James's role in every account's stored events
+// with selfOf, before anything reads them. Rows keep the roles the self of
+// the sync that stored them gave them, so rows a daemon that judged James
+// by every account's address stored are put right here. It does no
+// network IO; a failure is logged and leaves those rows as they were.
+func (s *Server) rederiveRoles(ctx context.Context, cc *calcache.Store) {
+	for _, name := range s.opts.Config.AccountNames() {
+		n, err := cc.Rederive(ctx, name, s.selfOf(name))
+		switch {
+		case err != nil:
+			s.opts.Logger.Warn("recomputing stored event roles failed", "account", name, "err", err)
+		case n > 0:
+			s.opts.Logger.Info("recomputed stored event roles", "account", name, "rows", n)
+		}
 	}
 }
 

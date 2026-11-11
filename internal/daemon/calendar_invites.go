@@ -41,8 +41,10 @@ type inviteHookOptions struct {
 	// StoreNone reports whether the account's calendar store is none, so
 	// invites reach it only through mail and the hook announces them.
 	StoreNone func(account string) bool
-	// Self reports whether a bare address is one of James's own.
-	Self func(addr string) bool
+	// Self reports whether a bare address is James's on account: that
+	// account's own address, so an invite from another of his accounts is
+	// an invite.
+	Self func(account, addr string) bool
 	// Now is the hook's clock. Nil means time.Now.
 	Now func() time.Time
 	// ReadPart reads a calendar part the cache builder deferred, once, as
@@ -123,7 +125,7 @@ func (s *Server) serverInviteHook(cal *calcache.Store, poke func(account string)
 			Log:       s.watchLog,
 			Poke:      poke,
 			StoreNone: s.calendarStoreNone,
-			Self:      s.policy.IsOwn,
+			Self:      func(account, addr string) bool { return s.selfOf(account)(addr) },
 			Now:       s.opts.Now,
 			Logger:    s.opts.Logger,
 			ReadPart:  s.readInvitePart,
@@ -304,7 +306,7 @@ func (h *inviteHook) announce(ctx context.Context, account string) {
 			h.settle(ctx, log, row)
 			continue
 		}
-		if !h.due(inv, now) {
+		if !h.due(account, inv, now) {
 			h.settle(ctx, log, row)
 			continue
 		}
@@ -333,7 +335,7 @@ func (h *inviteHook) settle(ctx context.Context, log *slog.Logger, row calcache.
 // due reports whether an invite gets an invite event: the method is
 // REQUEST, the event is not cancelled, James does not organize it, and not
 // every event of it has ended at now (a recurring one never has).
-func (h *inviteHook) due(inv calendar.MailInvite, now time.Time) bool {
+func (h *inviteHook) due(account string, inv calendar.MailInvite, now time.Time) bool {
 	if inv.Method != calendar.MethodRequest {
 		return false
 	}
@@ -341,7 +343,7 @@ func (h *inviteHook) due(inv calendar.MailInvite, now time.Time) bool {
 	if ev.Status == calendar.StatusCancelled {
 		return false
 	}
-	if ev.Organizer != nil && h.o.Self != nil && h.o.Self(ev.Organizer.Email) {
+	if ev.Organizer != nil && h.o.Self != nil && h.o.Self(account, ev.Organizer.Email) {
 		return false
 	}
 	return !inviteEnded(inv, now)

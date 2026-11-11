@@ -128,8 +128,10 @@ type Server struct {
 	auditReader *audit.Reader
 	// accountLocks serializes account tests, one account at a time.
 	accountLocks keyedLock
-	handlers     inflight
-	stores       *storeSet
+	// selves holds selfOf's answer per account name, built on first use.
+	selves   sync.Map
+	handlers inflight
+	stores   *storeSet
 	// idem records send-type calls by idempotency key.
 	idem *idempotency.Store
 	// uploads holds attachment bytes for later sends. Nil without a StateDir.
