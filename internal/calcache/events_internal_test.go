@@ -136,3 +136,36 @@ func TestDiffReadsOneSnapshot(t *testing.T) {
 		t.Errorf("changes = %+v, want the first version before, with its raw", changes)
 	}
 }
+
+// Rederive skips a row it cannot read and still recomputes the others: the
+// bad row keeps the roles it was stored with and is counted as skipped.
+func TestRederiveSkipsUnreadableRow(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 10, 15, 0, 0, 0, time.UTC)
+	s, _ := openPair(t)
+	asked := func(p string) calendar.Event {
+		ev := rawObject(p, "raw "+p, at)
+		ev.Attendees = []calendar.Attendee{{Person: calendar.Person{Email: "me@example.com"}, PartStat: calendar.PartStatTentative}}
+		return ev
+	}
+	ch := calendar.Changes{Upserts: []calendar.Event{asked("good"), asked("bad")}}
+	if err := s.Apply(t.Context(), "acme", "work", ch, nil, at); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(t.Context(), "UPDATE cal_events SET attendees_json = '{' WHERE provider_id = 'bad'"); err != nil {
+		t.Fatal(err)
+	}
+	mine := func(addr string) bool { return addr == "me@example.com" }
+	changed, skipped, err := s.Rederive(t.Context(), "acme", mine)
+	if err != nil || changed != 1 || skipped != 1 {
+		t.Fatalf("Rederive = %d changed, %d skipped, %v; want 1, 1, nil", changed, skipped, err)
+	}
+	row, err := s.Event(t.Context(), calendar.EventRef("acme", "work", "good"))
+	if err != nil || row.MyPartStat != calendar.PartStatTentative {
+		t.Errorf("good row = %+v, %v; want TENTATIVE", row, err)
+	}
+	var ps string
+	if err := s.db.QueryRowContext(t.Context(), "SELECT my_partstat FROM cal_events WHERE provider_id = 'bad'").Scan(&ps); err != nil || ps != "" {
+		t.Errorf("bad row my_partstat = %q, %v; want it left as stored", ps, err)
+	}
+}

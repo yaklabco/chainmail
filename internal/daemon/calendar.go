@@ -415,10 +415,31 @@ func (s *Server) lookupEvent(ctx context.Context, ref string) (resolvedEvent, er
 	return resolvedEvent{}, calcache.ErrNotFound
 }
 
-// ownAddress reports whether addr is one of the user's own addresses, the
-// set the policy always allows.
-func (s *Server) ownAddress(addr string) bool {
-	return addr != "" && s.policy.IsOwn(strings.TrimSpace(addr))
+// selfOf reports whether an address is the user's on account: the
+// account's own address, matched without regard to case (design section 6).
+// Another account's address is someone else there, so one of the user's
+// accounts can invite another and the guest account answers it. The policy
+// still allows every account's address as a recipient. An unknown account
+// knows no address.
+func (s *Server) selfOf(account string) func(string) bool {
+	if v, ok := s.selves.Load(account); ok {
+		if f, ok := v.(func(string) bool); ok {
+			return f
+		}
+	}
+	address := ""
+	if acct, err := s.opts.Config.Account(account); err == nil {
+		address = acct.Address
+	}
+	f := ownAddressMatcher(address)
+	s.selves.Store(account, f)
+	return f
+}
+
+// ownAddressMatcher reports whether an address is address, without regard
+// to case or spaces around it. An empty address matches nothing.
+func ownAddressMatcher(address string) func(string) bool {
+	return func(addr string) bool { return address != "" && strings.EqualFold(strings.TrimSpace(addr), address) }
 }
 
 // syncAfterWrite runs a sync cycle of ca so calendar.db holds what a write

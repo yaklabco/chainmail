@@ -59,7 +59,8 @@ type Options struct {
 	Cache   *calcache.Store
 	// Log receives the watch events. Nil publishes none.
 	Log *watch.Log
-	// Self reports whether an address is one of the user's. Nil knows none.
+	// Self reports whether an address is the user's on the account. Nil
+	// knows none.
 	Self func(addr string) bool
 	// Include keeps only the calendars with these IDs or names; empty
 	// keeps all. Exclude then drops the calendars with these IDs or names.
