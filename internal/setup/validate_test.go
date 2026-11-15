@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -138,6 +139,62 @@ func TestValidate(t *testing.T) {
 		{name: "auth-login on a password account", mutate: func(p *Plan) {
 			p.Actions = append(p.Actions, Action{Kind: ActAuthLogin, Name: "alice", Note: "x"})
 		}},
+		{name: "activation before install", mutate: func(p *Plan) {
+			i, j := indexOf(*p, ActInstallBin), indexOf(*p, ActActivate)
+			p.Actions[i], p.Actions[j] = p.Actions[j], p.Actions[i]
+		}},
+		{name: "test-account before store-secret", mutate: func(p *Plan) {
+			i, j := indexOf(*p, ActStoreSecret), indexOf(*p, ActTestAccount)
+			p.Actions[i], p.Actions[j] = p.Actions[j], p.Actions[i]
+		}},
+		{name: "create-user before create-group", mutate: func(p *Plan) {
+			p.Actions[0], p.Actions[1] = p.Actions[1], p.Actions[0]
+		}},
+		{name: "ensure-dir out of layout order", mutate: func(p *Plan) {
+			i := indexOf(*p, ActEnsureDir)
+			p.Actions[i], p.Actions[i+1] = p.Actions[i+1], p.Actions[i]
+		}},
+		{name: "duplicated ensure-dir", mutate: func(p *Plan) { p.Actions = duplicate(p.Actions, indexOf(*p, ActEnsureDir)) }},
+		{name: "duplicated write-config", mutate: func(p *Plan) { p.Actions = duplicate(p.Actions, indexOf(*p, ActWriteConfig)) }},
+		{name: "duplicated create-key", mutate: func(p *Plan) { p.Actions = duplicate(p.Actions, indexOf(*p, ActCreateKey)) }},
+		{name: "duplicated install-binary", mutate: func(p *Plan) { p.Actions = duplicate(p.Actions, indexOf(*p, ActInstallBin)) }},
+		{name: "duplicated write-service", mutate: func(p *Plan) { p.Actions = duplicate(p.Actions, indexOf(*p, ActWriteService)) }},
+		{name: "duplicated activate-service", mutate: func(p *Plan) { p.Actions = duplicate(p.Actions, indexOf(*p, ActActivate)) }},
+		{name: "duplicated test-account", mutate: func(p *Plan) { p.Actions = duplicate(p.Actions, indexOf(*p, ActTestAccount)) }},
+		{name: "duplicated add-member", mutate: func(p *Plan) { p.Actions = duplicate(p.Actions, indexOf(*p, ActAddMember)) }},
+		{name: "add-member for the daemon user", mutate: func(p *Plan) { at(p, ActAddMember).Name = linux.DaemonUser }},
+		{name: "missing test-account", mutate: func(p *Plan) { p.Actions = remove(p.Actions, indexOf(*p, ActTestAccount)) }},
+		{
+			name: "test-account on an oauth plan without a terminal", req: func() Request { return workspaceRequest(false) },
+			mutate: func(p *Plan) {
+				p.Actions = append(p.Actions, Action{Kind: ActTestAccount, Name: p.Account.Name, Note: "test account"})
+			},
+		},
+		{
+			name: "repeated auth-login", req: func() Request { return workspaceRequest(true) },
+			mutate: func(p *Plan) { p.Actions = duplicate(p.Actions, indexOf(*p, ActAuthLogin)) },
+		},
+		{
+			name: "auth-login without a stored secret", req: func() Request { return workspaceRequest(true) },
+			mutate: func(p *Plan) {
+				p.Actions = remove(p.Actions, indexOf(*p, ActStoreSecret))
+				p.NeedSecret = false
+			},
+		},
+		{name: "backup show without create-key", mutate: func(p *Plan) {
+			p.Backup = BackupShow
+			p.Actions = remove(p.Actions, indexOf(*p, ActCreateKey))
+		}},
+		{name: "activate without ServiceChanged", mutate: func(p *Plan) { p.ServiceChanged = false }},
+		{name: "ServiceChanged without activate", mutate: func(p *Plan) { p.Actions = remove(p.Actions, indexOf(*p, ActActivate)) }},
+		{name: "config redirecting the socket", mutate: func(p *Plan) {
+			a := at(p, ActWriteConfig)
+			a.Data = append([]byte("[daemon]\nsocket = \"/tmp/evil.sock\"\n\n"), a.Data...)
+		}},
+		{name: "config redirecting the client group", mutate: func(p *Plan) {
+			a := at(p, ActWriteConfig)
+			a.Data = append([]byte("[daemon]\nclient_group = \"users\"\n\n"), a.Data...)
+		}},
 	}
 	for _, tc := range refused {
 		t.Run("refuses "+tc.name, func(t *testing.T) {
@@ -157,4 +214,14 @@ func TestValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// duplicate returns actions with the action at i repeated right after it.
+func duplicate(actions []Action, i int) []Action {
+	return slices.Insert(slices.Clone(actions), i+1, actions[i])
+}
+
+// remove returns actions without the action at i.
+func remove(actions []Action, i int) []Action {
+	return slices.Delete(slices.Clone(actions), i, i+1)
 }

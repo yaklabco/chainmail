@@ -257,20 +257,6 @@ func TestBuildRerunNoop(t *testing.T) {
 		plan := mustBuild(t, l, cur, gmailRequest())
 		wantActions(t, plan.Actions, append(dirEnsures(l), "test-account alice"))
 	})
-
-	t.Run("linux daemon user missing from the client group", func(t *testing.T) {
-		t.Parallel()
-		l := LayoutFor(Linux)
-		h := installedHost(Linux, aliceGmail, nil)
-		u, _ := h.accounts.User(l.DaemonUser)
-		u.Groups = nil
-		h.accounts.AddUser(u)
-		cur := h.inspect(t, Linux)
-		cur.Health = okHealth
-		plan := mustBuild(t, l, cur, gmailRequest())
-		want := append([]string{"add-member " + l.DaemonUser}, dirEnsures(l)...)
-		wantActions(t, plan.Actions, append(want, "test-account alice"))
-	})
 }
 
 func TestBuildSecondAccount(t *testing.T) {

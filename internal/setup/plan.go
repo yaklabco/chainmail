@@ -95,9 +95,13 @@ type Plan struct {
 // Build plans everything from cur and req, or returns a *Refusal. cur
 // must come from Inspect, which records the trust chain Build checks.
 //
-// Build checks the trust chain first, then every other refusal, and
-// plans actions only for what is missing or different. Directories are
-// always ensured, which fixes their owners and modes.
+// Build checks the invoking user, the existing daemon user and group and
+// the existing vault key first, because the trust check trusts the daemon
+// user's uid. Then it checks the trust chain and every other refusal,
+// and plans actions only for what is missing or different. Directories
+// are always ensured, which fixes their owners and modes. It never plans
+// a repair to an existing user or group: an account of the wrong shape is
+// refused.
 func Build(l Layout, cur Current, req Request) (Plan, error) {
 	if cur.Platform != l.Platform {
 		return Plan{}, fmt.Errorf("plan: installation inspected for %s, layout is for %s", cur.Platform, l.Platform)
@@ -105,6 +109,15 @@ func Build(l Layout, cur Current, req Request) (Plan, error) {
 	if cur.NixOS {
 		return Plan{}, refuse("use the NixOS module instead: "+deployPage+"#nixos",
 			"bootstrap does not set up chainmail on NixOS; the system configuration owns users, files and services there")
+	}
+	if err := checkInvoking(l, cur); err != nil {
+		return Plan{}, err
+	}
+	if err := checkDaemonUser(l, cur); err != nil {
+		return Plan{}, err
+	}
+	if err := checkKey(l, cur); err != nil {
+		return Plan{}, err
 	}
 	if err := checkTrust(l, cur); err != nil {
 		return Plan{}, err
@@ -115,6 +128,10 @@ func Build(l Layout, cur Current, req Request) (Plan, error) {
 	backup, err := checkRequest(req)
 	if err != nil {
 		return Plan{}, err
+	}
+	if backup == BackupShow && !cur.KeyExists && !req.Terminal {
+		return Plan{}, refuse("run bootstrap from a terminal, or pass --key-backup none",
+			"--key-backup show needs a terminal; captured output would hold the key")
 	}
 	acct, err := planAccount(l, cur, req)
 	if err != nil {
@@ -207,7 +224,9 @@ func secretName(a AccountSpec) string {
 	return "accounts/" + a.Name
 }
 
-// planAccounts plans the group, the daemon user and the memberships.
+// planAccounts plans the group, the daemon user and the invoking user's
+// membership. An existing daemon user passed checkDaemonUser, so it is
+// already in the group.
 func planAccounts(l Layout, cur Current) []Action {
 	var actions []Action
 	if cur.ClientGroup == nil {
@@ -217,11 +236,6 @@ func planAccounts(l Layout, cur Current) []Action {
 		actions = append(actions, Action{
 			Kind: ActCreateUser, Name: l.DaemonUser,
 			Note: "create user " + l.DaemonUser + " to run the daemon",
-		})
-	} else if !isMember(*cur.DaemonUser, cur.ClientGroup, l.ClientGroup) {
-		actions = append(actions, Action{
-			Kind: ActAddMember, Name: l.DaemonUser,
-			Note: "add " + l.DaemonUser + " to group " + l.ClientGroup,
 		})
 	}
 	if !isMember(cur.InvokingUser, cur.ClientGroup, l.ClientGroup) {
@@ -269,17 +283,22 @@ func groupName(l Layout, g Group) string {
 }
 
 // checkTrust runs the trust check on every trust path against the chain
-// Inspect recorded. The daemon user's uid is trusted once it exists.
+// Inspect recorded. The daemon user's uid is trusted once it exists, and
+// only after checkDaemonIdentity has passed it: a uid shared with root or
+// with the invoking user is refused, never trusted.
 func checkTrust(l Layout, cur Current) error {
 	if cur.trust == nil {
 		return errors.New("plan: the installation was not inspected")
+	}
+	if err := checkDaemonIdentity(cur); err != nil {
+		return err
 	}
 	if info, err := cur.trust.Lstat(l.Config); err == nil && info.Mode&fs.ModeSymlink != 0 {
 		return refuse("replace the link with a regular file owned by root, or manage chainmail by hand",
 			"the config %s is a symlink, as one home-manager manages would be; bootstrap does not write through links", l.Config)
 	}
 	trusted := []uint32{0}
-	if cur.DaemonUser != nil && cur.DaemonUser.UID != 0 {
+	if cur.DaemonUser != nil {
 		trusted = append(trusted, cur.DaemonUser.UID)
 	}
 	for _, path := range trustPaths(l) {
@@ -290,9 +309,8 @@ func checkTrust(l Layout, cur Current) error {
 	return nil
 }
 
-// checkHost refuses an invoking user, daemon user, group, service file or
-// key that bootstrap cannot work with.
-func checkHost(l Layout, cur Current) error {
+// checkInvoking refuses an invoking user bootstrap must not run as.
+func checkInvoking(l Layout, cur Current) error {
 	inv := cur.InvokingUser
 	switch {
 	case inv.Name == "":
@@ -304,20 +322,125 @@ func checkHost(l Layout, cur Current) error {
 		return refuse("run bootstrap as the user who will use chainmail",
 			"bootstrap must not run as the daemon user %s", l.DaemonUser)
 	}
+	return nil
+}
 
-	shapeHint := "remove or fix the existing account by hand, then run bootstrap again"
-	if u := cur.DaemonUser; u != nil {
-		if u.UID == 0 {
-			return refuse(shapeHint, "the existing user %s has uid 0", u.Name)
-		}
-		if !slices.Contains(nologinShells, u.Shell) {
-			return refuse(shapeHint, "the existing user %s has the login shell %q; the daemon user must not be able to log in", u.Name, u.Shell)
+// accountHint is the hint on every refusal of an existing user or group.
+const accountHint = "remove or fix the existing account by hand, then run bootstrap again"
+
+// darwinDaemonHome is the macOS daemon user's home directory.
+const darwinDaemonHome = "/var/empty"
+
+// checkDaemonIdentity refuses an existing daemon user whose uid is root's
+// or a login user's. Only the invoking user is visible as a login user.
+// The trust check trusts the daemon user's uid, so this runs before it.
+func checkDaemonIdentity(cur Current) error {
+	u := cur.DaemonUser
+	if u == nil {
+		return nil
+	}
+	if u.UID < 1 {
+		return refuse(accountHint, "the existing user %s has uid %d; the daemon user must not be root", u.Name, u.UID)
+	}
+	if inv := cur.InvokingUser; u.UID == inv.UID {
+		return refuse(accountHint, "the existing user %s has uid %d, the same as %s; the daemon user needs a uid of its own",
+			u.Name, u.UID, inv.Name)
+	}
+	return nil
+}
+
+// checkDaemonUser refuses an existing daemon user or group that is not
+// the shape bootstrap creates. Linux: primary group chainmail, member of
+// chainmail-clients, home the state directory, a shell nobody can log in
+// with. macOS: primary group chainmail-clients, home /var/empty, shell
+// /usr/bin/false. A group with gid 0 is refused on either.
+func checkDaemonUser(l Layout, cur Current) error {
+	if err := checkDaemonIdentity(cur); err != nil {
+		return err
+	}
+	for _, g := range []*system.GroupInfo{cur.ClientGroup, cur.daemonGroup} {
+		if g != nil && g.GID == 0 {
+			return refuse(accountHint, "the existing group %s has gid 0", g.Name)
 		}
 	}
-	if g := cur.ClientGroup; g != nil && g.GID == 0 {
-		return refuse(shapeHint, "the existing group %s has gid 0", g.Name)
+	u := cur.DaemonUser
+	if u == nil {
+		return nil
 	}
+	bad := func(field, got, want string) error {
+		return refuse(accountHint, "the existing user %s has %s %s; the daemon user needs %s", u.Name, field, got, want)
+	}
+	clients := cur.ClientGroup
+	if clients == nil {
+		return refuse(accountHint, "the existing user %s needs the group %s, which does not exist", u.Name, l.ClientGroup)
+	}
+	primary, home, shells := cur.daemonGroup, l.StateDir, nologinShells
+	if l.Platform == Darwin {
+		home, shells = darwinDaemonHome, []string{"/usr/bin/false"}
+	}
+	switch {
+	case primary == nil:
+		return refuse(accountHint, "the existing user %s needs the group %s as its primary group, which does not exist",
+			u.Name, daemonGroup(l))
+	case u.GID != primary.GID:
+		return bad("primary group", fmt.Sprintf("gid %d", u.GID), fmt.Sprintf("the group %s (gid %d)", primary.Name, primary.GID))
+	case !isMember(*u, clients, l.ClientGroup):
+		return refuse(accountHint, "the existing user %s is not a member of the group %s", u.Name, l.ClientGroup)
+	case u.Home != home:
+		return bad("home", fmt.Sprintf("%q", u.Home), fmt.Sprintf("%q", home))
+	case !slices.Contains(shells, u.Shell):
+		return bad("login shell", fmt.Sprintf("%q", u.Shell), "one of "+strings.Join(shells, ", ")+", so nobody can log in as it")
+	}
+	return nil
+}
 
+// keyMode is the only mode an existing vault key may have.
+const keyMode fs.FileMode = 0o400
+
+// checkKey refuses an existing vault key that is not a regular file owned
+// by the daemon user and group with mode 0400. It runs after
+// checkDaemonUser, so the daemon user's gid is the daemon group's.
+func checkKey(l Layout, cur Current) error {
+	if !cur.KeyExists {
+		return nil
+	}
+	k := cur.key
+	owner := l.DaemonUser + ":" + daemonGroup(l)
+	fix := fmt.Sprintf("sudo chown %s %s && sudo chmod 0400 %s", owner, l.VaultKey, l.VaultKey)
+	exposed := "Anyone who could read the key may already have read it. If it may have been exposed, move " +
+		l.VaultKey + " and " + l.Vault + " aside, run bootstrap again to make a new key, and enter every account's password again."
+	hint := "fix it with: " + fix + ". " + exposed
+	want := fmt.Sprintf("it must be a regular file owned by %s with mode 0400", owner)
+	u := cur.DaemonUser
+	switch {
+	case k.Mode&fs.ModeSymlink != 0:
+		return refuse("replace the link with the key file itself, then "+hint,
+			"the vault key %s is a symlink; %s", l.VaultKey, want)
+	case !k.Mode.IsRegular():
+		return refuse("put the key file itself at "+l.VaultKey+", then "+hint,
+			"the vault key %s is not a regular file; %s", l.VaultKey, want)
+	case u == nil || k.UID != u.UID || k.GID != u.GID:
+		return refuse(hint, "the vault key %s is owned by uid %d gid %d; %s", l.VaultKey, k.UID, k.GID, want)
+	case k.Mode != keyMode:
+		return refuse(hint, "the vault key %s has mode %s; %s", l.VaultKey, octalMode(k.Mode), want)
+	}
+	return nil
+}
+
+// octalMode prints m's permission, setuid, setgid and sticky bits in
+// octal, such as 0644 or 4400.
+func octalMode(m fs.FileMode) string {
+	bits := uint32(m.Perm())
+	for flag, bit := range map[fs.FileMode]uint32{fs.ModeSetuid: 0o4000, fs.ModeSetgid: 0o2000, fs.ModeSticky: 0o1000} {
+		if m&flag != 0 {
+			bits |= bit
+		}
+	}
+	return fmt.Sprintf("%04o", bits)
+}
+
+// checkHost refuses a service file or vault bootstrap cannot work with.
+func checkHost(l Layout, cur Current) error {
 	if cur.Service != nil && !cur.ServiceMarked {
 		return refuse("move it aside to let bootstrap write its own, or keep managing the service by hand",
 			"the service definition %s has no bootstrap marker, so someone else wrote it; bootstrap will not replace it", l.Service)
@@ -423,6 +546,9 @@ func planAccount(l Layout, cur Current, req Request) (plannedAccount, error) {
 			return plannedAccount{}, refuse("fix the config by hand so it parses, then run bootstrap again",
 				"the existing config %s does not parse: %v", l.Config, err)
 		}
+		if err := checkDaemonTable(l, cfg.Daemon); err != nil {
+			return plannedAccount{}, err
+		}
 	}
 
 	prov, auth := req.Detection.Provider, req.Detection.Auth
@@ -466,6 +592,23 @@ func planAccount(l Layout, cur Current, req Request) (plannedAccount, error) {
 		pa.config = data
 	}
 	return pa, nil
+}
+
+// checkDaemonTable refuses a parsed [daemon] table that moves the socket
+// away from the layout's or hands it to another group, so an existing
+// config cannot point the daemon somewhere bootstrap does not check.
+// config.Parse fills in the defaults, so an unset socket is
+// config.DefaultSocket, which is the layout's on Linux only.
+func checkDaemonTable(l Layout, d config.Daemon) error {
+	if d.Socket != l.Socket {
+		return refuse(fmt.Sprintf("set socket = %q in the [daemon] table of %s, or remove it on Linux", l.Socket, l.Config),
+			"the existing config %s puts daemon.socket at %q; bootstrap's daemon listens on %s", l.Config, d.Socket, l.Socket)
+	}
+	if d.ClientGroup != l.ClientGroup {
+		return refuse("remove client_group from the [daemon] table of "+l.Config+", or set it to "+l.ClientGroup,
+			"the existing config %s sets daemon.client_group to %q; bootstrap's daemon serves the group %s", l.Config, d.ClientGroup, l.ClientGroup)
+	}
+	return nil
 }
 
 // matchExisting refuses a request that conflicts with the account of the
