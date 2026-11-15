@@ -1,0 +1,17 @@
+# Written by chainmail bootstrap. Edits are kept for config.toml only.
+
+[accounts.alice]
+provider = "hostinger"
+address = "alice@example.org"
+auth = "password"
+
+[accounts.alice.imap]
+host = "127.0.0.1"
+port = 1143
+security = "starttls"
+
+[accounts.alice.smtp]
+host = "127.0.0.1"
+port = 1465
+security = "tls"
+tls_server_name = "mail.example.org"

@@ -1,0 +1,6 @@
+# Written by chainmail bootstrap. Edits are kept for config.toml only.
+
+[accounts.in]
+provider = "hostinger"
+address = "in@example.org"
+auth = "password"
