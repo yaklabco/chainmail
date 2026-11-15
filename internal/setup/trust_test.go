@@ -437,6 +437,13 @@ func TestCheckTrustNixStore(t *testing.T) {
 			path:  "/nix/store/abc-chainmail/bin/absent",
 		},
 		{
+			name:   "store is a regular file",
+			files:  nixStoreTree(map[string]FileInfo{"/nix/store": file(0, fs.ModeSticky|0o775)}),
+			path:   "/nix/store",
+			unsafe: "/nix/store",
+			reason: "writable by group or others",
+		},
+		{
 			name:   "sticky directory elsewhere",
 			files:  nixStoreTree(nil),
 			path:   "/opt/store/chainmail",

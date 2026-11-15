@@ -759,3 +759,18 @@ func TestRunAsRefusesRelativePath(t *testing.T) {
 		t.Fatal("RunAs ran a relative path")
 	}
 }
+
+// TestFinderNixStoreFile checks that the Nix store exception covers the
+// store directory only: a group-writable regular file at that path, sticky
+// bit or not, is refused, since the sticky bit does not protect a file's
+// contents.
+func TestFinderNixStoreFile(t *testing.T) {
+	t.Parallel()
+	tr := newTree(t)
+	tr.dir("/nix", 0o755)
+	tr.file("/nix/store", "", os.ModeSticky|0o775)
+	_, err := tr.finder("/nix").find("store")
+	if err == nil || !strings.Contains(err.Error(), "writable by its group or others") {
+		t.Fatalf("find(store) error = %v, want it refused as writable by its group or others", err)
+	}
+}

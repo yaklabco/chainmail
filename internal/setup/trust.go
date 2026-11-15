@@ -134,8 +134,10 @@ func checkOwnerMode(path string, info FileInfo, trusted []uint32) error {
 	// to it. Its sticky bit means only an entry's owner can rename or
 	// remove that entry, and the entries bootstrap resolves are root-owned
 	// and read-only, so they still get the normal check. Only the exact
-	// path qualifies: no other sticky, group-writable directory does.
-	if path == NixStore && info.UID == 0 && info.Mode&fs.ModeSticky != 0 && info.Mode.Perm()&0o002 == 0 {
+	// directory qualifies: no other sticky, group-writable directory does,
+	// and neither does a file at that path, whose contents the sticky bit
+	// does not protect.
+	if path == NixStore && info.Mode.IsDir() && info.UID == 0 && info.Mode&fs.ModeSticky != 0 && info.Mode.Perm()&0o002 == 0 {
 		return nil
 	}
 	if !slices.Contains(trusted, info.UID) {
