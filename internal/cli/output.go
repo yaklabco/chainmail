@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/version"
 )
 
 var protoJSON = protojson.MarshalOptions{UseProtoNames: true, EmitUnpopulated: true}
@@ -104,6 +105,9 @@ func statusTable(w io.Writer, loc *time.Location, r *chainmailv1.GetStatusRespon
 	_, _ = fmt.Fprintf(tw, "started\t%s\n", longDate(r.GetStartedAt(), loc))
 	_, _ = fmt.Fprintf(tw, "dev mode\t%t\n", r.GetDevMode())
 	_, _ = fmt.Fprintf(tw, "secrets\t%s\n", strings.Join(r.GetSecretNames(), ", "))
+	for _, warning := range statusWarnings(r) {
+		_, _ = fmt.Fprintf(tw, "warning\t%s\n", warning)
+	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
@@ -124,6 +128,21 @@ func statusTable(w io.Writer, loc *time.Location, r *chainmailv1.GetStatusRespon
 		return err
 	}
 	return cacheAccountsTable(w, r.GetCache())
+}
+
+// statusWarnings are admin status's warning rows: a dev daemon, and a
+// daemon whose version is not this CLI's. They never fail the command.
+func statusWarnings(r *chainmailv1.GetStatusResponse) []string {
+	var warnings []string
+	if r.GetDevMode() {
+		warnings = append(warnings, devWarning)
+	}
+	if v := r.GetVersion(); v != version.Version {
+		warnings = append(warnings, fmt.Sprintf(
+			"the chainmail CLI is %s, the daemon is %s; run bootstrap again or restart the daemon after upgrading",
+			version.Version, termText(v)))
+	}
+	return warnings
 }
 
 // syncTable prints one line per synced folder, for admin status and watch
