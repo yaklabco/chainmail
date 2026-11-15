@@ -55,7 +55,7 @@ func newRig(p Platform, h host) *rig {
 		File(userExe, setuptest.AliceLinuxUID, setuptest.AliceLinuxUID, 0o755, newBinary)
 	h.files.Journal = r.journal
 	h.accounts.Journal = r.journal
-	r.svc = &setuptest.Service{Clock: r.clock, Journal: r.journal}
+	r.svc = &setuptest.Service{Clock: r.clock, Journal: r.journal, Launchd: p == Darwin}
 	r.daemon = &setuptest.Daemon{Service: r.svc, Socket: l.Socket, Journal: r.journal}
 	r.tty = setuptest.NewTTY("\n")
 	r.applier = &Applier{
@@ -213,12 +213,12 @@ func TestApplyFresh(t *testing.T) {
 			t.Errorf("%s: %d:%d %v, want %d:%d %v", f.path, info.UID, info.GID, info.Mode, f.uid, f.gid, f.mode)
 		}
 		if f.data != nil && !bytes.Equal(data, f.data) {
-			t.Errorf("%s holds %q, want %q", f.path, data, f.data)
+			t.Errorf("%s holds %d bytes that differ from the %d expected", f.path, len(data), len(f.data))
 		}
 	}
 	key, _, _ := r.h.files.Content(l.VaultKey)
 	if !bytes.Contains(key, []byte("AGE-SECRET-KEY-")) {
-		t.Errorf("vault key is %q, not an age identity", key)
+		t.Errorf("vault key (%d bytes) is not an age identity", len(key))
 	}
 
 	calls := r.daemon.Calls()
@@ -230,10 +230,10 @@ func TestApplyFresh(t *testing.T) {
 		t.Errorf("daemon calls:\n got %q\nwant %q", got, want)
 	}
 	if !bytes.Equal(calls[1].Stdin, testSecret) {
-		t.Errorf("secret set read %q from stdin, want the secret", calls[1].Stdin)
+		t.Errorf("secret set read %d bytes from stdin that differ from the %d-byte secret", len(calls[1].Stdin), len(testSecret))
 	}
 	if stored, _ := r.daemon.Secret("accounts/alice"); !bytes.Equal(stored, testSecret) {
-		t.Errorf("stored secret = %q", stored)
+		t.Errorf("stored secret (%d bytes) differs from the %d-byte secret", len(stored), len(testSecret))
 	}
 
 	if res.Test != "ok" || !res.ServiceRunning || res.Account != "alice" || res.Provider != "gmail" || res.KeyShown {
@@ -537,7 +537,7 @@ func TestApplyRejectedBeforeRestart(t *testing.T) {
 			t.Errorf("journal %q does not store the new secret after the restart", j)
 		}
 		if v, _ := r.daemon.Secret("accounts/alice"); !bytes.Equal(v, testSecret) || res.Test != "ok" {
-			t.Errorf("stored %q, result %+v", v, res)
+			t.Errorf("stored secret (%d bytes) differs from the new one, or result %+v", len(v), res)
 		}
 	})
 
@@ -641,7 +641,7 @@ func TestApplyKeyBackup(t *testing.T) {
 		key, _, _ := r.h.files.Content(r.l.VaultKey)
 		i := bytes.Index(key, []byte("AGE-SECRET-KEY-"))
 		if i < 0 {
-			t.Fatalf("vault key %q holds no identity", key)
+			t.Fatalf("vault key (%d bytes) holds no identity", len(key))
 		}
 		secretLine := bytes.TrimSpace(key[i:])
 		if !strings.Contains(r.tty.Output(), string(secretLine)) {
@@ -658,7 +658,7 @@ func TestApplyKeyBackup(t *testing.T) {
 		}
 		for _, c := range r.daemon.Calls() {
 			if bytes.Contains(c.Stdin, secretLine) || slices.ContainsFunc(c.Args, func(a string) bool { return strings.Contains(a, string(secretLine)) }) {
-				t.Errorf("the key was given to %q", c.Args)
+				t.Errorf("the key was given to the daemon command %q", c.Args[:min(2, len(c.Args))])
 			}
 		}
 		if !res.KeyShown || len(res.Warnings) != 0 {
@@ -798,7 +798,7 @@ func TestApplyOAuthLogin(t *testing.T) {
 			t.Error("the terminal was not closed")
 		}
 		if v, _ := r.daemon.Secret("oauth_clients/google"); string(v) != "client-secret" {
-			t.Errorf("client secret = %q", v)
+			t.Errorf("client secret (%d bytes) differs from the one given", len(v))
 		}
 		j := r.journal.Entries()
 		store, login2, test := slices.Index(j, "daemon secret set oauth_clients/google"), slices.Index(j, "daemon auth login alice"), slices.Index(j, "daemon accounts test alice")
@@ -826,4 +826,254 @@ func TestApplyOAuthLogin(t *testing.T) {
 			t.Errorf("result = %+v", res)
 		}
 	})
+}
+
+func TestApplyTrustsConfigDirBeforeWriting(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		p      Platform
+		tamper func(f *setuptest.Files)
+		want   string
+	}{
+		{
+			name: "symlinked config directory",
+			p:    Linux,
+			tamper: func(f *setuptest.Files) {
+				f.Dir("/tmp", 0, 0, 0o755).Symlink("/etc/chainmail", 0, "/tmp")
+			},
+			want: "/etc/chainmail: is a symlink",
+		},
+		{
+			name: "config directory owned by a user",
+			p:    Linux,
+			tamper: func(f *setuptest.Files) {
+				f.Dir("/etc/chainmail", setuptest.AliceLinuxUID, setuptest.AliceLinuxUID, 0o755)
+			},
+			want: "/etc/chainmail: owned by uid 1000",
+		},
+		{
+			name:   "ancestor owned by a user",
+			p:      Linux,
+			tamper: func(f *setuptest.Files) { f.Dir("/etc", setuptest.AliceLinuxUID, 0, 0o755) },
+			want:   "/etc: owned by uid 1000",
+		},
+		{
+			name: "ancestor owned by a user on macOS",
+			p:    Darwin,
+			tamper: func(f *setuptest.Files) {
+				f.Dir("/private/etc", setuptest.AliceDarwinUID, 0, 0o755)
+			},
+			want: "/private/etc: owned by uid 501",
+		},
+		{
+			name: "config directory writable by others",
+			p:    Linux,
+			tamper: func(f *setuptest.Files) {
+				f.Dir("/etc/chainmail", 0, 0, 0o777)
+			},
+			want: "/etc/chainmail: writable by group or others",
+		},
+		{
+			name: "config directory is a file",
+			p:    Linux,
+			tamper: func(f *setuptest.Files) {
+				f.File("/etc/chainmail", 0, 0, 0o644, []byte("x"))
+			},
+			want: "/etc/chainmail: is not a directory",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := freshRig(tc.p)
+			in := r.input(t, request(), nil, testSecret)
+			tc.tamper(r.h.files)
+			_, err := r.apply(in)
+			wantRefusal(t, err, tc.want)
+			if j := r.journal.Entries(); len(j) != 0 {
+				t.Errorf("journal after a refused config directory: %q", j)
+			}
+			if w := r.h.files.Writes(); len(w) != 0 {
+				t.Errorf("writes after a refused config directory: %q", w)
+			}
+			for _, lock := range []string{r.l.Lock, "/tmp/.bootstrap.lock"} {
+				if _, _, ok := r.h.files.Content(lock); ok {
+					t.Errorf("lock file %s was created", lock)
+				}
+			}
+		})
+	}
+}
+
+func TestEnsureAncestorsChecksTrust(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		tamper func(f *setuptest.Files)
+		want   string
+	}{
+		{
+			name:   "existing ancestor owned by a user",
+			tamper: func(f *setuptest.Files) { f.Remove("/var/lib").Dir("/var", setuptest.AliceLinuxUID, 0, 0o755) },
+			want:   "/var: owned by uid 1000",
+		},
+		{
+			name: "symlinked ancestor owned by a user",
+			tamper: func(f *setuptest.Files) {
+				f.Remove("/var/lib").Dir("/opt", 0, 0, 0o755).Symlink("/var/lib", setuptest.AliceLinuxUID, "/opt")
+			},
+			want: "/var/lib: is a symlink owned by uid 1000",
+		},
+		{
+			name: "symlinked ancestor into a user's directory",
+			tamper: func(f *setuptest.Files) {
+				f.Remove("/var/lib").Symlink("/var/lib", 0, "/home/alice")
+			},
+			want: "/home/alice: owned by uid 1000",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := freshRig(Linux)
+			r.h.files.Dir("/home", 0, 0, 0o755).Dir("/home/alice", setuptest.AliceLinuxUID, setuptest.AliceLinuxUID, 0o755)
+			tc.tamper(r.h.files)
+			err := r.applier.ensureAncestors(r.l.StateDir + "/sub")
+			wantRefusal(t, err, tc.want)
+			if j := r.journal.Entries(); len(j) != 0 {
+				t.Errorf("journal after a refused ancestor: %q", j)
+			}
+		})
+	}
+}
+
+func TestApplyReadinessBoundsHungStatus(t *testing.T) {
+	t.Parallel()
+	r := freshRig(Linux)
+	r.applier.readyTimeout = 50 * time.Millisecond
+	for i := 1; i <= 30; i++ {
+		r.svc.Log = append(r.svc.Log, fmt.Sprintf("log line %02d", i))
+	}
+	run := r.daemon.Run
+	r.applier.AsDaemon = func(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error {
+		if len(args) >= 2 && args[0] == "admin" && args[1] == "status" {
+			<-ctx.Done() // a daemon that accepts the connection and never answers
+			return ctx.Err()
+		}
+		return run(ctx, stdin, stdout, args...)
+	}
+	in := r.input(t, request(), nil, testSecret)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.apply(in)
+		done <- err
+	}()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Apply hung on an admin status that never returns")
+	}
+	if !errors.Is(err, ErrNotReady) {
+		t.Fatalf("Apply = %v, want ErrNotReady", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "log line 11") || !strings.Contains(msg, "log line 30") || strings.Contains(msg, "log line 10") {
+		t.Errorf("error does not carry the last 20 log lines:\n%s", msg)
+	}
+	if r.h.files.Locked(r.l.Lock) {
+		t.Error("the lock is still held")
+	}
+}
+
+func TestApplyReadinessHonoursCancel(t *testing.T) {
+	t.Parallel()
+	r := freshRig(Linux)
+	r.svc.Stuck = true
+	ctx, cancel := context.WithCancel(context.Background())
+	run := r.daemon.Run
+	r.applier.AsDaemon = func(c context.Context, stdin io.Reader, stdout io.Writer, args ...string) error {
+		cancel() // the caller gives up while the daemon is starting
+		return run(c, stdin, stdout, args...)
+	}
+	_, err := r.applier.Apply(ctx, r.input(t, request(), nil, testSecret))
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrNotReady) {
+		t.Fatalf("Apply = %v, want context.Canceled, not ErrNotReady", err)
+	}
+}
+
+func TestApplyRestartRules(t *testing.T) {
+	t.Parallel()
+	// oldService is a marked service definition other than the one this
+	// binary renders, as an older bootstrap would have written.
+	oldService := func(r *rig) {
+		r.h.files.File(r.l.Service, 0, 0, 0o644, append(RenderService(r.l), "\n"...))
+	}
+	sameBinary := func(r *rig) { r.h.files.File(userExe, 1000, 1000, 0o755, fakeBinary) }
+	cases := []struct {
+		name       string
+		p          Platform
+		prepare    func(r *rig)
+		newBinary  bool   // run newBinary rather than the installed one
+		secret     []byte // a new config holds a new account, which needs one
+		wantCalls  []string
+		wantStarts int
+	}{
+		{
+			name:       "macOS plist rewritten",
+			p:          Darwin,
+			prepare:    func(r *rig) { sameBinary(r); oldService(r) },
+			wantCalls:  []string{"state", "activate true", "state"},
+			wantStarts: 1,
+		},
+		{
+			name:       "macOS config only",
+			p:          Darwin,
+			prepare:    func(r *rig) { sameBinary(r); r.h.files.Remove(r.l.Config) },
+			secret:     testSecret,
+			wantCalls:  []string{"state", "activate false", "restart", "state"},
+			wantStarts: 1,
+		},
+		{
+			name:       "macOS binary only",
+			p:          Darwin,
+			prepare:    func(*rig) {},
+			newBinary:  true,
+			wantCalls:  []string{"state", "activate false", "restart", "state"},
+			wantStarts: 1,
+		},
+		{
+			name:       "Linux unit rewritten",
+			p:          Linux,
+			prepare:    func(r *rig) { sameBinary(r); oldService(r) },
+			wantCalls:  []string{"state", "activate true", "restart", "state"},
+			wantStarts: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := installedRig(tc.p)
+			tc.prepare(r)
+			req := gmailRequest()
+			if tc.newBinary {
+				req = request()
+			}
+			in := r.input(t, req, okHealth, tc.secret)
+			if !in.Plan.ServiceChanged {
+				t.Fatal("fixture plan does not change the service")
+			}
+			if _, err := r.apply(in); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+			if got := r.svc.Calls(); !slices.Equal(got, tc.wantCalls) {
+				t.Errorf("service calls = %q, want %q", got, tc.wantCalls)
+			}
+			if got := r.svc.Starts(); got != tc.wantStarts {
+				t.Errorf("starts = %d, want %d", got, tc.wantStarts)
+			}
+		})
+	}
 }

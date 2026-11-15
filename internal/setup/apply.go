@@ -69,6 +69,10 @@ type Applier struct {
 	// Resolver is not consulted: the request carries the detection the
 	// user confirmed, and Build checks it against the presets.
 	Resolver Resolver
+
+	// readyTimeout bounds the wait for a started daemon to answer. Zero
+	// means readinessTimeout; tests set it shorter.
+	readyTimeout time.Duration
 }
 
 // Input is what bootstrap apply reads from bootstrap.
@@ -114,7 +118,8 @@ var ErrNotReady = errors.New("daemon did not become ready")
 //
 // Nothing is written before the plan is validated and the user who ran
 // sudo is checked. The only write before the lock is the config
-// directory, which holds the lock file, when it does not exist yet. Under
+// directory, which holds the lock file, when it does not exist yet, and
+// only after the trust check passed it and every ancestor. Under
 // the lock Apply inspects the installation again, rebuilds the plan and
 // refuses unless it is the same, so a plan can only make the changes this
 // binary would plan itself.
@@ -136,7 +141,7 @@ func (a *Applier) Apply(ctx context.Context, in Input) (Result, error) {
 		return Result{}, err
 	}
 
-	if err := a.ensureConfigDir(); err != nil {
+	if err := a.prepareLockDir(); err != nil {
 		return Result{}, err
 	}
 	unlock, err := a.Files.Lock(l.Lock)
@@ -202,30 +207,49 @@ func (a *Applier) readExecutable(want string) ([]byte, error) {
 	return data, nil
 }
 
-// ensureConfigDir makes the config directory, which holds the lock file,
-// when it does not exist. An existing one is left as it is for the trust
-// check under the lock.
-func (a *Applier) ensureConfigDir() error {
+// prepareLockDir makes sure the config directory, which holds the lock
+// file, is a real directory root controls before anything is written. It
+// runs the trust check on the directory and every ancestor first, makes
+// the directory only when Lstat shows it missing, and then requires a
+// directory, not a symlink, owned by root and not writable by group or
+// others. Lock opens the lock file inside it, so a directory anyone else
+// controls would let them choose where root creates that file.
+func (a *Applier) prepareLockDir() error {
 	e, _ := a.Layout.Entry("config-dir")
+	if err := CheckTrust(filesView{a.Files}, e.Path, rootOnly); err != nil {
+		return err
+	}
 	info, err := a.Files.Lstat(e.Path)
 	if err != nil {
 		return fmt.Errorf("inspect %s: %w", e.Path, err)
 	}
-	if info.Exists {
-		return nil
+	if !info.Exists {
+		if err := a.ensureAncestors(e.Path); err != nil {
+			return err
+		}
+		if err := a.Files.EnsureDir(e.Path, 0, 0, e.Mode); err != nil {
+			return fmt.Errorf("create %s: %w", e.Path, err)
+		}
+		if info, err = a.Files.Lstat(e.Path); err != nil {
+			return fmt.Errorf("inspect %s: %w", e.Path, err)
+		}
 	}
-	if err := a.ensureAncestors(e.Path); err != nil {
-		return err
+	switch {
+	case !info.Exists:
+		return unsafePath(e.Path, "is missing after it was created")
+	case info.Mode&fs.ModeSymlink != 0:
+		return unsafePath(e.Path, "is a symlink")
+	case !info.Mode.IsDir():
+		return unsafePath(e.Path, "is not a directory")
 	}
-	if err := a.Files.EnsureDir(e.Path, 0, 0, e.Mode); err != nil {
-		return fmt.Errorf("create %s: %w", e.Path, err)
-	}
-	return nil
+	return checkOwnerMode(e.Path, FileInfo(info), rootOnly)
 }
 
 // ensureAncestors creates the missing directories above path, from the
 // top down, owned by root and the root group with mode 0755. macOS has no
-// /private/var/lib, for example.
+// /private/var/lib, for example. Before it creates anything it runs the
+// trust check on the topmost missing directory, which checks every
+// existing ancestor and follows only symlinks the trust rule accepts.
 func (a *Applier) ensureAncestors(path string) error {
 	var missing []string
 	for dir := filepath.Dir(path); dir != "/" && dir != "."; dir = filepath.Dir(dir) {
@@ -238,12 +262,33 @@ func (a *Applier) ensureAncestors(path string) error {
 		}
 		missing = append(missing, dir)
 	}
+	if len(missing) == 0 {
+		return nil
+	}
+	if err := CheckTrust(filesView{a.Files}, missing[len(missing)-1], rootOnly); err != nil {
+		return err
+	}
 	for _, dir := range slices.Backward(missing) {
 		if err := a.Files.EnsureDir(dir, 0, 0, 0o755); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
 	}
 	return nil
+}
+
+// rootOnly is the trusted uids before the lock is held: only root.
+var rootOnly = []uint32{0}
+
+// filesView is the FSView of a system.Files as root sees it. Unlike
+// Inspect's view, a path Lstat may not read is an error, never missing.
+type filesView struct{ files system.Files }
+
+func (v filesView) Lstat(path string) (FileInfo, error) {
+	info, err := v.files.Lstat(path)
+	if err != nil {
+		return FileInfo{}, err
+	}
+	return FileInfo(info), nil
 }
 
 // newResult is the Result before anything ran.
@@ -484,15 +529,19 @@ func (r *applyRun) showKey(key []byte) {
 }
 
 // activate runs the activate-service step: load or start the service,
-// restart it when it was running before, and wait for it to answer.
+// restart it when it was running before and Activate did not, and wait
+// for it to answer.
 func (r *applyRun) activate(ctx context.Context) error {
 	start := r.a.Now()
 	if err := r.a.Service.Activate(ctx, r.serviceWritten); err != nil {
 		return err
 	}
 	// systemd's enable --now leaves a running unit alone, so a running
-	// service would keep the old binary or config.
-	if r.pre.Running {
+	// service would keep the old binary or config. On macOS, Activate with
+	// a rewritten plist already booted the job out and bootstrapped it
+	// again, so a restart on top would start the daemon a second time.
+	reloaded := r.l.Platform == Darwin && r.serviceWritten
+	if r.pre.Running && !reloaded {
 		if err := r.a.Service.Restart(ctx); err != nil {
 			return err
 		}
@@ -514,30 +563,50 @@ func (r *applyRun) ensureRunning(ctx context.Context) error {
 }
 
 // waitReady polls admin status until the daemon reports a start later
-// than start, for at most readinessTimeout. A stale socket left by an
-// old daemon fails to connect or reports an older start, so it is never
-// taken for the new one.
+// than start, for at most the readiness timeout. A stale socket left by
+// an old daemon fails to connect or reports an older start, so it is
+// never taken for the new one.
+//
+// The timeout bounds the whole wait twice: by the Applier's clock between
+// polls, and by a context deadline that every status call runs under, so
+// a daemon that accepts the connection and never answers cannot hold the
+// lock forever. Cancelling ctx itself is an error of its own, not
+// ErrNotReady.
 func (r *applyRun) waitReady(ctx context.Context, start time.Time) error {
-	deadline := r.a.Now().Add(readinessTimeout)
+	timeout := r.a.readinessWait()
+	deadline := r.a.Now().Add(timeout)
+	wctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	for {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("wait for the daemon: %w", err)
 		}
-		st, err := r.status(ctx)
+		st, err := r.status(wctx)
 		if err == nil && st.StartedAt.After(start) {
 			r.ready = true
 			return nil
 		}
-		if !r.a.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("wait for the daemon: %w", err)
+		}
+		if wctx.Err() != nil || !r.a.Now().Before(deadline) {
 			break
 		}
 		r.a.Sleep(readinessPoll)
 	}
 	logs, err := r.a.Service.Logs(ctx, logTailLines)
 	if err != nil {
-		return fmt.Errorf("%w within %v; reading its log failed too: %w", ErrNotReady, readinessTimeout, err)
+		return fmt.Errorf("%w within %v; reading its log failed too: %w", ErrNotReady, timeout, err)
 	}
-	return fmt.Errorf("%w within %v; the last %d log lines:\n%s", ErrNotReady, readinessTimeout, logTailLines, bytes.TrimRight(logs, "\n"))
+	return fmt.Errorf("%w within %v; the last %d log lines:\n%s", ErrNotReady, timeout, logTailLines, bytes.TrimRight(logs, "\n"))
+}
+
+// readinessWait is how long Apply waits for a started daemon to answer.
+func (a *Applier) readinessWait() time.Duration {
+	if a.readyTimeout > 0 {
+		return a.readyTimeout
+	}
+	return readinessTimeout
 }
 
 // daemonStatus is the part of admin status's JSON Apply reads.
