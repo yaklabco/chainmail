@@ -237,12 +237,12 @@ func TestDetect(t *testing.T) {
 		}
 	})
 
-	t.Run("domain not found is unknown provider", func(t *testing.T) {
+	t.Run("domain not found is a DNS failure", func(t *testing.T) {
 		nf := &net.DNSError{Err: "no such host", Name: "example.org", IsNotFound: true}
 		_, err := Detect(ctx, &fakeResolver{err: nf}, "me@example.org", "")
 		r := asRefusal(t, err)
-		if !strings.HasPrefix(r.Msg, "unknown provider for example.org") {
-			t.Fatalf("message %q, want unknown provider", r.Msg)
+		if !strings.Contains(r.Msg, "DNS lookup") || !strings.Contains(r.Msg, "failed") || !strings.Contains(r.Msg, "no such host") {
+			t.Fatalf("message %q, want a DNS failure naming the resolver error", r.Msg)
 		}
 	})
 
