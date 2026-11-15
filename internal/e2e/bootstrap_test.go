@@ -449,7 +449,7 @@ func (h *host) checkLayout(ids hostIDs) {
 		h.t.Errorf("the socket: %v", err)
 		return
 	}
-	if st.Mode.Type() != fs.ModeSocket || st.Mode.Perm() != 0o660 || st.UID != ids.DaemonUID || st.GID != ids.ClientsGID {
+	if st.Mode.Type() != fs.ModeSocket || modeBits(st.Mode) != 0o660 ||st.UID != ids.DaemonUID || st.GID != ids.ClientsGID {
 		h.t.Errorf("socket %s is %s owned by %d:%d, want a socket with mode 0660 owned by %d:%d",
 			h.l.Socket, st.Mode, st.UID, st.GID, ids.DaemonUID, ids.ClientsGID)
 	}

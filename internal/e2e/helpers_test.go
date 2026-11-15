@@ -85,8 +85,8 @@ func checkEntry(e setup.Entry, st pathState, ids hostIDs) error {
 	case e.Kind == setup.KindFile && !st.Mode.IsRegular():
 		faults = append(faults, "is not a regular file")
 	}
-	if st.Mode.Perm() != e.Mode.Perm() {
-		faults = append(faults, fmt.Sprintf("mode %s, want %s", st.Mode.Perm(), e.Mode.Perm()))
+	if got, want := modeBits(st.Mode), modeBits(e.Mode); got != want {
+		faults = append(faults, fmt.Sprintf("mode %s, want %s", got, want))
 	}
 	uid, err := ids.owner(e.Owner)
 	if err != nil {
@@ -106,6 +106,17 @@ func checkEntry(e setup.Entry, st pathState, ids hostIDs) error {
 		return nil
 	}
 	return fmt.Errorf("%s (%s): %s", e.Path, e.Name, strings.Join(faults, "; "))
+}
+
+// specialBits are the mode bits beyond the permissions that a layout path
+// must match too: a setuid, setgid or sticky bit bootstrap did not ask for
+// is a fault.
+const specialBits = fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky
+
+// modeBits is m's permission, setuid, setgid and sticky bits, without its
+// type.
+func modeBits(m fs.FileMode) fs.FileMode {
+	return m & (fs.ModePerm | specialBits)
 }
 
 // decodeResult reads the one setup.Result object bootstrap --output json

@@ -91,6 +91,11 @@ func TestCheckEntry(t *testing.T) {
 		{name: "symlink", entry: key, state: pathState{Mode: fs.ModeSymlink | 0o777, UID: 301, GID: 302}, want: []string{"is a symlink"}},
 		{name: "file where a dir belongs", entry: dir, state: pathState{Mode: 0o755}, want: []string{"is not a directory"}},
 		{name: "dir where a file belongs", entry: key, state: pathState{Mode: fs.ModeDir | 0o400, UID: 301, GID: 302}, want: []string{"is not a regular file"}},
+		{name: "setuid file", entry: key, state: pathState{Mode: fs.ModeSetuid | 0o400, UID: 301, GID: 302}, want: []string{"mode ur--------, want -r--------"}},
+		{name: "setgid file", entry: key, state: pathState{Mode: fs.ModeSetgid | 0o400, UID: 301, GID: 302}, want: []string{"mode gr--------, want -r--------"}},
+		{name: "setgid dir", entry: dir, state: pathState{Mode: fs.ModeDir | fs.ModeSetgid | 0o755}, want: []string{"mode"}},
+		{name: "sticky dir", entry: dir, state: pathState{Mode: fs.ModeDir | fs.ModeSticky | 0o755}, want: []string{"mode"}},
+		{name: "every special bit", entry: key, state: pathState{Mode: fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky | 0o400, UID: 301, GID: 302}, want: []string{"mode"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
