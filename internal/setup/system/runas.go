@@ -42,6 +42,8 @@ func RunAs(ctx context.Context, uid, gid uint32, stdin io.Reader, stdout, stderr
 func runAsCmd(ctx context.Context, uid, gid uint32, stdin io.Reader, stdout, stderr io.Writer, path string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = append([]string(nil), runAsEnv...)
+	// Never the caller's working directory: see execRunner.
+	cmd.Dir = "/"
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr

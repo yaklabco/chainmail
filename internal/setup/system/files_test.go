@@ -291,6 +291,9 @@ func TestRunAsCmd(t *testing.T) {
 	if want := []string{"chainmail", "admin", "status"}; !reflect.DeepEqual(cmd.Args, want) {
 		t.Fatalf("Args = %q, want %q", cmd.Args, want)
 	}
+	if cmd.Dir != "/" {
+		t.Fatalf("Dir = %q, want /", cmd.Dir)
+	}
 	if cmd.Stdin != in || cmd.Stdout != &out || cmd.Stderr != &errOut {
 		t.Fatal("stdio not passed through")
 	}

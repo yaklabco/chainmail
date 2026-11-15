@@ -3,11 +3,13 @@ package system
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -218,6 +220,101 @@ func TestFinder(t *testing.T) {
 			command: "sudo",
 			want:    "/usr/local/bin/sudo",
 		},
+		{
+			name: "group-writable search directory holding a symlink to a trusted shell is refused",
+			setup: func(tr *tree) {
+				tr.file("/usr/bin/dash", "", 0o755)
+				tr.dir("/usr/local/bin", 0o775)
+				tr.symlink("/usr/local/bin/getent", "../../bin/dash")
+			},
+			dirs:    []string{"/usr/local/bin"},
+			command: "getent",
+			errHas:  "writable",
+		},
+		{
+			name: "other-writable search directory holding a symlink to a trusted shell is refused",
+			setup: func(tr *tree) {
+				tr.file("/usr/bin/dash", "", 0o755)
+				tr.symlink("/usr/sbin/getent", "../bin/dash")
+				tr.dir("/usr/sbin", 0o777)
+			},
+			dirs:    []string{"/usr/sbin"},
+			command: "getent",
+			errHas:  "writable",
+		},
+		{
+			name: "symlink hop through a writable directory is refused",
+			setup: func(tr *tree) {
+				tr.file("/usr/bin/dash", "", 0o755)
+				tr.symlink("/opt/hop/getent", "../../usr/bin/dash")
+				tr.dir("/opt/hop", 0o777)
+				tr.symlink("/usr/bin/getent", "../../opt/hop/getent")
+			},
+			dirs:    []string{"/usr/bin"},
+			command: "getent",
+			errHas:  "writable",
+		},
+		{
+			name: "directory symlink into a writable directory is refused",
+			setup: func(tr *tree) {
+				tr.file("/home/user/sbin/getent", "", 0o755)
+				tr.dir("/home/user", 0o777)
+				tr.symlink("/sbin", "home/user/sbin")
+			},
+			dirs:    []string{"/sbin"},
+			command: "getent",
+			errHas:  "writable",
+		},
+		{
+			name: "chain of trusted symlinks is followed",
+			setup: func(tr *tree) {
+				tr.file("/usr/bin/dash", "", 0o755)
+				tr.symlink("/usr/bin/sh", "dash")
+				tr.symlink("/bin", "usr/bin")
+			},
+			dirs:    []string{"/bin"},
+			command: "sh",
+			want:    "/usr/bin/dash",
+		},
+		{
+			name: "absolute symlink inside the root is followed",
+			setup: func(tr *tree) {
+				tr.file("/usr/sbin/groupadd", "", 0o755)
+				tr.symlink("/sbin", tr.path("/usr/sbin"))
+			},
+			dirs:    []string{"/sbin"},
+			command: "groupadd",
+			want:    "/usr/sbin/groupadd",
+		},
+		{
+			name: "symlink loop is refused",
+			setup: func(tr *tree) {
+				tr.symlink("/usr/bin/a", "b")
+				tr.symlink("/usr/bin/b", "a")
+			},
+			dirs:    []string{"/usr/bin"},
+			command: "a",
+			errHas:  "too many",
+		},
+		{
+			name: "symlink climbing out of the root is refused",
+			setup: func(tr *tree) {
+				tr.symlink("/usr/bin/sh", "../../../../../../../../../../../../bin/sh")
+			},
+			dirs:    []string{"/usr/bin"},
+			command: "sh",
+			errHas:  "outside",
+		},
+		{
+			name: "symlink resolving to a directory is refused",
+			setup: func(tr *tree) {
+				tr.dir("/usr/lib/thing", 0o755)
+				tr.symlink("/usr/bin/thing", "../lib/thing/..")
+			},
+			dirs:    []string{"/usr/bin"},
+			command: "thing",
+			errHas:  "not a regular file",
+		},
 		{name: "path, not a name", command: "/usr/bin/id", errHas: "bare command name"},
 		{name: "relative path", command: "bin/id", errHas: "bare command name"},
 		{name: "empty name", command: "", errHas: "bare command name"},
@@ -259,6 +356,106 @@ func TestFinderUntrustedOwner(t *testing.T) {
 	f.owner++
 	if got, err := f.find("id"); err == nil || !strings.Contains(err.Error(), "owned by") {
 		t.Fatalf("find of a file owned by another user = %q, %v; want an ownership error", got, err)
+	}
+}
+
+// ownedBy reports fs.FileInfo as owned by uid, for a test that cannot
+// chown.
+type ownedBy struct {
+	fs.FileInfo
+	uid uint32
+}
+
+func (o ownedBy) Sys() any {
+	st := *o.FileInfo.Sys().(*syscall.Stat_t)
+	st.Uid = o.uid
+	return &st
+}
+
+// lstatOwnedBy is os.Lstat, except that it reports each path in owners as
+// owned by the uid given for it.
+func lstatOwnedBy(owners map[string]uint32) func(string) (fs.FileInfo, error) {
+	return func(path string) (fs.FileInfo, error) {
+		fi, err := os.Lstat(path)
+		if err != nil {
+			return nil, err
+		}
+		if uid, ok := owners[path]; ok {
+			return ownedBy{FileInfo: fi, uid: uid}, nil
+		}
+		return fi, nil
+	}
+}
+
+// TestFinderUntrustedSymlinkOwner shows a symlink the finder's owner does
+// not own is refused, even in a trusted directory and pointing at a
+// trusted file, while the same link owned by the owner is followed.
+func TestFinderUntrustedSymlinkOwner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		setup   func(tr *tree)
+		link    string // host path of the symlink
+		dirs    []string
+		command string
+		want    string
+	}{
+		{
+			name: "command symlink",
+			setup: func(tr *tree) {
+				tr.file("/usr/bin/dash", "", 0o755)
+				tr.symlink("/usr/bin/getent", "dash")
+			},
+			link:    "/usr/bin/getent",
+			dirs:    []string{"/usr/bin"},
+			command: "getent",
+			want:    "/usr/bin/dash",
+		},
+		{
+			name: "search directory symlink",
+			setup: func(tr *tree) {
+				tr.file("/usr/sbin/groupadd", "", 0o755)
+				tr.symlink("/sbin", "usr/sbin")
+			},
+			link:    "/sbin",
+			dirs:    []string{"/sbin"},
+			command: "groupadd",
+			want:    "/usr/sbin/groupadd",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tr := newTree(t)
+			tt.setup(tr)
+			f := tr.finder(tt.dirs...)
+
+			f.lstat = lstatOwnedBy(map[string]uint32{tr.path(tt.link): f.owner})
+			got, err := f.find(tt.command)
+			if err != nil || got != tr.path(tt.want) {
+				t.Fatalf("find(%q) with a trusted link = %q, %v; want %q", tt.command, got, err, tr.path(tt.want))
+			}
+
+			f.lstat = lstatOwnedBy(map[string]uint32{tr.path(tt.link): f.owner + 1})
+			if got, err := f.find(tt.command); err == nil || !strings.Contains(err.Error(), "owned by") {
+				t.Fatalf("find(%q) through a link another user owns = %q, %v; want an ownership error", tt.command, got, err)
+			}
+		})
+	}
+}
+
+// TestFinderUntrustedSearchDirOwner shows a search directory the finder's
+// owner does not own is refused, though the command in it is a symlink to
+// a trusted file.
+func TestFinderUntrustedSearchDirOwner(t *testing.T) {
+	t.Parallel()
+	tr := newTree(t)
+	tr.file("/usr/bin/dash", "", 0o755)
+	tr.symlink("/usr/local/bin/getent", "../../bin/dash")
+	f := tr.finder("/usr/local/bin")
+	f.lstat = lstatOwnedBy(map[string]uint32{tr.path("/usr/local/bin"): f.owner + 1})
+	if got, err := f.find("getent"); err == nil || !strings.Contains(err.Error(), "owned by") {
+		t.Fatalf("find through a search directory another user owns = %q, %v; want an ownership error", got, err)
 	}
 }
 
@@ -345,6 +542,23 @@ func TestExecRunnerEnvironment(t *testing.T) {
 	want := "/usr/sbin:/usr/bin:/sbin:/bin|C|||" + tr.path("/usr/bin/show-env") + "\n"
 	if string(out) != want {
 		t.Fatalf("environment = %q, want %q", out, want)
+	}
+}
+
+// TestExecRunnerWorkingDirectory shows a host command runs in "/", never
+// the caller's working directory, so a relative argument such as a file
+// name a shell would read cannot resolve against a directory the invoking
+// user controls.
+func TestExecRunnerWorkingDirectory(t *testing.T) {
+	t.Chdir(t.TempDir())
+	tr := newTree(t)
+	tr.file("/usr/bin/show-dir", "pwd", 0o755)
+	out, err := execRunner(tr.finder().find)(context.Background(), "show-dir")
+	if err != nil {
+		t.Fatalf("show-dir: %v", err)
+	}
+	if string(out) != "/\n" {
+		t.Fatalf("working directory = %q, want /", out)
 	}
 }
 
