@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The error reasons `NOT_ORGANIZER` and `CALENDAR_READ_ONLY` (exit 3), `NO_CALENDAR_STORE` (exit 2) and `EVENT_CONFLICT` (exit 7).
 - `stave test:caldav`, which runs the CalDAV store tests against the Mailwright image `CHAINMAIL_MAILWRIGHT_IMAGE` names. CI does not run it.
 - A `Brewfile` and `stave prereq:brew`, which install the build tools with Homebrew, as the Nix dev shell does. Every stave target first checks that go, buf, golangci-lint and goreleaser are on PATH, from either setup or both. When one is missing, stave installs the Brewfile if Homebrew is installed, and otherwise says to use `nix develop` or Homebrew.
+- `chainmail bootstrap <email>`, which sets up a production daemon on Linux with systemd or on macOS, with one sudo call. It creates the daemon's user and the `chainmail-clients` group, and installs the binary, the config, the vault key and the service. It then stores one account's password or OAuth client secret and tests the login. It finds Gmail, Google Workspace, iCloud and Hostinger from the address, or takes `--provider`. A rerun adds another account or repairs the install, and restarts the daemon only when the binary, config or service changed.
+- The vault key backup choice in bootstrap. By default a new key stays only on the machine, readable only by the daemon's user. `--key-backup show` prints it once on the terminal, and never in output that could be captured.
+- `chainmail admin status` shows a `warning` row when the daemon's version differs from the CLI's.
+- `stave test:e2e`, and the `e2e-linux` and `e2e-macos` CI jobs that run it. The test runs bootstrap for real on GitHub's runners against test IMAP and SMTP servers. It changes the host, so it skips unless `CI=true` and `CHAINMAIL_E2E_MUTATE_HOST=1` are both set.
 
 ### Changed
 
@@ -44,6 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CACHE_NOT_READY` also answers a calendar read before the account's first calendar sync, and `HELD` a calendar answer or change the policy held.
 - The upgrade applies `state.db` migration 7, and an older binary refuses the database afterwards. Take a snapshot before you upgrade.
 - The README, the quick start and the runbook describe calendars.
+- Dev mode warns. A daemon started with `--dev` or `CHAINMAIL_DEV` prints a warning on stderr and logs it, and `admin status` shows it as a `warning` row. The warning says that anything running as you can read the vault key and every stored password.
+- The README and `docs/QUICKSTART.md` set up chainmail with `chainmail bootstrap`. The dev daemon moved to a note for people developing chainmail.
 
 ### Fixed
 
