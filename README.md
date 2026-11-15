@@ -107,11 +107,13 @@ chainmail bootstrap you@example.com
 
 Bootstrap makes a new key and asks for that account's password again. Run it once more for each other account, with the same address and options as before, to enter its password again. For an OAuth account, bootstrap asks for the OAuth client secret again and logs in through the browser. Without a terminal it cannot log in, and it tells you to run `chainmail auth login <name>`.
 
-On NixOS, the key is the sealed credential `chainmail-vault-key.cred` in your NixOS configuration, and bootstrap does not make a new one while the module is installed. A reinstall loses the host key that sealed it, so the credential no longer opens. If you saved the key, seal it again on this machine, in the directory that holds the old credential, then commit the new file and rebuild:
+On NixOS, the key is the sealed credential `chainmail-vault-key.cred` in your NixOS configuration, and bootstrap does not make a new one while the module is installed. A reinstall loses the host key that sealed it, so the credential no longer opens. If you saved the key, put it in a file called `vault-key` in the directory that holds the old credential, and seal it again on this machine. The new credential replaces the old one only after it decrypts to a valid age identity, and the saved copy is deleted only after that. Then commit the new file and rebuild:
 
 ```sh
-sudo systemd-creds encrypt --name=vault-key vault-key chainmail-vault-key.cred
-rm vault-key
+sudo nix shell nixpkgs#age -c bash -euo pipefail -c '
+  systemd-creds encrypt --name=vault-key vault-key chainmail-vault-key.cred.new
+  systemd-creds decrypt --name=vault-key chainmail-vault-key.cred.new - | age-keygen -y >/dev/null
+  mv chainmail-vault-key.cred.new chainmail-vault-key.cred' && rm vault-key
 ```
 
 Without a saved key, stop the daemon, move the old vault aside, and seal a new key in place of the old credential. Run the commands below in the directory that holds the old credential. One root shell makes the new key with `age-keygen` and pipes it straight into `systemd-creds`. The key never passes through a process of yours and is never shown. The new credential replaces the old one only after it decrypts to a valid age identity. Commit the new file and rebuild, which starts the daemon again. Then run bootstrap once for each account to enter its password again:
