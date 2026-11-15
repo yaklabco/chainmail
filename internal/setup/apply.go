@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/yaklabco/chainmail/internal/provider"
@@ -24,6 +25,16 @@ const (
 	readinessTimeout = 15 * time.Second
 	readinessPoll    = 250 * time.Millisecond
 	logTailLines     = 20
+)
+
+// Bounds on the other daemon calls, so a daemon that accepts the
+// connection and never answers cannot hold the install lock forever.
+// The account test logs in to the mail servers, so it gets longer.
+// auth login is interactive and has no bound.
+const (
+	logReadTimeout     = 5 * time.Second
+	daemonCallTimeout  = 15 * time.Second
+	accountTestTimeout = 60 * time.Second
 )
 
 // Result values for Result.Test.
@@ -73,6 +84,11 @@ type Applier struct {
 	// readyTimeout bounds the wait for a started daemon to answer. Zero
 	// means readinessTimeout; tests set it shorter.
 	readyTimeout time.Duration
+	// logTimeout bounds reading the service log after the daemon did not
+	// answer, callTimeout each admin status, accounts list and secret set
+	// outside the readiness wait, and testTimeout the account test. Zero
+	// means logReadTimeout, daemonCallTimeout and accountTestTimeout.
+	logTimeout, callTimeout, testTimeout time.Duration
 }
 
 // Input is what bootstrap apply reads from bootstrap.
@@ -594,19 +610,40 @@ func (r *applyRun) waitReady(ctx context.Context, start time.Time) error {
 		}
 		r.a.Sleep(readinessPoll)
 	}
-	logs, err := r.a.Service.Logs(ctx, logTailLines)
+	logs, err := r.logs(ctx)
 	if err != nil {
-		return fmt.Errorf("%w within %v; reading its log failed too: %w", ErrNotReady, timeout, err)
+		return fmt.Errorf("%w within %v, and bootstrap could not read its log: %w", ErrNotReady, timeout, err)
 	}
 	return fmt.Errorf("%w within %v; the last %d log lines:\n%s", ErrNotReady, timeout, logTailLines, bytes.TrimRight(logs, "\n"))
 }
 
+// logs reads the last lines of the service log for at most the log
+// timeout, so a journal reader that never returns cannot hold the lock
+// either.
+func (r *applyRun) logs(ctx context.Context) ([]byte, error) {
+	lctx, cancel := context.WithTimeout(ctx, r.a.logWait())
+	defer cancel()
+	return r.a.Service.Logs(lctx, logTailLines)
+}
+
 // readinessWait is how long Apply waits for a started daemon to answer.
-func (a *Applier) readinessWait() time.Duration {
-	if a.readyTimeout > 0 {
-		return a.readyTimeout
+func (a *Applier) readinessWait() time.Duration { return orDefault(a.readyTimeout, readinessTimeout) }
+
+// logWait bounds reading the service log.
+func (a *Applier) logWait() time.Duration { return orDefault(a.logTimeout, logReadTimeout) }
+
+// callWait bounds one admin status, accounts list or secret set.
+func (a *Applier) callWait() time.Duration { return orDefault(a.callTimeout, daemonCallTimeout) }
+
+// testWait bounds the account test.
+func (a *Applier) testWait() time.Duration { return orDefault(a.testTimeout, accountTestTimeout) }
+
+// orDefault is d, or def when d is not positive.
+func orDefault(d, def time.Duration) time.Duration {
+	if d > 0 {
+		return d
 	}
-	return readinessTimeout
+	return def
 }
 
 // daemonStatus is the part of admin status's JSON Apply reads.
@@ -651,12 +688,59 @@ func (r *applyRun) asDaemon(ctx context.Context, stdin io.Reader, stdout io.Writ
 	return r.a.AsDaemon(ctx, stdin, stdout, append(args, "--socket", r.l.Socket)...)
 }
 
+// noAnswerError is a daemon call that ran out of its timeout: the daemon
+// accepted the connection and did not answer in time.
+type noAnswerError struct {
+	command string
+	timeout time.Duration
+	err     error
+}
+
+func (e *noAnswerError) Error() string {
+	return fmt.Sprintf("%s did not answer within %v: %v", e.command, e.timeout, e.err)
+}
+
+func (e *noAnswerError) Unwrap() error { return e.err }
+
+// bounded runs call under timeout. When the timeout ran out, and ctx did
+// not end first, the error is a *noAnswerError that names command, so a
+// daemon that never answers fails that step instead of holding the lock.
+func bounded(ctx context.Context, timeout time.Duration, command string, call func(context.Context) error) error {
+	bctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	err := call(bctx)
+	if err != nil && ctx.Err() == nil && errors.Is(bctx.Err(), context.DeadlineExceeded) {
+		return &noAnswerError{command: command, timeout: timeout, err: err}
+	}
+	return err
+}
+
+// noAnswer reports whether err is a daemon call that ran out of time.
+func noAnswer(err error) bool {
+	var na *noAnswerError
+	return errors.As(err, &na)
+}
+
+// boundedJSON is daemonJSON under the daemon call timeout.
+func (r *applyRun) boundedJSON(ctx context.Context, v any, args ...string) error {
+	return bounded(ctx, r.a.callWait(), strings.Join(args, " "), func(c context.Context) error {
+		return r.daemonJSON(c, v, args...)
+	})
+}
+
 // checkRejected looks, before a restart, for an account the provider
 // already rejected: the daemon keeps that only in memory, and a restart
 // would make it try the bad password again. Without a new secret Apply
 // stops there.
 func (r *applyRun) checkRejected(ctx context.Context) error {
-	if !r.plan.ServiceChanged || !r.pre.Running || len(r.in.Secret) > 0 || !r.rejected(ctx) {
+	if !r.plan.ServiceChanged || !r.pre.Running || len(r.in.Secret) > 0 {
+		return nil
+	}
+	rejected, err := r.rejected(ctx)
+	if err != nil {
+		return fmt.Errorf("check the stored credentials of account %s: %w", r.plan.Account.Name, err)
+	}
+	if !rejected {
 		return nil
 	}
 	return &AuthError{
@@ -668,26 +752,38 @@ func (r *applyRun) checkRejected(ctx context.Context) error {
 
 // rejected reports whether the running daemon has the plan's secret
 // stored and still says the account needs auth. A daemon that cannot be
-// asked says nothing, so that is not a rejection. Only a password can be
-// rejected this way: an OAuth account that needs auth needs a new login,
-// which a restart does not hurt and a new client secret does not fix.
-func (r *applyRun) rejected(ctx context.Context) bool {
+// asked says nothing, so that is not a rejection, but one that accepts
+// the call and does not answer in time is an error, as is the end of ctx.
+// Only a password can be rejected this way: an OAuth account that needs
+// auth needs a new login, which a restart does not hurt and a new client
+// secret does not fix.
+func (r *applyRun) rejected(ctx context.Context) (bool, error) {
 	if r.plan.Account.Auth != provider.AuthPassword {
-		return false
+		return false, nil
 	}
 	var list daemonAccounts
-	if err := r.daemonJSON(ctx, &list, "accounts", "list"); err != nil {
-		return false
+	if err := r.boundedJSON(ctx, &list, "accounts", "list"); err != nil {
+		return false, unasked(ctx, err)
 	}
-	st, err := r.status(ctx)
-	if err != nil {
-		return false
+	var st daemonStatus
+	if err := r.boundedJSON(ctx, &st, "admin", "status"); err != nil {
+		return false, unasked(ctx, err)
 	}
 	name := r.plan.Account.Name
 	required := slices.ContainsFunc(list.Accounts, func(acc daemonAccount) bool {
 		return acc.Name == name && acc.AuthState == authStateRequired
 	})
-	return required && slices.Contains(st.SecretNames, r.plan.SecretName)
+	return required && slices.Contains(st.SecretNames, r.plan.SecretName), nil
+}
+
+// unasked is the error of a call rejected could not make: nil for a
+// daemon that could not be asked, err for one that did not answer in time
+// or when ctx ended.
+func unasked(ctx context.Context, err error) error {
+	if noAnswer(err) || ctx.Err() != nil {
+		return err
+	}
+	return nil
 }
 
 // storeSecret stores the secret the user gave, once.
@@ -699,7 +795,10 @@ func (r *applyRun) storeSecret(ctx context.Context) error {
 		return err
 	}
 	stdin := bytes.NewReader(r.in.Secret)
-	if err := r.asDaemon(ctx, stdin, io.Discard, "secret", "set", r.plan.SecretName, "--output", "json"); err != nil {
+	err := bounded(ctx, r.a.callWait(), "secret set", func(c context.Context) error {
+		return r.asDaemon(c, stdin, io.Discard, "secret", "set", r.plan.SecretName, "--output", "json")
+	})
+	if err != nil {
 		return fmt.Errorf("store the secret %s: %w", r.plan.SecretName, err)
 	}
 	r.secretStored = true
@@ -725,18 +824,24 @@ func (r *applyRun) login(ctx context.Context, account string) error {
 	return nil
 }
 
-// test runs the account test. Rejected credentials are an AuthError;
-// any other failure is a warning, since the install itself is done.
+// test runs the account test. Rejected credentials are an AuthError, and
+// a test that does not answer within its timeout is an error. Any other
+// failure is a warning, since the install itself is done.
 func (r *applyRun) test(ctx context.Context, account string) error {
 	if r.skipTest {
 		return nil
 	}
-	err := r.asDaemon(ctx, nil, io.Discard, "accounts", "test", account, "--output", "json")
+	err := bounded(ctx, r.a.testWait(), "accounts test", func(c context.Context) error {
+		return r.asDaemon(c, nil, io.Discard, "accounts", "test", account, "--output", "json")
+	})
 	if err == nil {
 		r.res.Test = testOK
 		return nil
 	}
 	r.res.Test = testFailed
+	if noAnswer(err) {
+		return fmt.Errorf("test account %s: %w", account, err)
+	}
 	var exit interface{ ExitCode() int }
 	if errors.As(err, &exit) && exit.ExitCode() == exitAuthRejected {
 		hint := newPasswordHint

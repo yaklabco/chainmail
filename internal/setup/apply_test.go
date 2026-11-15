@@ -1077,3 +1077,154 @@ func TestApplyRestartRules(t *testing.T) {
 		})
 	}
 }
+
+// hungLogs is a service whose log reader blocks until its context is
+// done, as journalctl would on a wedged journal.
+type hungLogs struct{ *setuptest.Service }
+
+func (hungLogs) Logs(ctx context.Context, _ int) ([]byte, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// applyWithin runs Apply in the background and fails the test when it
+// does not return within 5 seconds of real time.
+func applyWithin(t *testing.T, r *rig, in Input, what string) (Result, error) {
+	t.Helper()
+	type out struct {
+		res Result
+		err error
+	}
+	done := make(chan out, 1)
+	go func() {
+		res, err := r.apply(in)
+		done <- out{res, err}
+	}()
+	select {
+	case o := <-done:
+		return o.res, o.err
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Apply hung on %s", what)
+		return Result{}, nil
+	}
+}
+
+func TestApplyReadinessBoundsHungLogs(t *testing.T) {
+	t.Parallel()
+	r := freshRig(Linux)
+	r.svc.Stuck = true
+	r.applier.readyTimeout = 50 * time.Millisecond
+	r.applier.logTimeout = 50 * time.Millisecond
+	r.applier.Service = hungLogs{r.svc}
+	_, err := applyWithin(t, r, r.input(t, request(), nil, testSecret), "a log reader that never returns")
+	if !errors.Is(err, ErrNotReady) {
+		t.Fatalf("Apply = %v, want ErrNotReady", err)
+	}
+	if !strings.Contains(err.Error(), "could not read its log") || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error %q does not say the log could not be read", err)
+	}
+	if r.h.files.Locked(r.l.Lock) {
+		t.Error("the lock is still held")
+	}
+}
+
+// blockDaemon makes the rig's daemon-user runs of the command starting
+// with words block until their context is done, as a daemon that accepts
+// the connection and never answers would. It reports whether a blocked
+// call's context had a deadline.
+func blockDaemon(r *rig, words ...string) *bool {
+	var hadDeadline bool
+	run := r.daemon.Run
+	r.applier.AsDaemon = func(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error {
+		if len(args) >= len(words) && slices.Equal(args[:len(words)], words) {
+			_, hadDeadline = ctx.Deadline()
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return run(ctx, stdin, stdout, args...)
+	}
+	return &hadDeadline
+}
+
+func TestApplyBoundsDaemonCalls(t *testing.T) {
+	t.Parallel()
+	const short = 50 * time.Millisecond
+	cases := []struct {
+		name  string
+		rig   func() *rig
+		block []string
+		// secret is the secret given; the installed rig plans a new binary
+		// with none, so the rejected-credentials check runs.
+		secret []byte
+	}{
+		{name: "accounts list before a restart", rig: func() *rig { return installedRig(Linux) }, block: []string{"accounts", "list"}},
+		{name: "admin status before a restart", rig: func() *rig { return installedRig(Linux) }, block: []string{"admin", "status"}},
+		{name: "secret set", rig: func() *rig { return freshRig(Linux) }, block: []string{"secret", "set"}, secret: testSecret},
+		{name: "accounts test", rig: func() *rig { return freshRig(Linux) }, block: []string{"accounts", "test"}, secret: testSecret},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := tc.rig()
+			r.applier.callTimeout = short
+			r.applier.testTimeout = short
+			r.applier.readyTimeout = time.Second
+			hadDeadline := blockDaemon(r, tc.block...)
+			in := r.input(t, request(), okHealth, tc.secret)
+			_, err := applyWithin(t, r, in, strings.Join(tc.block, " "))
+			if !*hadDeadline {
+				t.Errorf("%s ran without a deadline", strings.Join(tc.block, " "))
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Apply = %v, want a deadline error", err)
+			}
+			if errors.Is(err, ErrNotReady) {
+				t.Errorf("Apply = %v, want a step error, not ErrNotReady", err)
+			}
+			if want := strings.Join(tc.block, " ") + " did not answer within"; !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name the step (%q)", err, want)
+			}
+			if r.h.files.Locked(r.l.Lock) {
+				t.Error("the lock is still held")
+			}
+		})
+	}
+}
+
+func TestApplyLeavesAuthLoginUnbounded(t *testing.T) {
+	t.Parallel()
+	r := freshRig(Linux)
+	r.applier.callTimeout = 50 * time.Millisecond
+	r.applier.testTimeout = 50 * time.Millisecond
+	var loginDeadline, sawLogin bool
+	run := r.daemon.Run
+	r.applier.AsDaemon = func(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error {
+		if len(args) >= 2 && args[0] == "auth" && args[1] == "login" {
+			sawLogin = true
+			_, loginDeadline = ctx.Deadline()
+		}
+		return run(ctx, stdin, stdout, args...)
+	}
+	req := workspaceRequest(true)
+	req.ExecSHA256 = sha256Hex(newBinary)
+	if _, err := r.apply(r.input(t, req, nil, []byte("client-secret"))); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !sawLogin || loginDeadline {
+		t.Errorf("auth login ran %v, with a deadline %v; want it run with none", sawLogin, loginDeadline)
+	}
+}
+
+func TestApplyDaemonTimeouts(t *testing.T) {
+	t.Parallel()
+	a := &Applier{}
+	if got := a.logWait(); got != 5*time.Second {
+		t.Errorf("log timeout = %v, want 5s", got)
+	}
+	if got := a.callWait(); got != 15*time.Second {
+		t.Errorf("daemon call timeout = %v, want 15s", got)
+	}
+	if got := a.testWait(); got != 60*time.Second {
+		t.Errorf("account test timeout = %v, want 60s", got)
+	}
+}
