@@ -114,6 +114,10 @@ func newBootRig(t *testing.T, goos string) *bootRig {
 	return r
 }
 
+// under is host path p inside fsRoot, joined as written. filepath.Join
+// would clean ".." away before the symlinks ahead of it are resolved.
+func (r *bootRig) under(p string) string { return r.fsRoot + "/" + p }
+
 // env is the invoking user's environment.
 func (r *bootRig) env() Env {
 	env := Env{
@@ -139,9 +143,9 @@ func (r *bootRig) env() Env {
 		},
 		Now:   r.clock.Now,
 		After: r.after,
-		Stat:  func(p string) (os.FileInfo, error) { return os.Stat(filepath.Join(r.fsRoot, p)) },
+		Stat:  func(p string) (os.FileInfo, error) { return os.Stat(r.under(p)) },
 		EvalSymlinks: func(p string) (string, error) {
-			got, err := filepath.EvalSymlinks(filepath.Join(r.fsRoot, p))
+			got, err := filepath.EvalSymlinks(r.under(p))
 			if err != nil {
 				return "", err
 			}
@@ -758,8 +762,38 @@ func TestBootstrapSocketFlagSelectsDaemon(t *testing.T) {
 			if len(r.sudoArgs) != 1 {
 				t.Errorf("sudo called %d times, want once", len(r.sudoArgs))
 			}
+			for _, want := range []string{"warning: --socket is " + otherSocket, "still reach that daemon", r.l.Socket} {
+				if !strings.Contains(got.stderr, want) {
+					t.Errorf("stderr lacks %q:\n%s", want, got.stderr)
+				}
+			}
 		})
 	}
+}
+
+// A dry run with --socket selecting another socket gives the same
+// warning, on stderr and in the JSON.
+func TestBootstrapDryRunWarnsSocketFlag(t *testing.T) {
+	t.Parallel()
+	r := newBootRig(t, "linux")
+	got := r.run("--socket", otherSocket, "alice@gmail.com", "--dry-run", "--output", "json")
+	if got.code != 0 {
+		t.Fatalf("exit %d: %s", got.code, got.stderr)
+	}
+	const want = "--socket is " + otherSocket
+	if !strings.Contains(got.stderr, "warning: "+want) {
+		t.Errorf("stderr lacks %q:\n%s", want, got.stderr)
+	}
+	var plan struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(got.stdout), &plan); err != nil {
+		t.Fatalf("dry run JSON = %s (%v)", got.stdout, err)
+	}
+	if !slices.ContainsFunc(plan.Warnings, func(w string) bool { return strings.HasPrefix(w, want) }) {
+		t.Errorf("JSON warnings %q lack %q", plan.Warnings, want)
+	}
+	r.noChanges()
 }
 
 // On macOS the built-in default socket is not the layout's, so with
@@ -824,18 +858,49 @@ func aliasRun(t *testing.T, root string, socket bool) {
 	}
 }
 
+// redirectSocket names /srv/other/chainmail/chainmail.sock once
+// redirectRun has run: the kernel follows /run/redirect before "..".
+// Cleaned, it would read as the layout socket.
+const redirectSocket = "/run/redirect/../chainmail/chainmail.sock"
+
+// redirectRun makes root hold /run/redirect, a symlink to /srv/other/run,
+// and a socket file at /srv/other/chainmail/chainmail.sock.
+func redirectRun(t *testing.T, root string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, "srv", "other", "run"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(root, "srv", "other", "chainmail", "chainmail.sock"), "")
+	if err := os.MkdirAll(filepath.Join(root, "run"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../srv/other/run", filepath.Join(root, "run", "redirect")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // sameSocket tells two names for one socket file from two sockets.
 func TestSameSocket(t *testing.T) {
 	t.Parallel()
 	root := realTempDir(t)
 	aliasRun(t, root, true)
 	writeTestFile(t, filepath.Join(root, "run", "chainmail", "other.sock"), "")
-	at := func(p string) string { return filepath.Join(root, p) }
+	redirectRun(t, root)
+	if err := os.Symlink("../run/chainmail", filepath.Join(root, "srv", "link")); err != nil {
+		t.Fatal(err)
+	}
+	// Joined as written: filepath.Join would clean "..".
+	at := func(p string) string { return root + p }
 	tests := []struct {
 		name string
 		a, b string
 		want bool
 	}{
+		{"a symlink before .. reaching another file", at(redirectSocket), at("/run/chainmail/chainmail.sock"), false},
+		{"a symlink before .. reaching another directory", at("/run/redirect/../chainmail/new.sock"), at("/run/chainmail/new.sock"), false},
+		{"a symlink before .. reaching the same file", at("/srv/link/../chainmail/chainmail.sock"), at("/run/chainmail/chainmail.sock"), true},
+		{"a symlink before .. reaching the same directory", at("/srv/link/../chainmail/new.sock"), at("/run/chainmail/new.sock"), true},
+		{"an unresolvable path that cleans to a resolvable one", at("/none/../run/chainmail/new.sock"), at("/run/chainmail/new.sock"), false},
 		{"one file through a symlinked directory", at("/var/run/chainmail/chainmail.sock"), at("/run/chainmail/chainmail.sock"), true},
 		{"a missing file through a symlinked directory", at("/var/run/chainmail/new.sock"), at("/run/chainmail/new.sock"), true},
 		{"two files in one directory", at("/run/chainmail/other.sock"), at("/run/chainmail/chainmail.sock"), false},
@@ -873,11 +938,15 @@ func TestBootstrapAliasedLayoutSocket(t *testing.T) {
 				} else {
 					args = append([]string{"--socket", alias}, args...)
 				}
-				if got := r.run(args...); got.code != 0 {
+				got := r.run(args...)
+				if got.code != 0 {
 					t.Fatalf("exit %d: %s", got.code, got.stderr)
 				}
 				if len(r.statusAsked) > 0 {
 					t.Errorf("status asked of %q, want none", r.statusAsked)
+				}
+				if strings.Contains(got.stderr, "still reach that daemon") {
+					t.Errorf("an alias of the layout socket was warned about as another daemon:\n%s", got.stderr)
 				}
 			})
 		}
@@ -899,6 +968,39 @@ func TestBootstrapDifferentSocketStillProbed(t *testing.T) {
 		t.Errorf("status asked of %q, want only %s", r.statusAsked, otherSocket)
 	}
 	r.noChanges()
+}
+
+// A selection whose symlink comes before "..", such as
+// /run/redirect/../chainmail/chainmail.sock, names the socket the kernel
+// reaches, not the one its cleaned spelling suggests. With both sockets
+// present it is asked about, and a production answer refuses.
+func TestBootstrapSymlinkBeforeDotDotProbed(t *testing.T) {
+	t.Parallel()
+	for _, how := range []string{"env", "flag"} {
+		t.Run(how, func(t *testing.T) {
+			t.Parallel()
+			r := newBootRig(t, "linux")
+			r.stdin = bootSecret
+			aliasRun(t, r.fsRoot, true)
+			redirectRun(t, r.fsRoot)
+			r.status = func(context.Context, string) (DaemonInfo, error) { return DaemonInfo{Version: "0.9.0"}, nil }
+			args := []string{"alice@gmail.com", "--yes"}
+			if how == "env" {
+				r.getenv["CHAINMAIL_SOCKET"] = redirectSocket
+			} else {
+				args = append([]string{"--socket", redirectSocket}, args...)
+			}
+			got := r.run(args...)
+			wantError(t, got, api.ExitUsage, redirectSocket, "production")
+			if !slices.Equal(r.statusAsked, []string{redirectSocket}) {
+				t.Errorf("status asked of %q, want only %s", r.statusAsked, redirectSocket)
+			}
+			if len(r.sudoArgs) > 0 {
+				t.Error("sudo was called")
+			}
+			r.noChanges()
+		})
+	}
 }
 
 // With no other socket selected, no other daemon is asked about.

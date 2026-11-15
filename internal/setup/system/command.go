@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -63,7 +64,9 @@ func (f finder) find(name string) (string, error) {
 	}
 	var refused []error
 	for _, dir := range f.dirs {
-		path, err := f.resolve(root, filepath.Join("/", dir, name))
+		// Not filepath.Join, which would clean ".." away before the walk
+		// resolves the symlinks ahead of it.
+		path, err := f.resolve(root, "/"+dir+"/"+name)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
@@ -139,15 +142,19 @@ func (f finder) resolve(root, hostPath string) (string, error) {
 			if err != nil {
 				return "", err
 			}
+			// The target is never cleaned: the kernel follows a symlink
+			// before the ".." after it, so every component is walked, and
+			// checked, in order.
+			names := splitPath(dest)
 			if filepath.IsAbs(dest) {
-				dest = filepath.Clean(dest)
-				if !within(root, dest) {
+				rest, ok := belowRoot(root, names)
+				if !ok {
 					return "", fmt.Errorf("%s points to %s, outside %s", next, dest, root)
 				}
 				cur = root
-				dest = strings.TrimPrefix(dest, root)
+				names = rest
 			}
-			pending = append(splitPath(dest), pending...)
+			pending = append(names, pending...)
 			continue
 		}
 
@@ -208,12 +215,18 @@ func (f finder) ownedByOwner(path string, fi fs.FileInfo) error {
 	return nil
 }
 
-// within reports whether path is root or below it.
-func within(root, path string) bool {
-	if root == "/" {
-		return filepath.IsAbs(path)
+// belowRoot returns the components of an absolute symlink target that
+// follow root, for the walk to resolve from root. The target must start
+// with root's own components, name for name: a "." or ".." among them
+// would reach root through its parent, which the walk cannot check, so
+// such a target is refused. On a real host root is "/" and every absolute
+// target qualifies.
+func belowRoot(root string, names []string) ([]string, bool) {
+	prefix := splitPath(root)
+	if len(names) < len(prefix) || !slices.Equal(names[:len(prefix)], prefix) {
+		return nil, false
 	}
-	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
+	return names[len(prefix):], true
 }
 
 // ExecRunner is the real Runner. It runs the trusted copy of name from

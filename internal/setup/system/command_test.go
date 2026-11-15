@@ -287,6 +287,97 @@ func TestFinder(t *testing.T) {
 			want:    "/usr/sbin/groupadd",
 		},
 		{
+			// The kernel resolves /opt/redirect before "..", so the link
+			// reaches /usr/local/libexec/helper. Cleaning the target first
+			// would pick /opt/libexec/helper instead.
+			name: "absolute target with a symlink before .. resolves as the kernel does",
+			setup: func(tr *tree) {
+				tr.file("/usr/local/libexec/helper", "", 0o755)
+				tr.dir("/usr/local/bin", 0o755)
+				tr.file("/opt/libexec/helper", "", 0o755)
+				tr.symlink("/opt/redirect", tr.path("/usr/local/bin"))
+				tr.symlink("/usr/bin/helper", tr.path("/opt/redirect")+"/../libexec/helper")
+			},
+			dirs:    []string{"/usr/bin"},
+			command: "helper",
+			want:    "/usr/local/libexec/helper",
+		},
+		{
+			name: "relative target with a symlink before .. resolves as the kernel does",
+			setup: func(tr *tree) {
+				tr.file("/usr/local/libexec/helper", "", 0o755)
+				tr.dir("/usr/local/bin", 0o755)
+				tr.file("/opt/libexec/helper", "", 0o755)
+				tr.symlink("/opt/redirect", "../usr/local/bin")
+				tr.symlink("/usr/bin/helper", "../../opt/redirect/../libexec/helper")
+			},
+			dirs:    []string{"/usr/bin"},
+			command: "helper",
+			want:    "/usr/local/libexec/helper",
+		},
+		{
+			// The link really reaches /srv/drop/libexec/helper, inside a
+			// world-writable directory that cleaning the target would skip.
+			name: "absolute target with a symlink into a writable directory before .. is refused",
+			setup: func(tr *tree) {
+				tr.file("/srv/drop/libexec/helper", "", 0o755)
+				tr.dir("/srv/drop/bin", 0o755)
+				tr.dir("/srv/drop", 0o777)
+				tr.file("/opt/libexec/helper", "", 0o755)
+				tr.symlink("/opt/redirect", tr.path("/srv/drop/bin"))
+				tr.symlink("/usr/bin/helper", tr.path("/opt/redirect")+"/../libexec/helper")
+			},
+			dirs:    []string{"/usr/bin"},
+			command: "helper",
+			errHas:  "writable",
+		},
+		{
+			name: "relative target with a symlink into a writable directory before .. is refused",
+			setup: func(tr *tree) {
+				tr.file("/srv/drop/libexec/helper", "", 0o755)
+				tr.dir("/srv/drop/bin", 0o755)
+				tr.dir("/srv/drop", 0o777)
+				tr.file("/opt/libexec/helper", "", 0o755)
+				tr.symlink("/opt/redirect", "../srv/drop/bin")
+				tr.symlink("/usr/bin/helper", "../../opt/redirect/../libexec/helper")
+			},
+			dirs:    []string{"/usr/bin"},
+			command: "helper",
+			errHas:  "writable",
+		},
+		{
+			name: "search directory with a symlink before .. resolves as the kernel does",
+			setup: func(tr *tree) {
+				tr.file("/usr/local/sbin/helper", "", 0o755)
+				tr.dir("/usr/local/bin", 0o755)
+				tr.file("/opt/sbin/helper", "", 0o755)
+				tr.symlink("/opt/redirect", "../usr/local/bin")
+			},
+			dirs:    []string{"/opt/redirect/../sbin"},
+			command: "helper",
+			want:    "/usr/local/sbin/helper",
+		},
+		{
+			name: "absolute target climbing out of the root through .. is refused",
+			setup: func(tr *tree) {
+				tr.dir("/usr/bin", 0o755)
+				tr.symlink("/usr/bin/sh", tr.path("/usr")+"/../../bin/sh")
+			},
+			dirs:    []string{"/usr/bin"},
+			command: "sh",
+			errHas:  "outside",
+		},
+		{
+			name: "absolute target naming the root through .. is refused",
+			setup: func(tr *tree) {
+				tr.file("/usr/bin/dash", "", 0o755)
+				tr.symlink("/usr/bin/sh", tr.root+"/../"+filepath.Base(tr.root)+"/usr/bin/dash")
+			},
+			dirs:    []string{"/usr/bin"},
+			command: "sh",
+			errHas:  "outside",
+		},
+		{
 			name: "symlink loop is refused",
 			setup: func(tr *tree) {
 				tr.symlink("/usr/bin/a", "b")
@@ -421,6 +512,22 @@ func TestFinderUntrustedSymlinkOwner(t *testing.T) {
 			dirs:    []string{"/sbin"},
 			command: "groupadd",
 			want:    "/usr/sbin/groupadd",
+		},
+		{
+			// /opt/redirect is followed before "..", so its owner counts,
+			// though cleaning the target would erase it.
+			name: "symlink before .. in an absolute target",
+			setup: func(tr *tree) {
+				tr.file("/usr/local/libexec/helper", "", 0o755)
+				tr.dir("/usr/local/bin", 0o755)
+				tr.file("/opt/libexec/helper", "", 0o755)
+				tr.symlink("/opt/redirect", tr.path("/usr/local/bin"))
+				tr.symlink("/usr/bin/helper", tr.path("/opt/redirect")+"/../libexec/helper")
+			},
+			link:    "/opt/redirect",
+			dirs:    []string{"/usr/bin"},
+			command: "helper",
+			want:    "/usr/local/libexec/helper",
 		},
 	}
 	for _, tt := range tests {
