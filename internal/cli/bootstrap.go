@@ -751,7 +751,7 @@ func clientSocketWarnings(env Env, l setup.Layout, write bool) []string {
 		case err != nil:
 			// resolve already read it; a file that broke since is reported
 			// by the next command.
-		case set && socket != l.Socket:
+		case set && !sameSocket(env, socket, l.Socket):
 			warnings = append(warnings, fmt.Sprintf(
 				"%s sets socket = %q, so chainmail commands still reach that daemon, not the one bootstrap set up at %s; change that line to: %s",
 				path, socket, l.Socket, line))
@@ -761,7 +761,7 @@ func clientSocketWarnings(env Env, l setup.Layout, write bool) []string {
 				path, config.DefaultSocket, l.Socket, line))
 		}
 	}
-	if s := env.Getenv(socketBinding.envVar); s != "" && s != l.Socket {
+	if s := env.Getenv(socketBinding.envVar); s != "" && !sameSocket(env, s, l.Socket) {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s is %s, so chainmail commands still reach that daemon, not the one bootstrap set up at %s; change the line that sets it to: %s=%s",
 			socketBinding.envVar, s, l.Socket, socketBinding.envVar, l.Socket))

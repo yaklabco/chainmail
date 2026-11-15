@@ -873,11 +873,15 @@ func TestBootstrapAliasedLayoutSocket(t *testing.T) {
 				} else {
 					args = append([]string{"--socket", alias}, args...)
 				}
-				if got := r.run(args...); got.code != 0 {
+				got := r.run(args...)
+				if got.code != 0 {
 					t.Fatalf("exit %d: %s", got.code, got.stderr)
 				}
 				if len(r.statusAsked) > 0 {
 					t.Errorf("status asked of %q, want none", r.statusAsked)
+				}
+				if how == "env" && strings.Contains(got.stderr, "still reach that daemon") {
+					t.Errorf("an alias of the layout socket was warned about as another daemon:\n%s", got.stderr)
 				}
 			})
 		}
