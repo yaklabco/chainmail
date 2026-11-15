@@ -23,12 +23,22 @@ import (
 	"github.com/yaklabco/chainmail/internal/testutil/daemontest"
 )
 
-// fakeAdmin records the ReadAudit requests it gets.
+// fakeAdmin records the ReadAudit requests it gets, and answers GetStatus
+// with status when it is set.
 type fakeAdmin struct {
 	chainmailv1connect.UnimplementedAdminServiceHandler
 
+	status *chainmailv1.GetStatusResponse
+
 	mu   sync.Mutex
 	reqs []*chainmailv1.ReadAuditRequest
+}
+
+func (f *fakeAdmin) GetStatus(ctx context.Context, req *connect.Request[chainmailv1.GetStatusRequest]) (*connect.Response[chainmailv1.GetStatusResponse], error) {
+	if f.status == nil {
+		return f.UnimplementedAdminServiceHandler.GetStatus(ctx, req)
+	}
+	return connect.NewResponse(f.status), nil
 }
 
 func (f *fakeAdmin) ReadAudit(_ context.Context, req *connect.Request[chainmailv1.ReadAuditRequest]) (*connect.Response[chainmailv1.ReadAuditResponse], error) {

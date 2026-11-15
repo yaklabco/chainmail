@@ -65,6 +65,7 @@ type bootRig struct {
 	getenv   map[string]string
 	resolver fakeResolver
 	health   func(ctx context.Context, socket, account string) (*setup.AccountHealth, error)
+	status   func(ctx context.Context, socket string) (DaemonInfo, error)
 
 	// Recorded by run.
 	linesLeft     []string
@@ -72,6 +73,7 @@ type bootRig struct {
 	sudoStdin     [][]byte
 	passwordReads int
 	healthAsked   []string
+	statusAsked   []string
 	stderr        bytes.Buffer
 }
 
@@ -101,6 +103,9 @@ func newBootRig(t *testing.T, goos string) *bootRig {
 	r.health = func(context.Context, string, string) (*setup.AccountHealth, error) {
 		return nil, errors.New("dial unix: no such file or directory")
 	}
+	r.status = func(context.Context, string) (DaemonInfo, error) {
+		return DaemonInfo{}, errors.New("dial unix: no such file or directory")
+	}
 	return r
 }
 
@@ -122,6 +127,10 @@ func (r *bootRig) env() Env {
 		AccountHealth: func(ctx context.Context, socket, account string) (*setup.AccountHealth, error) {
 			r.healthAsked = append(r.healthAsked, socket+" "+account)
 			return r.health(ctx, socket, account)
+		},
+		DaemonStatus: func(ctx context.Context, socket string) (DaemonInfo, error) {
+			r.statusAsked = append(r.statusAsked, socket)
+			return r.status(ctx, socket)
 		},
 		Now:   r.clock.Now,
 		After: r.after,
@@ -573,6 +582,141 @@ func TestBootstrapWarnsOtherSocket(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(path); string(data) != "socket = \""+dev+"\"\n" {
 		t.Errorf("cli.toml changed: %q", data)
+	}
+}
+
+// otherSocket is a socket CHAINMAIL_SOCKET or cli.toml selects in place of
+// the layout's.
+const otherSocket = "/srv/other/chainmail.sock"
+
+// selectOther makes r's user select otherSocket through how ("env" or
+// "cli.toml").
+func selectOther(t *testing.T, r *bootRig, how string) {
+	t.Helper()
+	switch how {
+	case "env":
+		r.getenv["CHAINMAIL_SOCKET"] = otherSocket
+	case "cli.toml":
+		dir := t.TempDir()
+		r.getenv["XDG_CONFIG_HOME"] = dir
+		writeTestFile(t, filepath.Join(dir, "chainmail", "cli.toml"), "socket = \""+otherSocket+"\"\n")
+	default:
+		t.Fatalf("unknown selection %q", how)
+	}
+}
+
+// A production daemon answering at another selected socket is a different
+// installation: bootstrap refuses before changing anything.
+func TestBootstrapRefusesOtherProductionDaemon(t *testing.T) {
+	t.Parallel()
+	for _, how := range []string{"env", "cli.toml"} {
+		for _, dryRun := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s dry-run=%v", how, dryRun), func(t *testing.T) {
+				t.Parallel()
+				r := newBootRig(t, "linux")
+				r.stdin = bootSecret
+				selectOther(t, r, how)
+				r.status = func(context.Context, string) (DaemonInfo, error) {
+					return DaemonInfo{Dev: false, Version: "0.9.0"}, nil
+				}
+				args := []string{"alice@gmail.com", "--yes"}
+				if dryRun {
+					args = append(args, "--dry-run")
+				}
+				got := r.run(args...)
+				wantError(t, got, api.ExitUsage, otherSocket, "production")
+				if !slices.Equal(r.statusAsked, []string{otherSocket}) {
+					t.Errorf("status asked of %q, want only %s", r.statusAsked, otherSocket)
+				}
+				if len(r.sudoArgs) > 0 {
+					t.Error("sudo was called")
+				}
+				if r.passwordReads > 0 {
+					t.Error("the password was asked for")
+				}
+				r.noChanges()
+			})
+		}
+	}
+}
+
+// A dev daemon at another selected socket only gets today's warning.
+func TestBootstrapOtherDevDaemonWarns(t *testing.T) {
+	t.Parallel()
+	for _, how := range []string{"env", "cli.toml"} {
+		t.Run(how, func(t *testing.T) {
+			t.Parallel()
+			r := newBootRig(t, "linux")
+			r.stdin = bootSecret
+			selectOther(t, r, how)
+			r.status = func(context.Context, string) (DaemonInfo, error) {
+				return DaemonInfo{Dev: true, Version: "0.9.0"}, nil
+			}
+			got := r.run("alice@gmail.com", "--yes")
+			if got.code != 0 {
+				t.Fatalf("exit %d: %s", got.code, got.stderr)
+			}
+			if !slices.Equal(r.statusAsked, []string{otherSocket}) {
+				t.Errorf("status asked of %q, want only %s", r.statusAsked, otherSocket)
+			}
+			if !strings.Contains(got.stderr, "warning: ") || !strings.Contains(got.stderr, otherSocket) {
+				t.Errorf("no warning about %s:\n%s", otherSocket, got.stderr)
+			}
+			if len(r.sudoArgs) != 1 {
+				t.Errorf("sudo called %d times, want once", len(r.sudoArgs))
+			}
+		})
+	}
+}
+
+// An unreachable socket selected in place of the layout's only gets
+// today's warning.
+func TestBootstrapOtherSocketUnreachableWarns(t *testing.T) {
+	t.Parallel()
+	for _, how := range []string{"env", "cli.toml"} {
+		t.Run(how, func(t *testing.T) {
+			t.Parallel()
+			r := newBootRig(t, "linux")
+			r.stdin = bootSecret
+			selectOther(t, r, how)
+			got := r.run("alice@gmail.com", "--yes")
+			if got.code != 0 {
+				t.Fatalf("exit %d: %s", got.code, got.stderr)
+			}
+			if !slices.Equal(r.statusAsked, []string{otherSocket}) {
+				t.Errorf("status asked of %q, want only %s", r.statusAsked, otherSocket)
+			}
+			if !strings.Contains(got.stderr, "warning: ") || !strings.Contains(got.stderr, otherSocket) {
+				t.Errorf("no warning about %s:\n%s", otherSocket, got.stderr)
+			}
+		})
+	}
+}
+
+// With no other socket selected, no other daemon is asked about.
+func TestBootstrapAsksNoOtherDaemon(t *testing.T) {
+	t.Parallel()
+	r := newBootRig(t, "linux")
+	r.stdin = bootSecret
+	r.getenv["CHAINMAIL_SOCKET"] = r.l.Socket
+	if got := r.run("alice@gmail.com", "--yes"); got.code != 0 {
+		t.Fatalf("exit %d: %s", got.code, got.stderr)
+	}
+	if len(r.statusAsked) > 0 {
+		t.Errorf("status asked of %q, want none", r.statusAsked)
+	}
+}
+
+// daemonStatus reads dev mode and version from admin status.
+func TestDaemonStatus(t *testing.T) {
+	t.Parallel()
+	socket := startFakeAdmin(t, &fakeAdmin{status: &chainmailv1.GetStatusResponse{Version: "1.2.3", DevMode: true}})
+	got, err := daemonStatus(t.Context(), socket)
+	if err != nil || got != (DaemonInfo{Dev: true, Version: "1.2.3"}) {
+		t.Fatalf("daemonStatus = %+v, %v", got, err)
+	}
+	if _, err := daemonStatus(t.Context(), filepath.Join(t.TempDir(), "none.sock")); err == nil {
+		t.Fatal("daemonStatus of a missing socket succeeded")
 	}
 }
 

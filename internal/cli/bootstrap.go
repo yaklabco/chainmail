@@ -48,6 +48,9 @@ const (
 	// maxDaemonStderr caps the stderr of a daemon-user command quoted in
 	// an error.
 	maxDaemonStderr = 500
+	// maxVersionText caps the version another daemon reports, quoted in a
+	// refusal.
+	maxVersionText = 64
 
 	// nixosMarker exists on every NixOS system.
 	nixosMarker = "/etc/NIXOS"
@@ -169,6 +172,9 @@ func runBootstrap(ctx context.Context, env Env, g *globals, f bootstrapFlags, ad
 	}
 	if int64(cur.InvokingUser.UID) != int64(uid) {
 		return fmt.Errorf("bootstrap runs as uid %d, but user %s has uid %d", uid, invoking, cur.InvokingUser.UID)
+	}
+	if err := refuseOtherProduction(ctx, env, l); err != nil {
+		return err
 	}
 	cur.Health = askHealth(ctx, env, l, address, f.name)
 	plan, err := setup.Build(l, cur, req)
@@ -393,6 +399,74 @@ func daemonAccountHealth(ctx context.Context, socket, account string) (*setup.Ac
 		return nil, err
 	}
 	return accountHealthFrom(list.Msg, status.Msg, account), nil
+}
+
+// socketSelection is a socket the user's commands are pointed at, and
+// what points them there.
+type socketSelection struct {
+	socket, source string
+}
+
+// selectedSockets lists the sockets this user's chainmail commands are
+// pointed at in place of the layout's, each with what selects it:
+// CHAINMAIL_SOCKET, then cli.toml.
+func selectedSockets(env Env, l setup.Layout) []socketSelection {
+	var out []socketSelection
+	add := func(socket, source string) {
+		if socket == "" || socket == l.Socket || slices.ContainsFunc(out, func(s socketSelection) bool { return s.socket == socket }) {
+			return
+		}
+		out = append(out, socketSelection{socket: socket, source: source})
+	}
+	add(env.Getenv(socketBinding.envVar), socketBinding.envVar)
+	if path := cliConfigPath(env); path != "" {
+		// resolve already read it; a file that broke since is reported by
+		// the next command.
+		if file, err := readCLIConfig(path); err == nil {
+			socket, _ := file[socketBinding.key].(string)
+			add(socket, path)
+		}
+	}
+	return out
+}
+
+// refuseOtherProduction asks the daemon at each socket the user selects in
+// place of the layout's for its status. One that answers and is not in
+// dev mode is another production installation, and bootstrap refuses to
+// set up a second. A dev daemon, or a socket nothing answers on, only gets
+// the warning clientSocketWarnings gives.
+func refuseOtherProduction(ctx context.Context, env Env, l setup.Layout) error {
+	ask := env.DaemonStatus
+	if ask == nil {
+		ask = daemonStatus
+	}
+	for _, sel := range selectedSockets(env, l) {
+		st, err := ask(ctx, sel.socket)
+		if err != nil || st.Dev {
+			continue
+		}
+		return &setup.Refusal{
+			Msg: fmt.Sprintf("a production chainmail daemon (version %s) already answers at %s, which %s selects; "+
+				"bootstrap would set up a second one at %s",
+				clip(termText(st.Version), maxVersionText), sel.socket, sel.source, l.Socket),
+			Hint: "use that installation, or stop and remove it before running bootstrap",
+		}
+	}
+	return nil
+}
+
+// daemonStatus asks the daemon at socket for its dev mode and version,
+// giving up after healthTimeout.
+func daemonStatus(ctx context.Context, socket string) (DaemonInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, healthTimeout)
+	defer cancel()
+	c := client.New(socket, "bootstrap")
+	defer c.Close()
+	status, err := c.Admin.GetStatus(ctx, connect.NewRequest(&chainmailv1.GetStatusRequest{}))
+	if err != nil {
+		return DaemonInfo{}, err
+	}
+	return DaemonInfo{Dev: status.Msg.GetDevMode(), Version: status.Msg.GetVersion()}, nil
 }
 
 // accountHealthFrom reads account's health from accounts list and admin

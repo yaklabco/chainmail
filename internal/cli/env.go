@@ -80,6 +80,17 @@ type Env struct {
 	// AccountHealth asks the daemon at socket about account. An error
 	// means it could not be asked.
 	AccountHealth func(ctx context.Context, socket, account string) (*setup.AccountHealth, error)
+	// DaemonStatus asks the daemon at socket for its admin status, giving
+	// up as quickly as AccountHealth. An error means it could not be asked.
+	DaemonStatus func(ctx context.Context, socket string) (DaemonInfo, error)
+}
+
+// DaemonInfo is what bootstrap needs from a daemon's admin status.
+type DaemonInfo struct {
+	// Dev says the daemon runs in dev mode.
+	Dev bool
+	// Version is the daemon's version.
+	Version string
 }
 
 // DefaultEnv returns the real process environment.
@@ -91,7 +102,7 @@ func DefaultEnv() Env {
 		Getuid: os.Getuid, Username: currentUsername, Executable: resolvedExecutable,
 		Sudo: realSudo, Resolver: net.DefaultResolver,
 		SetupFiles: system.OSFiles{}, SetupAccounts: system.NewAccounts(runtime.GOOS, system.ExecRunner),
-		OpenTTY: openTTY, AccountHealth: daemonAccountHealth,
+		OpenTTY: openTTY, AccountHealth: daemonAccountHealth, DaemonStatus: daemonStatus,
 	}
 	if fd := int(os.Stdin.Fd()); term.IsTerminal(fd) {
 		env.ReadPassword = func() ([]byte, error) { return readTerminalPassword(fd) }
