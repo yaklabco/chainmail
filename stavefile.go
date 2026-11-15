@@ -185,6 +185,22 @@ func calDAVTestArgs() []string {
 	}
 }
 
+// E2E runs chainmail bootstrap for real against in-process IMAP and SMTP
+// servers. It creates users and groups, installs the service and adds a CA
+// to the system trust store, so the test skips unless CI=true and
+// CHAINMAIL_E2E_MUTATE_HOST=1 are both set. Only CI's e2e jobs set them.
+// Never run it with them on a machine you use.
+func (Test) E2E() error {
+	st.Deps(Prereq.All)
+
+	return sh.RunV("go", e2eTestArgs()...)
+}
+
+// e2eTestArgs is the go command line of Test.E2E.
+func e2eTestArgs() []string {
+	return []string{"test", "-tags", "e2e", "-count=1", "-timeout", "20m", "-v", "./internal/e2e/"}
+}
+
 // Build compiles bin/chainmail without cgo.
 func Build() error {
 	st.Deps(Prereq.All)

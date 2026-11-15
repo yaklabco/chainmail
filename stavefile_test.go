@@ -374,6 +374,17 @@ func TestCalDAVTestArgsCapParallelism(t *testing.T) {
 	}
 }
 
+// TestE2ETestArgsRunOnlyTheE2EPackage: the end-to-end test builds with the
+// e2e tag, never reuses a cached result, has the time a cold build and two
+// bootstrap runs need, and runs only its own package, since it changes the
+// host.
+func TestE2ETestArgsRunOnlyTheE2EPackage(t *testing.T) {
+	want := []string{"test", "-tags", "e2e", "-count=1", "-timeout", "20m", "-v", "./internal/e2e/"}
+	if got := e2eTestArgs(); !slices.Equal(got, want) {
+		t.Errorf("e2eTestArgs() = %q, want %q", got, want)
+	}
+}
+
 // TestMissingToolsListsOnlyToolsNotOnPath: a tool the lookup finds is not
 // missing, wherever it came from.
 func TestMissingToolsListsOnlyToolsNotOnPath(t *testing.T) {
