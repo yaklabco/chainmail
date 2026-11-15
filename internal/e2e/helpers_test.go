@@ -3,6 +3,7 @@ package e2e
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -10,10 +11,12 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/yaklabco/chainmail/internal/setup"
 )
@@ -320,3 +323,27 @@ func ancestors(paths ...string) []string {
 
 // depth counts the components of a clean absolute path.
 func depth(p string) int { return strings.Count(p, "/") }
+
+// waitDelay is how long runBounded waits for a killed command's pipes to
+// close. A child that outlives the command, such as the security tool under
+// a killed sudo, would otherwise keep exec.Cmd.Wait blocked forever.
+const waitDelay = 5 * time.Second
+
+// runBounded runs name with args and stdin, kills it after timeout, and
+// returns its stdout and stderr. A non-zero exit or a kill is an error
+// holding the stderr.
+func runBounded(timeout time.Duration, stdin []byte, name string, args ...string) (stdout, stderr []byte, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = waitDelay
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	var out, errOut bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	if err := cmd.Run(); err != nil {
+		return out.Bytes(), errOut.Bytes(), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(errOut.String()))
+	}
+	return out.Bytes(), errOut.Bytes(), nil
+}

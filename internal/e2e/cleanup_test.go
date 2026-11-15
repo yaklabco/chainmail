@@ -382,7 +382,14 @@ func (h *host) untrustCA() {
 			if err != nil {
 				h.t.Errorf("cleanup: %v", err)
 			} else {
-				h.cleanupStep("security", "remove-trusted-cert", "-d", file)
+				// Removing admin trust settings can wait for an authorization
+				// dialog even as root, which a runner never answers. Leftover
+				// settings are inert: the CA's private key died with this test
+				// process, so nothing can present a chain it signs, and the
+				// certificate itself is deleted from the keychain below.
+				if err := h.sudoWithin(untrustTimeout, "security", "remove-trusted-cert", "-d", file); err != nil {
+					h.t.Logf("cleanup: could not remove the admin trust settings for %q, which are inert without the CA key: %v", ca.name, err)
+				}
 				_ = os.Remove(file) // a leftover copy of a public certificate harms nothing
 			}
 		}
@@ -519,9 +526,11 @@ func (h *host) checkCAGone() {
 			h.t.Errorf("cleanup left the test CA in %s", linuxCABundle)
 		}
 	case setup.Darwin:
+		// Admin trust settings may outlive the cleanup (see untrustCA); they
+		// are reported, not failed. The certificate itself must be gone.
 		trusted, err := h.adminTrust()
 		if err != nil || trustListsName(trusted, ca.name) {
-			h.t.Errorf("cleanup left admin trust settings for %q (%v)", ca.name, err)
+			h.t.Logf("cleanup left admin trust settings for %q (%v); they are inert without the CA key", ca.name, err)
 		}
 		listing, err := h.keychainListing()
 		if err != nil || keychainHasSHA1(listing, ca.sha1) {

@@ -52,6 +52,9 @@ const (
 
 	// cmdTimeout bounds every command but the build.
 	cmdTimeout = 3 * time.Minute
+	// untrustTimeout bounds removing the macOS admin trust setting, which
+	// can block on an authorization dialog nobody answers on a runner.
+	untrustTimeout = 30 * time.Second
 	// buildTimeout bounds go build, which may start with a cold cache.
 	buildTimeout = 10 * time.Minute
 )
@@ -152,19 +155,15 @@ func newHost(t *testing.T, l setup.Layout) *host {
 // stdout and stderr. A non-zero exit is an error holding the stderr.
 func (h *host) run(stdin []byte, name string, args ...string) (stdout, stderr []byte, err error) {
 	h.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	if stdin != nil {
-		cmd.Stdin = bytes.NewReader(stdin)
-	}
-	var out, errOut bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errOut
-	err = cmd.Run()
-	if err != nil {
-		err = fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(errOut.String()))
-	}
-	return out.Bytes(), errOut.Bytes(), err
+	return runBounded(cmdTimeout, stdin, name, args...)
+}
+
+// sudoWithin is sudo with its own timeout, for a step that may block
+// waiting for an authorization nobody can give on a runner.
+func (h *host) sudoWithin(timeout time.Duration, args ...string) error {
+	h.t.Helper()
+	_, _, err := runBounded(timeout, nil, "sudo", append([]string{"-n"}, args...)...)
+	return err
 }
 
 // sudo runs a command as root without asking for a password.
