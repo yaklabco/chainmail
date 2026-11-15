@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode"
@@ -22,6 +23,9 @@ const nixStorePrefix = NixStore + "/"
 // daemonBinaryName is the base name of the binary the module's unit runs:
 // ${package}/bin/chainmail.
 const daemonBinaryName = "chainmail"
+
+// nixPathNameRE matches a directory name a Nix path literal can hold.
+var nixPathNameRE = regexp.MustCompile(`^[A-Za-z0-9._+-]+$`)
 
 // finishActions are the only actions a Finish plan may hold.
 var finishActions = []ActionKind{ActStoreSecret, ActAuthLogin, ActTestAccount}
@@ -151,6 +155,9 @@ func BuildNixOS(l Layout, cur NixCurrent, req Request) (Plan, error) {
 	if !nixDirOK(req.NixDir) {
 		return Plan{}, fmt.Errorf("plan: --nix-dir %q is not a clean absolute path below /", req.NixDir)
 	}
+	if err := checkNixDirName(req.NixDir); err != nil {
+		return Plan{}, err
+	}
 	backup, err := checkRequest(req)
 	if err != nil {
 		return Plan{}, err
@@ -224,6 +231,9 @@ func nixState(l Layout, cur NixCurrent, name string) (NixState, *config.Config, 
 		if cfg, err = config.Parse(cur.Config); err != nil {
 			return "", nil, refuse("fix the config in your NixOS configuration so it parses, rebuild, then run bootstrap again",
 				"the config %s does not parse: %v", l.Config, err)
+		}
+		if err := checkNixDaemonTable(l, cfg.Daemon); err != nil {
+			return "", nil, err
 		}
 	}
 	if cfg != nil {
@@ -372,6 +382,33 @@ func rerunStep(p Plan) string {
 	return "Run bootstrap again to store the password and test the login:\n  " + cmd
 }
 
+// checkNixDirName refuses a Nix directory whose name a Nix path literal
+// cannot hold, since the printed steps import ./<name>/chainmail.nix.
+func checkNixDirName(dir string) error {
+	name := filepath.Base(dir)
+	if nixPathNameRE.MatchString(name) && name != "." && name != ".." {
+		return nil
+	}
+	return refuse("choose a --nix-dir whose last part uses only letters, digits, dots, underscores, plus signs and dashes, such as ./chainmail-nixos",
+		"the Nix directory name %q cannot be written as a Nix path", name)
+}
+
+// checkNixDaemonTable refuses a module config whose daemon listens away
+// from the layout's socket or serves another group: every call bootstrap
+// makes goes to the layout's socket. The module allows any socket under
+// /run/chainmail and pins the client group.
+func checkNixDaemonTable(l Layout, d config.Daemon) error {
+	if d.Socket != l.Socket {
+		return refuse("remove services.chainmail.settings.daemon.socket from your NixOS configuration, or set it to "+l.Socket,
+			"the config %s puts daemon.socket at %q; bootstrap reaches the daemon at %s", l.Config, d.Socket, l.Socket)
+	}
+	if d.ClientGroup != l.ClientGroup {
+		return refuse("remove services.chainmail.settings.daemon.client_group from your NixOS configuration, or set it to "+l.ClientGroup,
+			"the config %s sets daemon.client_group to %q; bootstrap's clients use the group %s", l.Config, d.ClientGroup, l.ClientGroup)
+	}
+	return nil
+}
+
 // cleanAbs reports whether path is absolute, already clean and free of
 // control characters.
 func cleanAbs(path string) bool {
@@ -397,7 +434,7 @@ func inNixStore(path string) bool {
 // daemon binary in the store. Every write-nix's bytes are rendered again
 // and compared, and the next steps are recomputed.
 func validateNixOS(l Layout, p Plan) error {
-	if !nixDirOK(p.NixDir) {
+	if !nixDirOK(p.NixDir) || checkNixDirName(p.NixDir) != nil {
 		return refuse(validateHint, "plan names the Nix directory %q", p.NixDir)
 	}
 	if p.ServiceChanged {

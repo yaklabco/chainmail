@@ -354,6 +354,16 @@ func TestBuildNixOSFresh(t *testing.T) {
 		}
 	})
 
+	t.Run("nix dir name with dots, underscores, plus signs and dashes", func(t *testing.T) {
+		t.Parallel()
+		req := nixRequest()
+		req.NixDir = "/home/alice/chainmail.nixos_2+x-y"
+		p := mustBuildNixOS(t, cur, req)
+		if !strings.Contains(p.NextSteps[0], "./chainmail.nixos_2+x-y/chainmail.nix\n") {
+			t.Errorf("step 1 does not import from the directory:\n%s", p.NextSteps[0])
+		}
+	})
+
 	t.Run("another nix dir", func(t *testing.T) {
 		t.Parallel()
 		req := nixRequest()
@@ -364,6 +374,21 @@ func TestBuildNixOSFresh(t *testing.T) {
 			t.Errorf("step 1 does not use the directory's base name:\n%s", p.NextSteps[0])
 		}
 	})
+}
+
+// nixDirRequest is nixRequest with NixDir dir.
+func nixDirRequest(dir string) func() Request {
+	return func() Request {
+		r := nixRequest()
+		r.NixDir = dir
+		return r
+	}
+}
+
+// movedSocket puts the daemon socket of config at another path under
+// /run/chainmail, which the module allows.
+func movedSocket(config []byte) []byte {
+	return append([]byte("[daemon]\nsocket = \"/run/chainmail/other.sock\"\n\n"), config...)
 }
 
 // findNixFile returns the write-nix action for the file called name.
@@ -770,6 +795,41 @@ func TestBuildNixOSRefusals(t *testing.T) {
 			want: "the config /etc/chainmail/config.toml does not parse",
 		},
 		{
+			name: "nix dir with a space in its name",
+			host: freshNixHost,
+			req:  nixDirRequest("/home/alice/mail files"),
+			want: `the Nix directory name "mail files"`,
+		},
+		{
+			name: "nix dir with a quote in its name",
+			host: freshNixHost,
+			req:  nixDirRequest(`/home/alice/mail"x`),
+			want: "the Nix directory name",
+		},
+		{
+			name: "nix dir with a dollar in its name",
+			host: freshNixHost,
+			req:  nixDirRequest("/home/alice/mail$x"),
+			want: "the Nix directory name",
+		},
+		{
+			name: "add with the module's socket elsewhere",
+			host: func() nixHost { return moduleNixHost(movedSocket(moduleConfig(bobGmail, nil))) },
+			want: `puts daemon.socket at "/run/chainmail/other.sock"`,
+		},
+		{
+			name: "finish with the module's socket elsewhere",
+			host: func() nixHost { return moduleNixHost(movedSocket(moduleConfig(aliceGmail, nil))) },
+			want: `puts daemon.socket at "/run/chainmail/other.sock"`,
+		},
+		{
+			name: "finish with another client group",
+			host: func() nixHost {
+				return moduleNixHost(append([]byte("[daemon]\nclient_group = \"users\"\n\n"), moduleConfig(aliceGmail, nil)...))
+			},
+			want: `sets daemon.client_group to "users"`,
+		},
+		{
 			name: "invoking user root",
 			host: freshNixHost,
 			edit: func(cur *NixCurrent) { cur.InvokingUser = system.User{Name: "root", UID: 0} },
@@ -834,6 +894,26 @@ func TestBuildNixOSRefusals(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("nix dir name hint", func(t *testing.T) {
+		t.Parallel()
+		req := nixRequest()
+		req.NixDir = "/home/alice/mail files"
+		_, err := BuildNixOS(l, freshNixHost().inspect(t), req)
+		want := "choose a --nix-dir whose last part uses only letters, digits, dots, underscores, plus signs and dashes, such as ./chainmail-nixos"
+		if r := asRefusal(t, err); r.Hint != want {
+			t.Errorf("hint = %q, want %q", r.Hint, want)
+		}
+	})
+
+	t.Run("socket hint", func(t *testing.T) {
+		t.Parallel()
+		_, err := BuildNixOS(l, moduleNixHost(movedSocket(moduleConfig(aliceGmail, nil))).inspect(t), nixRequest())
+		want := "remove services.chainmail.settings.daemon.socket from your NixOS configuration, or set it to /run/chainmail/chainmail.sock"
+		if r := asRefusal(t, err); r.Hint != want {
+			t.Errorf("hint = %q, want %q", r.Hint, want)
+		}
+	})
 
 	t.Run("not active hint", func(t *testing.T) {
 		t.Parallel()
@@ -1048,6 +1128,10 @@ func TestValidateNixOS(t *testing.T) {
 		{"finish with a daemon binary that is the store", finish, func(p *Plan) { p.DaemonBinary = "/nix/store/" }},
 		{"finish with another program as the daemon binary", finish, func(p *Plan) { p.DaemonBinary = "/nix/store/x-coreutils/bin/env" }},
 		{"root as the nix dir", fresh, func(p *Plan) { p.NixDir = "/" }},
+		{"nix dir name Nix cannot read", add, func(p *Plan) {
+			p.NixDir = "/home/alice/mail files"
+			p.NextSteps = addNixSteps(*p)
+		}},
 		{"fresh with a daemon binary", fresh, func(p *Plan) { p.DaemonBinary = storeBinary }},
 		{"add with a daemon binary", add, func(p *Plan) { p.DaemonBinary = storeBinary }},
 		{"fresh with backup show and check-cred", freshReuse, func(p *Plan) { p.Backup = BackupShow }},
