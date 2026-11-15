@@ -2,12 +2,16 @@ package e2e
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -85,8 +89,8 @@ func checkEntry(e setup.Entry, st pathState, ids hostIDs) error {
 	case e.Kind == setup.KindFile && !st.Mode.IsRegular():
 		faults = append(faults, "is not a regular file")
 	}
-	if st.Mode.Perm() != e.Mode.Perm() {
-		faults = append(faults, fmt.Sprintf("mode %s, want %s", st.Mode.Perm(), e.Mode.Perm()))
+	if got, want := modeBits(st.Mode), modeBits(e.Mode); got != want {
+		faults = append(faults, fmt.Sprintf("mode %s, want %s", got, want))
 	}
 	uid, err := ids.owner(e.Owner)
 	if err != nil {
@@ -106,6 +110,17 @@ func checkEntry(e setup.Entry, st pathState, ids hostIDs) error {
 		return nil
 	}
 	return fmt.Errorf("%s (%s): %s", e.Path, e.Name, strings.Join(faults, "; "))
+}
+
+// specialBits are the mode bits beyond the permissions that a layout path
+// must match too: a setuid, setgid or sticky bit bootstrap did not ask for
+// is a fault.
+const specialBits = fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky
+
+// modeBits is m's permission, setuid, setgid and sticky bits, without its
+// type.
+func modeBits(m fs.FileMode) fs.FileMode {
+	return m & (fs.ModePerm | specialBits)
 }
 
 // decodeResult reads the one setup.Result object bootstrap --output json
@@ -180,3 +195,128 @@ func cliConfigPath(getenv func(string) string) string {
 	}
 	return ""
 }
+
+// installState is what a rerun of bootstrap on a working install must
+// leave as it was.
+type installState struct {
+	StartedAt string               // the daemon's start time from admin status
+	Paths     map[string]pathState // every layout entry, by path
+	Sums      map[string]string    // the SHA-256 of every layout file, by path
+}
+
+// installChanges lists every difference from before to after, one line
+// each, in path order after any start time change.
+func installChanges(before, after installState) []string {
+	var changes []string
+	if before.StartedAt != after.StartedAt {
+		changes = append(changes, fmt.Sprintf("started_at %s, then %s", before.StartedAt, after.StartedAt))
+	}
+	paths := slices.Concat(slices.Collect(maps.Keys(before.Paths)), slices.Collect(maps.Keys(after.Paths)),
+		slices.Collect(maps.Keys(before.Sums)), slices.Collect(maps.Keys(after.Sums)))
+	slices.Sort(paths)
+	for _, path := range slices.Compact(paths) {
+		changes = append(changes, pathChanges(path, before, after)...)
+	}
+	return changes
+}
+
+// pathChanges lists how path's type, mode, owner, group and contents
+// differ from before to after.
+func pathChanges(path string, before, after installState) []string {
+	var changes []string
+	b, hadB := before.Paths[path]
+	a, hasA := after.Paths[path]
+	switch {
+	case hadB && !hasA:
+		changes = append(changes, path+": gone")
+	case !hadB && hasA:
+		changes = append(changes, path+": new")
+	case hadB:
+		if b.Mode != a.Mode {
+			changes = append(changes, fmt.Sprintf("%s: mode %s, then %s", path, b.Mode, a.Mode))
+		}
+		if b.UID != a.UID {
+			changes = append(changes, fmt.Sprintf("%s: owner %d, then %d", path, b.UID, a.UID))
+		}
+		if b.GID != a.GID {
+			changes = append(changes, fmt.Sprintf("%s: group %d, then %d", path, b.GID, a.GID))
+		}
+	}
+	if bs, as := before.Sums[path], after.Sums[path]; bs != as {
+		changes = append(changes, fmt.Sprintf("%s: SHA-256 %s, then %s", path, cmp.Or(bs, "none"), cmp.Or(as, "none")))
+	}
+	return changes
+}
+
+// bundleHolds reports whether a PEM bundle, such as the system's CA
+// bundle, holds the certificate whose DER is der.
+func bundleHolds(bundle, der []byte) bool {
+	for {
+		var block *pem.Block
+		block, bundle = pem.Decode(bundle)
+		if block == nil {
+			return false
+		}
+		if block.Type == "CERTIFICATE" && bytes.Equal(block.Bytes, der) {
+			return true
+		}
+	}
+}
+
+// keychainHasSHA1 reports whether `security find-certificate -a -Z`
+// output lists a certificate with the SHA-1 hash sum, in hex.
+func keychainHasSHA1(listing, sum string) bool {
+	if sum == "" {
+		return false
+	}
+	for line := range strings.Lines(listing) {
+		if got, ok := strings.CutPrefix(strings.TrimSpace(line), "SHA-1 hash:"); ok && strings.EqualFold(strings.TrimSpace(got), sum) {
+			return true
+		}
+	}
+	return false
+}
+
+// trustListsName reports whether `security dump-trust-settings -d` output
+// lists trust settings for a certificate called name.
+func trustListsName(dump, name string) bool {
+	if name == "" {
+		return false
+	}
+	for line := range strings.Lines(dump) {
+		label, cert, ok := strings.Cut(strings.TrimSpace(line), ": ")
+		if ok && strings.HasPrefix(label, "Cert ") && cert == name {
+			return true
+		}
+	}
+	return false
+}
+
+// deletable reports whether cleanup may delete dir with rm -rf: it must
+// be absolute, clean and end in a directory called chainmail, so a wrong
+// layout value can never remove a parent such as /usr/local/libexec.
+func deletable(dir string) bool {
+	return filepath.IsAbs(dir) && filepath.Clean(dir) == dir && filepath.Base(dir) == "chainmail"
+}
+
+// ancestors lists the directories above each absolute path, each once and
+// without the root, deepest first, so removing them in order empties each
+// before its parent. Relative paths are ignored.
+func ancestors(paths ...string) []string {
+	var dirs []string
+	for _, p := range paths {
+		if !filepath.IsAbs(p) {
+			continue
+		}
+		for d := filepath.Dir(filepath.Clean(p)); d != "/"; d = filepath.Dir(d) {
+			dirs = append(dirs, d)
+		}
+	}
+	slices.SortFunc(dirs, func(a, b string) int {
+		return cmp.Or(cmp.Compare(depth(b), depth(a)), cmp.Compare(a, b))
+	})
+	return slices.Compact(dirs)
+}
+
+// depth counts the components of a clean absolute path.
+func depth(p string) int { return strings.Count(p, "/") }
