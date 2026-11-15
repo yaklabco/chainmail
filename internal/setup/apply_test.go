@@ -1280,3 +1280,33 @@ func TestApplySecretSetCoversTheProbe(t *testing.T) {
 		t.Errorf("stored secret present %v, length %d; want the given secret, length %d", ok, len(got), len(testSecret))
 	}
 }
+
+func TestApplyRepairsFileMetadata(t *testing.T) {
+	t.Parallel()
+	for _, p := range []Platform{Linux, Darwin} {
+		for _, tc := range metadataCases() {
+			t.Run(string(p)+" "+tc.name, func(t *testing.T) {
+				t.Parallel()
+				r := installedRig(p)
+				r.h.files.File(userExe, 1000, 1000, 0o755, fakeBinary) // the installed binary
+				e, _ := r.l.Entry(tc.entry)
+				before, _, _ := r.h.files.Content(e.Path)
+				daemon, _ := r.h.accounts.User(r.l.DaemonUser)
+				tc.tamper(r.h, r.l, daemon.UID)
+
+				in := r.input(t, gmailRequest(), okHealth, nil)
+				if _, err := r.apply(in); err != nil {
+					t.Fatalf("Apply: %v", err)
+				}
+				data, info, ok := r.h.files.Content(e.Path)
+				if !ok || !bytes.Equal(data, before) {
+					t.Errorf("%s holds %d bytes (present %v), want the %d bytes it had", e.Path, len(data), ok, len(before))
+				}
+				want := system.FileInfo{Exists: true, Mode: e.Mode, UID: 0, GID: 0}
+				if info != want {
+					t.Errorf("%s metadata = uid %d gid %d mode %v, want uid 0 gid 0 mode %v", e.Path, info.UID, info.GID, info.Mode, e.Mode)
+				}
+			})
+		}
+	}
+}
