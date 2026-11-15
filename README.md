@@ -64,11 +64,25 @@ chainmail folders --account you
 chainmail search is:unread in:inbox
 ```
 
-On macOS, bootstrap also writes your `cli.toml` so commands find the daemon's socket. Bootstrap supports Linux with systemd and macOS. On NixOS, use the [NixOS module](https://chainmail.sh/docs/operations/deploy#nixos) instead.
+On macOS, bootstrap also writes your `cli.toml` so commands find the daemon's socket. Bootstrap supports Linux with systemd, NixOS and macOS. [On NixOS](#on-nixos) it works differently.
 
 An agent that can run sudo without a password can get around all of this. Run agents from an account that cannot.
 
 The [quick start](https://chainmail.sh/docs/getting-started/quick-start) goes on to Google accounts, sends and the policy, watching and items.
+
+### On NixOS
+
+On NixOS, the [NixOS module](https://chainmail.sh/docs/operations/deploy#nixos) runs chainmail, and bootstrap writes the files that configure it. Bootstrap never edits your NixOS configuration and never rebuilds. It never starts or restarts the daemon either.
+
+```sh
+chainmail bootstrap you@example.com --nix-dir ./chainmail-nixos
+```
+
+Bootstrap writes three files into `--nix-dir`, which is `./chainmail-nixos` by default. `chainmail.nix` turns on the module and adds you to `chainmail-clients`. `chainmail-you.nix` holds the account. `chainmail-vault-key.cred` is the vault key, sealed with `systemd-creds` so that only this machine can open it. None of the files holds a secret in the clear, so you can commit them.
+
+Import the files from your NixOS configuration and add the chainmail flake input. Bootstrap prints the lines to add. Rebuild the way you normally do. Then run bootstrap again with the same address. It stores the password through the daemon and tests the login.
+
+A second account works the same way. Bootstrap writes only that account's file, `chainmail-<name>.nix`, and needs no sudo for it. Import the file, rebuild, and run bootstrap again.
 
 ### If the vault key is lost
 
@@ -92,6 +106,26 @@ chainmail bootstrap you@example.com
 ```
 
 Bootstrap makes a new key and asks for that account's password again. Run it once more for each other account, with the same address and options as before, to enter its password again. For an OAuth account, bootstrap asks for the OAuth client secret again and logs in through the browser. Without a terminal it cannot log in, and it tells you to run `chainmail auth login <name>`.
+
+On NixOS, the key is the sealed credential `chainmail-vault-key.cred` in your NixOS configuration, and bootstrap does not make a new one while the module is installed. A reinstall loses the host key that sealed it, so the credential no longer opens. If you saved the key, put it in a file called `vault-key` in the directory that holds the old credential, and seal it again on this machine. The new credential replaces the old one only after it decrypts to a valid age identity, and the saved copy is deleted only after that. Then commit the new file and rebuild:
+
+```sh
+sudo nix shell nixpkgs#age -c bash -euo pipefail -c '
+  systemd-creds encrypt --name=vault-key vault-key chainmail-vault-key.cred.new
+  systemd-creds decrypt --name=vault-key chainmail-vault-key.cred.new - | age-keygen -y >/dev/null
+  mv chainmail-vault-key.cred.new chainmail-vault-key.cred' && rm vault-key
+```
+
+Without a saved key, stop the daemon, move the old vault aside, and seal a new key in place of the old credential. Run the commands below in the directory that holds the old credential. One root shell makes the new key with `age-keygen` and pipes it straight into `systemd-creds`. The key never passes through a process of yours and is never shown. The new credential replaces the old one only after it decrypts to a valid age identity. Commit the new file and rebuild, which starts the daemon again. Then run bootstrap once for each account to enter its password again:
+
+```sh
+sudo systemctl stop chainmail
+sudo mv /var/lib/chainmail/vault.age /var/lib/chainmail/vault.age.lost
+sudo nix shell nixpkgs#age -c bash -euo pipefail -c '
+  age-keygen 2>/dev/null | systemd-creds encrypt --name=vault-key - chainmail-vault-key.cred.new
+  systemd-creds decrypt --name=vault-key chainmail-vault-key.cred.new - | age-keygen -y >/dev/null
+  mv chainmail-vault-key.cred.new chainmail-vault-key.cred'
+```
 
 ### Developing chainmail
 
