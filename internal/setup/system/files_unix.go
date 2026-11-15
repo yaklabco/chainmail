@@ -15,6 +15,11 @@ import (
 // noFollow makes open fail on a final symlink instead of following it.
 const noFollow = unix.O_NOFOLLOW
 
+// nonBlock makes open return at once on a FIFO with no writer, so the
+// file type can be checked before anything blocks. A regular file ignores
+// it.
+const nonBlock = unix.O_NONBLOCK
+
 // owner returns the uid and gid of fi.
 func owner(fi fs.FileInfo) (uid, gid uint32, err error) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
