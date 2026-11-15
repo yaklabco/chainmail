@@ -244,8 +244,8 @@ func TestCredsSealsAndChecks(t *testing.T) {
 		t.Errorf("CheckDecrypt of an accepted credential: %v", err)
 	}
 	err = c.CheckDecrypt(ctx, "vault-key", []byte("foreign credential"))
-	if err == nil || !strings.HasPrefix(err.Error(), "the credential does not decrypt on this host: ") {
-		t.Errorf("CheckDecrypt of a foreign credential = %v", err)
+	if !errors.Is(err, system.ErrNotDecrypted) || !strings.HasPrefix(err.Error(), "the credential does not decrypt on this host: ") {
+		t.Errorf("CheckDecrypt of a foreign credential = %v, want system.ErrNotDecrypted", err)
 	}
 
 	boom := errors.New("no TPM")
@@ -253,8 +253,8 @@ func TestCredsSealsAndChecks(t *testing.T) {
 	if got, err := c.Encrypt(ctx, "vault-key", []byte("k")); !errors.Is(err, boom) || got != nil {
 		t.Errorf("Encrypt with EncryptErr = %q, %v", got, err)
 	}
-	if err := c.CheckDecrypt(ctx, "vault-key", cred); !errors.Is(err, boom) {
-		t.Errorf("CheckDecrypt with DecryptErr = %v", err)
+	if err := c.CheckDecrypt(ctx, "vault-key", cred); !errors.Is(err, boom) || errors.Is(err, system.ErrNotDecrypted) {
+		t.Errorf("CheckDecrypt with DecryptErr = %v, want boom as an operational error", err)
 	}
 
 	want := []string{
