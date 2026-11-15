@@ -41,7 +41,7 @@ type inviteHookOptions struct {
 	// StoreNone reports whether the account's calendar store is none, so
 	// invites reach it only through mail and the hook announces them.
 	StoreNone func(account string) bool
-	// Self reports whether a bare address is one of James's own.
+	// Self reports whether a bare address is one of the user's own.
 	Self func(addr string) bool
 	// Now is the hook's clock. Nil means time.Now.
 	Now func() time.Time
@@ -273,7 +273,7 @@ func (h *inviteHook) handle(ctx context.Context, f cache.FoundInvite) inviteOutc
 // nothing unless the account's store is none and the hook has a log. A
 // publish that fails leaves the invite pending for the next call, for as
 // long as the invite stays actionable: an invite that is not (it is
-// cancelled, James organizes it, every event of it has ended, or its data
+// cancelled, the user organizes it, every event of it has ended, or its data
 // does not parse) is settled, so no later pass reads it again. A UID whose
 // latest row is a CANCEL is never pending. One call reads at most
 // inviteAnnounceBatch invites, those first found longest ago first, and
@@ -331,7 +331,7 @@ func (h *inviteHook) settle(ctx context.Context, log *slog.Logger, row calcache.
 }
 
 // due reports whether an invite gets an invite event: the method is
-// REQUEST, the event is not cancelled, James does not organize it, and not
+// REQUEST, the event is not cancelled, the user does not organize it, and not
 // every event of it has ended at now (a recurring one never has).
 func (h *inviteHook) due(inv calendar.MailInvite, now time.Time) bool {
 	if inv.Method != calendar.MethodRequest {

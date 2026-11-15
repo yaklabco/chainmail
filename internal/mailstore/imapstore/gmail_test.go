@@ -58,7 +58,7 @@ type gmailFixture struct {
 }
 
 // newGmailFixture: message 0 is an invoice with a 2.5 MiB attachment in the
-// inbox, message 1 James's reply in Sent (same thread), message 2 in Trash.
+// inbox, message 1 the user's reply in Sent (same thread), message 2 in Trash.
 // The fake has Gmail's capabilities, so no PREVIEW.
 func newGmailFixture(t *testing.T) gmailFixture {
 	t.Helper()

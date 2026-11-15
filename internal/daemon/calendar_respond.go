@@ -38,9 +38,9 @@ const (
 	maxReplySubjectRunes = 200
 	// rsvpStoreHeldHint is CalendarHeld.hint for a held answer through a
 	// calendar store, which was not applied.
-	rsvpStoreHeldHint = "held by policy: the answer was not sent; James can answer in the calendar app"
+	rsvpStoreHeldHint = "held by policy: the answer was not sent; the user can answer in the calendar app"
 	// rsvpEmailHeldHint is CalendarHeld.hint for a held answer by email.
-	rsvpEmailHeldHint = "held by policy: the reply was saved to Drafts for James to review and send"
+	rsvpEmailHeldHint = "held by policy: the reply was saved to Drafts for the user to review and send"
 )
 
 var (
@@ -66,7 +66,7 @@ type rsvpTarget struct {
 	ev calendar.Event
 	// invite is the mail invite, when the ref names one.
 	invite *calcache.MailInviteRow
-	// self is James's attendee address on the event, organizer the
+	// self is the user's attendee address on the event, organizer the
 	// organizer's address.
 	self, organizer string
 }
@@ -111,7 +111,7 @@ func (h *calendarService) Respond(ctx context.Context, req *connect.Request[chai
 
 // rsvpTargetOf resolves an RSVP's ref: a calendar event, or a mail invite,
 // which the account's calendar event with the same UID stands for when
-// there is one. It checks that James is an attendee and that someone else
+// there is one. It checks that the user is an attendee and that someone else
 // organizes the event.
 func (s *Server) rsvpTargetOf(ctx context.Context, ref string) (rsvpTarget, error) {
 	var t rsvpTarget
@@ -177,8 +177,8 @@ func (s *Server) rsvpTargetOf(ctx context.Context, ref string) (rsvpTarget, erro
 	return t, nil
 }
 
-// selfAttendee is James's attendee address on ev: the account's own
-// address when it is listed, else the first of his addresses listed, else
+// selfAttendee is the user's attendee address on ev: the account's own
+// address when it is listed, else the first of their addresses listed, else
 // "".
 func (s *Server) selfAttendee(ev calendar.Event, address string) string {
 	first := ""
@@ -195,7 +195,7 @@ func (s *Server) selfAttendee(ev calendar.Event, address string) string {
 
 // respondInStore answers through the account's calendar store. With a
 // caller's key, a repeat replays the first outcome. A conflict reads the
-// event again once and retries when James's answer is still what it was.
+// event again once and retries when the user's answer is still what it was.
 func (s *Server) respondInStore(ctx context.Context, m *chainmailv1.RespondRequest, t rsvpTarget, ps calendar.PartStat, entry *audit.Entry) (*chainmailv1.RespondResponse, error) {
 	account := t.ca.name
 	key := ""
@@ -232,7 +232,7 @@ func (s *Server) respondInStore(ctx context.Context, m *chainmailv1.RespondReque
 // organizer, calendar access and policy were checked: the store refuses
 // the answer when the event changed since (Response.ETag). Then the event
 // is synced and resolved again, every check is repeated on the new
-// version, and the answer is retried once when James's own answer is
+// version, and the answer is retried once when the user's own answer is
 // still what the caller saw (spec 6.1 step 5); otherwise EVENT_CONFLICT.
 // The response is the version the store wrote, whether or not the sync
 // after it works.

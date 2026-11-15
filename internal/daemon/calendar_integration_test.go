@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	// calItAllowed organizes the invite James may answer: the policy
+	// calItAllowed organizes the invite the user may answer: the policy
 	// allows *@allowed.test.
 	calItAllowed = "chair@allowed.test"
 	// calItBlocked organizes the invite whose answer the policy holds.
@@ -148,7 +148,7 @@ func calItWaitInvite(t *testing.T, h *daemontest.Harness, account, inviteRef str
 
 // calItDeliver appends an invitation from organizer to user's INBOX, waits
 // for ListInvites to list it and checks the invite against the delivered
-// message: source mail, method REQUEST, the message's ref, James not yet
+// message: source mail, method REQUEST, the message's ref, the user not yet
 // answered. It returns the invite's ref.
 func calItDeliver(t *testing.T, h *daemontest.Harness, dove *dovecot.Server, user, organizer, uid, id string) string {
 	t.Helper()

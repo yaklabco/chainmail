@@ -37,8 +37,8 @@ func TestErrorResultMapping(t *testing.T) {
 		},
 		{
 			name:       "policy denied",
-			err:        api.New(connect.CodePermissionDenied, api.ReasonPolicyDenied, "ask James to enable it", errors.New("expunge is disabled by policy")),
-			wantReason: api.ReasonPolicyDenied, wantMessage: "expunge is disabled", wantHint: "James",
+			err:        api.New(connect.CodePermissionDenied, api.ReasonPolicyDenied, "ask the user to enable it", errors.New("expunge is disabled by policy")),
+			wantReason: api.ReasonPolicyDenied, wantMessage: "expunge is disabled", wantHint: "the user",
 		},
 		{
 			name:       "unreachable names the socket and the group",

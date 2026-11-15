@@ -156,7 +156,7 @@ func TestGatedToolStillMeetsTheDaemonsPolicy(t *testing.T) {
 	t.Parallel()
 	p := &gatePolicy{expunge: true}
 	f := &fakeDaemon{ListAccounts: p.listAccounts, Expunge: func(context.Context, *chainmailv1.ExpungeRequest) (*chainmailv1.ExpungeResponse, error) {
-		return nil, api.New(connect.CodePermissionDenied, api.ReasonPolicyDenied, "ask James to allow expunge for this account", errors.New("expunge is disabled"))
+		return nil, api.New(connect.CodePermissionDenied, api.ReasonPolicyDenied, "ask the user to allow expunge for this account", errors.New("expunge is disabled"))
 	}}
 	e := newTestEnv(t, f, latest)
 	wantError(t, e.call(t, "expunge", map[string]any{"refs": []string{testRef}}), api.ReasonPolicyDenied)

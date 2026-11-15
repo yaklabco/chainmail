@@ -498,7 +498,7 @@ func TestActReplaysPendingRows(t *testing.T) {
 
 // TestActAuditsRuleFolder checks that a rule's move and copy rows carry
 // the ref, the destination folder as socket callers' rows do, then the
-// rule and the run (James, 2026-11-08: validated folder names may appear
+// rule and the run (a maintainer decision, 2026-11-08: validated folder names may appear
 // in audit targets).
 func TestActAuditsRuleFolder(t *testing.T) {
 	t.Parallel()

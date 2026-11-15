@@ -10,7 +10,7 @@ import (
 )
 
 // attributionRE matches the line a client writes above a quoted reply, in
-// the languages James's correspondents use.
+// the languages the user's correspondents use.
 var attributionRE = []*regexp.Regexp{
 	regexp.MustCompile(`^On .{4,200} wrote:$`),
 	regexp.MustCompile(`^Am .{4,200} schrieb .{1,200}:$`),

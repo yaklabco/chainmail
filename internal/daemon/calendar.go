@@ -72,7 +72,7 @@ var (
 	}
 	errOwnEvent = &calendarRefusal{
 		code: connect.CodeFailedPrecondition, reason: api.ReasonInvalidArgument,
-		msg:  "James organizes this event, so there is no invite to answer",
+		msg:  "the user organizes this event, so there is no invite to answer",
 		hint: "change it with: chainmail event edit <ref>",
 	}
 	errCalendarKeyBusy = &calendarRefusal{
@@ -415,7 +415,7 @@ func (s *Server) lookupEvent(ctx context.Context, ref string) (resolvedEvent, er
 	return resolvedEvent{}, calcache.ErrNotFound
 }
 
-// ownAddress reports whether addr is one of James's own addresses, the
+// ownAddress reports whether addr is one of the user's own addresses, the
 // set the policy always allows.
 func (s *Server) ownAddress(addr string) bool {
 	return addr != "" && s.policy.IsOwn(strings.TrimSpace(addr))

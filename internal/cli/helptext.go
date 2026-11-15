@@ -182,7 +182,7 @@ var examples = map[string]string{
   chainmail watch --kind item,item_mail --item it_01jcb7m2k9r8q3v4w5x6y7z8a9
   # rule changes, and work items coming due
   chainmail watch --kind rule,item_due_soon,item_due,item_overdue
-  # new invites, changes to events and replies to events James organizes
+  # new invites, changes to events and replies to events you organize
   chainmail watch --group calendar --kind invite,event_changed,event_cancelled,invite_reply`,
 	"chainmail watch groups":        `  chainmail watch groups`,
 	"chainmail watch groups delete": `  chainmail watch groups delete triage`,

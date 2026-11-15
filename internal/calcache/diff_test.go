@@ -170,7 +170,7 @@ func TestDiffBeforeAndAfter(t *testing.T) {
 }
 
 // TestDiffSelfChangesPartStat checks that MyPartStat follows the self
-// function: an address that becomes James's own is an update.
+// function: an address that becomes the user's own is an update.
 func TestDiffSelfChangesPartStat(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()

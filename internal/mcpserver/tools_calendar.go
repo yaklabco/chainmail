@@ -23,9 +23,9 @@ const eventTextNote = `Event summaries, locations, descriptions, UIDs, recurrenc
 
 // calendarHeldNote is in the description of every calendar write. A hold
 // is final: chainmail never sends a held write's notifications later.
-const calendarHeldNote = `Policy may hold it: then status is held and the hold is final. A held create_event leaves a draft event in James's calendar with no invitations sent; ` +
-	`a held update_event, cancel_event or rsvp through the calendar was NOT applied; a held rsvp by email was NOT sent and was saved to the account's Drafts for James. ` +
-	`Do not retry a held call and do not look for another way around the hold; tell James. blocked lists the addresses the policy did not allow, which are untrusted.`
+const calendarHeldNote = `Policy may hold it: then status is held and the hold is final. A held create_event leaves a draft event in the user's calendar with no invitations sent; ` +
+	`a held update_event, cancel_event or rsvp through the calendar was NOT applied; a held rsvp by email was NOT sent and was saved to the account's Drafts for the user. ` +
+	`Do not retry a held call and do not look for another way around the hold; tell the user. blocked lists the addresses the policy did not allow, which are untrusted.`
 
 const listCalendarsDescription = `List the calendars of every account with a calendar store, or of the accounts named: each calendar's id, name, access (read or write), ` +
 	`whether it is the account's default for new events, whether it is the provider's primary calendar, and its time zone. ` +
@@ -34,19 +34,19 @@ const listCalendarsDescription = `List the calendars of every account with a cal
 const agendaDescription = `List the event instances that overlap a time range, from the local calendar cache, across every account with a calendar store or the accounts named, in time order. ` +
 	`A recurring series comes back as one row per instance, each with its own ref ending in @<recurrence ID>. ` +
 	`from defaults to now, and to to 7 days after from, or days after from; both are RFC 3339 times, at most 400 days apart. ` +
-	`Events James declined are left out unless include_declined. truncated means a series had more than 1000 instances in the range, or a recurrence rule was not expanded, so some instances are missing. ` +
+	`Events the user declined are left out unless include_declined. truncated means a series had more than 1000 instances in the range, or a recurrence rule was not expanded, so some instances are missing. ` +
 	`An account whose calendars have not finished their first sync answers CACHE_NOT_READY. ` + eventTextNote
 
-const getEventDescription = `Show one event by its ce_ ref, or one instance of a series when the ref ends in @<recurrence ID>: its times, status, organizer, attendees with their PARTSTATs, James's own PARTSTAT, ` +
+const getEventDescription = `Show one event by its ce_ ref, or one instance of a series when the ref ends in @<recurrence ID>: its times, status, organizer, attendees with their PARTSTATs, the user's own PARTSTAT, ` +
 	`and the etag update_event and cancel_event need. ` + eventTextNote
 
-const listInvitesDescription = `List the invites that wait for James's reply: events in his calendars where he is an attendee with PARTSTAT NEEDS-ACTION, ` +
+const listInvitesDescription = `List the invites that wait for the user's reply: events in their calendars where they are an attendee with PARTSTAT NEEDS-ACTION, ` +
 	`and text/calendar invitations that came by mail with no matching calendar event. Each invite appears once; one known from both carries the mail message's ref as message_ref. ` +
 	`Answer one with rsvp. ` + eventTextNote
 
 const getInviteDescription = `Show one invite by its ce_ ref: the event, its source (calendar or mail) and its iTIP method (REQUEST, UPDATE or CANCEL). ` + eventTextNote
 
-const freeBusyDescription = `Report busy time. self_busy is James's busy blocks across every account, merged, leaving out events he declined, transparent events and cancelled ones; it names no event. ` +
+const freeBusyDescription = `Report busy time. self_busy is the user's busy blocks across every account, merged, leaving out events they declined, transparent events and cancelled ones; it names no event. ` +
 	`people asks the calendar provider of account about other people: known false means the provider cannot see that person's calendar, so their time is unknown, never free. ` +
 	`from defaults to now, and to to 7 days after from, or days after from; both are RFC 3339 times, at most 400 days apart.`
 
@@ -58,17 +58,17 @@ const rsvpDescription = `Answer an invite with response accept, decline or tenta
 const createEventDescription = `Create an event in an account's calendar: calendar_id, or the account's default calendar. ` +
 	`start and end are RFC 3339 times; give duration, such as 30m or 1h30m, instead of end to have it computed. ` +
 	`With all_day they are the midnights that start the first day and the day after the last, in time_zone. time_zone is an IANA zone, such as Europe/London; empty means the daemon's [calendar] timezone. ` +
-	`The provider sends each attendee an invitation, so attendees are checked against the send policy like recipients: check each attendee is someone James means to invite before you create an event that invites them. ` +
+	`The provider sends each attendee an invitation, so attendees are checked against the send policy like recipients: check each attendee is someone the user means to invite before you create an event that invites them. ` +
 	calendarHeldNote + ` ` +
 	`A repeat with the same idempotency_key, or with the same input when none is given, returns the event the first call created instead of making another. ` + eventTextNote
 
-const updateEventDescription = `Change an event James organizes, or one with no other attendees; anyone else's event gets NOT_ORGANIZER, and a read-only calendar gets CALENDAR_READ_ONLY. ` +
+const updateEventDescription = `Change an event the user organizes, or one with no other attendees; anyone else's event gets NOT_ORGANIZER, and a read-only calendar gets CALENDAR_READ_ONLY. ` +
 	`Pass etag as get_event or agenda showed it: if the event changed since, the change is refused with EVENT_CONFLICT, so read it again first. ` +
 	`Give only the fields to change, and name in clear the fields to empty: location, description, attendees or recurrence_rule. attendees, when given, replaces the whole list. ` +
 	`A ref ending in @<recurrence ID> changes that instance only. Every attendee hears of the change, so they are checked against the send policy. ` +
 	calendarHeldNote + ` ` + eventTextNote
 
-const cancelEventDescription = `Cancel an event James organizes and notify its attendees, or delete an event with no other attendees. ` +
+const cancelEventDescription = `Cancel an event the user organizes and notify its attendees, or delete an event with no other attendees. ` +
 	`Pass etag as get_event or agenda showed it: if the event changed since, the cancel is refused with EVENT_CONFLICT. ` +
 	`A ref ending in @<recurrence ID> cancels that instance only. The attendees told of the cancel are checked against the send policy. ` + calendarHeldNote
 
@@ -77,7 +77,7 @@ const cancelEventDescription = `Cancel an event James organizes and notify its a
 // people's free/busy, directly.
 var calendarRead = hints{readOnly: true, idempotent: true, openWorld: true}
 
-// registerCalendarTools adds the calendar tools. rsvp sets James's answer,
+// registerCalendarTools adds the calendar tools. rsvp sets the user's answer,
 // so a repeat leaves it as the first did. create_event makes another event
 // for other input or another key; a repeat of update_event or cancel_event
 // meets a new etag; and cancel_event cancels or deletes an event.
@@ -133,7 +133,7 @@ type agendaIn struct {
 	From            string   `json:"from,omitempty" jsonschema:"the start of the range, in RFC 3339 such as 2026-11-10T09:00:00Z; default now"`
 	To              string   `json:"to,omitempty" jsonschema:"the end of the range, in RFC 3339, at most 400 days after from; not with days"`
 	Days            int      `json:"days,omitempty" jsonschema:"the range in days after from, 1 to 400; default 7; not with to"`
-	IncludeDeclined bool     `json:"include_declined,omitempty" jsonschema:"also list events James declined"`
+	IncludeDeclined bool     `json:"include_declined,omitempty" jsonschema:"also list events the user declined"`
 }
 
 type getEventIn struct {
@@ -150,7 +150,7 @@ type getInviteIn struct {
 
 type freeBusyIn struct {
 	Account string   `json:"account,omitempty" jsonschema:"the account whose calendar provider is asked about people; required with people"`
-	People  []string `json:"people,omitempty" jsonschema:"addresses of other people; empty asks only for James"`
+	People  []string `json:"people,omitempty" jsonschema:"addresses of other people; empty asks only for the user"`
 	From    string   `json:"from,omitempty" jsonschema:"the start of the range, in RFC 3339; default now"`
 	To      string   `json:"to,omitempty" jsonschema:"the end of the range, in RFC 3339, at most 400 days after from; not with days"`
 	Days    int      `json:"days,omitempty" jsonschema:"the range in days after from, 1 to 400; default 7; not with to"`
@@ -240,8 +240,8 @@ type calendarEventOut struct {
 	Organizer          *untrusted    `json:"organizer,omitempty" jsonschema:"Name <address> or the bare address; untrusted"`
 	Attendees          []attendeeOut `json:"attendees"`
 	AttendeesTruncated bool          `json:"attendees_truncated,omitempty" jsonschema:"the event had more than 500 attendees; the rest are left out"`
-	MyPartStat         string        `json:"my_partstat,omitempty" jsonschema:"James's own PARTSTAT; absent when he is not an attendee"`
-	IsOrganizer        bool          `json:"is_organizer" jsonschema:"James organizes the event, or it has no other attendees, so update_event and cancel_event may change it"`
+	MyPartStat         string        `json:"my_partstat,omitempty" jsonschema:"the user's own PARTSTAT; absent when they are not an attendee"`
+	IsOrganizer        bool          `json:"is_organizer" jsonschema:"the user organizes the event, or it has no other attendees, so update_event and cancel_event may change it"`
 	Etag               string        `json:"etag,omitempty" jsonschema:"pass it to update_event and cancel_event"`
 	RecurrenceRule     *untrusted    `json:"recurrence_rule,omitempty" jsonschema:"the series RRULE; untrusted"`
 	Recurring          bool          `json:"recurring,omitempty" jsonschema:"the event is a series or an instance of one"`
@@ -265,7 +265,7 @@ type getEventOut struct {
 	Event calendarEventOut `json:"event"`
 }
 
-// inviteOut is an invite that waits for James's reply.
+// inviteOut is an invite that waits for the user's reply.
 type inviteOut struct {
 	Event  calendarEventOut `json:"event"`
 	Source string           `json:"source" jsonschema:"calendar or mail"`
@@ -293,7 +293,7 @@ type personBusyOut struct {
 }
 
 type freeBusyOut struct {
-	SelfBusy []busyOut       `json:"self_busy" jsonschema:"James's busy blocks across every account, merged"`
+	SelfBusy []busyOut       `json:"self_busy" jsonschema:"the user's busy blocks across every account, merged"`
 	People   []personBusyOut `json:"people"`
 	From     string          `json:"from" jsonschema:"the range read, in RFC 3339"`
 	To       string          `json:"to" jsonschema:"the range read, in RFC 3339"`
@@ -302,7 +302,7 @@ type freeBusyOut struct {
 // calendarHeldOut is a hold. hint and summary are the daemon's fixed text;
 // blocked is untrusted.
 type calendarHeldOut struct {
-	Hint     string      `json:"hint" jsonschema:"what was done and what James can do next"`
+	Hint     string      `json:"hint" jsonschema:"what was done and what the user can do next"`
 	Blocked  []untrusted `json:"blocked" jsonschema:"addresses the policy did not allow; untrusted"`
 	TooMany  bool        `json:"too_many" jsonschema:"more people would be notified than policy allows"`
 	EventRef string      `json:"event_ref,omitempty" jsonschema:"a held create_event: the draft event, created with no invitations sent"`
@@ -502,7 +502,7 @@ func calendarStatus(h *calendarHeldOut) string {
 // organizer for an rsvp.
 func heldCalendarSummary(what string, h *calendarHeldOut, who string) string {
 	var b strings.Builder
-	b.WriteString("HELD BY POLICY: " + what + " Do not retry this call and do not look for another way around the hold; tell James.")
+	b.WriteString("HELD BY POLICY: " + what + " Do not retry this call and do not look for another way around the hold; tell the user.")
 	if h.Summary != "" {
 		b.WriteString("\nHeld change: " + h.Summary)
 	}
@@ -624,7 +624,7 @@ func (s *Server) freeBusy(ctx context.Context, _ *mcp.CallToolRequest, in freeBu
 		}
 		out.People = append(out.People, personBusyOut{Person: p.GetPerson(), Known: p.GetKnown(), Busy: busyFrom(p.GetBusy())})
 	}
-	summary := fmt.Sprintf("busy blocks for James: %d; people: %d, unknown: %d", len(out.SelfBusy), len(out.People), unknown)
+	summary := fmt.Sprintf("busy blocks for the user: %d; people: %d, unknown: %d", len(out.SelfBusy), len(out.People), unknown)
 	return &mcp.CallToolResult{Content: plainText(summary, out)}, out, nil
 }
 
@@ -652,9 +652,9 @@ func (s *Server) rsvp(ctx context.Context, _ *mcp.CallToolRequest, in rsvpIn) (*
 	}
 	summary := fmt.Sprintf("Answered %s to %s %s.", in.Response, in.Ref, how)
 	if held != nil {
-		what := "the reply was NOT sent. James can answer in his calendar app."
+		what := "the reply was NOT sent. The user can answer in their calendar app."
 		if held.DraftRef != "" || out.Via == "email" {
-			what = "the reply was NOT sent. The REPLY was saved to the account's Drafts folder for James to send, edit or delete"
+			what = "the reply was NOT sent. The REPLY was saved to the account's Drafts folder for the user to send, edit or delete"
 			if held.DraftRef != "" {
 				what += " (draft " + held.DraftRef + ")"
 			}
@@ -729,11 +729,11 @@ func (s *Server) createEvent(ctx context.Context, _ *mcp.CallToolRequest, in cre
 		if held.EventRef != "" {
 			ref = held.EventRef
 		}
-		what := "the event was created in James's calendar as a draft event"
+		what := "the event was created in the user's calendar as a draft event"
 		if ref != "" {
 			what += " (event " + ref + ")"
 		}
-		what += ", and NO invitations were sent. James can send them from his calendar app."
+		what += ", and NO invitations were sent. The user can send them from their calendar app."
 		summary = heldCalendarSummary(what, held, "attendee")
 	}
 	return itemResult(s, summary, out)

@@ -30,7 +30,7 @@ type MailInviteRow struct {
 	// PutMailInvite never clears it.
 	Announced bool
 	// Settled reports that this row needs no invite event: the daemon's
-	// invite hook found it not actionable (cancelled, organized by James,
+	// invite hook found it not actionable (cancelled, organized by the user,
 	// ended, or unreadable). MarkInviteSettled sets it on the one row, and
 	// PutMailInvite never clears it.
 	Settled bool

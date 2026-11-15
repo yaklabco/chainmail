@@ -98,11 +98,11 @@ func TestSendEmailResults(t *testing.T) {
 			name: "held",
 			result: &chainmailv1.ComposeResult{Result: &chainmailv1.ComposeResult_Held{Held: &chainmailv1.Held{
 				Draft: &chainmailv1.Draft{Ref: testRef2, MessageId: "m2@x"}, Blocked: []string{"stranger@evil.test"}, TooManyRecipients: true,
-				Hint: "held by policy: saved to Drafts for James to review and send",
+				Hint: "held by policy: saved to Drafts for the user to review and send",
 			}}},
 			want: composeOut{
 				Status: statusHeld, DraftRef: testRef2, MessageID: serverNamePtr("m2@x"), Blocked: []untrusted{{Untrusted: "stranger@evil.test"}},
-				TooManyRecipients: true, Hint: "held by policy: saved to Drafts for James to review and send",
+				TooManyRecipients: true, Hint: "held by policy: saved to Drafts for the user to review and send",
 			},
 			wantText: []string{"NOT sent", "Drafts", "Do not retry", "stranger@evil.test", "More recipients"},
 		},
@@ -328,7 +328,7 @@ func composeHeld(h *chainmailv1.Held) *chainmailv1.ComposeResult {
 // present, even when empty or false.
 func TestComposeHeldWireShape(t *testing.T) {
 	t.Parallel()
-	hint := "held by policy: saved to Drafts for James to review and send"
+	hint := "held by policy: saved to Drafts for the user to review and send"
 	tests := []struct {
 		name        string
 		held        *chainmailv1.Held

@@ -27,7 +27,7 @@ ref with @<recurrence ID> names one instance, and a plain ref the whole
 series.
 
 event create, edit and cancel change calendars under the send policy.
-Attendees other than James are told of a change, so they are checked
+Attendees other than you are told of a change, so they are checked
 against the policy. A create whose attendees it does not allow makes a
 draft event that notifies no one, and exits 4: send the invitations from
 the calendar app. An edit or cancel it does not allow is not applied,
@@ -74,7 +74,7 @@ the etag it has now.
 
 ` + calendarTimesHelp
 
-const eventCancelHelp = `Cancel an event James organizes and tell its attendees, or delete an
+const eventCancelHelp = `Cancel an event you organize and tell its attendees, or delete an
 event with no other attendees. The cancel is refused with EVENT_CONFLICT
 when the event changed since the etag was read. Without --etag the CLI
 reads the event first and uses the etag it has now.`

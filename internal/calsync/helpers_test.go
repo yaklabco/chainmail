@@ -158,7 +158,7 @@ func single(uid string, start time.Time) calendar.Event {
 	}
 }
 
-// invited is a single event the boss organizes with James invited.
+// invited is a single event the boss organizes with the user invited.
 func invited(uid string, start time.Time, ps calendar.PartStat) calendar.Event {
 	ev := single(uid, start)
 	ev.Organizer = &calendar.Person{Email: boss, Name: secret}
@@ -169,7 +169,7 @@ func invited(uid string, start time.Time, ps calendar.PartStat) calendar.Event {
 	return ev
 }
 
-// organized is a single event James organizes with the boss invited.
+// organized is a single event the user organizes with the boss invited.
 func organized(uid string, start time.Time, bossPS calendar.PartStat) calendar.Event {
 	ev := single(uid, start)
 	ev.Organizer = &calendar.Person{Email: me, Name: secret}

@@ -65,7 +65,7 @@ const (
 	maxMaxRecipients = 500
 )
 
-// Policy is the global [policy] table: what agents may do without James.
+// Policy is the global [policy] table: what agents may do without the user.
 type Policy struct {
 	// SendAllow lists the recipients every account may send to, each a bare
 	// address or *@domain.

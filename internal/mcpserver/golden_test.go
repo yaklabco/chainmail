@@ -54,7 +54,7 @@ func TestToolsListGolden(t *testing.T) {
 // each tool's hints while no account allows expunge. While one does, the
 // daemon expunges the old draft for good, so update_draft, send_draft and
 // delete_draft are destructive then, and nothing else changes. read_events,
-// added in SP6, is not read-only, by James's decision: it changes no mail,
+// added in SP6, is not read-only, by the maintainer's decision: it changes no mail,
 // but a read with a group moves the group's acknowledged position, so it is
 // not idempotent either. cache_status, added in SP7, reads only the
 // daemon's own state, so like list_accounts it is not open world.
@@ -71,7 +71,7 @@ func TestToolsListGolden(t *testing.T) {
 // arrived since, so it is destructive, open world and not idempotent.
 // The SP9 calendar tools reach calendar providers, through the cache or
 // directly, so all are open world. The reads change nothing. rsvp sets
-// James's answer, so a repeat leaves it as the first did. create_event is
+// the user's answer, so a repeat leaves it as the first did. create_event is
 // not idempotent, since a call with other input or another key makes
 // another event; a repeat of update_event or cancel_event meets a new etag;
 // and cancel_event deletes or cancels an event, so it is destructive.

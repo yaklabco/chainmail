@@ -195,7 +195,7 @@ func newAgendaCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		Use:   "agenda [--account NAME]... [--calendar ID]... [--days N | --from T --to T] [--tz ZONE]",
 		Short: "List the events in a range of days, in time order, from the calendar cache",
 		Long: "List the events and recurring instances that overlap a range, from the\n" +
-			"daemon's calendar cache, in time order. Events James declined are left\n" +
+			"daemon's calendar cache, in time order. Events you declined are left\n" +
 			"out unless --include-declined.\n\n" + calendarRangeHelp + "\n\n" + calendarTimesHelp + "\n\n" + calendarTextHelp,
 		Args: exactArgs(0),
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -221,7 +221,7 @@ func newAgendaCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	f := cmd.Flags()
 	f.StringArrayVar(&accounts, "account", nil, "only this account; repeat for more (default: every account with a calendar store)")
 	f.StringArrayVar(&calendars, "calendar", nil, "only this calendar ID; repeat for more (default: every calendar)")
-	f.BoolVar(&declined, "include-declined", false, "also list events James declined")
+	f.BoolVar(&declined, "include-declined", false, "also list events you declined")
 	return cmd
 }
 
@@ -230,7 +230,7 @@ func newInvitesCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "invites [--account NAME]...",
 		Short: "List the invites that wait for a reply, from calendars and from mail",
-		Long: `List the invites that wait for James's reply: calendar events where he is
+		Long: `List the invites that wait for your reply: calendar events where you are
 an attendee who has not answered, and invites that came only by mail.
 Answer one with chainmail rsvp.
 
@@ -325,9 +325,9 @@ func newFreeBusyCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "freebusy [--account NAME] [--days N | --from T --to T] [--tz ZONE] [address...]",
-		Short: "Show when James is busy across every account, and when other people are",
-		Long: "Show James's busy time across every account's calendars, leaving out\n" +
-			"events he declined, transparent events and cancelled ones. It names no\n" +
+		Short: "Show when you are busy across every account, and when other people are",
+		Long: "Show your busy time across every account's calendars, leaving out\n" +
+			"events you declined, transparent events and cancelled ones. It names no\n" +
 			"event. Each address asks the provider of the account --account names\n" +
 			"for that person's busy time. A person the provider cannot see shows as\n" +
 			"unknown, never as free.\n\n" + calendarRangeHelp + "\n\n" + calendarTimesHelp,

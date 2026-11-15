@@ -204,7 +204,7 @@ func calendarChangeEqual(a, b watch.CalendarChange) bool {
 
 // A UID already stored publishes nothing more, whether the new message is
 // another REQUEST or an UPDATE; a CANCEL never publishes; and an invite
-// James organizes, or one that has ended, is stored without an event.
+// the user organizes, or one that has ended, is stored without an event.
 func TestInviteHookPublishesOnlyNewRequestsNeedingAReply(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -345,7 +345,7 @@ func TestInviteHookNeedsACalendarCache(t *testing.T) {
 // The server's hook takes store none from each account's resolved
 // calendar table and own addresses from the policy: an invite on the
 // store none account is announced, one on the caldav account is not, and
-// one James organizes is not either. Both accounts are poked.
+// one the user organizes is not either. Both accounts are poked.
 func TestCalendarInviteHookUsesTheServerConfig(t *testing.T) {
 	t.Parallel()
 	s, _ := newTestServerConfig(t, passwordConfig+`
@@ -593,7 +593,7 @@ func TestInviteHookRetriesAnUpcomingMeetingAfterAWeek(t *testing.T) {
 	}
 }
 
-// A pending invite that will never get an event (it ended, James
+// A pending invite that will never get an event (it ended, the user
 // organizes it, it is cancelled, or its stored data does not parse) is
 // settled the first time it is looked at, so later passes do not read it
 // again; a pending one whose publish failed is not.

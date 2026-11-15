@@ -32,7 +32,7 @@ const (
 
 var (
 	composeHints = hints{openWorld: true}
-	heldNote     = "Policy may hold a send: then status is held, the message was NOT sent, it was saved to the account's Drafts for James, and it must not be retried."
+	heldNote     = "Policy may hold a send: then status is held, the message was NOT sent, it was saved to the account's Drafts for the user, and it must not be retried."
 	keyNote      = "Repeating the same send within 7 days replays the first result instead of sending twice."
 	draftNote    = "With draft, nothing is sent and each call saves a new draft."
 )
@@ -152,7 +152,7 @@ type composeOut struct {
 	DraftRef          string      `json:"draft_ref,omitempty" jsonschema:"the ref of the saved draft; with held always present, empty when the server did not report it"`
 	Blocked           []untrusted `json:"blocked,omitempty" jsonschema:"with held, always present: recipients not on the allowlist, possibly taken from the original message"`
 	TooManyRecipients bool        `json:"too_many_recipients,omitempty" jsonschema:"with held, always present: more recipients than policy allows"`
-	Hint              string      `json:"hint,omitempty" jsonschema:"what to tell James, or how to find the draft"`
+	Hint              string      `json:"hint,omitempty" jsonschema:"what to tell the user, or how to find the draft"`
 	IdempotencyKey    string      `json:"idempotency_key,omitempty" jsonschema:"the key this call used"`
 }
 
@@ -279,11 +279,11 @@ func refAccount(s string) (string, error) {
 // themselves appear only inside the untrusted block.
 func heldSummary(o composeOut) string {
 	var b strings.Builder
-	b.WriteString("HELD BY POLICY: the message was NOT sent. It was saved to the account's Drafts folder for James to send, edit or delete")
+	b.WriteString("HELD BY POLICY: the message was NOT sent. It was saved to the account's Drafts folder for the user to send, edit or delete")
 	if o.DraftRef != "" {
 		b.WriteString(" (draft " + o.DraftRef + ")")
 	}
-	b.WriteString(". Do not retry this send and do not look for another way to send it; tell James it is waiting in Drafts.")
+	b.WriteString(". Do not retry this send and do not look for another way to send it; tell the user it is waiting in Drafts.")
 	switch n := len(o.Blocked); {
 	case n == 1:
 		b.WriteString("\n1 recipient is not on the allowlist; it is listed in blocked below.")

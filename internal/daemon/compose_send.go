@@ -271,7 +271,7 @@ func (c *composeService) attempt(ctx context.Context, job sendJob, entry *audit.
 }
 
 // heldHint is Held.hint, fixed text for the agent to relay.
-const heldHint = "held by policy: saved to Drafts for James to review and send"
+const heldHint = "held by policy: saved to Drafts for the user to review and send"
 
 // hold settles a send the policy held: it saves the built message to
 // Drafts, or for SendDraft names the draft already there, and returns the

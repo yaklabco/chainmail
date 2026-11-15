@@ -290,7 +290,7 @@ func TestRespondRechecksAChangedOrganizer(t *testing.T) {
 	}
 }
 
-// An answer James gave elsewhere since the caller read the event is not
+// An answer the user gave elsewhere since the caller read the event is not
 // overwritten.
 func TestRespondKeepsANewerAnswer(t *testing.T) {
 	t.Parallel()

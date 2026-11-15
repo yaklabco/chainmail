@@ -171,7 +171,7 @@ func seriesGroups(rows []calcache.EventRow) [][]calcache.EventRow {
 }
 
 // expandGroup expands the rows of one object over [from, to), at most limit
-// instances, each with the row it comes from and James's role in it.
+// instances, each with the row it comes from and the user's role in it.
 func expandGroup(group []calcache.EventRow, from, to time.Time, limit int) ([]eventView, bool, error) {
 	evs := make([]calendar.Event, len(group))
 	var master *calcache.EventRow
@@ -272,7 +272,7 @@ func (h *calendarService) ListInvites(ctx context.Context, req *connect.Request[
 }
 
 // accountInvites lists one account's invites: calendar events waiting for
-// James's reply, then invites known only from mail.
+// the user's reply, then invites known only from mail.
 func (s *Server) accountInvites(ctx context.Context, ca *calAccount) ([]*chainmailv1.Invite, error) {
 	mailRows, err := s.calcache.MailInvites(ctx, ca.name)
 	if err != nil {
@@ -310,8 +310,8 @@ func (s *Server) accountInvites(ctx context.Context, ca *calAccount) ([]*chainma
 	return out, nil
 }
 
-// calendarInvites lists the account's calendar events where James is an
-// attendee who has not answered, that he does not organize, that are not
+// calendarInvites lists the account's calendar events where the user is an
+// attendee who has not answered, that they do not organize, that are not
 // cancelled and that end after now. A series waiting for a reply is one
 // invite; an instance waiting on its own is another.
 func (s *Server) calendarInvites(ctx context.Context, account string, messageRefs map[string]string) ([]*chainmailv1.Invite, error) {
@@ -344,7 +344,7 @@ func (s *Server) calendarInvites(ctx context.Context, account string, messageRef
 	return out, nil
 }
 
-// waitsForReply reports whether James is asked for a reply on a row.
+// waitsForReply reports whether the user is asked for a reply on a row.
 func waitsForReply(r calcache.EventRow) bool {
 	return r.MyPartStat == calendar.PartStatNeedsAction && !r.IsOrganizer && r.Event.Status != calendar.StatusCancelled
 }
@@ -367,7 +367,7 @@ func (s *Server) calendarInvite(res resolvedEvent, messageRefs map[string]string
 }
 
 // mailInviteOf is the Invite of a mail invite row, and false when it is not
-// one to list: it does not parse, James organizes it, it is cancelled, or
+// one to list: it does not parse, the user organizes it, it is cancelled, or
 // it is over.
 func (s *Server) mailInviteOf(r calcache.MailInviteRow) (*chainmailv1.Invite, bool) {
 	ev, evs, ok := s.parseMailInvite(r)
@@ -421,8 +421,8 @@ func (s *Server) mailInviteProto(r calcache.MailInviteRow, ev calendar.Event) *c
 	return &chainmailv1.Invite{Event: eventProto(v, s.ownAddress), Source: inviteSourceMail, Method: knownToken(r.Method, inviteMethods)}
 }
 
-// selfPartStat is the PARTSTAT of James's first attendee entry, "" when he
-// is not an attendee.
+// selfPartStat is the PARTSTAT of the user's first attendee entry, "" when they
+// are not an attendee.
 func selfPartStat(ev calendar.Event, self func(string) bool) calendar.PartStat {
 	for _, a := range ev.Attendees {
 		if self(a.Email) {
@@ -465,7 +465,7 @@ func (s *Server) inviteMessageRef(ctx context.Context, account, uid string) stri
 }
 
 // GetInvite implements chainmailv1connect.CalendarServiceHandler. A
-// calendar ref names an event James is invited to; a mail ref names an
+// calendar ref names an event the user is invited to; a mail ref names an
 // invite found in mail, shown as the account's calendar event when it has
 // one with the same UID.
 func (h *calendarService) GetInvite(ctx context.Context, req *connect.Request[chainmailv1.GetInviteRequest]) (*connect.Response[chainmailv1.GetInviteResponse], error) {
@@ -532,7 +532,7 @@ func (s *Server) calendarEventOfUID(ctx context.Context, account, uid string) (r
 	return resolvedEvent{}, false
 }
 
-// FreeBusy implements chainmailv1connect.CalendarServiceHandler. James's
+// FreeBusy implements chainmailv1connect.CalendarServiceHandler. The user's
 // busy time comes from the cache of every account with a store; other
 // people's from the named account's provider.
 func (h *calendarService) FreeBusy(ctx context.Context, req *connect.Request[chainmailv1.FreeBusyRequest]) (*connect.Response[chainmailv1.FreeBusyResponse], error) {
@@ -604,7 +604,7 @@ var errBusyIncomplete = &calendarRefusal{
 	hint: "ask for a shorter range",
 }
 
-// selfBusy is James's merged busy time from the cached events of accounts
+// selfBusy is the user's merged busy time from the cached events of accounts
 // that overlap [from, to), each block clipped to [clipFrom, clipTo): every
 // instance but cancelled, transparent and declined ones. Each series is expanded whole, from a budget of
 // maxBusyInstances shared by all, so no busy time is left out: a series

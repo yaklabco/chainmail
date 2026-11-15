@@ -276,7 +276,7 @@ func TestMyPartStatAndIsOrganizer(t *testing.T) {
 		}
 	}
 
-	// A nil self knows no address of James.
+	// A nil self knows no address of the user.
 	if err := s.Apply(ctx, "acme", "home", calendar.Changes{Full: true, Upserts: []calendar.Event{invited("asked", t0, calendar.PartStatNeedsAction)}}, nil, t0); err != nil {
 		t.Fatal(err)
 	}

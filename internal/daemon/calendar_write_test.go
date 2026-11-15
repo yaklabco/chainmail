@@ -585,7 +585,7 @@ func TestEditRechecksTheRefreshedEvent(t *testing.T) {
 		p = e.mw.Add(mwCal, own("alone@x", "james@mw.example", e.start))
 	})
 	ref := calendar.EventRef("mw", mwCal, p)
-	// The event is handed to boss, who invites James; the cache has not
+	// The event is handed to boss, who invites the user; the cache has not
 	// seen it yet.
 	e.mw.Change(mwCal, p, func(evs []calendar.Event) []calendar.Event {
 		inv := invitation("alone@x", "james@mw.example", e.start)

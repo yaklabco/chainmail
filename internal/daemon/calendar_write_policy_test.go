@@ -27,7 +27,7 @@ func organizedBy(uid, org, self string, start time.Time) calendar.Event {
 
 // Removing an event someone else organizes tells the organizer (a CalDAV
 // scheduling server sends a REPLY, Google a decline), so the cancel is
-// checked against the policy for the organizer even when he is not listed
+// checked against the policy for the organizer even when they are not listed
 // as an attendee; a held one is not applied.
 func TestAttendeeSideCancelChecksTheOrganizer(t *testing.T) {
 	t.Parallel()
@@ -80,7 +80,7 @@ func TestAttendeeSideCancelChecksTheOrganizer(t *testing.T) {
 	noSecretInAudit(t, e.Harness)
 }
 
-// oldSeries adds a weekly series James organizes that started ten weeks
+// oldSeries adds a weekly series the user organizes that started ten weeks
 // ago, with boss invited, and an override of its second occurrence (nine
 // weeks ago, so calendar.db prunes it) that mod changes.
 func oldSeries(e *calEnv, uid string, mod func(ov *calendar.Event)) string {
@@ -163,7 +163,7 @@ func TestSeriesChangeChecksPrunedOverrides(t *testing.T) {
 	}
 }
 
-// An update of an event someone else organizes, with James its only
+// An update of an event someone else organizes, with the user its only
 // attendee, is checked against the policy for the organizer too: a server
 // may tell the organizer about an attendee's change, so an organizer the
 // policy does not allow means the update is never sent.

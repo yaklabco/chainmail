@@ -274,7 +274,7 @@ func TestReadEventsDaemonErrors(t *testing.T) {
 		{
 			name:   "a bare error gets fixed text",
 			err:    errors.New("disk I/O error at /var/lib/chainmail/state.db"),
-			reason: api.ReasonInternal, inMessage: "internal error", inHint: "tell James",
+			reason: api.ReasonInternal, inMessage: "internal error", inHint: "tell the user",
 		},
 	}
 	for _, tt := range tests {
@@ -360,7 +360,7 @@ func TestReadEventsAnnotations(t *testing.T) {
 	case a.ReadOnlyHint || a.IdempotentHint || a.DestructiveHint == nil || *a.DestructiveHint || a.OpenWorldHint == nil || !*a.OpenWorldHint:
 		t.Errorf("hints %+v, want not read-only, not destructive, not idempotent, open world: a group read moves the group", a)
 	}
-	for _, want := range []string{`read_events(group: "<name>", wait_seconds: 60)`, "untrusted", "acknowledges what it returns", "auth_required", "James", "item_mail", "opt-in", "never holds item text", "rule", "item_due_soon", "item_overdue", "never holds rule text", "get_item"} {
+	for _, want := range []string{`read_events(group: "<name>", wait_seconds: 60)`, "untrusted", "acknowledges what it returns", "auth_required", "the user", "item_mail", "opt-in", "never holds item text", "rule", "item_due_soon", "item_overdue", "never holds rule text", "get_item"} {
 		if !strings.Contains(tl.Description, want) {
 			t.Errorf("description lacks %q: %q", want, tl.Description)
 		}

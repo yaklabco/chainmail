@@ -1424,7 +1424,7 @@ func TestSendSizeCheckedBeforeReadingUploads(t *testing.T) {
 const blocked = "stranger@blocked.invalid"
 
 // heldHintText is the fixed hint of a held send.
-const heldHintText = "held by policy: saved to Drafts for James to review and send"
+const heldHintText = "held by policy: saved to Drafts for the user to review and send"
 
 // checkHeldAudit checks the last audit row is a hold of action: ok, HELD,
 // with the draft ref, the Message-ID and the blocked count as its targets,

@@ -43,7 +43,7 @@ reaching a stage of its due date. They come when --kind names them or
 Calendar events come only when --kind names them: invite, an invite that
 waits for a reply; event_changed, a change to the time, place, recurrence
 or attendees of an event; event_cancelled; and invite_reply, an
-attendee's answer on an event James organizes. Their lines show refs,
+attendee's answer on an event you organize. Their lines show refs,
 times in UTC, field names and PARTSTATs, never event text; --output json
 adds the organizer and attendee addresses.
 --item ID limits the item kinds to that item and every item below it, and

@@ -129,7 +129,7 @@ func ownZoneRow(e *chainmailv1.CalendarEvent, loc *time.Location) string {
 	return " (" + span(s, en, dated) + " " + termText(e.GetTimeZone()) + ")"
 }
 
-// partstatText is how James stands with an event: organizer, his PARTSTAT
+// partstatText is how the user stands with an event: organizer, their PARTSTAT
 // in lower case, or "-".
 func partstatText(e *chainmailv1.CalendarEvent) string {
 	if e.GetIsOrganizer() {
@@ -292,7 +292,7 @@ func attendeesText(w io.Writer, e *chainmailv1.CalendarEvent) error {
 	return nil
 }
 
-// freeBusyTable prints James's busy blocks, then each person's, in loc.
+// freeBusyTable prints the user's busy blocks, then each person's, in loc.
 func freeBusyTable(w io.Writer, loc *time.Location, r *chainmailv1.FreeBusyResponse) error {
 	tw := newTable(w)
 	_, _ = fmt.Fprintln(tw, "WHO\tBUSY")

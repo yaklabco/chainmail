@@ -634,16 +634,16 @@ func TestComposeResultHeldTable(t *testing.T) {
 			name: "empty ref prints the hint",
 			held: &chainmailv1.Held{
 				Draft: &chainmailv1.Draft{MessageId: "h.1@example.com"},
-				Hint:  "held by policy: saved to Drafts for James to review and send\x1b]0;x\x07",
+				Hint:  "held by policy: saved to Drafts for the user to review and send\x1b]0;x\x07",
 			},
 			// termText drops the control bytes and keeps the printable rest.
-			want: "held by policy, not sent: held by policy: saved to Drafts for James to review and send]0;x\n",
+			want: "held by policy, not sent: held by policy: saved to Drafts for the user to review and send]0;x\n",
 		},
 		{
 			name: "empty ref prints the draft's own hint first",
 			held: &chainmailv1.Held{
 				Draft: &chainmailv1.Draft{MessageId: "h.1@example.com", Hint: "search the Drafts folder for h.1@example.com"},
-				Hint:  "held by policy: saved to Drafts for James to review and send",
+				Hint:  "held by policy: saved to Drafts for the user to review and send",
 			},
 			want: "held by policy, not sent: search the Drafts folder for h.1@example.com\n",
 		},
@@ -718,6 +718,12 @@ func TestSendHeldExitsFour(t *testing.T) {
 	table := e.run(t, Env{}, append([]string{"--output", "table"}, args...)...)
 	if table.code != 4 || !strings.HasPrefix(table.stdout, "held by policy, not sent: saved to Drafts ") || !strings.Contains(table.stderr, "HELD") {
 		t.Errorf("table: %+v, want the held text, HELD and exit 4", table)
+	}
+
+	for _, out := range []string{got.stdout, got.stderr, table.stdout, table.stderr} {
+		if strings.Contains(out, "James") {
+			t.Errorf("held output names one person, want it to work for any user: %q", out)
+		}
 	}
 
 	sent := e.run(t, Env{}, "--output", "json", "draft", "send", held.GetDraft().GetRef())
