@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/yaklabco/chainmail/internal/provider"
 	"github.com/yaklabco/chainmail/internal/setup/setuptest"
@@ -86,7 +87,7 @@ func moduleNixHost(config []byte) nixHost {
 	})
 	h.accounts.AddGroup(system.GroupInfo{Name: l.DaemonUser, GID: nixDaemonGID})
 	h.accounts.AddGroup(system.GroupInfo{Name: l.ClientGroup, GID: nixClientsGID, Members: []string{"alice"}})
-	h.units.Info = system.UnitInfo{Loaded: true, Fragment: storeFragment, ExecPath: storeBinary, Active: true}
+	h.units.Info = system.UnitInfo{Loaded: true, LoadState: "loaded", Fragment: storeFragment, ExecPath: storeBinary, Active: true}
 	return h
 }
 
@@ -154,7 +155,7 @@ func TestInspectNixOS(t *testing.T) {
 		if !cur.ModuleInstalled() {
 			t.Error("ModuleInstalled() = false with the unit loaded from the store")
 		}
-		want := system.UnitInfo{Loaded: true, Fragment: storeFragment, ExecPath: storeBinary, Active: true}
+		want := system.UnitInfo{Loaded: true, LoadState: "loaded", Fragment: storeFragment, ExecPath: storeBinary, Active: true}
 		if cur.Unit != want {
 			t.Errorf("Unit = %+v, want %+v", cur.Unit, want)
 		}
@@ -374,6 +375,64 @@ func TestBuildNixOSFresh(t *testing.T) {
 			t.Errorf("step 1 does not use the directory's base name:\n%s", p.NextSteps[0])
 		}
 	})
+}
+
+// TestNixRerunStep checks the printed command that runs bootstrap again:
+// every value from the user is one shell word, quoted only when it needs
+// it, and the provider is named unless the address alone picks it.
+func TestNixRerunStep(t *testing.T) {
+	t.Parallel()
+	hostinger := Detection{Provider: "hostinger", Auth: provider.AuthPassword}
+	cases := []struct {
+		name      string
+		address   string
+		accName   string
+		detection Detection
+		want      string
+	}{
+		{name: "plain address", address: "alice@gmail.com", want: "alice@gmail.com"},
+		{name: "plus and dots stay bare", address: "a.b+c_d-e@googlemail.com", want: "a.b+c_d-e@googlemail.com"},
+		{name: "dollar", address: "alice$USER@gmail.com", want: `'alice$USER@gmail.com'`},
+		{name: "leading dollar", address: "$HOME@gmail.com", want: `'$HOME@gmail.com'`},
+		{name: "backtick", address: "a`id`b@gmail.com", want: "'a`id`b@gmail.com'"},
+		{name: "single quote", address: "o'brien@gmail.com", want: `'o'\''brien@gmail.com'`},
+		{name: "name override", address: "alice@gmail.com", accName: "personal", want: "alice@gmail.com --name personal"},
+		{
+			name: "provider the address does not give", address: "alice@example.com", detection: hostinger,
+			want: "alice@example.com --provider hostinger",
+		},
+		{
+			name: "provider that differs from the domain list", address: "alice@gmail.com",
+			detection: Detection{Provider: "google-workspace", Auth: provider.AuthOAuth2},
+			want:      "alice@gmail.com --provider google-workspace",
+		},
+		{
+			name: "provider with a quoted address and a name", address: "o'brien@example.com", accName: "ob", detection: hostinger,
+			want: `'o'\''brien@example.com' --name ob --provider hostinger`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := nixRequest()
+			req.Address, req.Name = tc.address, tc.accName
+			if tc.detection != (Detection{}) {
+				req.Detection = tc.detection
+			}
+			if req.Detection.Auth == provider.AuthOAuth2 {
+				req.OAuthClientID = workspaceClientID
+			}
+			for _, host := range []nixHost{freshNixHost(), moduleNixHost(moduleConfig(bobGmail, nil))} {
+				p := mustBuildNixOS(t, host.inspect(t), req)
+				if got, want := p.NextSteps[len(p.NextSteps)-1], rerunStepIntro+tc.want; got != want {
+					t.Errorf("%s: rerun step = %q, want %q", p.NixState, got, want)
+				}
+				if err := Validate(LayoutFor(NixOS), p); err != nil {
+					t.Errorf("%s: Validate: %v", p.NixState, err)
+				}
+			}
+		})
+	}
 }
 
 // nixDirRequest is nixRequest with NixDir dir.
@@ -608,7 +667,7 @@ func TestBuildNixOSRefusals(t *testing.T) {
 			name: "unit not from the store",
 			host: func() nixHost {
 				h := freshNixHost()
-				h.units.Info = system.UnitInfo{Loaded: true, Fragment: "/etc/systemd/system/chainmail.service", ExecPath: "/usr/local/libexec/chainmail/chainmail", Active: true}
+				h.units.Info = system.UnitInfo{Loaded: true, LoadState: "loaded", Fragment: "/etc/systemd/system/chainmail.service", ExecPath: "/usr/local/libexec/chainmail/chainmail", Active: true}
 				return h
 			},
 			want: "chainmail is set up on this NixOS host, but not by the NixOS module",
@@ -933,6 +992,22 @@ func TestBuildNixOSRefusals(t *testing.T) {
 		}
 	})
 
+	for _, state := range []string{"bad-setting", "error"} {
+		t.Run("module unit with load state "+state, func(t *testing.T) {
+			t.Parallel()
+			h := moduleNixHost(moduleConfig(aliceGmail, nil))
+			h.units.Info.Loaded, h.units.Info.LoadState, h.units.Info.Active = false, state, false
+			_, err := BuildNixOS(l, h.inspect(t), nixRequest())
+			r := asRefusal(t, err)
+			if want := "chainmail.service comes from the NixOS module but systemd could not load it (load state " + state + ")"; r.Msg != want {
+				t.Errorf("refusal = %q, want %q", r.Msg, want)
+			}
+			if want := "check it with: systemctl status chainmail.service, fix your NixOS configuration, rebuild, then run bootstrap again"; r.Hint != want {
+				t.Errorf("hint = %q, want %q", r.Hint, want)
+			}
+		})
+	}
+
 	t.Run("backup show without a terminal is fine when the key is reused", func(t *testing.T) {
 		t.Parallel()
 		req := nixRequest()
@@ -946,9 +1021,12 @@ func TestBuildNixOSRefusals(t *testing.T) {
 			req := nixRequest()
 			req.NixDir = dir
 			_, err := BuildNixOS(l, freshNixHost().inspect(t), req)
-			var r *Refusal
-			if err == nil || errors.As(err, &r) {
-				t.Errorf("BuildNixOS with NixDir %q: %v, want a plain error", dir, err)
+			r := asRefusal(t, err)
+			if r.Hint != "choose a --nix-dir such as ./chainmail-nixos" {
+				t.Errorf("BuildNixOS with NixDir %q: hint %q", dir, r.Hint)
+			}
+			if !strings.Contains(r.Msg, "--nix-dir") || strings.ContainsFunc(r.Msg, unicode.IsControl) {
+				t.Errorf("BuildNixOS with NixDir %q: message %q, want it to name --nix-dir without control characters", dir, r.Msg)
 			}
 		})
 	}

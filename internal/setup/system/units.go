@@ -9,10 +9,11 @@ import (
 
 // UnitInfo is what systemd reports about a unit.
 type UnitInfo struct {
-	Loaded   bool   // LoadState is "loaded"
-	Fragment string // FragmentPath with every symlink resolved, "" when none
-	ExecPath string // path= of the first ExecStart entry, "" when none
-	Active   bool   // ActiveState is "active"
+	Loaded    bool   // LoadState is "loaded"
+	LoadState string // LoadState as systemd prints it, such as "loaded" or "bad-setting"
+	Fragment  string // FragmentPath with every symlink resolved, "" when none
+	ExecPath  string // path= of the first ExecStart entry, "" when none
+	Active    bool   // ActiveState is "active"
 }
 
 // Units reads unit facts from systemd. It never changes a unit.
@@ -51,10 +52,11 @@ func (u systemdUnits) Show(ctx context.Context, unit string) (UnitInfo, error) {
 		}
 	}
 	return UnitInfo{
-		Loaded:   props["LoadState"] == "loaded",
-		Fragment: resolveFragment(props["FragmentPath"]),
-		ExecPath: execStartPath(props["ExecStart"]),
-		Active:   props["ActiveState"] == "active",
+		Loaded:    props["LoadState"] == "loaded",
+		LoadState: props["LoadState"],
+		Fragment:  resolveFragment(props["FragmentPath"]),
+		ExecPath:  execStartPath(props["ExecStart"]),
+		Active:    props["ActiveState"] == "active",
 	}, nil
 }
 

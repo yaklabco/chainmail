@@ -153,7 +153,8 @@ func BuildNixOS(l Layout, cur NixCurrent, req Request) (Plan, error) {
 		return Plan{}, err
 	}
 	if !nixDirOK(req.NixDir) {
-		return Plan{}, fmt.Errorf("plan: --nix-dir %q is not a clean absolute path below /", req.NixDir)
+		return Plan{}, refuse("choose a --nix-dir such as ./chainmail-nixos",
+			"--nix-dir %q is not a clean absolute path below /", req.NixDir)
 	}
 	if err := checkNixDirName(req.NixDir); err != nil {
 		return Plan{}, err
@@ -207,6 +208,12 @@ func BuildNixOS(l Layout, cur NixCurrent, req Request) (Plan, error) {
 // without the module, and returns the parsed config (nil when there is
 // none).
 func nixState(l Layout, cur NixCurrent, name string) (NixState, *config.Config, error) {
+	// A module unit systemd rejected keeps its fragment in the store. It
+	// is the module's, broken, not chainmail set up some other way.
+	if !cur.Unit.Loaded && inNixStore(cur.Unit.Fragment) {
+		return "", nil, refuse("check it with: systemctl status "+l.ServiceLabel+", fix your NixOS configuration, rebuild, then run bootstrap again",
+			"%s comes from the NixOS module but systemd could not load it (load state %s)", l.ServiceLabel, cur.Unit.LoadState)
+	}
 	if !cur.ModuleInstalled() {
 		if cur.VaultExists {
 			return "", nil, refuse("restore the chainmail module with its credential, or move "+l.Vault+" aside, then run bootstrap again",
@@ -372,13 +379,32 @@ func addNixSteps(p Plan) []string {
 }
 
 // rerunStep runs bootstrap again for the plan's account, naming it when
-// the address alone would give another name.
+// the address alone would give another name, and naming its provider
+// unless the domain list picks it from the address. Each value is one
+// shell word, so pasting the command runs nothing the address holds.
 func rerunStep(p Plan) string {
-	cmd := "chainmail bootstrap " + p.Account.Address
+	cmd := "chainmail bootstrap " + shellWord(p.Account.Address)
 	if derived, err := AccountName(p.Account.Address); err != nil || derived != p.Account.Name {
-		cmd += " --name " + p.Account.Name
+		cmd += " --name " + shellWord(p.Account.Name)
+	}
+	if _, domain, err := ParseAddress(p.Account.Address); err != nil || knownDomains[domain] != p.Account.Provider {
+		cmd += " --provider " + shellWord(p.Account.Provider)
 	}
 	return "Run bootstrap again to store the password and test the login:\n  " + cmd
+}
+
+// shellWordRE matches a value a POSIX shell reads as one plain word.
+var shellWordRE = regexp.MustCompile(`^[A-Za-z0-9@._+-]+$`)
+
+// shellWord returns s as one POSIX shell word: as it is when it holds
+// only plain characters, and in single quotes otherwise. A single quote
+// inside s closes the quoted run, is written escaped with a backslash,
+// and opens a new run.
+func shellWord(s string) string {
+	if shellWordRE.MatchString(s) {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // checkNixDirName refuses a Nix directory whose name a Nix path literal

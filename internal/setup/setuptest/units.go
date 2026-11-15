@@ -9,7 +9,8 @@ import (
 )
 
 // Units is a fake system.Units. Show returns Info, or Err when it is set,
-// whatever unit it is asked about.
+// whatever unit it is asked about. Info is returned as given, so a test
+// sets Loaded and LoadState together, as systemd reports them.
 type Units struct {
 	Info system.UnitInfo
 	Err  error
