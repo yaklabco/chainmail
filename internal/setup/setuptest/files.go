@@ -57,10 +57,11 @@ func NewFiles() *Files {
 	}
 }
 
-// resolve follows symlinks in the ancestors of path. The caller holds mu,
-// or owns f.
+// resolve follows symlinks in the ancestors of path. Like the kernel, it
+// takes ".." from the directory reached so far, so it never cleans path
+// as text first. The caller holds mu, or owns f.
 func (f *Files) resolve(path string) string {
-	parts := splitPath(filepath.Clean(path))
+	parts := splitPath(path)
 	cur := "/"
 	for hops := 0; len(parts) > 0 && hops < maxSymlinkHops; {
 		name := parts[0]

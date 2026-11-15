@@ -2,7 +2,9 @@ package setup
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"slices"
 	"strconv"
@@ -328,15 +330,6 @@ func TestBuildRefusals(t *testing.T) {
 		// want is a substring of the refusal message.
 		want string
 	}{
-		{
-			name: "nixos",
-			host: func() host {
-				h := freshHost(Linux)
-				h.files.File("/etc/NIXOS", 0, 0, 0o644, nil)
-				return h
-			},
-			want: "NixOS",
-		},
 		{
 			name: "same name with another address",
 			host: func() host { return installedHost(Linux, aliceGmail, nil) },
@@ -765,6 +758,39 @@ func TestBuildHealth(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A NixOS host is planned by BuildNixOS. Build refuses to plan one with a
+// plain error, whichever layout it is handed, so a caller that forgets to
+// dispatch never plans an Ubuntu install on NixOS.
+func TestBuildRefusesNixOSLayout(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nixos layout", func(t *testing.T) {
+		t.Parallel()
+		l := LayoutFor(NixOS)
+		h := freshNixHost()
+		cur, err := Inspect(context.Background(), l, h.files, h.accounts, "alice")
+		if err != nil {
+			t.Fatalf("Inspect: %v", err)
+		}
+		_, err = Build(l, cur, gmailRequest())
+		var r *Refusal
+		if err == nil || errors.As(err, &r) || !strings.Contains(err.Error(), "BuildNixOS") {
+			t.Errorf("Build(LayoutFor(NixOS)) = %v, want a plain error naming BuildNixOS", err)
+		}
+	})
+
+	t.Run("nixos host with the linux layout", func(t *testing.T) {
+		t.Parallel()
+		h := freshHost(Linux)
+		h.files.File("/etc/NIXOS", 0, 0, 0o644, nil)
+		_, err := Build(LayoutFor(Linux), h.inspect(t, Linux), gmailRequest())
+		var r *Refusal
+		if err == nil || errors.As(err, &r) || !strings.Contains(err.Error(), "BuildNixOS") {
+			t.Errorf("Build on a NixOS host = %v, want a plain error naming BuildNixOS", err)
+		}
+	})
 }
 
 func TestSame(t *testing.T) {
