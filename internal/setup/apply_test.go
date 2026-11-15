@@ -1167,6 +1167,7 @@ func TestApplyBoundsDaemonCalls(t *testing.T) {
 			t.Parallel()
 			r := tc.rig()
 			r.applier.callTimeout = short
+			r.applier.secretTimeout = short
 			r.applier.testTimeout = short
 			r.applier.readyTimeout = time.Second
 			hadDeadline := blockDaemon(r, tc.block...)
@@ -1224,7 +1225,58 @@ func TestApplyDaemonTimeouts(t *testing.T) {
 	if got := a.callWait(); got != 15*time.Second {
 		t.Errorf("daemon call timeout = %v, want 15s", got)
 	}
+	if got := a.secretWait(); got != 150*time.Second {
+		t.Errorf("secret set timeout = %v, want 150s", got)
+	}
 	if got := a.testWait(); got != 60*time.Second {
 		t.Errorf("account test timeout = %v, want 60s", got)
+	}
+}
+
+// slowSecretSet makes the rig's secret set take probe, as the real
+// command does when it stores a password and then probes the account's
+// IMAP connection limit. It does not wait in real time: a call whose
+// deadline leaves less than probe is killed at once, as the deadline
+// would kill it, and a call with enough time runs the fake daemon. It
+// reports the time each secret set had left.
+func slowSecretSet(r *rig, probe time.Duration) *[]time.Duration {
+	var left []time.Duration
+	run := r.daemon.Run
+	r.applier.AsDaemon = func(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error {
+		if len(args) >= 2 && args[0] == "secret" && args[1] == "set" {
+			deadline, ok := ctx.Deadline()
+			remaining := time.Until(deadline)
+			left = append(left, remaining)
+			if ok && remaining < probe {
+				return fmt.Errorf("secret set killed after %v of %v: %w", remaining.Round(time.Second), probe, context.DeadlineExceeded)
+			}
+		}
+		return run(ctx, stdin, stdout, args...)
+	}
+	return &left
+}
+
+func TestApplySecretSetCoversTheProbe(t *testing.T) {
+	t.Parallel()
+	// Longer than the 15 s other daemon calls get, shorter than the 150 s
+	// secret set gets.
+	const probe = 20 * time.Second
+	r := freshRig(Linux)
+	left := slowSecretSet(r, probe)
+	res, err := r.apply(r.input(t, request(), nil, testSecret))
+	if err != nil {
+		t.Fatalf("Apply with a secret set taking %v: %v", probe, err)
+	}
+	if len(*left) != 1 {
+		t.Fatalf("secret set ran %d times, want once", len(*left))
+	}
+	if got := (*left)[0]; got <= probe || got > 150*time.Second {
+		t.Errorf("secret set had %v left, want more than %v and at most 150s", got, probe)
+	}
+	if res.Test != testOK {
+		t.Errorf("Test = %q, want %q", res.Test, testOK)
+	}
+	if got, ok := r.daemon.Secret("accounts/alice"); !ok || !bytes.Equal(got, testSecret) {
+		t.Errorf("stored secret present %v, length %d; want the given secret, length %d", ok, len(got), len(testSecret))
 	}
 }
