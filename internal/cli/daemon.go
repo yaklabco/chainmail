@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/user"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/yaklabco/chainmail/internal/config"
 	"github.com/yaklabco/chainmail/internal/daemon"
@@ -23,6 +25,10 @@ const (
 	productionStateDir = "/var/lib/chainmail"
 	daemonHint         = "run: chainmail daemon --help"
 )
+
+// devWarning is the one sentence every dev mode warning uses: the daemon's
+// stderr and log at start, and admin status.
+const devWarning = "dev mode: this daemon runs as you, so any program running as you, including agents, can read the vault key and every stored password. Use it only to develop chainmail, never with real accounts."
 
 type daemonFlags struct {
 	configPath string
@@ -58,11 +64,26 @@ func newDaemonCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			return runDaemon(ctx, env, plan)
 		},
 	}
-	cmd.Flags().StringVar(&f.configPath, "config", config.DefaultPath, "config file (default $CHAINMAIL_CONFIG, then /etc/chainmail/config.toml)")
-	cmd.Flags().StringVar(&f.stateDir, "state-dir", productionStateDir, "directory for vault.age, state.db and, unless [cache] dir is set, cache.db (default $CHAINMAIL_STATE_DIR, then /var/lib/chainmail)")
-	cmd.Flags().StringVar(&f.vaultKey, "vault-key-file", "", "age identity file (default $CHAINMAIL_VAULT_KEY_FILE, then $CREDENTIALS_DIRECTORY/vault-key)")
-	cmd.Flags().BoolVar(&f.dev, "dev", false, "development mode: run as yourself with a non-production state directory (default $CHAINMAIL_DEV)")
+	f.bind(cmd.Flags())
 	return cmd
+}
+
+// bind adds the daemon command's flags to flags, writing into f.
+func (f *daemonFlags) bind(flags *pflag.FlagSet) {
+	flags.StringVar(&f.configPath, "config", config.DefaultPath, "config file (default $CHAINMAIL_CONFIG, then /etc/chainmail/config.toml)")
+	flags.StringVar(&f.stateDir, "state-dir", productionStateDir, "directory for vault.age, state.db and, unless [cache] dir is set, cache.db (default $CHAINMAIL_STATE_DIR, then /var/lib/chainmail)")
+	flags.StringVar(&f.vaultKey, "vault-key-file", "", "age identity file (default $CHAINMAIL_VAULT_KEY_FILE, then $CREDENTIALS_DIRECTORY/vault-key)")
+	flags.BoolVar(&f.dev, "dev", false, "development only: run as yourself, so anything running as you can read the vault key; never with real accounts (default $CHAINMAIL_DEV)")
+}
+
+// announceMode warns, on stderr and in the log, that a dev daemon is
+// running. A production daemon says nothing here.
+func announceMode(stderr io.Writer, logger *slog.Logger, dev bool) {
+	if !dev {
+		return
+	}
+	_, _ = fmt.Fprintln(stderr, devWarning)
+	logger.Warn(devWarning, "dev", true)
 }
 
 func (f *daemonFlags) resolve(env Env, g *globals) (daemonPlan, error) {
@@ -112,6 +133,7 @@ func (f *daemonFlags) resolve(env Env, g *globals) (daemonPlan, error) {
 
 func runDaemon(ctx context.Context, env Env, p daemonPlan) error {
 	logger := slog.New(slog.NewJSONHandler(env.Stderr, nil))
+	announceMode(env.Stderr, logger, p.dev)
 	if err := os.MkdirAll(p.stateDir, 0o700); err != nil {
 		return fmt.Errorf("creating state dir: %w", err)
 	}

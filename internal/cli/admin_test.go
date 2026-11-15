@@ -8,6 +8,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
+	"github.com/yaklabco/chainmail/internal/version"
 )
 
 // statusAt is a time on 2026-11-02 in UTC.
@@ -19,7 +20,7 @@ func statusAt(hour, minute int) *timestamppb.Timestamp {
 func TestStatusTableShowsSync(t *testing.T) {
 	t.Parallel()
 	r := &chainmailv1.GetStatusResponse{
-		Version: "1.2.3", StartedAt: statusAt(8, 0), SecretNames: []string{"accounts/host", "tokens/gm"},
+		Version: version.Version, StartedAt: statusAt(8, 0), SecretNames: []string{"accounts/host", "tokens/gm"},
 		Sync: []*chainmailv1.FolderSyncStatus{
 			{Account: "gm", Folder: "[Gmail]/All Mail", Mode: "idle", State: "watching", LastSyncAt: statusAt(8, 58)},
 			{Account: "host", Folder: "INBOX", Mode: "idle", State: "watching", Condstore: true, LastSyncAt: statusAt(8, 59)},
@@ -33,19 +34,20 @@ func TestStatusTableShowsSync(t *testing.T) {
 	golden(t, "admin_status_table", b.String())
 }
 
-// Without synced folders admin status prints what it always did, with no
+// Without synced folders admin status prints its details and warnings, with no
 // empty sync section.
 func TestStatusTableWithoutSync(t *testing.T) {
 	t.Parallel()
-	r := &chainmailv1.GetStatusResponse{Version: "1.2.3", StartedAt: statusAt(8, 0), DevMode: true}
+	r := &chainmailv1.GetStatusResponse{Version: version.Version, StartedAt: statusAt(8, 0), DevMode: true}
 	var b strings.Builder
 	if err := statusTable(&b, time.UTC, r); err != nil {
 		t.Fatal(err)
 	}
-	want := "version   1.2.3\n" +
+	want := "version   " + version.Version + "\n" +
 		"started   Mon, 02 Nov 2026 08:00 UTC\n" +
 		"dev mode  true\n" +
-		"secrets   \n"
+		"secrets   \n" +
+		"warning   " + devWarning + "\n"
 	if b.String() != want {
 		t.Errorf("statusTable =\n%q\nwant\n%q", b.String(), want)
 	}
@@ -73,7 +75,7 @@ func TestStatusSyncTableCleansText(t *testing.T) {
 func TestStatusTableShowsCache(t *testing.T) {
 	t.Parallel()
 	r := &chainmailv1.GetStatusResponse{
-		Version: "1.2.3", StartedAt: statusAt(8, 0), SecretNames: []string{"accounts/host"},
+		Version: version.Version, StartedAt: statusAt(8, 0), SecretNames: []string{"accounts/host"},
 		Sync: []*chainmailv1.FolderSyncStatus{
 			{Account: "host", Folder: "INBOX", Mode: "idle", State: "watching", Condstore: true, LastSyncAt: statusAt(8, 59)},
 		},
@@ -95,14 +97,14 @@ func TestStatusTableShowsCache(t *testing.T) {
 func TestStatusTableShowsCacheWithoutSync(t *testing.T) {
 	t.Parallel()
 	r := &chainmailv1.GetStatusResponse{
-		Version: "1.2.3", StartedAt: statusAt(8, 0),
+		Version: version.Version, StartedAt: statusAt(8, 0),
 		Cache: []*chainmailv1.AccountCacheStatus{{Account: "host", State: "error", BudgetBytes: 16 << 20, LastError: "INTERNAL"}},
 	}
 	var b strings.Builder
 	if err := statusTable(&b, time.UTC, r); err != nil {
 		t.Fatal(err)
 	}
-	want := "version   1.2.3\n" +
+	want := "version   " + version.Version + "\n" +
 		"started   Mon, 02 Nov 2026 08:00 UTC\n" +
 		"dev mode  false\n" +
 		"secrets   \n" +
