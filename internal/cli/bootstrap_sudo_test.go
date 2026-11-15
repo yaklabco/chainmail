@@ -34,9 +34,11 @@ func wantSudoNotPlanted(t *testing.T, marker string) {
 	}
 }
 
-func TestSudoDirs(t *testing.T) {
+// TestSudoDirsIncludeWrappers shows NixOS's setuid wrapper directory is
+// searched for sudo, after the directories every other host uses.
+func TestSudoDirsIncludeWrappers(t *testing.T) {
 	t.Parallel()
-	if want := []string{"/usr/bin", "/bin", "/usr/local/bin"}; !slices.Equal(sudoDirs, want) {
+	if want := []string{"/usr/bin", "/bin", "/usr/local/bin", "/run/wrappers/bin"}; !slices.Equal(sudoDirs, want) {
 		t.Fatalf("sudoDirs = %v, want %v", sudoDirs, want)
 	}
 }

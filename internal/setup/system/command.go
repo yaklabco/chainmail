@@ -16,8 +16,10 @@ import (
 // trustedDirs are the only directories bootstrap runs host commands from,
 // searched in this order. PATH is never consulted: under sudo it can
 // still name a directory the invoking user, or an agent of theirs, can
-// write.
-var trustedDirs = []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin"}
+// write. /run/current-system/sw/bin is the NixOS system profile, a link
+// into the Nix store; elsewhere it does not exist, and only root can
+// create it under /run.
+var trustedDirs = []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin", "/run/current-system/sw/bin"}
 
 // commandEnv is the whole environment of a host command. Nothing is
 // inherited from the caller.
@@ -47,8 +49,10 @@ type finder struct {
 // is trusted when every directory on the way to it, from "/" through the
 // search directory, is owned by root and writable only by root; every
 // symlink on the way is owned by root and sits in such a directory; and
-// it ends at a regular file root owns and only root can write. A missing
-// command is an error wrapping exec.ErrNotFound.
+// it ends at a regular file root owns and only root can write. The Nix
+// store directory alone may also be writable by its group, while it has
+// the sticky bit, as trusted explains. A missing command is an error
+// wrapping exec.ErrNotFound.
 func LookupTrusted(name string, dirs []string) (string, error) {
 	return finder{root: "/", dirs: dirs, owner: 0}.find(name)
 }
@@ -98,7 +102,7 @@ func (f finder) resolve(root, hostPath string) (string, error) {
 	if !fi.IsDir() {
 		return "", fmt.Errorf("%s is not a directory", root)
 	}
-	if err := f.trusted(root, fi); err != nil {
+	if err := f.trusted(root, root, fi); err != nil {
 		return "", err
 	}
 
@@ -158,7 +162,7 @@ func (f finder) resolve(root, hostPath string) (string, error) {
 			continue
 		}
 
-		if err := f.trusted(next, fi); err != nil {
+		if err := f.trusted(root, next, fi); err != nil {
 			return "", err
 		}
 		if len(pending) > 0 && !fi.IsDir() {
@@ -191,16 +195,40 @@ func splitPath(path string) []string {
 	return strings.FieldsFunc(path, func(r rune) bool { return r == '/' })
 }
 
-// trusted refuses path unless the finder's owner owns it and neither its
-// group nor others can write it.
-func (f finder) trusted(path string, fi fs.FileInfo) error {
+// nixStore is the Nix store directory, as a host path. The system package
+// cannot import setup, which names it NixStore.
+const nixStore = "/nix/store"
+
+// trusted refuses path, a directory or file under root, unless the
+// finder's owner owns it and neither its group nor others can write it.
+// The host directory /nix/store is the one exception.
+func (f finder) trusted(root, path string, fi fs.FileInfo) error {
 	if err := f.ownedByOwner(path, fi); err != nil {
 		return err
+	}
+	// The Nix store is group-writable so the nixbld build users can add
+	// to it. Its sticky bit means only an entry's owner can rename or
+	// remove that entry, and the entries a command resolves through are
+	// owned by the owner and read-only, so they still get the normal
+	// check. Only the exact host path qualifies: no other sticky,
+	// group-writable directory does.
+	if hostPath(root, path) == nixStore && fi.Mode()&fs.ModeSticky != 0 && fi.Mode().Perm()&0o002 == 0 {
+		return nil
 	}
 	if fi.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("%s is writable by its group or others (mode %v)", path, fi.Mode().Perm())
 	}
 	return nil
+}
+
+// hostPath is path, which is root or below it, as a path on the host the
+// tree under root stands for. It is "" when path is outside root.
+func hostPath(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return ""
+	}
+	return filepath.Join("/", rel)
 }
 
 // ownedByOwner refuses path unless the finder's owner owns it.

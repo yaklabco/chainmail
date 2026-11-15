@@ -12,6 +12,11 @@ import (
 // the path as a loop, matching Linux's limit.
 const maxSymlinkHops = 40
 
+// NixStore is the Nix store directory. CheckTrust accepts it, and only it,
+// while it is owned by root, has the sticky bit and is not writable by
+// others, although its group (nixbld) may write it.
+const NixStore = "/nix/store"
+
 // FileInfo is what the trust check needs to know about a path, read
 // without following a final symlink.
 type FileInfo struct {
@@ -31,7 +36,8 @@ type FSView interface {
 // returns a *Refusal naming the first unsafe path, or nil.
 //
 // Each existing component must be owned by a trusted uid and must not be
-// writable by group or others. The final component must not be a symlink.
+// writable by group or others. NixStore is the one exception, see
+// checkOwnerMode. The final component must not be a symlink.
 // An ancestor that is a symlink is accepted only when root owns the link
 // and its directory passed the check, and then the check continues at the
 // link's target. A missing component passes, with everything below it,
@@ -114,8 +120,16 @@ func CheckTrust(fsv FSView, path string, trusted []uint32) error {
 }
 
 // checkOwnerMode refuses a path owned by an untrusted uid or writable by
-// group or others.
+// group or others, except for NixStore.
 func checkOwnerMode(path string, info FileInfo, trusted []uint32) error {
+	// The Nix store is group-writable so the nixbld build users can add
+	// to it. Its sticky bit means only an entry's owner can rename or
+	// remove that entry, and the entries bootstrap resolves are root-owned
+	// and read-only, so they still get the normal check. Only the exact
+	// path qualifies: no other sticky, group-writable directory does.
+	if path == NixStore && info.UID == 0 && info.Mode&fs.ModeSticky != 0 && info.Mode.Perm()&0o002 == 0 {
+		return nil
+	}
 	if !slices.Contains(trusted, info.UID) {
 		return unsafePath(path, fmt.Sprintf("owned by uid %d", info.UID))
 	}

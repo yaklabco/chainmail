@@ -83,7 +83,7 @@ func (tr *tree) finder(dirs ...string) finder {
 
 func TestTrustedDirs(t *testing.T) {
 	t.Parallel()
-	want := []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin"}
+	want := []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin", "/run/current-system/sw/bin"}
 	if !slices.Equal(trustedDirs, want) {
 		t.Fatalf("trustedDirs = %v, want %v", trustedDirs, want)
 	}
@@ -92,6 +92,75 @@ func TestTrustedDirs(t *testing.T) {
 	}
 	if hostFinder.root != "/" || hostFinder.owner != 0 || !slices.Equal(hostFinder.dirs, want) {
 		t.Fatalf("hostFinder = %+v, want root /, owner 0, dirs %v", hostFinder, want)
+	}
+}
+
+// TestTrustedDirsIncludeNixOS shows the NixOS system profile is searched
+// last, after the directories every other host uses, in their old order.
+func TestTrustedDirsIncludeNixOS(t *testing.T) {
+	t.Parallel()
+	if len(trustedDirs) != 5 {
+		t.Fatalf("trustedDirs = %v, want 5 entries", trustedDirs)
+	}
+	if got, want := trustedDirs[:4], []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin"}; !slices.Equal(got, want) {
+		t.Fatalf("trustedDirs[:4] = %v, want %v", got, want)
+	}
+	if got := trustedDirs[len(trustedDirs)-1]; got != "/run/current-system/sw/bin" {
+		t.Fatalf("last trusted dir = %q, want /run/current-system/sw/bin", got)
+	}
+}
+
+// TestFinderNixStore shows a command under the NixOS system profile is
+// found through the group-writable /nix/store only while that directory
+// has the sticky bit, is not writable by others and the finder's owner
+// owns it, and that no other directory gets the same exception.
+func TestFinderNixStore(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		store  string      // host path of the store directory
+		mode   os.FileMode // its mode
+		owner  uint32      // when not 0, the uid the store is reported as owned by
+		errHas string      // "" when systemctl is found
+	}{
+		{name: "sticky store", store: "/nix/store", mode: os.ModeSticky | 0o775},
+		{name: "store without the sticky bit", store: "/nix/store", mode: 0o775, errHas: "writable by its group or others"},
+		{name: "store writable by others", store: "/nix/store", mode: os.ModeSticky | 0o777, errHas: "writable by its group or others"},
+		{name: "store owned by another uid", store: "/nix/store", mode: os.ModeSticky | 0o775, owner: 12345, errHas: "owned by uid 12345"},
+		{name: "sticky directory elsewhere", store: "/opt/store", mode: os.ModeSticky | 0o775, errHas: "writable by its group or others"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tr := newTree(t)
+			// run/current-system links into the store, as on NixOS.
+			systemctl := tt.store + "/sys/sw/bin/systemctl"
+			tr.file(systemctl, "", 0o555)
+			tr.dir(tt.store, tt.mode)
+			tr.dir("/run", 0o755)
+			tr.symlink("/run/current-system", ".."+tt.store+"/sys")
+			f := tr.finder("/run/current-system/sw/bin")
+			if tt.owner != 0 {
+				f.lstat = lstatOwnedBy(map[string]uint32{tr.path(tt.store): tt.owner})
+			}
+
+			got, err := f.find("systemctl")
+			if tt.errHas != "" {
+				if err == nil {
+					t.Fatalf("find(systemctl) = %q, want an error", got)
+				}
+				if !strings.Contains(err.Error(), tt.errHas) {
+					t.Fatalf("find(systemctl) error = %v, want it to mention %q", err, tt.errHas)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("find(systemctl): %v", err)
+			}
+			if want := tr.path(systemctl); got != want {
+				t.Fatalf("find(systemctl) = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
