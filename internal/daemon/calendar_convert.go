@@ -71,7 +71,7 @@ type eventView struct {
 	// ev is the event: a single event, a series master, an override, or an
 	// instance with the instance's times and recurrence ID.
 	ev calendar.Event
-	// myPartStat and isOrganizer are James's role, as calcache computed it.
+	// myPartStat and isOrganizer are the user's role, as calcache computed it.
 	myPartStat  calendar.PartStat
 	isOrganizer bool
 	// rrule is the series rule, set on a series and on its instances.
@@ -104,7 +104,7 @@ func viewOfResolved(r resolvedEvent) eventView {
 // eventProto converts a view to the API form. Text written by whoever made
 // the event (summary, location, description, names and addresses) is
 // wrapped as untrusted. Fields the API documents as fixed values carry only
-// those values, and anything else as OTHER. self reports James's own
+// those values, and anything else as OTHER. self reports the user's own
 // addresses.
 func eventProto(v eventView, self func(string) bool) *chainmailv1.CalendarEvent {
 	ev := v.ev
@@ -132,7 +132,7 @@ func eventProto(v eventView, self func(string) bool) *chainmailv1.CalendarEvent 
 }
 
 // hasOtherAttendees reports whether ev has an attendee that is not one of
-// James's own addresses.
+// the user's own addresses.
 func hasOtherAttendees(ev calendar.Event, self func(string) bool) bool {
 	return slices.ContainsFunc(ev.Attendees, func(a calendar.Attendee) bool { return !self(a.Email) })
 }

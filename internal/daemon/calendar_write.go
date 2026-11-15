@@ -36,7 +36,7 @@ const (
 	maxDescriptionBytes = 64 << 10
 	maxRuleBytes        = 1024
 	// createHeldHint is CalendarHeld.hint for a held create.
-	createHeldHint = "held by policy: the event was created as a draft and no invitations were sent; James can send them from the calendar app"
+	createHeldHint = "held by policy: the event was created as a draft and no invitations were sent; the user can send them from the calendar app"
 )
 
 var (
@@ -54,7 +54,7 @@ var (
 // CreateEvent implements chainmailv1connect.CalendarServiceHandler. It
 // creates the event in the account's default calendar or the one named,
 // with UID derived from the idempotency key, so a retry finds the event a
-// lost create made (Amendment 14). Attendees other than James are checked
+// lost create made (Amendment 14). Attendees other than the user are checked
 // against the send policy: a held create makes a draft event that notifies
 // no one.
 func (h *calendarService) CreateEvent(ctx context.Context, req *connect.Request[chainmailv1.CreateEventRequest]) (*connect.Response[chainmailv1.CreateEventResponse], error) {
@@ -175,8 +175,8 @@ func (s *Server) writableCalendar(ctx context.Context, account, id string) (calc
 	return cal, nil
 }
 
-// newEvent checks a create request and builds its event: James as the
-// organizer, and as an accepted attendee when he invites others, with the
+// newEvent checks a create request and builds its event: the user as the
+// organizer, and as an accepted attendee when they invite others, with the
 // UID derived from the account and key.
 func (s *Server) newEvent(m *chainmailv1.CreateEventRequest, acct config.ResolvedAccount) (calendar.Event, error) {
 	ev := calendar.Event{
@@ -303,7 +303,7 @@ func (s *Server) existingEvent(ctx context.Context, ca *calAccount, calID, uid s
 }
 
 // notified is who a write to an event with attendees notifies: every
-// attendee but James.
+// attendee but the user.
 func (s *Server) notified(attendees []calendar.Attendee) []string {
 	var out []string
 	for _, a := range attendees {
@@ -417,8 +417,8 @@ func parseAttendees(list []string) ([]calendar.Person, error) {
 }
 
 // mergeAttendees is the attendee list people asks for: an attendee who
-// was already on old keeps his entry (PARTSTAT, role), a new one needs to
-// answer. James's own entries on old are kept even when people leaves them
+// was already on old keeps their entry (PARTSTAT, role), a new one needs to
+// answer. The user's own entries on old are kept even when people leaves them
 // out, so an organizer's own acceptance survives.
 func (s *Server) mergeAttendees(old []calendar.Attendee, people []calendar.Person) []calendar.Attendee {
 	var out []calendar.Attendee
@@ -459,7 +459,7 @@ const (
 	// eventMaskHint lists UpdateEvent's mask paths.
 	eventMaskHint = "paths are title, start, end, time_zone, all_day, location, description, attendees and recurrence_rule"
 	// editHeldHint is CalendarHeld.hint for a held update or cancel.
-	editHeldHint = "held by policy: the change was not applied and no one was notified; James can make it in the calendar app"
+	editHeldHint = "held by policy: the change was not applied and no one was notified; the user can make it in the calendar app"
 )
 
 // eventPaths are UpdateEvent's mask paths, in request field order.
@@ -491,7 +491,7 @@ var errIncompleteAudience = &calendarRefusal{
 // UpdateEvent implements chainmailv1connect.CalendarServiceHandler. Only
 // the organizer may change an event with other attendees. The masked
 // fields are applied to the cached event, and the change is checked
-// against the send policy for every attendee but James, as both providers
+// against the send policy for every attendee but the user, as both providers
 // notify them all; a held change is not applied.
 func (h *calendarService) UpdateEvent(ctx context.Context, req *connect.Request[chainmailv1.UpdateEventRequest]) (*connect.Response[chainmailv1.UpdateEventResponse], error) {
 	s := h.s
@@ -603,7 +603,7 @@ func (s *Server) editError(ctx context.Context, ca *calAccount, err error) error
 }
 
 // editTarget resolves the event an update or cancel names and checks that
-// it may be changed: its account has a store, James organizes it or it has
+// it may be changed: its account has a store, the user organizes it or it has
 // no other attendees, its calendar is writable, and etag is its current
 // etag. When the cache holds another etag, a sync runs and every check is
 // repeated on the version read then, as the caller can have read a newer
@@ -632,8 +632,8 @@ func (s *Server) editTarget(ctx context.Context, ref, etag string, entry *audit.
 	}
 }
 
-// editable checks that James may change res: its account has a store, he
-// organizes it or it has no attendee but him, and its calendar is
+// editable checks that the user may change res: its account has a store, they
+// organize it or it has no attendee but them, and its calendar is
 // writable.
 func (s *Server) editable(ctx context.Context, res resolvedEvent) (*calAccount, error) {
 	ca, ok := s.calendars[res.row.Account]
@@ -711,10 +711,10 @@ func (s *Server) freshSeries(ctx context.Context, ca *calAccount, res resolvedEv
 }
 
 // removalNotice is who a cancel or an update of res tells besides its attendees: the
-// organizer, when someone other than James organizes it. Removing such an
-// event from James's calendar is an attendee's removal, which tells the
+// organizer, when someone other than the user organizes it. Removing such an
+// event from the user's calendar is an attendee's removal, which tells the
 // organizer (a CalDAV scheduling server sends a REPLY, RFC 6638 section
-// 8.1; Google a decline) whether or not he is listed as an attendee.
+// 8.1; Google a decline) whether or not they are listed as an attendee.
 func (s *Server) removalNotice(res resolvedEvent) []calendar.Attendee {
 	if _, org := res.role(); org {
 		return nil
@@ -752,8 +752,8 @@ func (s *Server) writtenView(ctx context.Context, res resolvedEvent, written cal
 	return v
 }
 
-// mayChange reports whether James may change an event: he organizes it,
-// or it has no attendee but him. Both are the effective values, so a
+// mayChange reports whether the user may change an event: they organize it,
+// or it has no attendee but them. Both are the effective values, so a
 // sparse override is judged by its series.
 func (s *Server) mayChange(res resolvedEvent) bool {
 	_, org := res.role()

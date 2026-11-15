@@ -159,7 +159,7 @@ func addr(name, email string) *chainmailv1.Address {
 
 func ts(t time.Time) *timestamppb.Timestamp { return timestamppb.New(t) }
 
-// standupFixture is a weekly instance James accepted, organized in Paris,
+// standupFixture is a weekly instance the user accepted, organized in Paris,
 // with a summary that tries to clear the terminal.
 func standupFixture() *chainmailv1.CalendarEvent {
 	return &chainmailv1.CalendarEvent{
@@ -178,7 +178,7 @@ func standupFixture() *chainmailv1.CalendarEvent {
 	}
 }
 
-// offsiteFixture is an all-day event over three days that James organizes.
+// offsiteFixture is an all-day event over three days that the user organizes.
 func offsiteFixture() *chainmailv1.CalendarEvent {
 	return &chainmailv1.CalendarEvent{
 		Ref: calRef2, Account: "home", CalendarId: "/dav/calendars/me/personal/", Uid: "offsite@chainmail",

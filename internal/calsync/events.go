@@ -41,21 +41,21 @@ type eventInput struct {
 
 // calendarEvents turns one calendar's diff into watch events:
 //
-//   - invite: a new row (or a row James was just added to) where James's
-//     PARTSTAT is NEEDS-ACTION, he does not organize it, it is not
+//   - invite: a new row (or a row the user was just added to) where the user's
+//     PARTSTAT is NEEDS-ACTION, they do not organize it, it is not
 //     cancelled, and it ends after now. A new series gives one invite, not
 //     one per override, when any instance of it as its overrides leave it
 //     (moved or cancelled) asks for an answer and ends after now.
 //   - event_changed: start, end, location, recurrence or the attendee set
-//     changed on a row James attends or organizes, including a new override
+//     changed on a row the user attends or organizes, including a new override
 //     that moves one instance of a stored series, and an override taken out
 //     of a series that stays, which gives its instance back as the master
 //     has it (status when a cancelled instance comes back).
-//   - event_cancelled: a row James attends, not organizes, became
+//   - event_cancelled: a row the user attends, not organizes, became
 //     CANCELLED, or its object was deleted, including one cancelled
 //     instance of a series.
-//   - invite_reply: an attendee other than James changed PARTSTAT on a row
-//     James organizes.
+//   - invite_reply: an attendee other than the user changed PARTSTAT on a row
+//     the user organizes.
 //
 // Rows that ended before now - windowPast give no events, so a sync that
 // sends old rows again (after a prune or a full sync) stays quiet.
@@ -149,18 +149,18 @@ func (b *eventBuilder) baseCreated(row *calcache.EventRow) bool {
 	return ok && c.Kind == calcache.ChangeCreated
 }
 
-// role is James's part in an event.
+// role is the user's part in an event.
 type role struct {
 	organizer bool
-	partStat  calendar.PartStat // "" when James is not an attendee
+	partStat  calendar.PartStat // "" when the user is not an attendee
 }
 
 func (r role) involved() bool { return r.organizer || r.partStat != "" }
 
-// attends reports whether James attends and does not organize.
+// attends reports whether the user attends and does not organize.
 func (r role) attends() bool { return !r.organizer && r.partStat != "" }
 
-// roleOf is James's part in row. An override that names no organizer and
+// roleOf is the user's part in row. An override that names no organizer and
 // no attendees, such as a cancelled instance, takes its series' part.
 func (b *eventBuilder) roleOf(row *calcache.EventRow) role {
 	r := role{organizer: row.IsOrganizer, partStat: row.MyPartStat}
@@ -217,8 +217,8 @@ func (b *eventBuilder) isSeries(m *calcache.EventRow) bool {
 	return m.Event.RRule != "" || len(m.Event.RDates) > 0 || len(b.overrides[m.Event.ProviderID]) > 0
 }
 
-// needsReply reports whether row asks James for an answer: it is not
-// cancelled, he does not organize it, and his PARTSTAT is NEEDS-ACTION.
+// needsReply reports whether row asks the user for an answer: it is not
+// cancelled, they do not organize it, and their PARTSTAT is NEEDS-ACTION.
 func (b *eventBuilder) needsReply(row *calcache.EventRow) bool {
 	r := b.roleOf(row)
 	return row.Event.Status != calendar.StatusCancelled && !r.organizer && r.partStat == calendar.PartStatNeedsAction
@@ -226,7 +226,7 @@ func (b *eventBuilder) needsReply(row *calcache.EventRow) bool {
 
 // newSeries gives the invite of a series the diff creates, decided on the
 // series as its master and overrides make it: one invite when an instance
-// James must answer ends after now, on the master when it asks for an
+// the user must answer ends after now, on the master when it asks for an
 // answer, else on that override. A cancelled override removes its instance
 // and a moved one counts where it now is. Nothing else is reported for a
 // new series.
@@ -293,7 +293,7 @@ func (b *eventBuilder) updated(before, after *calcache.EventRow) {
 		return
 	}
 	if !after.IsOrganizer && after.MyPartStat == calendar.PartStatNeedsAction && before.MyPartStat == "" && b.endsAfter(after, b.in.now) {
-		// James was added to an event he could already see.
+		// The user was added to an event they could already see.
 		b.invite(after)
 		return
 	}
@@ -323,11 +323,11 @@ func (b *eventBuilder) deleted(row *calcache.EventRow) {
 // That is not a cancellation: its instance goes back to what the master
 // gives. A moved or changed override gives an event_changed naming what
 // the instance gets back (start, end, location, attendees); a cancelled
-// one brings the instance back, an invite when James has still to answer
+// one brings the instance back, an invite when the user has still to answer
 // the series, else an event_changed of its status. An instance that ended
 // before now - windowPast, as removed and as restored, stays quiet, and so
 // does one the master no longer gives (its recurrence changed too, which
-// the master's own change reports). On a series James organizes, each
+// the master's own change reports). On a series the user organizes, each
 // attendee the restored instance gives another answer gets an
 // invite_reply (C9).
 func (b *eventBuilder) overrideRemoved(o *calcache.EventRow) {
@@ -367,7 +367,7 @@ func (b *eventBuilder) overrideRemoved(o *calcache.EventRow) {
 	b.restoredReplies(o, back)
 }
 
-// restoredReplies emits, on a series James organizes, an invite_reply for
+// restoredReplies emits, on a series the user organizes, an invite_reply for
 // each attendee whose answer the removed override o held and the restored
 // instance back gives differently. An override that lists no attendees
 // took its series' answers, so nothing changes.
@@ -418,7 +418,7 @@ func (b *eventBuilder) cancelled(row *calcache.EventRow) {
 	b.emit(watch.KindEventCancelled, row, watch.CalendarChange{Start: rfc3339(start)})
 }
 
-// replies emits an invite_reply for each attendee other than James whose
+// replies emits an invite_reply for each attendee other than the user whose
 // PARTSTAT differs between before and after.
 func (b *eventBuilder) replies(row *calcache.EventRow, before, after []calendar.Attendee) {
 	was := make(map[string]calendar.PartStat, len(before))

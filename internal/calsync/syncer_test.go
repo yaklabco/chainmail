@@ -81,7 +81,7 @@ func TestInviteEvent(t *testing.T) {
 	}
 }
 
-// TestNoInvite lists new rows that are not invites James must answer.
+// TestNoInvite lists new rows that are not invites the user must answer.
 func TestNoInvite(t *testing.T) {
 	t.Parallel()
 	future := t0.Add(24 * time.Hour)
@@ -241,7 +241,7 @@ func TestEventCancelled(t *testing.T) {
 	}
 }
 
-// TestOrganizerCancelIsQuiet checks that James cancelling his own event
+// TestOrganizerCancelIsQuiet checks that the user cancelling their own event
 // emits no event_cancelled.
 func TestOrganizerCancelIsQuiet(t *testing.T) {
 	t.Parallel()
@@ -291,7 +291,7 @@ func TestInviteReply(t *testing.T) {
 	}
 }
 
-// TestInstanceReply checks a reply to one instance of James's series.
+// TestInstanceReply checks a reply to one instance of the user's series.
 func TestInstanceReply(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
@@ -589,7 +589,7 @@ func TestObjectReplaceQuietForPrunedRows(t *testing.T) {
 }
 
 // objectReplaceSeries stores, on a CalDAV-style store, a weekly series
-// James is invited to with an old moved override (pruned by the first
+// the user is invited to with an old moved override (pruned by the first
 // sync) and an upcoming one moved by an hour, and runs that first sync. It
 // returns the rig, the ProviderID and the upcoming override.
 func objectReplaceSeries(t *testing.T) (*rig, string, calendar.Event) {
@@ -657,7 +657,7 @@ func TestRemovedOverrideRestoresLocation(t *testing.T) {
 
 // TestRemovedCancelledOverrideRestoresTheInstance checks that removing a
 // cancelled override brings the instance back: an event_changed of its
-// status, or an invite when James has still to answer the series.
+// status, or an invite when the user has still to answer the series.
 func TestRemovedCancelledOverrideRestoresTheInstance(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -772,8 +772,8 @@ func TestRecurringNoInviteWhenFutureCancelled(t *testing.T) {
 	}
 }
 
-// TestRecurringInviteOnOverride checks that a new series James has already
-// accepted, with one instance that asks him again, gives one invite for
+// TestRecurringInviteOnOverride checks that a new series the user has already
+// accepted, with one instance that asks them again, gives one invite for
 // that instance.
 func TestRecurringInviteOnOverride(t *testing.T) {
 	t.Parallel()
@@ -868,7 +868,7 @@ func (s *changedInstances) Sync(ctx context.Context, calID, token string) (calen
 	return ch, nil
 }
 
-// TestRemovedOverrideRestoresAnAnswer checks a series James organizes
+// TestRemovedOverrideRestoresAnAnswer checks a series the user organizes
 // whose override differed from its master only in the boss's answer:
 // removing the override gives the instance the master's answer back, an
 // invite_reply for the boss. An instance past the window stays quiet.

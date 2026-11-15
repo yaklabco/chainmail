@@ -1085,7 +1085,7 @@ func TestRuleToolsPassDaemonErrors(t *testing.T) {
 		{
 			name:   "a bare error gets fixed text",
 			err:    errors.New("disk I/O error at /var/lib/chainmail/state.db"),
-			reason: api.ReasonInternal, inMessage: "internal error", inHint: "tell James",
+			reason: api.ReasonInternal, inMessage: "internal error", inHint: "tell the user",
 		},
 	}
 	for tool, args := range ruleCalls {

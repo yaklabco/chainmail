@@ -222,9 +222,9 @@ type CalendarEvent struct {
 	Attendees   []*Attendee `protobuf:"bytes,15,rep,name=attendees,proto3" json:"attendees,omitempty"`
 	// The event had more than 500 attendees; the rest are left out.
 	AttendeesTruncated bool `protobuf:"varint,16,opt,name=attendees_truncated,json=attendeesTruncated,proto3" json:"attendees_truncated,omitempty"`
-	// James's own PARTSTAT, empty when he is not an attendee.
+	// The user's own PARTSTAT, empty when they are not an attendee.
 	MyPartstat string `protobuf:"bytes,17,opt,name=my_partstat,json=myPartstat,proto3" json:"my_partstat,omitempty"`
-	// James organizes the event, or it has no other attendees.
+	// The user organizes the event, or it has no other attendees.
 	IsOrganizer bool `protobuf:"varint,18,opt,name=is_organizer,json=isOrganizer,proto3" json:"is_organizer,omitempty"`
 	// Pass to UpdateEvent and CancelEvent. A changed event is refused with
 	// EVENT_CONFLICT.
@@ -445,7 +445,7 @@ func (x *CalendarEvent) GetMessageRef() string {
 // final: chainmail never sends a held operation's notifications later.
 type CalendarHeld struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Fixed text: what was done and what James can do next.
+	// Fixed text: what was done and what the user can do next.
 	Hint string `protobuf:"bytes,1,opt,name=hint,proto3" json:"hint,omitempty"`
 	// Attendee addresses the policy did not allow, as given.
 	Blocked []*Untrusted `protobuf:"bytes,2,rep,name=blocked,proto3" json:"blocked,omitempty"`
@@ -632,7 +632,7 @@ type AgendaRequest struct {
 	// from is before to, and they are at most 400 days apart.
 	From *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=from,proto3" json:"from,omitempty"`
 	To   *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=to,proto3" json:"to,omitempty"`
-	// Include events James declined.
+	// Include events the user declined.
 	IncludeDeclined bool `protobuf:"varint,5,opt,name=include_declined,json=includeDeclined,proto3" json:"include_declined,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -846,7 +846,7 @@ func (x *GetEventResponse) GetEvent() *CalendarEvent {
 	return nil
 }
 
-// Invite is an event invite that waits for James's reply.
+// Invite is an event invite that waits for the user's reply.
 type Invite struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Event *CalendarEvent         `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"`
@@ -1209,7 +1209,7 @@ type FreeBusyRequest struct {
 	// The account whose provider is asked about people. Required when
 	// people is set.
 	Account string `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
-	// Addresses of other people. Empty asks only for James.
+	// Addresses of other people. Empty asks only for the user.
 	People []string `protobuf:"bytes,2,rep,name=people,proto3" json:"people,omitempty"`
 	// from is before to, and they are at most 400 days apart.
 	From          *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=from,proto3" json:"from,omitempty"`
@@ -1278,8 +1278,8 @@ func (x *FreeBusyRequest) GetTo() *timestamppb.Timestamp {
 
 type FreeBusyResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// James's busy blocks across every account, merged, leaving out events
-	// he declined, transparent events and cancelled ones.
+	// The user's busy blocks across every account, merged, leaving out events
+	// they declined, transparent events and cancelled ones.
 	SelfBusy      []*BusyBlock      `protobuf:"bytes,1,rep,name=self_busy,json=selfBusy,proto3" json:"self_busy,omitempty"`
 	People        []*PersonFreeBusy `protobuf:"bytes,2,rep,name=people,proto3" json:"people,omitempty"`
 	unknownFields protoimpl.UnknownFields

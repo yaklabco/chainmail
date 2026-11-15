@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -67,6 +68,34 @@ func TestNegotiationAndIdentity(t *testing.T) {
 				t.Errorf("tools/list: %v", err)
 			}
 		})
+	}
+}
+
+// namesTheOwner matches a first name or a he/his/him pronoun for the
+// person who runs chainmail. Text an agent reads speaks of "the user".
+var namesTheOwner = regexp.MustCompile(`\b(James|[Hh]e|[Hh]is|[Hh]im)\b`)
+
+// TestTextNamesNoOne checks that the instructions and every tool's name,
+// title, description and schemas speak of the user, not of one person by
+// name or as he.
+func TestTextNamesNoOne(t *testing.T) {
+	t.Parallel()
+	e := newTestEnv(t, &fakeDaemon{ListAccounts: allowAll}, latest)
+	if m := namesTheOwner.FindAllString(e.cs.InitializeResult().Instructions, -1); m != nil {
+		t.Errorf("instructions name the owner: %q", m)
+	}
+	res, err := e.cs.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tl := range res.Tools {
+		wire, err := json.Marshal(tl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := namesTheOwner.FindAllString(string(wire), -1); m != nil {
+			t.Errorf("tool %s names the owner: %q", tl.Name, m)
+		}
 	}
 }
 

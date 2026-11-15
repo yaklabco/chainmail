@@ -61,8 +61,8 @@ type accountOut struct {
 	Provider          string `json:"provider" jsonschema:"the mail provider, such as gmail, icloud, hostinger or custom"`
 	Address           string `json:"address" jsonschema:"the account's own address"`
 	AuthMethod        string `json:"auth_method" jsonschema:"password or oauth2"`
-	AuthState         string `json:"auth_state" jsonschema:"ok, or required when James must log in again"`
-	AuthDetail        string `json:"auth_detail,omitempty" jsonschema:"why auth is required and what James should run"`
+	AuthState         string `json:"auth_state" jsonschema:"ok, or required when the user must log in again"`
+	AuthDetail        string `json:"auth_detail,omitempty" jsonschema:"why auth is required and what the user should run"`
 	AllowExpunge      bool   `json:"allow_expunge" jsonschema:"policy lets expunge delete this account's mail for good"`
 	AllowFolderDelete bool   `json:"allow_folder_delete" jsonschema:"policy lets delete_folder delete this account's folders"`
 }

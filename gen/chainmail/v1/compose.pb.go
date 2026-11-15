@@ -682,7 +682,7 @@ type ComposeResult_Draft struct {
 
 type ComposeResult_Held struct {
 	// Policy held the message. It was not sent. It was saved to Drafts
-	// for James to review and send from his own mail client.
+	// for the user to review and send from their own mail client.
 	Held *Held `protobuf:"bytes,4,opt,name=held,proto3,oneof"`
 }
 
@@ -704,7 +704,7 @@ type Held struct {
 	// The message had more recipients than max_recipients.
 	TooManyRecipients bool `protobuf:"varint,3,opt,name=too_many_recipients,json=tooManyRecipients,proto3" json:"too_many_recipients,omitempty"`
 	// Fixed text for the agent to relay, such as
-	// "held by policy: saved to Drafts for James to review and send".
+	// "held by policy: saved to Drafts for the user to review and send".
 	Hint          string `protobuf:"bytes,4,opt,name=hint,proto3" json:"hint,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

@@ -1,4 +1,4 @@
-// Package policy decides what agents may do without James: which recipients
+// Package policy decides what agents may do without the user: which recipients
 // a send may reach, how many, and whether destructive actions are allowed. It
 // is pure, with no I/O.
 package policy

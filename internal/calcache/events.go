@@ -30,7 +30,7 @@ type EventRow struct {
 	Account     string
 	CalendarID  string
 	Event       calendar.Event
-	MyPartStat  calendar.PartStat // "" when James is not an attendee
+	MyPartStat  calendar.PartStat // "" when the user is not an attendee
 	IsOrganizer bool
 }
 

@@ -109,7 +109,7 @@ message ComposeResult {
     // draft was set: the message was saved to Drafts and not sent.
     Draft draft = 3;
     // Policy held the message. It was not sent. It was saved to Drafts
-    // for James to review and send from his own mail client.
+    // for the user to review and send from their own mail client.
     Held held = 4;
   }
 }
@@ -123,7 +123,7 @@ message Held {
   // The message had more recipients than max_recipients.
   bool too_many_recipients = 3;
   // Fixed text for the agent to relay, such as
-  // "held by policy: saved to Drafts for James to review and send".
+  // "held by policy: saved to Drafts for the user to review and send".
   string hint = 4;
 }
 

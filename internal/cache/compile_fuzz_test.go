@@ -16,7 +16,7 @@ import (
 // with ErrUnsupportedQuery, as imapstore refuses it. Compile must never
 // panic, every ? must have its argument, and only a server-only plan has a
 // reason. Plain go test runs the seed corpus, which starts with
-// internal/query's own. Explore further by hand only with James's approval
+// internal/query's own. Explore further by hand only with the maintainer's approval
 // (it is long fuzzing): go test -run '^$' -fuzz FuzzCompile -fuzztime 60s ./internal/cache/
 func FuzzCompile(f *testing.F) {
 	seeds := []string{

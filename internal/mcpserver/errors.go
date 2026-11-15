@@ -111,7 +111,7 @@ func (s *Server) fallbackBody(err error) errorBody {
 	case isConnect && cerr.Code() == connect.CodePermissionDenied:
 		return errorBody{Reason: api.ReasonForbidden, Message: "the chainmail daemon refused this user", Hint: s.forbiddenHint()}
 	default:
-		return errorBody{Reason: api.ReasonInternal, Message: internalMessage, Hint: "this is a fault in chainmail, not in the request; tell James"}
+		return errorBody{Reason: api.ReasonInternal, Message: internalMessage, Hint: "this is a fault in chainmail, not in the request; tell the user"}
 	}
 }
 

@@ -468,7 +468,7 @@ func TestListAndGetInvites(t *testing.T) {
 	// A mail copy of the calendar invite: the calendar invite wins and
 	// carries its message ref.
 	e.putMailInvite(t, "mw", "mw:INBOX:1:2", "REQUEST", invitation("cal@x", "james@mw.example", e.start))
-	// Withdrawn, organized by James, and over.
+	// Withdrawn, organized by the user, and over.
 	e.putMailInvite(t, "host", "host:INBOX:1:3", "REQUEST", invitation("withdrawn@x", "me@example.com", e.start))
 	cancel := invitation("withdrawn@x", "me@example.com", e.start)
 	cancel.Sequence = 1
@@ -621,7 +621,7 @@ func TestCalendarScopeAuditsOnlyValidNames(t *testing.T) {
 	}
 }
 
-// James's busy time over a long range is complete even when one series
+// The user's busy time over a long range is complete even when one series
 // has more instances in it than one expansion returns.
 func TestFreeBusyOfAnHourlySeries(t *testing.T) {
 	t.Parallel()

@@ -15,7 +15,7 @@ var t0 = time.Date(2026, 11, 10, 15, 0, 0, 0, time.UTC)
 
 const me = "james@example.com"
 
-// self reports whether addr is one of James's addresses.
+// self reports whether addr is one of the user's addresses.
 func self(addr string) bool {
 	return strings.EqualFold(addr, me) || strings.EqualFold(addr, "j@alias.example")
 }
@@ -35,7 +35,7 @@ func single(p string, start, end time.Time) calendar.Event {
 	}
 }
 
-// invited is a single event organized by someone else with James invited.
+// invited is a single event organized by someone else with the user invited.
 func invited(p string, start time.Time, ps calendar.PartStat) calendar.Event {
 	ev := single(p, start, start.Add(time.Hour))
 	ev.Organizer = &calendar.Person{Email: "boss@example.com", Name: "Boss"}

@@ -219,7 +219,7 @@ func TestMCPAgainstDovecot(t *testing.T) {
 		t.Fatalf("create_draft = %+v", draft)
 	}
 	s.call("send_email", map[string]any{
-		"account": "dove", "to": []string{"b@blocked.test"}, "subject": "Held for James", "body": "Please review.",
+		"account": "dove", "to": []string{"b@blocked.test"}, "subject": "Held for review", "body": "Please review.",
 	}, &held)
 	if held.Status != "held" || held.DraftRef == "" || len(held.Blocked) != 1 || held.Blocked[0].Untrusted != "b@blocked.test" {
 		t.Fatalf("send_email = %+v, want held", held)
@@ -232,7 +232,7 @@ func TestMCPAgainstDovecot(t *testing.T) {
 			Ref string `json:"ref"`
 		} `json:"rows"`
 	}
-	s.call("search", map[string]any{"query": `in:drafts subject:"Held for James"`}, &drafts)
+	s.call("search", map[string]any{"query": `in:drafts subject:"Held for review"`}, &drafts)
 	if len(drafts.Rows) != 1 || drafts.Rows[0].Ref != held.DraftRef {
 		t.Fatalf("Drafts search = %+v, want the held draft %s", drafts.Rows, held.DraftRef)
 	}

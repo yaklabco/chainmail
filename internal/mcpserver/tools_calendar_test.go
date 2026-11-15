@@ -152,7 +152,7 @@ func TestCalendarToolRequests(t *testing.T) {
 			proc: chainmailv1connect.CalendarServiceGetInviteProcedure, want: &chainmailv1.GetInviteRequest{Ref: testEventRef},
 		},
 		{
-			name: "free/busy for James alone", tool: "free_busy", args: map[string]any{},
+			name: "free/busy for the user alone", tool: "free_busy", args: map[string]any{},
 			proc: chainmailv1connect.CalendarServiceFreeBusyProcedure,
 			want: &chainmailv1.FreeBusyRequest{From: ts(calNow), To: ts(calNow.Add(7 * 24 * time.Hour))},
 		},
@@ -482,7 +482,7 @@ func calendarHolding(text, via string) *fakeDaemon {
 		return &chainmailv1.UpdateEventResponse{Held: h}, nil
 	}
 	f.CancelEvent = func(context.Context, *chainmailv1.CancelEventRequest) (*chainmailv1.CancelEventResponse, error) {
-		return &chainmailv1.CancelEventResponse{Held: &chainmailv1.CalendarHeld{Hint: "tell James", Blocked: []*chainmailv1.Untrusted{readU(text)}, Summary: "cancel; 1 attendee"}}, nil
+		return &chainmailv1.CancelEventResponse{Held: &chainmailv1.CalendarHeld{Hint: "tell the user", Blocked: []*chainmailv1.Untrusted{readU(text)}, Summary: "cancel; 1 attendee"}}, nil
 	}
 	return f
 }
@@ -608,7 +608,7 @@ func TestCalendarHeldResults(t *testing.T) {
 		{
 			name: "cancel", tool: "cancel_event",
 			want: cancelEventOut{Status: statusHeld, Ref: testEventRef, Held: &calendarHeldOut{
-				Hint: "tell James", Blocked: []untrusted{{Untrusted: text}}, Summary: "cancel; 1 attendee",
+				Hint: "tell the user", Blocked: []untrusted{{Untrusted: text}}, Summary: "cancel; 1 attendee",
 			}},
 			summary: []string{"HELD BY POLICY", "the cancel was NOT applied", "Do not retry", "1 attendee is not on the allowlist"},
 		},
@@ -731,7 +731,7 @@ func TestCalendarToolSummaries(t *testing.T) {
 		{tool: "get_event", summary: "event " + testEventRef + ", attendees 2"},
 		{tool: "list_invites", summary: "invites: 1"},
 		{tool: "get_invite", summary: "invite " + testEventRef + " from mail, method UPDATE"},
-		{tool: "free_busy", summary: "busy blocks for James: 1; people: 2, unknown: 1", plain: true},
+		{tool: "free_busy", summary: "busy blocks for the user: 1; people: 2, unknown: 1", plain: true},
 		{tool: "rsvp", summary: "Answered accept to " + testEventRef + " by email."},
 		{tool: "create_event", summary: "Created event " + testEventRef + " with 2 attendees."},
 		{tool: "update_event", summary: "Updated event " + testEventRef + "."},
@@ -839,7 +839,7 @@ func TestCalendarToolsPassDaemonErrors(t *testing.T) {
 		{
 			name:   "a bare error gets fixed text",
 			err:    errors.New("disk I/O error at /var/lib/chainmail/calendar.db"),
-			reason: api.ReasonInternal, inMessage: "internal error", inHint: "tell James",
+			reason: api.ReasonInternal, inMessage: "internal error", inHint: "tell the user",
 		},
 	}
 	for tool, args := range calendarCalls {
@@ -872,7 +872,7 @@ func TestCalendarToolAnnotations(t *testing.T) {
 		mentions  []string
 	}
 	read := hints{readOnly: true, idempotent: true, openWorld: true}
-	held := []string{"held", "draft event", "NOT applied", "Drafts", "Do not retry", "tell James"}
+	held := []string{"held", "draft event", "NOT applied", "Drafts", "Do not retry", "tell the user"}
 	table := map[string]want{
 		"list_calendars": {"List calendars", read, true, []string{"access", "calendar_id"}},
 		"agenda":         {"Show the agenda", read, true, []string{"RFC 3339", "400 days", "include_declined", "truncated", "CACHE_NOT_READY", "@<recurrence ID>"}},

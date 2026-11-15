@@ -74,13 +74,13 @@ type CalendarServiceClient interface {
 	// GetEvent returns one event or one instance of a series, with its
 	// attendees. Audited as calendar.get_event, with the ref.
 	GetEvent(context.Context, *connect.Request[v1.GetEventRequest]) (*connect.Response[v1.GetEventResponse], error)
-	// ListInvites lists the invites that wait for James's reply, from a
+	// ListInvites lists the invites that wait for the user's reply, from a
 	// calendar or from mail. Audited as calendar.list_invites.
 	ListInvites(context.Context, *connect.Request[v1.ListInvitesRequest]) (*connect.Response[v1.ListInvitesResponse], error)
 	// GetInvite returns one invite. Audited as calendar.get_invite, with the
 	// ref.
 	GetInvite(context.Context, *connect.Request[v1.GetInviteRequest]) (*connect.Response[v1.GetInviteResponse], error)
-	// FreeBusy returns James's busy blocks across every account, and the
+	// FreeBusy returns the user's busy blocks across every account, and the
 	// busy blocks of other people the named account's provider can see.
 	// Audited as calendar.free_busy.
 	FreeBusy(context.Context, *connect.Request[v1.FreeBusyRequest]) (*connect.Response[v1.FreeBusyResponse], error)
@@ -94,12 +94,12 @@ type CalendarServiceClient interface {
 	// calendar.create_event, with the account, calendar ID, new ref and the
 	// decision.
 	CreateEvent(context.Context, *connect.Request[v1.CreateEventRequest]) (*connect.Response[v1.CreateEventResponse], error)
-	// UpdateEvent changes an event James organizes, or one with no other
+	// UpdateEvent changes an event the user organizes, or one with no other
 	// attendees. A change that would notify attendees the policy does not
 	// allow is held and not applied. Audited as calendar.update_event, with
 	// the ref and the decision.
 	UpdateEvent(context.Context, *connect.Request[v1.UpdateEventRequest]) (*connect.Response[v1.UpdateEventResponse], error)
-	// CancelEvent cancels an event James organizes and notifies its
+	// CancelEvent cancels an event the user organizes and notifies its
 	// attendees, or deletes one with no other attendees. A cancel that would
 	// notify attendees the policy does not allow is held and not applied.
 	// Audited as calendar.cancel_event, with the ref and the decision.
@@ -255,13 +255,13 @@ type CalendarServiceHandler interface {
 	// GetEvent returns one event or one instance of a series, with its
 	// attendees. Audited as calendar.get_event, with the ref.
 	GetEvent(context.Context, *connect.Request[v1.GetEventRequest]) (*connect.Response[v1.GetEventResponse], error)
-	// ListInvites lists the invites that wait for James's reply, from a
+	// ListInvites lists the invites that wait for the user's reply, from a
 	// calendar or from mail. Audited as calendar.list_invites.
 	ListInvites(context.Context, *connect.Request[v1.ListInvitesRequest]) (*connect.Response[v1.ListInvitesResponse], error)
 	// GetInvite returns one invite. Audited as calendar.get_invite, with the
 	// ref.
 	GetInvite(context.Context, *connect.Request[v1.GetInviteRequest]) (*connect.Response[v1.GetInviteResponse], error)
-	// FreeBusy returns James's busy blocks across every account, and the
+	// FreeBusy returns the user's busy blocks across every account, and the
 	// busy blocks of other people the named account's provider can see.
 	// Audited as calendar.free_busy.
 	FreeBusy(context.Context, *connect.Request[v1.FreeBusyRequest]) (*connect.Response[v1.FreeBusyResponse], error)
@@ -275,12 +275,12 @@ type CalendarServiceHandler interface {
 	// calendar.create_event, with the account, calendar ID, new ref and the
 	// decision.
 	CreateEvent(context.Context, *connect.Request[v1.CreateEventRequest]) (*connect.Response[v1.CreateEventResponse], error)
-	// UpdateEvent changes an event James organizes, or one with no other
+	// UpdateEvent changes an event the user organizes, or one with no other
 	// attendees. A change that would notify attendees the policy does not
 	// allow is held and not applied. Audited as calendar.update_event, with
 	// the ref and the decision.
 	UpdateEvent(context.Context, *connect.Request[v1.UpdateEventRequest]) (*connect.Response[v1.UpdateEventResponse], error)
-	// CancelEvent cancels an event James organizes and notifies its
+	// CancelEvent cancels an event the user organizes and notifies its
 	// attendees, or deletes one with no other attendees. A cancel that would
 	// notify attendees the policy does not allow is held and not applied.
 	// Audited as calendar.cancel_event, with the ref and the decision.

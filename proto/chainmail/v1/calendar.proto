@@ -21,13 +21,13 @@ service CalendarService {
   // GetEvent returns one event or one instance of a series, with its
   // attendees. Audited as calendar.get_event, with the ref.
   rpc GetEvent(GetEventRequest) returns (GetEventResponse);
-  // ListInvites lists the invites that wait for James's reply, from a
+  // ListInvites lists the invites that wait for the user's reply, from a
   // calendar or from mail. Audited as calendar.list_invites.
   rpc ListInvites(ListInvitesRequest) returns (ListInvitesResponse);
   // GetInvite returns one invite. Audited as calendar.get_invite, with the
   // ref.
   rpc GetInvite(GetInviteRequest) returns (GetInviteResponse);
-  // FreeBusy returns James's busy blocks across every account, and the
+  // FreeBusy returns the user's busy blocks across every account, and the
   // busy blocks of other people the named account's provider can see.
   // Audited as calendar.free_busy.
   rpc FreeBusy(FreeBusyRequest) returns (FreeBusyResponse);
@@ -41,12 +41,12 @@ service CalendarService {
   // calendar.create_event, with the account, calendar ID, new ref and the
   // decision.
   rpc CreateEvent(CreateEventRequest) returns (CreateEventResponse);
-  // UpdateEvent changes an event James organizes, or one with no other
+  // UpdateEvent changes an event the user organizes, or one with no other
   // attendees. A change that would notify attendees the policy does not
   // allow is held and not applied. Audited as calendar.update_event, with
   // the ref and the decision.
   rpc UpdateEvent(UpdateEventRequest) returns (UpdateEventResponse);
-  // CancelEvent cancels an event James organizes and notifies its
+  // CancelEvent cancels an event the user organizes and notifies its
   // attendees, or deletes one with no other attendees. A cancel that would
   // notify attendees the policy does not allow is held and not applied.
   // Audited as calendar.cancel_event, with the ref and the decision.
@@ -108,9 +108,9 @@ message CalendarEvent {
   repeated Attendee attendees = 15;
   // The event had more than 500 attendees; the rest are left out.
   bool attendees_truncated = 16;
-  // James's own PARTSTAT, empty when he is not an attendee.
+  // The user's own PARTSTAT, empty when they are not an attendee.
   string my_partstat = 17;
-  // James organizes the event, or it has no other attendees.
+  // The user organizes the event, or it has no other attendees.
   bool is_organizer = 18;
   // Pass to UpdateEvent and CancelEvent. A changed event is refused with
   // EVENT_CONFLICT.
@@ -130,7 +130,7 @@ message CalendarEvent {
 // CalendarHeld reports a calendar operation the policy held. A hold is
 // final: chainmail never sends a held operation's notifications later.
 message CalendarHeld {
-  // Fixed text: what was done and what James can do next.
+  // Fixed text: what was done and what the user can do next.
   string hint = 1;
   // Attendee addresses the policy did not allow, as given.
   repeated Untrusted blocked = 2;
@@ -162,7 +162,7 @@ message AgendaRequest {
   // from is before to, and they are at most 400 days apart.
   google.protobuf.Timestamp from = 3;
   google.protobuf.Timestamp to = 4;
-  // Include events James declined.
+  // Include events the user declined.
   bool include_declined = 5;
 }
 
@@ -182,7 +182,7 @@ message GetEventResponse {
   CalendarEvent event = 1;
 }
 
-// Invite is an event invite that waits for James's reply.
+// Invite is an event invite that waits for the user's reply.
 message Invite {
   CalendarEvent event = 1;
   // calendar or mail.
@@ -229,7 +229,7 @@ message FreeBusyRequest {
   // The account whose provider is asked about people. Required when
   // people is set.
   string account = 1;
-  // Addresses of other people. Empty asks only for James.
+  // Addresses of other people. Empty asks only for the user.
   repeated string people = 2;
   // from is before to, and they are at most 400 days apart.
   google.protobuf.Timestamp from = 3;
@@ -237,8 +237,8 @@ message FreeBusyRequest {
 }
 
 message FreeBusyResponse {
-  // James's busy blocks across every account, merged, leaving out events
-  // he declined, transparent events and cancelled ones.
+  // The user's busy blocks across every account, merged, leaving out events
+  // they declined, transparent events and cancelled ones.
   repeated BusyBlock self_busy = 1;
   repeated PersonFreeBusy people = 2;
 }
