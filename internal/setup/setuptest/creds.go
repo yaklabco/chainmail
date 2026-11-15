@@ -3,7 +3,7 @@ package setuptest
 import (
 	"context"
 	"encoding/base64"
-	"errors"
+	"fmt"
 	"slices"
 	"sync"
 
@@ -16,11 +16,16 @@ const sealedPrefix = "sealed:"
 // Creds is a fake system.Creds. Encrypt "seals" by returning "sealed:"
 // and the base64 of the plaintext, so a test can check the key round
 // trip. CheckDecrypt accepts a credential it sealed, under the same name,
-// and any credential given to Accept, under any name. It keeps nothing of
+// and any credential given to Accept, under any name, and rejects any
+// other with an error wrapping system.ErrNotDecrypted. It keeps nothing of
 // a plaintext but that sealed form.
 type Creds struct {
-	// EncryptErr and DecryptErr make those methods fail.
-	EncryptErr, DecryptErr error
+	// EncryptErr makes Encrypt fail.
+	EncryptErr error
+	// DecryptErr makes CheckDecrypt fail with it as given, before it looks
+	// at the credential, as when systemd-creds cannot run. It is an
+	// operational error unless the test wraps system.ErrNotDecrypted in it.
+	DecryptErr error
 	// Journal, when set, gets an entry for each call.
 	Journal *Journal
 
@@ -74,7 +79,7 @@ func (c *Creds) CheckDecrypt(_ context.Context, name string, cred []byte) error 
 	if sealedAs, ok := c.sealed[string(cred)]; ok && sealedAs == name {
 		return nil
 	}
-	return errors.New("the credential does not decrypt on this host: fake systemd-creds rejects it")
+	return fmt.Errorf("%w: fake systemd-creds rejects it", system.ErrNotDecrypted)
 }
 
 // Calls lists the calls so far: "encrypt <name>" and "decrypt <name>".

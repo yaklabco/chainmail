@@ -2,8 +2,15 @@ package system
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
+
+// ErrNotDecrypted is wrapped by CheckDecrypt's error when systemd-creds ran
+// and refused the credential, exiting with a non-zero status. An error
+// without it means systemd-creds could not be run or did not finish, which
+// says nothing about the credential.
+var ErrNotDecrypted = errors.New("the credential does not decrypt on this host")
 
 // Creds seals and checks systemd credentials. It runs systemd-creds, found
 // by the host finder, with the plaintext and credential only on pipes.
@@ -32,12 +39,19 @@ func (c systemdCreds) Encrypt(ctx context.Context, name string, plaintext []byte
 }
 
 // CheckDecrypt implements Creds. The decrypted plaintext is cleared
-// whether or not the command succeeded.
+// whether or not the command succeeded. Only a non-zero exit status of
+// systemd-creds wraps ErrNotDecrypted. A command the finder could not
+// resolve or trust, one killed by a signal and other run errors are
+// returned wrapped without it.
 func (c systemdCreds) CheckDecrypt(ctx context.Context, name string, cred []byte) error {
 	plain, err := c.pipe(ctx, cred, "systemd-creds", "decrypt", "--name="+name, "-", "-")
 	clear(plain)
-	if err != nil {
-		return fmt.Errorf("the credential does not decrypt on this host: %w", err)
+	switch {
+	case err == nil:
+		return nil
+	case exitCode(err) > 0:
+		return fmt.Errorf("%w: %w", ErrNotDecrypted, err)
+	default:
+		return fmt.Errorf("checking credential %s: %w", name, err)
 	}
-	return nil
 }

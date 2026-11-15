@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
@@ -295,6 +297,28 @@ func TestApplyNixOSCheckCred(t *testing.T) {
 		}
 		if calls := r.creds.Calls(); !slices.Equal(calls, []string{"decrypt vault-key"}) {
 			t.Errorf("Creds calls = %q, want only the decrypt", calls)
+		}
+	})
+
+	t.Run("systemd-creds cannot run", func(t *testing.T) {
+		t.Parallel()
+		r := newNixRig(freshNixHost())
+		r.creds.Accept(existing)
+		r.creds.DecryptErr = fmt.Errorf("systemd-creds decrypt --name=vault-key - -: %w", exec.ErrNotFound)
+		_, err := r.apply(r.input(t, credReq(), nil, nil))
+		ref := asRefusal(t, err)
+		const prefix = "systemd-creds could not check the credential in /home/alice/chainmail-nixos: "
+		if !strings.HasPrefix(ref.Msg, prefix) || !strings.Contains(ref.Msg, exec.ErrNotFound.Error()) {
+			t.Errorf("refusal = %q, want %q and the cause", ref.Msg, prefix)
+		}
+		if want := "make sure systemd-creds works on this host (it ships with systemd), then run bootstrap again"; ref.Hint != want {
+			t.Errorf("hint = %q, want %q", ref.Hint, want)
+		}
+		if strings.Contains(ref.Msg+ref.Hint, "move it aside") {
+			t.Error("the refusal tells the user to move a credential that may be fine")
+		}
+		if calls := r.creds.Calls(); !slices.Equal(calls, []string{"decrypt vault-key"}) {
+			t.Errorf("Creds calls = %q, want only the decrypt, never an encrypt", calls)
 		}
 	})
 

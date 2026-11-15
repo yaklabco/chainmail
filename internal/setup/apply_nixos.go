@@ -2,8 +2,11 @@ package setup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+
+	"github.com/yaklabco/chainmail/internal/setup/system"
 )
 
 // maxNixCred bounds the credential bootstrap apply hands to systemd-creds.
@@ -12,9 +15,10 @@ const maxNixCred = 64 << 10
 
 // Hints for the NixOS key steps.
 const (
-	badCredHint   = "move it aside and run bootstrap again to seal a new key"
-	sealFailHint  = "check that systemd-creds is installed and can encrypt on this host, then run bootstrap again"
-	notActiveHint = "check it with: journalctl -u chainmail"
+	badCredHint     = "move it aside and run bootstrap again to seal a new key"
+	credsBrokenHint = "make sure systemd-creds works on this host (it ships with systemd), then run bootstrap again"
+	sealFailHint    = "check that systemd-creds is installed and can encrypt on this host, then run bootstrap again"
+	notActiveHint   = "check it with: journalctl -u chainmail"
 )
 
 // errNotActive is the refusal for a chainmail.service that is not running
@@ -102,10 +106,17 @@ func (r *applyRun) sealKey(ctx context.Context) error {
 }
 
 // checkCred refuses unless the credential already in the Nix directory
-// decrypts on this host. Its plaintext is never kept.
+// decrypts on this host. Its plaintext is never kept. Only a credential
+// systemd-creds refused is called bad; when systemd-creds could not run,
+// the credential may be fine, so the refusal points at systemd-creds.
 func (r *applyRun) checkCred(ctx context.Context) error {
-	if err := r.a.Creds.CheckDecrypt(ctx, CredName, r.in.Request.NixCred); err != nil {
+	err := r.a.Creds.CheckDecrypt(ctx, CredName, r.in.Request.NixCred)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, system.ErrNotDecrypted):
 		return refuse(badCredHint, "the credential in %s does not decrypt on this host", r.plan.NixDir)
+	default:
+		return refuse(credsBrokenHint, "systemd-creds could not check the credential in %s: %v", r.plan.NixDir, err)
 	}
-	return nil
 }

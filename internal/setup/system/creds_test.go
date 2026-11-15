@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"sync"
@@ -112,7 +113,7 @@ func TestCredsCheckDecrypt(t *testing.T) {
 		}
 	})
 
-	t.Run("runner error", func(t *testing.T) {
+	t.Run("command exits non-zero", func(t *testing.T) {
 		t.Parallel()
 		out := []byte(plainKey)
 		args := []string{"decrypt", "--name=vault-key", "-", "-"}
@@ -122,12 +123,52 @@ func TestCredsCheckDecrypt(t *testing.T) {
 		if !errors.As(err, &exit) {
 			t.Fatalf("CheckDecrypt error = %v, want the runner's error wrapped", err)
 		}
+		if !errors.Is(err, ErrNotDecrypted) {
+			t.Fatalf("CheckDecrypt error = %v, want it to wrap ErrNotDecrypted", err)
+		}
 		const prefix = "the credential does not decrypt on this host: "
 		if !strings.HasPrefix(err.Error(), prefix) || !strings.Contains(err.Error(), "bad MAC") {
 			t.Fatalf("CheckDecrypt error = %q, want %q and the command's stderr", err, prefix)
 		}
 		if !allZero(out) {
 			t.Fatal("output returned with the error was not cleared")
+		}
+	})
+
+	// Errors where systemd-creds did not run, or did not exit with a
+	// status, say nothing about the credential.
+	operational := []struct {
+		name string
+		err  error
+	}{
+		{"not found", fmt.Errorf("systemd-creds decrypt --name=vault-key - -: %w", exec.ErrNotFound)},
+		{"untrusted copy", errors.New("systemd-creds decrypt --name=vault-key - -: /usr/bin/systemd-creds is writable by group or others")},
+		{"killed by a signal", commandError("systemd-creds", nil, &fakeExit{code: -1}, nil)},
+		{"context ended", fmt.Errorf("systemd-creds: %w", context.DeadlineExceeded)},
+	}
+	for _, tc := range operational {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := &fakePipe{err: tc.err}
+			err := NewCreds(p.run).CheckDecrypt(ctx, "vault-key", cred)
+			if err == nil || errors.Is(err, ErrNotDecrypted) {
+				t.Fatalf("CheckDecrypt error = %v, want an error without ErrNotDecrypted", err)
+			}
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("CheckDecrypt error = %v, want the runner's error wrapped", err)
+			}
+		})
+	}
+
+	t.Run("finder finds no systemd-creds", func(t *testing.T) {
+		t.Parallel()
+		tr := newTree(t)
+		err := NewCreds(execPipeRunner(tr.finder().find)).CheckDecrypt(ctx, "vault-key", cred)
+		if !errors.Is(err, exec.ErrNotFound) {
+			t.Fatalf("CheckDecrypt error = %v, want exec.ErrNotFound", err)
+		}
+		if errors.Is(err, ErrNotDecrypted) {
+			t.Fatalf("CheckDecrypt error = %v wraps ErrNotDecrypted, but systemd-creds never ran", err)
 		}
 	})
 }
