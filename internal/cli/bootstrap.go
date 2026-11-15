@@ -417,7 +417,7 @@ type socketSelection struct {
 func selectedSockets(env Env, g *globals, l setup.Layout) []socketSelection {
 	var out []socketSelection
 	add := func(socket, source string) {
-		if socket == "" || socket == l.Socket || slices.ContainsFunc(out, func(s socketSelection) bool { return s.socket == socket }) {
+		if socket == "" || sameSocket(env, socket, l.Socket) || slices.ContainsFunc(out, func(s socketSelection) bool { return s.socket == socket }) {
 			return
 		}
 		out = append(out, socketSelection{socket: socket, source: source})
@@ -444,6 +444,28 @@ func selectedSockets(env Env, g *globals, l setup.Layout) []socketSelection {
 	add(envSocket, socketBinding.envVar)
 	add(fileSocket, path)
 	return out
+}
+
+// sameSocket reports whether a and b name the same socket, such as
+// /var/run/chainmail/chainmail.sock and /run/chainmail/chainmail.sock
+// where /var/run links to /run. When both exist it compares the files.
+// Otherwise it compares their directories with every symlink resolved,
+// and the names in them. When a directory cannot be resolved either, it
+// compares the cleaned paths.
+func sameSocket(env Env, a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	stat, eval := env.stat(), env.evalSymlinks()
+	if ai, err := stat(a); err == nil {
+		if bi, err := stat(b); err == nil {
+			return os.SameFile(ai, bi)
+		}
+	}
+	if da, err := eval(filepath.Dir(a)); err == nil {
+		if db, err := eval(filepath.Dir(b)); err == nil {
+			return filepath.Join(da, filepath.Base(a)) == filepath.Join(db, filepath.Base(b))
+		}
+	}
+	return a == b
 }
 
 // refuseOtherProduction asks the daemon at each socket the user selects in
