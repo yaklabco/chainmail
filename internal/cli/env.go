@@ -6,14 +6,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
 	"golang.org/x/term"
+
+	"github.com/yaklabco/chainmail/internal/setup"
+	"github.com/yaklabco/chainmail/internal/setup/system"
 )
 
 // Env is everything the CLI reads or writes outside its arguments. Tests replace it.
@@ -41,6 +46,40 @@ type Env struct {
 	// After waits for a duration, as time.After does, for long-running
 	// commands such as watch. Nil means time.After.
 	After func(time.Duration) <-chan time.Time
+
+	// The fields below serve chainmail bootstrap. Nil means the real
+	// implementation, except Sudo: nil means sudo is not available, so a
+	// test that forgets it never runs the real one.
+
+	// GOOS is the operating system bootstrap sets up. "" means runtime.GOOS.
+	GOOS string
+	// Getuid returns the real user id of the process.
+	Getuid func() int
+	// Username returns the name of the user running chainmail.
+	Username func() (string, error)
+	// Executable returns the path of the running binary with every
+	// symlink resolved.
+	Executable func() (string, error)
+	// Sudo runs "sudo <args...>" with stdin and stdout given and stderr
+	// passed through to Env.Stderr.
+	Sudo func(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error
+	// Resolver looks up the MX records that pick a provider.
+	Resolver setup.Resolver
+	// ReadLine reads one line from the terminal. Nil when stdin is not a
+	// terminal.
+	ReadLine func() (string, error)
+	// SetupFiles, SetupAccounts and SetupService let tests fake the OS in
+	// bootstrap's unprivileged phase and in bootstrap apply.
+	SetupFiles    system.Files
+	SetupAccounts system.Accounts
+	SetupService  system.Service
+	// AsDaemon runs the installed binary as the daemon user.
+	AsDaemon func(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error
+	// OpenTTY opens the controlling terminal.
+	OpenTTY func() (io.ReadWriteCloser, error)
+	// AccountHealth asks the daemon at socket about account. An error
+	// means it could not be asked.
+	AccountHealth func(ctx context.Context, socket, account string) (*setup.AccountHealth, error)
 }
 
 // DefaultEnv returns the real process environment.
@@ -49,9 +88,14 @@ func DefaultEnv() Env {
 		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Getenv: os.Getenv, PassShow: passShow,
 		StdoutTerminal: term.IsTerminal(int(os.Stdout.Fd())), StderrTerminal: term.IsTerminal(int(os.Stderr.Fd())),
 		TZ: time.Local, Now: time.Now, After: time.After,
+		Getuid: os.Getuid, Username: currentUsername, Executable: resolvedExecutable,
+		Sudo: realSudo, Resolver: net.DefaultResolver,
+		SetupFiles: system.OSFiles{}, SetupAccounts: system.NewAccounts(runtime.GOOS, system.ExecRunner),
+		OpenTTY: openTTY, AccountHealth: daemonAccountHealth,
 	}
 	if fd := int(os.Stdin.Fd()); term.IsTerminal(fd) {
 		env.ReadPassword = func() ([]byte, error) { return readTerminalPassword(fd) }
+		env.ReadLine = func() (string, error) { return readTerminalLine(os.Stdin) }
 	}
 	return env
 }

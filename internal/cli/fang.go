@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -24,6 +25,9 @@ func fangOptions() []fang.Option {
 // errors, so both modes report the same failure. All three can carry text
 // from the daemon, so each is cleaned for the terminal.
 func styledError(w io.Writer, styles fang.Styles, err error) {
+	if errors.As(err, new(reportedExit)) {
+		return // already shown by the process that failed
+	}
 	c := classify(err)
 	_, _ = fmt.Fprintln(w, styles.ErrorHeader.SetString(termText(c.reason)).String())
 	_, _ = fmt.Fprintln(w, styles.ErrorText.Render(termText(c.message)))
