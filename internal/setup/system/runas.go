@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 )
 
@@ -16,19 +17,30 @@ var runAsEnv = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/var/empty",
 
 // RunAs runs name with args as uid and gid (with no supplementary groups
 // beyond gid), with the given stdio. Real only; the apply step injects it.
-// The caller must be root to change to another user. A nil stdin reads
-// from the null device and a nil stdout or stderr discards. The command
-// gets a fixed minimal environment, not the caller's.
+// The caller must be root to change to another user. name is an absolute
+// path, run as it is, or a bare command name, run from the trusted system
+// directories as ExecRunner runs it; PATH is never searched. A nil stdin
+// reads from the null device and a nil stdout or stderr discards. The
+// command gets a fixed minimal environment, not the caller's.
 func RunAs(ctx context.Context, uid, gid uint32, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
-	if err := runAsCmd(ctx, uid, gid, stdin, stdout, stderr, name, args...).Run(); err != nil {
+	path := name
+	if !filepath.IsAbs(name) {
+		var err error
+		if path, err = hostFinder.find(name); err != nil {
+			return fmt.Errorf("running %s as %d:%d: %w", name, uid, gid, err)
+		}
+	}
+	cmd := runAsCmd(ctx, uid, gid, stdin, stdout, stderr, path, args...)
+	cmd.Args[0] = name
+	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("running %s as %d:%d: %w", name, uid, gid, err)
 	}
 	return nil
 }
 
-// runAsCmd builds the command RunAs runs.
-func runAsCmd(ctx context.Context, uid, gid uint32, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, name, args...)
+// runAsCmd builds the command RunAs runs from the absolute path.
+func runAsCmd(ctx context.Context, uid, gid uint32, stdin io.Reader, stdout, stderr io.Writer, path string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = append([]string(nil), runAsEnv...)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout

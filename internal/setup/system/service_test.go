@@ -2,9 +2,6 @@ package system
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"io/fs"
 	"os/exec"
 	"strings"
 	"testing"
@@ -25,7 +22,7 @@ func TestServiceSystemd(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	newSvc := func(r *fakeRunner) Service {
-		return NewService("linux", unit, unitPath, "", r.run, nil)
+		return NewService("linux", unit, unitPath, "", r.run)
 	}
 
 	stateTests := []struct {
@@ -119,21 +116,6 @@ func TestServiceSystemd(t *testing.T) {
 	})
 }
 
-// logFiles is a fake Files that serves one log file.
-type logFiles struct {
-	Files
-	path string
-	data []byte
-	err  error
-}
-
-func (f *logFiles) ReadFile(path string) ([]byte, error) {
-	if path != f.path {
-		return nil, fmt.Errorf("unexpected read of %s", path)
-	}
-	return f.data, f.err
-}
-
 const launchdRunning = `system/sh.chainmail.daemon = {
 	active count = 1
 	path = /Library/LaunchDaemons/sh.chainmail.daemon.plist
@@ -155,8 +137,8 @@ const notLoadedStderr = `Could not find service "sh.chainmail.daemon" in domain 
 func TestServiceLaunchd(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	newSvc := func(r *fakeRunner, files Files) Service {
-		s := NewService("darwin", label, plistPath, daemonLog, r.run, files)
+	newSvc := func(r *fakeRunner) Service {
+		s := NewService("darwin", label, plistPath, daemonLog, r.run)
 		s.(*launchdService).sleep = func(time.Duration) {}
 		return s
 	}
@@ -177,7 +159,7 @@ func TestServiceLaunchd(t *testing.T) {
 		t.Run("State "+tt.name, func(t *testing.T) {
 			t.Parallel()
 			r := tt.reply(newFakeRunner())
-			got, err := newSvc(r, nil).State(ctx)
+			got, err := newSvc(r).State(ctx)
 			if err != nil {
 				t.Fatalf("State: %v", err)
 			}
@@ -207,14 +189,14 @@ func TestServiceLaunchd(t *testing.T) {
 		t.Run("State "+tt.name, func(t *testing.T) {
 			t.Parallel()
 			r := tt.reply(newFakeRunner())
-			if got, err := newSvc(r, nil).State(ctx); err == nil {
+			if got, err := newSvc(r).State(ctx); err == nil {
 				t.Fatalf("State = %+v, want an error", got)
 			}
 		})
 		t.Run("Activate "+tt.name, func(t *testing.T) {
 			t.Parallel()
 			r := tt.reply(newFakeRunner())
-			if err := newSvc(r, nil).Activate(ctx, true); err == nil {
+			if err := newSvc(r).Activate(ctx, true); err == nil {
 				t.Fatal("Activate succeeded when launchctl print failed")
 			}
 			r.wantCalls(t, printLabel)
@@ -222,7 +204,7 @@ func TestServiceLaunchd(t *testing.T) {
 		t.Run("Activate waiting for bootout "+tt.name, func(t *testing.T) {
 			t.Parallel()
 			r := tt.reply(newFakeRunner().on(printLabel, launchdRunning, nil))
-			if err := newSvc(r, nil).Activate(ctx, true); err == nil {
+			if err := newSvc(r).Activate(ctx, true); err == nil {
 				t.Fatal("Activate succeeded when launchctl print failed after bootout")
 			}
 			r.wantCalls(t, printLabel, "launchctl bootout system/sh.chainmail.daemon", printLabel)
@@ -232,7 +214,7 @@ func TestServiceLaunchd(t *testing.T) {
 	t.Run("Activate not loaded", func(t *testing.T) {
 		t.Parallel()
 		r := notLoaded(newFakeRunner())
-		if err := newSvc(r, nil).Activate(ctx, true); err != nil {
+		if err := newSvc(r).Activate(ctx, true); err != nil {
 			t.Fatalf("Activate: %v", err)
 		}
 		r.wantCalls(t, printLabel, "launchctl bootstrap system "+plistPath)
@@ -244,7 +226,7 @@ func TestServiceLaunchd(t *testing.T) {
 			on(printLabel, launchdRunning, nil).
 			on(printLabel, launchdRunning, nil). // still unloading
 			onFail(printLabel, "", 113, notLoadedStderr)
-		if err := newSvc(r, nil).Activate(ctx, true); err != nil {
+		if err := newSvc(r).Activate(ctx, true); err != nil {
 			t.Fatalf("Activate: %v", err)
 		}
 		r.wantCalls(t,
@@ -259,7 +241,7 @@ func TestServiceLaunchd(t *testing.T) {
 	t.Run("Activate changed but never unloads", func(t *testing.T) {
 		t.Parallel()
 		r := newFakeRunner().on(printLabel, launchdRunning, nil)
-		err := newSvc(r, nil).Activate(ctx, true)
+		err := newSvc(r).Activate(ctx, true)
 		if err == nil {
 			t.Fatal("Activate succeeded while the old service stayed loaded")
 		}
@@ -273,7 +255,7 @@ func TestServiceLaunchd(t *testing.T) {
 	t.Run("Activate unchanged and stopped", func(t *testing.T) {
 		t.Parallel()
 		r := newFakeRunner().on(printLabel, launchdWaiting, nil)
-		if err := newSvc(r, nil).Activate(ctx, false); err != nil {
+		if err := newSvc(r).Activate(ctx, false); err != nil {
 			t.Fatalf("Activate: %v", err)
 		}
 		r.wantCalls(t, printLabel, "launchctl kickstart system/sh.chainmail.daemon")
@@ -282,7 +264,7 @@ func TestServiceLaunchd(t *testing.T) {
 	t.Run("Activate unchanged and running", func(t *testing.T) {
 		t.Parallel()
 		r := newFakeRunner().on(printLabel, launchdRunning, nil)
-		if err := newSvc(r, nil).Activate(ctx, false); err != nil {
+		if err := newSvc(r).Activate(ctx, false); err != nil {
 			t.Fatalf("Activate: %v", err)
 		}
 		r.wantCalls(t, printLabel)
@@ -291,52 +273,10 @@ func TestServiceLaunchd(t *testing.T) {
 	t.Run("Restart", func(t *testing.T) {
 		t.Parallel()
 		r := newFakeRunner()
-		if err := newSvc(r, nil).Restart(ctx); err != nil {
+		if err := newSvc(r).Restart(ctx); err != nil {
 			t.Fatalf("Restart: %v", err)
 		}
 		r.wantCalls(t, "launchctl kickstart -k system/sh.chainmail.daemon")
-	})
-
-	t.Run("Logs", func(t *testing.T) {
-		t.Parallel()
-		var b strings.Builder
-		for i := 1; i <= 30; i++ {
-			fmt.Fprintf(&b, "line %d\n", i)
-		}
-		r := newFakeRunner()
-		out, err := newSvc(r, &logFiles{path: daemonLog, data: []byte(b.String())}).Logs(ctx, 20)
-		if err != nil {
-			t.Fatalf("Logs: %v", err)
-		}
-		lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
-		if len(lines) != 20 || lines[0] != "line 11" || lines[19] != "line 30" {
-			t.Fatalf("Logs returned %d lines from %q to %q", len(lines), lines[0], lines[len(lines)-1])
-		}
-		r.wantCalls(t)
-	})
-
-	t.Run("Logs short file", func(t *testing.T) {
-		t.Parallel()
-		out, err := newSvc(newFakeRunner(), &logFiles{path: daemonLog, data: []byte("one\ntwo")}).Logs(ctx, 20)
-		if err != nil || string(out) != "one\ntwo" {
-			t.Fatalf("Logs = %q, %v", out, err)
-		}
-	})
-
-	t.Run("Logs missing file", func(t *testing.T) {
-		t.Parallel()
-		out, err := newSvc(newFakeRunner(), &logFiles{path: daemonLog, err: fs.ErrNotExist}).Logs(ctx, 20)
-		if err != nil || len(out) != 0 {
-			t.Fatalf("Logs = %q, %v, want empty", out, err)
-		}
-	})
-
-	t.Run("Logs read failure", func(t *testing.T) {
-		t.Parallel()
-		_, err := newSvc(newFakeRunner(), &logFiles{path: daemonLog, err: errors.New("denied")}).Logs(ctx, 20)
-		if err == nil {
-			t.Fatal("Logs succeeded when the read failed")
-		}
 	})
 }
 
