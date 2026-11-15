@@ -41,7 +41,7 @@ func TestAccountsLinux(t *testing.T) {
 
 	t.Run("LookupUser missing", func(t *testing.T) {
 		t.Parallel()
-		r := newFakeRunner().on("getent passwd chainmail", "", &fakeExit{code: 2})
+		r := newFakeRunner().onFail("getent passwd chainmail", "", 2, "")
 		_, ok, err := NewAccounts("linux", r.run).LookupUser(ctx, "chainmail")
 		if err != nil || ok {
 			t.Fatalf("LookupUser = %v, %v, want false, nil", ok, err)
@@ -51,7 +51,7 @@ func TestAccountsLinux(t *testing.T) {
 
 	t.Run("LookupUser failure", func(t *testing.T) {
 		t.Parallel()
-		r := newFakeRunner().on("getent passwd chainmail", "", &fakeExit{code: 1})
+		r := newFakeRunner().onFail("getent passwd chainmail", "", 1, "")
 		if _, _, err := NewAccounts("linux", r.run).LookupUser(ctx, "chainmail"); err == nil {
 			t.Fatal("LookupUser succeeded when getent failed")
 		}
@@ -92,7 +92,7 @@ func TestAccountsLinux(t *testing.T) {
 
 	t.Run("LookupGroup missing", func(t *testing.T) {
 		t.Parallel()
-		r := newFakeRunner().on("getent group chainmail-clients", "", &fakeExit{code: 2})
+		r := newFakeRunner().onFail("getent group chainmail-clients", "", 2, "")
 		_, ok, err := NewAccounts("linux", r.run).LookupGroup(ctx, "chainmail-clients")
 		if err != nil || ok {
 			t.Fatalf("LookupGroup = %v, %v, want false, nil", ok, err)
@@ -114,7 +114,7 @@ func TestAccountsLinux(t *testing.T) {
 
 	t.Run("CreateGroup failure", func(t *testing.T) {
 		t.Parallel()
-		r := newFakeRunner().on("groupadd --system chainmail-clients", "", &fakeExit{code: 9, stderr: "exists"})
+		r := newFakeRunner().onFail("groupadd --system chainmail-clients", "", 9, "exists")
 		if _, err := NewAccounts("linux", r.run).CreateGroup(ctx, "chainmail-clients"); err == nil {
 			t.Fatal("CreateGroup succeeded when groupadd failed")
 		}
@@ -228,7 +228,7 @@ func TestAccountsDarwin(t *testing.T) {
 
 	t.Run("LookupUser missing", func(t *testing.T) {
 		t.Parallel()
-		r := newFakeRunner().on(dsReadUser, "", &fakeExit{code: 56, stderr: dsNotFound})
+		r := newFakeRunner().onFail(dsReadUser, "", 56, dsNotFound)
 		_, ok, err := NewAccounts("darwin", r.run).LookupUser(ctx, "_chainmail")
 		if err != nil || ok {
 			t.Fatalf("LookupUser = %v, %v, want false, nil", ok, err)
@@ -238,7 +238,7 @@ func TestAccountsDarwin(t *testing.T) {
 
 	t.Run("LookupUser failure", func(t *testing.T) {
 		t.Parallel()
-		r := newFakeRunner().on(dsReadUser, "", &fakeExit{code: 1, stderr: "eDSPermissionError"})
+		r := newFakeRunner().onFail(dsReadUser, "", 1, "eDSPermissionError")
 		if _, _, err := NewAccounts("darwin", r.run).LookupUser(ctx, "_chainmail"); err == nil {
 			t.Fatal("LookupUser succeeded when dscl failed")
 		}
@@ -261,7 +261,7 @@ func TestAccountsDarwin(t *testing.T) {
 		t.Parallel()
 		// dscl reports the missing GroupMembership key on stderr and exits
 		// non-zero, but still prints the attributes it found.
-		r := newFakeRunner().on(dsReadGroup, darwinEmptyGroupPlist, &fakeExit{code: 181, stderr: "No such key: GroupMembership"})
+		r := newFakeRunner().onFail(dsReadGroup, darwinEmptyGroupPlist, 181, "No such key: GroupMembership")
 		g, ok, err := NewAccounts("darwin", r.run).LookupGroup(ctx, "chainmail-clients")
 		if err != nil || !ok {
 			t.Fatalf("LookupGroup = %v, %v", ok, err)
@@ -271,9 +271,46 @@ func TestAccountsDarwin(t *testing.T) {
 		}
 	})
 
+	t.Run("LookupGroup no members as a DS error", func(t *testing.T) {
+		t.Parallel()
+		r := newFakeRunner().onFail(dsReadGroup, darwinEmptyGroupPlist, 181, "<dscl_cmd> DS Error: -14134 (eDSAttributeNotFound)")
+		g, ok, err := NewAccounts("darwin", r.run).LookupGroup(ctx, "chainmail-clients")
+		if err != nil || !ok {
+			t.Fatalf("LookupGroup = %v, %v", ok, err)
+		}
+		if g.GID != 302 || len(g.Members) != 0 {
+			t.Fatalf("group = %+v", g)
+		}
+	})
+
+	// Output that parses does not excuse a failure other than a missing
+	// attribute.
+	readFailures := []struct {
+		name  string
+		reply func(*fakeRunner) *fakeRunner
+	}{
+		{"permission error", func(r *fakeRunner) *fakeRunner {
+			return r.onFail(dsReadGroup, darwinGroupPlist, 1, "<dscl_cmd> DS Error: -14120 (eDSPermissionError)")
+		}},
+		{"cancelled", func(r *fakeRunner) *fakeRunner { return r.on(dsReadGroup, darwinGroupPlist, context.Canceled) }},
+		{"killed", func(r *fakeRunner) *fakeRunner { return r.onFail(dsReadGroup, darwinGroupPlist, -1, "") }},
+		{"missing attribute with no output", func(r *fakeRunner) *fakeRunner {
+			return r.onFail(dsReadGroup, "", 181, "No such key: GroupMembership")
+		}},
+	}
+	for _, tt := range readFailures {
+		t.Run("LookupGroup "+tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := tt.reply(newFakeRunner())
+			if g, ok, err := NewAccounts("darwin", r.run).LookupGroup(ctx, "chainmail-clients"); err == nil {
+				t.Fatalf("LookupGroup = %+v, %v, want an error", g, ok)
+			}
+		})
+	}
+
 	t.Run("LookupGroup missing", func(t *testing.T) {
 		t.Parallel()
-		r := newFakeRunner().on(dsReadGroup, "", &fakeExit{code: 56, stderr: dsNotFound})
+		r := newFakeRunner().onFail(dsReadGroup, "", 56, dsNotFound)
 		_, ok, err := NewAccounts("darwin", r.run).LookupGroup(ctx, "chainmail-clients")
 		if err != nil || ok {
 			t.Fatalf("LookupGroup = %v, %v, want false, nil", ok, err)
@@ -339,7 +376,7 @@ func TestAccountsDarwin(t *testing.T) {
 
 	t.Run("CreateDaemonUser without the group", func(t *testing.T) {
 		t.Parallel()
-		r := newFakeRunner().on(dsReadGroup, "", &fakeExit{code: 56, stderr: dsNotFound})
+		r := newFakeRunner().onFail(dsReadGroup, "", 56, dsNotFound)
 		if _, err := NewAccounts("darwin", r.run).CreateDaemonUser(ctx, "_chainmail", "chainmail-clients", "/var/empty"); err == nil {
 			t.Fatal("CreateDaemonUser succeeded without the clients group")
 		}
@@ -351,7 +388,7 @@ func TestAccountsDarwin(t *testing.T) {
 		r := newFakeRunner().
 			on(dsReadGroup, darwinGroupPlist, nil).
 			on("dscl . -list /Users UniqueID", "root 0\n", nil).
-			on("dscl . -create /Users/_chainmail UniqueID 300", "", &fakeExit{code: 1, stderr: "denied"})
+			onFail("dscl . -create /Users/_chainmail UniqueID 300", "", 1, "denied")
 		if _, err := NewAccounts("darwin", r.run).CreateDaemonUser(ctx, "_chainmail", "chainmail-clients", "/var/empty"); err == nil {
 			t.Fatal("CreateDaemonUser succeeded when dscl failed")
 		}
