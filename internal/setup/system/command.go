@@ -289,3 +289,37 @@ func execRunner(find func(string) (string, error)) Runner {
 		return out, nil
 	}
 }
+
+// PipeRunner runs a trusted host command with stdin, returning stdout.
+// stderr goes into the error, as commandError does.
+type PipeRunner func(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, error)
+
+// ExecPipeRunner is the real PipeRunner: it finds name with the host
+// finder, like ExecRunner, and runs it with stdin.
+var ExecPipeRunner PipeRunner = func(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, error) {
+	return execPipeRunner(hostFinder.find)(ctx, stdin, name, args...)
+}
+
+// execPipeRunner is a PipeRunner that resolves each command with find when
+// it is run. It runs the command as execRunner does, with stdin on a pipe.
+// stdin may be secret, so it never goes into an error.
+func execPipeRunner(find func(string) (string, error)) PipeRunner {
+	return func(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, error) {
+		path, err := find(name)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", commandLine(name, args), err)
+		}
+		cmd := exec.CommandContext(ctx, path, args...)
+		cmd.Args[0] = name
+		cmd.Env = append([]string(nil), commandEnv...)
+		cmd.Dir = "/"
+		cmd.Stdin = bytes.NewReader(stdin)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			return out, commandError(name, args, err, stderr.Bytes())
+		}
+		return out, nil
+	}
+}

@@ -175,3 +175,78 @@ func TestServiceStarts(t *testing.T) {
 		}
 	})
 }
+
+func TestUnitsReturnsWhatItIsGiven(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	j := &Journal{}
+	info := system.UnitInfo{Loaded: true, Fragment: "/nix/store/x-unit/chainmail.service", ExecPath: "/nix/store/x/bin/chainmail", Active: true}
+	u := &Units{Info: info, Journal: j}
+	got, err := u.Show(ctx, "chainmail.service")
+	if err != nil || got != info {
+		t.Errorf("Show = %+v, %v; want %+v", got, err, info)
+	}
+	boom := errors.New("no bus")
+	u.Err = boom
+	if got, err := u.Show(ctx, "chainmail.service"); !errors.Is(err, boom) || got != (system.UnitInfo{}) {
+		t.Errorf("Show with Err = %+v, %v; want the zero UnitInfo and %v", got, err, boom)
+	}
+	want := []string{"show chainmail.service", "show chainmail.service"}
+	if got := u.Calls(); !slices.Equal(got, want) {
+		t.Errorf("Calls = %q, want %q", got, want)
+	}
+	if got := j.Entries(); !slices.Equal(got, []string{"units show chainmail.service", "units show chainmail.service"}) {
+		t.Errorf("journal = %q", got)
+	}
+}
+
+func TestCredsSealsAndChecks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	j := &Journal{}
+	c := (&Creds{Journal: j}).Accept([]byte("old credential"))
+
+	plain := []byte("AGE-SECRET-KEY-1FAKE")
+	cred, err := c.Encrypt(ctx, "vault-key", plain)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if want := "sealed:QUdFLVNFQ1JFVC1LRVktMUZBS0U="; string(cred) != want {
+		t.Errorf("Encrypt = %q, want %q", cred, want)
+	}
+	// The fake keeps nothing that aliases the caller's plaintext.
+	clear(plain)
+	if err := c.CheckDecrypt(ctx, "vault-key", cred); err != nil {
+		t.Errorf("CheckDecrypt of a credential it sealed: %v", err)
+	}
+	if err := c.CheckDecrypt(ctx, "other-name", cred); err == nil {
+		t.Error("CheckDecrypt accepted a credential under another name")
+	}
+	if err := c.CheckDecrypt(ctx, "vault-key", []byte("old credential")); err != nil {
+		t.Errorf("CheckDecrypt of an accepted credential: %v", err)
+	}
+	err = c.CheckDecrypt(ctx, "vault-key", []byte("foreign credential"))
+	if err == nil || !strings.HasPrefix(err.Error(), "the credential does not decrypt on this host: ") {
+		t.Errorf("CheckDecrypt of a foreign credential = %v", err)
+	}
+
+	boom := errors.New("no TPM")
+	c.EncryptErr, c.DecryptErr = boom, boom
+	if got, err := c.Encrypt(ctx, "vault-key", []byte("k")); !errors.Is(err, boom) || got != nil {
+		t.Errorf("Encrypt with EncryptErr = %q, %v", got, err)
+	}
+	if err := c.CheckDecrypt(ctx, "vault-key", cred); !errors.Is(err, boom) {
+		t.Errorf("CheckDecrypt with DecryptErr = %v", err)
+	}
+
+	want := []string{
+		"encrypt vault-key", "decrypt vault-key", "decrypt other-name", "decrypt vault-key",
+		"decrypt vault-key", "encrypt vault-key", "decrypt vault-key",
+	}
+	if got := c.Calls(); !slices.Equal(got, want) {
+		t.Errorf("Calls = %q, want %q", got, want)
+	}
+	if got := j.Entries(); len(got) != len(want) || got[0] != "creds encrypt vault-key" {
+		t.Errorf("journal = %q", got)
+	}
+}
