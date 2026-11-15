@@ -93,35 +93,87 @@ func (r *recordTB) Errorf(format string, args ...any) {
 	r.msgs = append(r.msgs, fmt.Sprintf(format, args...))
 }
 
-// The checks the bootstrap tests use on secrets report a failure without
-// the secret in it.
-func TestSecretChecksHideValues(t *testing.T) {
-	t.Parallel()
-	const want, stored = "typed-secret-1", "other-secret-22"
+// The secrets the tests of the secret checks use.
+const (
+	checkTyped  = "typed-secret-1"
+	checkStored = "other-secret-22"
+)
 
-	rec := &recordTB{TB: t}
-	checkSecret(rec, "accounts/alice", []byte(stored), true, want)
-	checkSecret(rec, "accounts/bob", nil, false, want)
-	checkArgv(rec, "sudo", []string{"/bin/chainmail", "x" + want, "apply"}, want)
+// secretChecks are the checks the bootstrap tests use on secrets.
+type secretChecks struct {
+	secret func(tb testing.TB, name string, got []byte, ok bool, want string)
+	argv   func(tb testing.TB, what string, args []string, secret string)
+}
+
+// verifySecretChecks fails tb unless c reports exactly the three expected
+// failures, none holding a secret, and nothing for matching values. Its
+// own failures give indexes and counts, never what c reported, which may
+// hold a secret.
+func verifySecretChecks(tb testing.TB, c secretChecks) {
+	tb.Helper()
+	rec := &recordTB{TB: tb}
+	c.secret(rec, "accounts/alice", []byte(checkStored), true, checkTyped)
+	c.secret(rec, "accounts/bob", nil, false, checkTyped)
+	c.argv(rec, "sudo", []string{"/bin/chainmail", "x" + checkTyped, "apply"}, checkTyped)
 	if len(rec.msgs) != 3 {
-		t.Fatalf("checks reported %d failures, want 3: %q", len(rec.msgs), rec.msgs)
+		tb.Errorf("checks reported %d failures, want 3", len(rec.msgs))
+		return
 	}
-	for _, m := range rec.msgs {
-		if strings.Contains(m, want) || strings.Contains(m, stored) {
-			t.Errorf("failure message holds a secret: %q", m)
+	for i, m := range rec.msgs {
+		if strings.Contains(m, checkTyped) || strings.Contains(m, checkStored) {
+			tb.Errorf("failure %d holds a secret", i)
 		}
 	}
 	for i, wantPart := range []string{"15 bytes", "no secret", "position 1 of 3"} {
 		if !strings.Contains(rec.msgs[i], wantPart) {
-			t.Errorf("failure %d = %q, want it to say %q", i, rec.msgs[i], wantPart)
+			tb.Errorf("failure %d (%d bytes) does not say %q", i, len(rec.msgs[i]), wantPart)
 		}
 	}
 
 	// Matching values report nothing.
-	rec = &recordTB{TB: t}
-	checkSecret(rec, "accounts/alice", []byte(want), true, want)
-	checkArgv(rec, "sudo", []string{"/bin/chainmail", "apply"}, want)
+	rec = &recordTB{TB: tb}
+	c.secret(rec, "accounts/alice", []byte(checkTyped), true, checkTyped)
+	c.argv(rec, "sudo", []string{"/bin/chainmail", "apply"}, checkTyped)
 	if len(rec.msgs) != 0 {
-		t.Fatalf("checks of good values reported %q", rec.msgs)
+		tb.Errorf("checks of good values reported %d failures, want none", len(rec.msgs))
+	}
+}
+
+// The checks the bootstrap tests use on secrets report a failure without
+// the secret in it.
+func TestSecretChecksHideValues(t *testing.T) {
+	t.Parallel()
+	verifySecretChecks(t, secretChecks{secret: checkSecret, argv: checkArgv})
+}
+
+// verifySecretChecks catches checks that print secrets without printing
+// them itself.
+func TestVerifySecretChecksHidesValues(t *testing.T) {
+	t.Parallel()
+	leaky := func(times int) secretChecks {
+		return secretChecks{
+			secret: func(tb testing.TB, name string, got []byte, _ bool, want string) {
+				for range times {
+					tb.Errorf("%s holds %q, want %q", name, got, want)
+				}
+			},
+			argv: func(tb testing.TB, what string, args []string, _ string) {
+				for range times {
+					tb.Errorf("%s argv %q", what, args)
+				}
+			},
+		}
+	}
+	for _, times := range []int{1, 2} {
+		rec := &recordTB{TB: t}
+		verifySecretChecks(rec, leaky(times))
+		if len(rec.msgs) == 0 {
+			t.Errorf("checks that print secrets %d times each passed", times)
+		}
+		for i, m := range rec.msgs {
+			if strings.Contains(m, checkTyped) || strings.Contains(m, checkStored) {
+				t.Errorf("checks printing %d times: failure %d of verifySecretChecks holds a secret", times, i)
+			}
+		}
 	}
 }

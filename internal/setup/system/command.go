@@ -26,21 +26,28 @@ var commandEnv = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C"}
 // by root.
 var hostFinder = finder{root: "/", dirs: trustedDirs, owner: 0}
 
+// maxSymlinkHops is how many symlinks the finder follows for one
+// candidate before it treats the path as a loop, matching Linux's limit.
+const maxSymlinkHops = 40
+
 // finder resolves a bare command name to the absolute path of a file only
 // owner can change. root is "/" on a real host and a test tree in tests;
-// dirs are host paths under it.
+// dirs are host paths under it. lstat reads path metadata without
+// following a final symlink; nil means os.Lstat.
 type finder struct {
 	root  string
 	dirs  []string
 	owner uint32
+	lstat func(string) (fs.FileInfo, error)
 }
 
 // LookupTrusted returns the absolute path, with every symlink resolved, of
 // the command name in the first of dirs that holds a trusted copy. A copy
-// is trusted when it resolves to a regular file that root owns and only
-// root can write, in directories that root owns and only root can write,
-// all the way up to "/". A missing command is an error wrapping
-// exec.ErrNotFound.
+// is trusted when every directory on the way to it, from "/" through the
+// search directory, is owned by root and writable only by root; every
+// symlink on the way is owned by root and sits in such a directory; and
+// it ends at a regular file root owns and only root can write. A missing
+// command is an error wrapping exec.ErrNotFound.
 func LookupTrusted(name string, dirs []string) (string, error) {
 	return finder{root: "/", dirs: dirs, owner: 0}.find(name)
 }
@@ -56,7 +63,7 @@ func (f finder) find(name string) (string, error) {
 	}
 	var refused []error
 	for _, dir := range f.dirs {
-		path, err := f.check(root, filepath.Join(root, dir, name))
+		path, err := f.resolve(root, filepath.Join("/", dir, name))
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
@@ -72,56 +79,131 @@ func (f finder) find(name string) (string, error) {
 	return "", fmt.Errorf("command %s not found in %s: %w", name, strings.Join(f.dirs, ", "), exec.ErrNotFound)
 }
 
-// check resolves candidate and returns the resolved path when it is a
-// regular file that it, and every directory above it up to root, is
-// trusted.
-func (f finder) check(root, candidate string) (string, error) {
-	path, err := filepath.EvalSymlinks(candidate)
+// resolve walks hostPath under root one component at a time, never
+// letting the OS follow a symlink, and returns the real path of the
+// regular file it ends at. Every directory it walks through, root
+// included, must pass trusted before anything in it is read or followed.
+// A symlink is followed one hop at a time, and only when owner owns the
+// link itself; its directory has already passed. The file it ends at must
+// pass trusted too. A missing component is an error wrapping
+// fs.ErrNotExist, so the caller can try the next directory.
+func (f finder) resolve(root, hostPath string) (string, error) {
+	fi, err := f.lstatPath(root)
 	if err != nil {
 		return "", err
 	}
-	if !within(root, path) {
-		return "", fmt.Errorf("%s resolves to %s, outside %s", candidate, path, root)
+	if !fi.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", root)
 	}
-	fi, err := os.Lstat(path)
+	if err := f.trusted(root, fi); err != nil {
+		return "", err
+	}
+
+	// cur is a directory that passed trusted and is not a symlink, so ".."
+	// can be resolved against it lexically.
+	cur := root
+	pending := splitPath(hostPath)
+	hops := 0
+	for len(pending) > 0 {
+		name := pending[0]
+		pending = pending[1:]
+		switch name {
+		case ".":
+			continue
+		case "..":
+			if cur == root {
+				if root == "/" {
+					continue
+				}
+				return "", fmt.Errorf("%s leads outside %s", hostPath, root)
+			}
+			cur = filepath.Dir(cur)
+			continue
+		}
+
+		next := filepath.Join(cur, name)
+		fi, err := f.lstatPath(next)
+		if err != nil {
+			return "", err
+		}
+
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			if err := f.ownedByOwner(next, fi); err != nil {
+				return "", fmt.Errorf("symlink %w", err)
+			}
+			hops++
+			if hops > maxSymlinkHops {
+				return "", fmt.Errorf("%s: too many symlinks", hostPath)
+			}
+			dest, err := os.Readlink(next)
+			if err != nil {
+				return "", err
+			}
+			if filepath.IsAbs(dest) {
+				dest = filepath.Clean(dest)
+				if !within(root, dest) {
+					return "", fmt.Errorf("%s points to %s, outside %s", next, dest, root)
+				}
+				cur = root
+				dest = strings.TrimPrefix(dest, root)
+			}
+			pending = append(splitPath(dest), pending...)
+			continue
+		}
+
+		if err := f.trusted(next, fi); err != nil {
+			return "", err
+		}
+		if len(pending) > 0 && !fi.IsDir() {
+			return "", fmt.Errorf("%s is not a directory", next)
+		}
+		cur = next
+	}
+
+	fi, err = f.lstatPath(cur)
 	if err != nil {
 		return "", err
 	}
 	if !fi.Mode().IsRegular() {
-		return "", fmt.Errorf("%s is not a regular file", path)
+		return "", fmt.Errorf("%s is not a regular file", cur)
 	}
-	if err := f.trusted(path, fi); err != nil {
-		return "", err
+	return cur, nil
+}
+
+// lstatPath reads path's metadata without following a final symlink.
+func (f finder) lstatPath(path string) (fs.FileInfo, error) {
+	if f.lstat != nil {
+		return f.lstat(path)
 	}
-	for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
-		fi, err := os.Lstat(dir)
-		if err != nil {
-			return "", err
-		}
-		if !fi.IsDir() {
-			return "", fmt.Errorf("%s is not a directory", dir)
-		}
-		if err := f.trusted(dir, fi); err != nil {
-			return "", err
-		}
-		if dir == root || dir == filepath.Dir(dir) {
-			return path, nil
-		}
-	}
+	return os.Lstat(path)
+}
+
+// splitPath splits a slash-separated path into its components, dropping
+// empty ones.
+func splitPath(path string) []string {
+	return strings.FieldsFunc(path, func(r rune) bool { return r == '/' })
 }
 
 // trusted refuses path unless the finder's owner owns it and neither its
 // group nor others can write it.
 func (f finder) trusted(path string, fi fs.FileInfo) error {
+	if err := f.ownedByOwner(path, fi); err != nil {
+		return err
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s is writable by its group or others (mode %v)", path, fi.Mode().Perm())
+	}
+	return nil
+}
+
+// ownedByOwner refuses path unless the finder's owner owns it.
+func (f finder) ownedByOwner(path string, fi fs.FileInfo) error {
 	uid, _, err := owner(fi)
 	if err != nil {
 		return err
 	}
 	if uid != f.owner {
 		return fmt.Errorf("%s is owned by uid %d, not %d", path, uid, f.owner)
-	}
-	if fi.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("%s is writable by its group or others (mode %v)", path, fi.Mode().Perm())
 	}
 	return nil
 }
@@ -153,6 +235,10 @@ func execRunner(find func(string) (string, error)) Runner {
 		// A multi-call binary such as busybox picks its applet from argv[0].
 		cmd.Args[0] = name
 		cmd.Env = append([]string(nil), commandEnv...)
+		// Never the caller's working directory: a relative argument, such
+		// as a file a shell would read, must not resolve against a
+		// directory the invoking user controls.
+		cmd.Dir = "/"
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()

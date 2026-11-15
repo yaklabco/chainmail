@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -83,6 +85,11 @@ type Env struct {
 	// DaemonStatus asks the daemon at socket for its admin status, giving
 	// up as quickly as AccountHealth. An error means it could not be asked.
 	DaemonStatus func(ctx context.Context, socket string) (DaemonInfo, error)
+	// Stat and EvalSymlinks read the filesystem when bootstrap tells
+	// whether two socket paths name the same file. Nil means os.Stat and
+	// filepath.EvalSymlinks.
+	Stat         func(path string) (fs.FileInfo, error)
+	EvalSymlinks func(path string) (string, error)
 }
 
 // DaemonInfo is what bootstrap needs from a daemon's admin status.
@@ -109,6 +116,22 @@ func DefaultEnv() Env {
 		env.ReadLine = func() (string, error) { return readTerminalLine(os.Stdin) }
 	}
 	return env
+}
+
+// stat is e.Stat, or os.Stat when it is nil.
+func (e Env) stat() func(string) (fs.FileInfo, error) {
+	if e.Stat == nil {
+		return os.Stat
+	}
+	return e.Stat
+}
+
+// evalSymlinks is e.EvalSymlinks, or filepath.EvalSymlinks when it is nil.
+func (e Env) evalSymlinks() func(string) (string, error) {
+	if e.EvalSymlinks == nil {
+		return filepath.EvalSymlinks
+	}
+	return e.EvalSymlinks
 }
 
 // location is the time zone for dates in tables and text.

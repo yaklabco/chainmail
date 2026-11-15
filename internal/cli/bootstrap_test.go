@@ -18,6 +18,7 @@ import (
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/config"
 	"github.com/yaklabco/chainmail/internal/setup"
 	"github.com/yaklabco/chainmail/internal/setup/setuptest"
 	"github.com/yaklabco/chainmail/internal/setup/system"
@@ -66,6 +67,9 @@ type bootRig struct {
 	resolver fakeResolver
 	health   func(ctx context.Context, socket, account string) (*setup.AccountHealth, error)
 	status   func(ctx context.Context, socket string) (DaemonInfo, error)
+	// fsRoot stands in for "/" when bootstrap asks whether two socket
+	// paths name the same file. It starts empty.
+	fsRoot string
 
 	// Recorded by run.
 	linesLeft     []string
@@ -96,6 +100,7 @@ func newBootRig(t *testing.T, goos string) *bootRig {
 		exe:    home + "/bin/chainmail",
 		uid:    int(alice.UID),
 		getenv: map[string]string{},
+		fsRoot: realTempDir(t),
 	}
 	h.Files.Dir(home, alice.UID, alice.GID, 0o755).
 		Dir(home+"/bin", alice.UID, alice.GID, 0o755).
@@ -134,6 +139,18 @@ func (r *bootRig) env() Env {
 		},
 		Now:   r.clock.Now,
 		After: r.after,
+		Stat:  func(p string) (os.FileInfo, error) { return os.Stat(filepath.Join(r.fsRoot, p)) },
+		EvalSymlinks: func(p string) (string, error) {
+			got, err := filepath.EvalSymlinks(filepath.Join(r.fsRoot, p))
+			if err != nil {
+				return "", err
+			}
+			rel, err := filepath.Rel(r.fsRoot, got)
+			if err != nil || strings.HasPrefix(rel, "..") {
+				return "", fmt.Errorf("%s leaves the test root", p)
+			}
+			return filepath.Join("/", rel), nil
+		},
 	}
 	if r.terminal {
 		env.StdoutTerminal = true
@@ -689,6 +706,199 @@ func TestBootstrapOtherSocketUnreachableWarns(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The --socket flag selects the socket this run's client would dial, as
+// it does for every other command, so a daemon answering there is checked
+// the same way: production refuses, dev and silence go ahead.
+func TestBootstrapSocketFlagSelectsDaemon(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		status func(context.Context, string) (DaemonInfo, error)
+		refuse bool
+	}{
+		{
+			name:   "production",
+			status: func(context.Context, string) (DaemonInfo, error) { return DaemonInfo{Version: "0.9.0"}, nil },
+			refuse: true,
+		},
+		{
+			name:   "dev",
+			status: func(context.Context, string) (DaemonInfo, error) { return DaemonInfo{Dev: true, Version: "0.9.0"}, nil },
+		},
+		{
+			name: "unreachable",
+			status: func(context.Context, string) (DaemonInfo, error) {
+				return DaemonInfo{}, errors.New("dial unix: no such file or directory")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newBootRig(t, "linux")
+			r.stdin = bootSecret
+			r.status = tt.status
+			got := r.run("--socket", otherSocket, "alice@gmail.com", "--yes")
+			if !slices.Equal(r.statusAsked, []string{otherSocket}) {
+				t.Errorf("status asked of %q, want only %s", r.statusAsked, otherSocket)
+			}
+			if tt.refuse {
+				wantError(t, got, api.ExitUsage, otherSocket, "--socket", "production")
+				if len(r.sudoArgs) > 0 {
+					t.Error("sudo was called")
+				}
+				r.noChanges()
+				return
+			}
+			if got.code != 0 {
+				t.Fatalf("exit %d: %s", got.code, got.stderr)
+			}
+			if len(r.sudoArgs) != 1 {
+				t.Errorf("sudo called %d times, want once", len(r.sudoArgs))
+			}
+		})
+	}
+}
+
+// On macOS the built-in default socket is not the layout's, so with
+// nothing selected the client dials the default: a production daemon
+// answering there is another installation.
+func TestBootstrapMacDefaultSocketDaemon(t *testing.T) {
+	t.Parallel()
+	r := newBootRig(t, "darwin")
+	r.stdin = bootSecret
+	if r.l.Socket == config.DefaultSocket {
+		t.Fatalf("the macOS layout socket is the default %s", config.DefaultSocket)
+	}
+	r.status = func(context.Context, string) (DaemonInfo, error) { return DaemonInfo{Version: "0.9.0"}, nil }
+	got := r.run("alice@icloud.com", "--yes")
+	wantError(t, got, api.ExitUsage, config.DefaultSocket, "production")
+	if !slices.Equal(r.statusAsked, []string{config.DefaultSocket}) {
+		t.Errorf("status asked of %q, want only %s", r.statusAsked, config.DefaultSocket)
+	}
+	if len(r.sudoArgs) > 0 {
+		t.Error("sudo was called")
+	}
+	r.noChanges()
+
+	// Nothing answering at the default is no reason to stop.
+	r2 := newBootRig(t, "darwin")
+	r2.stdin = bootSecret
+	if got := r2.run("alice@icloud.com", "--yes"); got.code != 0 {
+		t.Fatalf("nothing at the default: exit %d: %s", got.code, got.stderr)
+	}
+	if !slices.Equal(r2.statusAsked, []string{config.DefaultSocket}) {
+		t.Errorf("status asked of %q, want only %s", r2.statusAsked, config.DefaultSocket)
+	}
+}
+
+// realTempDir is a temporary directory with every symlink in its path
+// resolved.
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// aliasRun makes root hold /run/chainmail, with /var/run a symlink to
+// /run as on most Linux hosts, and the socket file itself when socket is
+// set.
+func aliasRun(t *testing.T, root string, socket bool) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, "run", "chainmail"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "var"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../run", filepath.Join(root, "var", "run")); err != nil {
+		t.Fatal(err)
+	}
+	if socket {
+		writeTestFile(t, filepath.Join(root, "run", "chainmail", "chainmail.sock"), "")
+	}
+}
+
+// sameSocket tells two names for one socket file from two sockets.
+func TestSameSocket(t *testing.T) {
+	t.Parallel()
+	root := realTempDir(t)
+	aliasRun(t, root, true)
+	writeTestFile(t, filepath.Join(root, "run", "chainmail", "other.sock"), "")
+	at := func(p string) string { return filepath.Join(root, p) }
+	tests := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"one file through a symlinked directory", at("/var/run/chainmail/chainmail.sock"), at("/run/chainmail/chainmail.sock"), true},
+		{"a missing file through a symlinked directory", at("/var/run/chainmail/new.sock"), at("/run/chainmail/new.sock"), true},
+		{"two files in one directory", at("/run/chainmail/other.sock"), at("/run/chainmail/chainmail.sock"), false},
+		{"a missing file next to an existing one", at("/run/chainmail/new.sock"), at("/run/chainmail/chainmail.sock"), false},
+		{"unresolvable paths that clean to one", root + "/none/./x/../chainmail.sock", at("/none/chainmail.sock"), true},
+		{"unresolvable paths that differ", at("/none/a.sock"), at("/none/b.sock"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sameSocket(Env{}, tt.a, tt.b); got != tt.want {
+				t.Errorf("sameSocket(%s, %s) = %v, want %v", tt.a, tt.b, got, tt.want)
+			}
+		})
+	}
+}
+
+// A socket selected through another name for the layout's socket, such as
+// /var/run for /run, is the installation bootstrap sets up, not another
+// one: its daemon is not asked about and bootstrap goes ahead.
+func TestBootstrapAliasedLayoutSocket(t *testing.T) {
+	t.Parallel()
+	const alias = "/var/run/chainmail/chainmail.sock"
+	for _, socketExists := range []bool{true, false} {
+		for _, how := range []string{"env", "flag"} {
+			t.Run(fmt.Sprintf("%s socket=%v", how, socketExists), func(t *testing.T) {
+				t.Parallel()
+				r := newBootRig(t, "linux")
+				r.stdin = bootSecret
+				aliasRun(t, r.fsRoot, socketExists)
+				r.status = func(context.Context, string) (DaemonInfo, error) { return DaemonInfo{Version: "0.9.0"}, nil }
+				args := []string{"alice@gmail.com", "--yes"}
+				if how == "env" {
+					r.getenv["CHAINMAIL_SOCKET"] = alias
+				} else {
+					args = append([]string{"--socket", alias}, args...)
+				}
+				if got := r.run(args...); got.code != 0 {
+					t.Fatalf("exit %d: %s", got.code, got.stderr)
+				}
+				if len(r.statusAsked) > 0 {
+					t.Errorf("status asked of %q, want none", r.statusAsked)
+				}
+			})
+		}
+	}
+}
+
+// A different socket is still asked about when the layout's socket exists.
+func TestBootstrapDifferentSocketStillProbed(t *testing.T) {
+	t.Parallel()
+	r := newBootRig(t, "linux")
+	r.stdin = bootSecret
+	aliasRun(t, r.fsRoot, true)
+	writeTestFile(t, filepath.Join(r.fsRoot, otherSocket), "")
+	r.getenv["CHAINMAIL_SOCKET"] = otherSocket
+	r.status = func(context.Context, string) (DaemonInfo, error) { return DaemonInfo{Version: "0.9.0"}, nil }
+	got := r.run("alice@gmail.com", "--yes")
+	wantError(t, got, api.ExitUsage, otherSocket, "production")
+	if !slices.Equal(r.statusAsked, []string{otherSocket}) {
+		t.Errorf("status asked of %q, want only %s", r.statusAsked, otherSocket)
+	}
+	r.noChanges()
 }
 
 // With no other socket selected, no other daemon is asked about.
