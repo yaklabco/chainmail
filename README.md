@@ -114,12 +114,15 @@ sudo systemd-creds encrypt --name=vault-key vault-key chainmail-vault-key.cred
 rm vault-key
 ```
 
-Without a saved key, stop the daemon, move the old vault aside, and seal a new key in place of the old credential. The new key goes straight from `age-keygen` into `systemd-creds` and is never shown. Commit the new file and rebuild, which starts the daemon again. Then run bootstrap once for each account to enter its password again:
+Without a saved key, stop the daemon, move the old vault aside, and seal a new key in place of the old credential. Run the commands below in the directory that holds the old credential. One root shell makes the new key with `age-keygen` and pipes it straight into `systemd-creds`. The key never passes through a process of yours and is never shown. The new credential replaces the old one only after it decrypts to a valid age identity. Commit the new file and rebuild, which starts the daemon again. Then run bootstrap once for each account to enter its password again:
 
 ```sh
 sudo systemctl stop chainmail
 sudo mv /var/lib/chainmail/vault.age /var/lib/chainmail/vault.age.lost
-nix shell nixpkgs#age -c age-keygen 2>/dev/null | sudo systemd-creds encrypt --name=vault-key - chainmail-vault-key.cred
+sudo nix shell nixpkgs#age -c bash -euo pipefail -c '
+  age-keygen 2>/dev/null | systemd-creds encrypt --name=vault-key - chainmail-vault-key.cred.new
+  systemd-creds decrypt --name=vault-key chainmail-vault-key.cred.new - | age-keygen -y >/dev/null
+  mv chainmail-vault-key.cred.new chainmail-vault-key.cred'
 ```
 
 ### Developing chainmail
