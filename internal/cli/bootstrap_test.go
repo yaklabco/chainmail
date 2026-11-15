@@ -70,15 +70,20 @@ type bootRig struct {
 	// fsRoot stands in for "/" when bootstrap asks whether two socket
 	// paths name the same file. It starts empty.
 	fsRoot string
+	// units and creds fake systemd's unit facts and systemd-creds on a
+	// NixOS host; nil elsewhere.
+	units *setuptest.Units
+	creds *setuptest.Creds
 
 	// Recorded by run.
-	linesLeft     []string
-	sudoArgs      [][]string
-	sudoStdin     [][]byte
-	passwordReads int
-	healthAsked   []string
-	statusAsked   []string
-	stderr        bytes.Buffer
+	runnerBinaries []string // the binaries DaemonRunnerFor built runners for
+	linesLeft      []string
+	sudoArgs       [][]string
+	sudoStdin      [][]byte
+	passwordReads  int
+	healthAsked    []string
+	statusAsked    []string
+	stderr         bytes.Buffer
 }
 
 // newBootRig is a fresh host for goos with alice's binary in her home.
@@ -132,7 +137,11 @@ func (r *bootRig) env() Env {
 		Resolver:   r.resolver,
 		SetupFiles: r.host.Files, SetupAccounts: r.host.Accounts, SetupService: r.svc,
 		AsDaemon: r.daemon.Run,
-		OpenTTY:  func() (io.ReadWriteCloser, error) { return r.tty, nil },
+		DaemonRunnerFor: func(binary string) func(context.Context, io.Reader, io.Writer, ...string) error {
+			r.runnerBinaries = append(r.runnerBinaries, binary)
+			return r.daemon.Run
+		},
+		OpenTTY: func() (io.ReadWriteCloser, error) { return r.tty, nil },
 		AccountHealth: func(ctx context.Context, socket, account string) (*setup.AccountHealth, error) {
 			r.healthAsked = append(r.healthAsked, socket+" "+account)
 			return r.health(ctx, socket, account)
@@ -155,6 +164,12 @@ func (r *bootRig) env() Env {
 			}
 			return filepath.Join("/", rel), nil
 		},
+	}
+	if r.units != nil {
+		env.SetupUnits = r.units
+	}
+	if r.creds != nil {
+		env.SetupCreds = r.creds
 	}
 	if r.terminal {
 		env.StdoutTerminal = true
@@ -279,14 +294,35 @@ func TestBootstrapRefusesRoot(t *testing.T) {
 	r.noChanges()
 }
 
-func TestBootstrapRefusesNixOS(t *testing.T) {
+func TestBootstrapDispatchesNixOS(t *testing.T) {
 	t.Parallel()
-	r := newBootRig(t, "linux")
-	r.host.Files.File("/etc/NIXOS", 0, 0, 0o644, nil)
-	got := r.run("alice@gmail.com", "--yes")
-	wantError(t, got, api.ExitUsage, "https://chainmail.sh/docs/operations/deploy#nixos")
-	if len(r.sudoArgs) > 0 {
-		t.Error("sudo was called")
+	// /etc/NIXOS makes bootstrap plan for NixOS: a sealed key and Nix
+	// files, never the users, config and service of other Linux hosts.
+	r := newNixBootRig(t, nil)
+	r.terminal = true
+	got := r.run("alice@gmail.com", "--dry-run", "--nix-dir", nixTestDir)
+	if got.code != 0 {
+		t.Fatalf("exit %d: %s", got.code, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "seal a new vault key into "+nixTestDir+"/chainmail-vault-key.cred") {
+		t.Errorf("plan is not the NixOS plan:\n%s", got.stdout)
+	}
+	if strings.Contains(got.stdout, "create user chainmail") {
+		t.Errorf("NixOS plan creates the daemon user:\n%s", got.stdout)
+	}
+
+	// Elsewhere --nix-dir is ignored, without a warning.
+	r2 := newBootRig(t, "linux")
+	r2.terminal = true
+	got = r2.run("alice@gmail.com", "--dry-run", "--nix-dir", nixTestDir)
+	if got.code != 0 {
+		t.Fatalf("Linux with --nix-dir: exit %d: %s", got.code, got.stderr)
+	}
+	if !strings.Contains(got.stdout, "create user chainmail") || strings.Contains(got.stdout, nixTestDir) {
+		t.Errorf("Linux plan with --nix-dir:\n%s", got.stdout)
+	}
+	if got.stderr != "" {
+		t.Errorf("Linux with --nix-dir warned: %s", got.stderr)
 	}
 }
 
