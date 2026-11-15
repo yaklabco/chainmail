@@ -1,0 +1,13 @@
+# Written by chainmail bootstrap. Edits are kept for config.toml only.
+
+[daemon]
+socket = "/var/db/chainmail/chainmail.sock"
+
+[oauth_clients.google]
+client_id = "id.apps.googleusercontent.com"
+
+[accounts.jane]
+provider = "google-workspace"
+address = "jane@example.com"
+auth = "oauth2"
+oauth_client = "google"
