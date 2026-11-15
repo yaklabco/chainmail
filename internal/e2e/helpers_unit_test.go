@@ -1,7 +1,9 @@
 package e2e
 
 import (
+	"encoding/pem"
 	"io/fs"
+	"slices"
 	"strings"
 	"testing"
 
@@ -295,5 +297,77 @@ func TestInstallChanges(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBundleHolds(t *testing.T) {
+	t.Parallel()
+	pemBlock := func(der string) string {
+		return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte(der)}))
+	}
+	bundle := []byte(pemBlock("one") + "\n" + pemBlock("two"))
+	if !bundleHolds(bundle, []byte("two")) {
+		t.Error("bundleHolds missed the second certificate")
+	}
+	if bundleHolds(bundle, []byte("three")) {
+		t.Error("bundleHolds found a certificate the bundle lacks")
+	}
+	if bundleHolds(nil, []byte("one")) {
+		t.Error("bundleHolds found a certificate in an empty bundle")
+	}
+	if bundleHolds([]byte(pemBlock("twofold")), []byte("two")) {
+		t.Error("bundleHolds matched part of a certificate")
+	}
+}
+
+func TestKeychainHasSHA1(t *testing.T) {
+	t.Parallel()
+	listing := "SHA-256 hash: 1111\nSHA-1 hash: AB12CD\nkeychain: \"/Library/Keychains/System.keychain\"\n" +
+		"version: 512\nSHA-1 hash: EF34\n"
+	cases := map[string]bool{"AB12CD": true, "ab12cd": true, "EF34": true, "1111": false, "AB12": false, "": false}
+	for sum, want := range cases {
+		if got := keychainHasSHA1(listing, sum); got != want {
+			t.Errorf("keychainHasSHA1(%q) = %v, want %v", sum, got, want)
+		}
+	}
+}
+
+func TestTrustListsName(t *testing.T) {
+	t.Parallel()
+	dump := "Number of trusted certs = 2\nCert 0: Some Root\n   Number of trust settings : 0\n" +
+		"Cert 1: chainmail test\n   Number of trust settings : 1\n   Trust Setting 0:\n"
+	cases := map[string]bool{"chainmail test": true, "Some Root": true, "chainmail": false, "": false}
+	for name, want := range cases {
+		if got := trustListsName(dump, name); got != want {
+			t.Errorf("trustListsName(%q) = %v, want %v", name, got, want)
+		}
+	}
+	if trustListsName("", "chainmail test") {
+		t.Error("trustListsName found a name in an empty dump")
+	}
+}
+
+func TestDeletable(t *testing.T) {
+	t.Parallel()
+	cases := map[string]bool{
+		"/etc/chainmail": true, "/Library/Application Support/chainmail": true,
+		"/etc": false, "/usr/local/libexec": false, "chainmail": false, "": false, "/var/lib/chainmail/..": false,
+	}
+	for dir, want := range cases {
+		if got := deletable(dir); got != want {
+			t.Errorf("deletable(%q) = %v, want %v", dir, got, want)
+		}
+	}
+}
+
+func TestAncestors(t *testing.T) {
+	t.Parallel()
+	got := ancestors("/var/lib/chainmail", "/usr/local/libexec/chainmail", "/etc/chainmail", "/var/log/chainmail")
+	want := []string{"/usr/local/libexec", "/usr/local", "/var/lib", "/var/log", "/etc", "/usr", "/var"}
+	if !slices.Equal(got, want) {
+		t.Errorf("ancestors = %q, want %q", got, want)
+	}
+	if got := ancestors("/", "relative/path"); len(got) != 0 {
+		t.Errorf("ancestors of the root and a relative path = %q, want none", got)
 	}
 }

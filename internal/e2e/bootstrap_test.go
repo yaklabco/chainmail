@@ -6,11 +6,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha1" // security delete-certificate -Z names a certificate by its SHA-1 hash
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -75,6 +73,7 @@ func TestBootstrapEndToEnd(t *testing.T) {
 	h := newHost(t, setup.LayoutFor(p))
 	h.requireSudo()
 	h.requireClean()
+	h.recordMissing()
 	// Registered before the first change, so a failure part way still
 	// leaves the runner clean. Cleanups run last first: the log dump
 	// below runs before this.
@@ -129,6 +128,10 @@ type host struct {
 	cliConfig        string
 	cliConfigExisted bool
 	caPEM            []byte
+	// made is what the test has changed, and missing lists the directories
+	// that did not exist before it, deepest first: cleanup removes those.
+	made    made
+	missing []string
 }
 
 func newHost(t *testing.T, l setup.Layout) *host {
@@ -140,7 +143,7 @@ func newHost(t *testing.T, l setup.Layout) *host {
 	h := &host{t: t, l: l, runner: u.Username, cliConfig: cliConfigPath(os.Getenv)}
 	if h.cliConfig != "" {
 		_, err := os.Lstat(h.cliConfig)
-		h.cliConfigExisted = err == nil
+		h.cliConfigExisted = !errors.Is(err, fs.ErrNotExist)
 	}
 	return h
 }
@@ -219,6 +222,7 @@ func (h *host) trustCA(ca *tlstest.CA) {
 		h.t.Fatal(err)
 	}
 	h.caPEM = cert
+	h.made.ca = true
 	file := filepath.Join(h.t.TempDir(), "chainmail-e2e-ca.pem")
 	if err := os.WriteFile(file, cert, 0o644); err != nil {
 		h.t.Fatal(err)
@@ -230,62 +234,6 @@ func (h *host) trustCA(ca *tlstest.CA) {
 	case setup.Darwin:
 		h.mustSudo("security", "add-trusted-cert", "-d", "-r", "trustRoot", "-k", systemKeychain, file)
 	}
-}
-
-// untrustCA removes the test CA from the system trust store.
-func (h *host) untrustCA() {
-	h.t.Helper()
-	switch h.l.Platform {
-	case setup.Linux:
-		h.cleanupStep("rm", "-f", linuxCAFile)
-		h.cleanupStep("update-ca-certificates", "--fresh")
-	case setup.Darwin:
-		if h.caPEM == nil {
-			return
-		}
-		// This runs in a cleanup, where t.TempDir may not be called.
-		file, err := writeTemp(h.caPEM)
-		if err != nil {
-			h.t.Errorf("cleanup: %v", err)
-			return
-		}
-		defer func() { _ = os.Remove(file) }() // a leftover temp file harms nothing
-		h.cleanupStep("security", "remove-trusted-cert", "-d", file)
-		sum, err := certSHA1(h.caPEM)
-		if err != nil {
-			h.t.Errorf("cleanup: %v", err)
-			return
-		}
-		h.cleanupStep("security", "delete-certificate", "-Z", sum, systemKeychain)
-	}
-}
-
-// writeTemp writes data to a new temp file readable by root and returns
-// its path.
-func writeTemp(data []byte) (string, error) {
-	f, err := os.CreateTemp("", "chainmail-e2e-ca-*.pem")
-	if err != nil {
-		return "", err
-	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close() // the write error is the one to report
-		return "", err
-	}
-	if err := f.Close(); err != nil {
-		return "", err
-	}
-	return f.Name(), nil
-}
-
-// certSHA1 is the SHA-1 hash of a PEM certificate's DER, in the form
-// security delete-certificate -Z takes.
-func certSHA1(pemCert []byte) (string, error) {
-	block, _ := pem.Decode(pemCert)
-	if block == nil {
-		return "", errors.New("the test CA is not PEM")
-	}
-	sum := sha1.Sum(block.Bytes)
-	return strings.ToUpper(hex.EncodeToString(sum[:])), nil
 }
 
 // buildChainmail builds chainmail with the e2e tag, the only build that
@@ -318,6 +266,7 @@ func bootstrapEnv(imapEP, smtpEP provider.Endpoint) []string {
 // and returns its result. Anything but exit 0 fails the test.
 func (h *host) bootstrap(bin string, env []string, password string) setup.Result {
 	h.t.Helper()
+	h.made.install = true
 	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "bootstrap", e2eAddress, "--provider", "hostinger", "--yes", "--output", "json")
@@ -504,6 +453,7 @@ func (h *host) checkOtherUserRefused() {
 // createOtherUser makes otherUser, with no membership in the client group.
 func (h *host) createOtherUser() {
 	h.t.Helper()
+	h.made.otherUser = true
 	if h.l.Platform == setup.Linux {
 		h.mustSudo("useradd", "--system", "--no-create-home", "--shell", "/usr/sbin/nologin", otherUser)
 		return
@@ -647,84 +597,6 @@ func (h *host) dumpLogsOnFailure() {
 		out, err = h.sudo("tail", "-n", "100", h.l.LogFile)
 	}
 	h.t.Logf("daemon log (%v):\n%s", err, out)
-}
-
-// cleanupStep runs one cleanup command as root. A step that fails is
-// logged and the next one runs: after a failed bootstrap some of what
-// they remove was never made.
-func (h *host) cleanupStep(args ...string) {
-	h.t.Helper()
-	if _, err := h.sudo(args...); err != nil {
-		h.t.Logf("cleanup: %v", err)
-	}
-}
-
-// removable lists the directories cleanup deletes. Each is a layout path
-// that bootstrap creates whole; parents such as /usr/local/libexec stay.
-func (h *host) removable() []string {
-	dirs := []string{h.l.ConfigDir, h.l.StateDir, h.l.SocketDir}
-	switch h.l.Platform {
-	case setup.Linux:
-		dirs = append(dirs, h.l.BinaryDir)
-	case setup.Darwin:
-		// BinaryDir is .../chainmail/bin; bootstrap made .../chainmail too.
-		dirs = append(dirs, filepath.Dir(h.l.BinaryDir), h.l.LogDir)
-	}
-	return dirs
-}
-
-// cleanup stops and removes the service, the users, the group, every
-// path bootstrap made and the test CA, then checks they are gone, so a
-// rerun on the same runner starts clean.
-func (h *host) cleanup() {
-	h.t.Helper()
-	switch h.l.Platform {
-	case setup.Linux:
-		h.cleanupStep("systemctl", "disable", "--now", h.l.ServiceLabel)
-		h.cleanupStep("rm", "-f", h.l.Service)
-		h.cleanupStep("systemctl", "daemon-reload")
-		h.cleanupStep("systemctl", "reset-failed", h.l.ServiceLabel)
-		h.cleanupStep("userdel", otherUser)
-		h.cleanupStep("userdel", h.l.DaemonUser)
-		if _, err := user.LookupGroup(h.l.DaemonUser); err == nil {
-			h.cleanupStep("groupdel", h.l.DaemonUser)
-		}
-		h.cleanupStep("groupdel", h.l.ClientGroup)
-	case setup.Darwin:
-		h.cleanupStep("launchctl", "bootout", "system/"+h.l.ServiceLabel)
-		h.cleanupStep("rm", "-f", h.l.Service)
-		h.cleanupStep("dscl", ".", "-delete", "/Users/"+otherUser)
-		h.cleanupStep("dscl", ".", "-delete", "/Users/"+h.l.DaemonUser)
-		h.cleanupStep("dscl", ".", "-delete", "/Groups/"+h.l.ClientGroup)
-		h.cleanupStep("dscacheutil", "-flushcache")
-		if h.cliConfig != "" && !h.cliConfigExisted {
-			if err := os.Remove(h.cliConfig); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				h.t.Logf("cleanup: %v", err)
-			}
-		}
-	}
-	for _, dir := range h.removable() {
-		if !filepath.IsAbs(dir) || !strings.Contains(dir, "chainmail") {
-			h.t.Errorf("cleanup: refusing to delete %q", dir)
-			continue
-		}
-		h.cleanupStep("rm", "-rf", dir)
-	}
-	h.untrustCA()
-
-	for _, name := range []string{h.l.DaemonUser, otherUser} {
-		if _, err := user.Lookup(name); err == nil {
-			h.t.Errorf("cleanup left user %s", name)
-		}
-	}
-	if _, err := user.LookupGroup(h.l.ClientGroup); err == nil {
-		h.t.Errorf("cleanup left group %s", h.l.ClientGroup)
-	}
-	for _, e := range h.l.Entries() {
-		if _, err := os.Lstat(e.Path); !errors.Is(err, fs.ErrNotExist) {
-			h.t.Errorf("cleanup left %s (%v)", e.Path, err)
-		}
-	}
 }
 
 // randomPassword is a fresh password for the test servers.
