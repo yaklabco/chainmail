@@ -43,6 +43,12 @@ func TestValidate(t *testing.T) {
 			h.files.File(l.Config, 0, 0, 0o644, []byte(handWritten))
 			return l, mustBuild(t, l, h.inspect(t, Linux), gmailRequest())
 		}},
+		{"second account on a config keeping the cache in the state directory", func(t *testing.T) (Layout, Plan) {
+			l := LayoutFor(Linux)
+			h := installedHost(Linux, aliceGmail, nil)
+			h.files.File(l.Config, 0, 0, 0o644, []byte(handWritten+"\n[cache]\ndir = \""+l.StateDir+"\"\n"))
+			return l, mustBuild(t, l, h.inspect(t, Linux), gmailRequest())
+		}},
 	}
 	for _, tc := range valid {
 		t.Run("valid "+tc.name, func(t *testing.T) {
@@ -194,6 +200,14 @@ func TestValidate(t *testing.T) {
 		{name: "config redirecting the client group", mutate: func(p *Plan) {
 			a := at(p, ActWriteConfig)
 			a.Data = append([]byte("[daemon]\nclient_group = \"users\"\n\n"), a.Data...)
+		}},
+		{name: "config moving the cache out of the state directory", mutate: func(p *Plan) {
+			a := at(p, ActWriteConfig)
+			a.Data = append(a.Data, "\n[cache]\ndir = \"/tmp/chainmail-cache\"\n"...)
+		}},
+		{name: "config moving the cache below the state directory", mutate: func(p *Plan) {
+			a := at(p, ActWriteConfig)
+			a.Data = append(a.Data, "\n[cache]\ndir = \"/var/lib/chainmail/cache\"\n"...)
 		}},
 	}
 	for _, tc := range refused {

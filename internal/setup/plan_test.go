@@ -883,3 +883,112 @@ func TestPlanJSONRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// metadataCase is an installed host with one file's bytes unchanged but
+// its owner, group or mode not the layout's.
+type metadataCase struct {
+	name   string
+	entry  string // the layout entry tampered with
+	action string // the action Build must plan for it
+	// tamper rewrites the entry's file with its own bytes and new metadata.
+	tamper func(h host, l Layout, daemonUID uint32)
+}
+
+// metadataCases are the files whose metadata Build repairs.
+func metadataCases() []metadataCase {
+	same := func(name string, uid, gid uint32, mode fs.FileMode) func(h host, l Layout, daemonUID uint32) {
+		return func(h host, l Layout, daemonUID uint32) {
+			e, _ := l.Entry(name)
+			data, _, _ := h.files.Content(e.Path)
+			if uid == ownerIsDaemon {
+				uid = daemonUID
+			}
+			h.files.File(e.Path, uid, gid, mode, data)
+		}
+	}
+	return []metadataCase{
+		{"binary with mode 0644", "binary", "install-binary binary", same("binary", 0, 0, 0o644)},
+		{"setuid binary", "binary", "install-binary binary", same("binary", 0, 0, 0o755|fs.ModeSetuid)},
+		{"setgid binary", "binary", "install-binary binary", same("binary", 0, 0, 0o755|fs.ModeSetgid)},
+		{"binary owned by the daemon user", "binary", "install-binary binary", same("binary", ownerIsDaemon, 0, 0o755)},
+		{"config owned by the daemon user", "config", "write-config config", same("config", ownerIsDaemon, 0, 0o644)},
+		{"config readable by owner only", "config", "write-config config", same("config", 0, 0, 0o600)},
+		{"config in the client group", "config", "write-config config", same("config", 0, fakeClientsGID, 0o644)},
+		{"executable service file", "service", "write-service service", same("service", 0, 0, 0o755)},
+		{"service file owned by the daemon user", "service", "write-service service", same("service", ownerIsDaemon, 0, 0o644)},
+		{"sticky service file", "service", "write-service service", same("service", 0, 0, 0o644|fs.ModeSticky)},
+	}
+}
+
+// ownerIsDaemon stands for the daemon user's uid in metadataCases.
+const ownerIsDaemon = ^uint32(0)
+
+func TestBuildRepairsFileMetadata(t *testing.T) {
+	t.Parallel()
+	for _, p := range []Platform{Linux, Darwin} {
+		for _, tc := range metadataCases() {
+			t.Run(string(p)+" "+tc.name, func(t *testing.T) {
+				t.Parallel()
+				l := LayoutFor(p)
+				h := installedHost(p, aliceGmail, nil)
+				e, _ := l.Entry(tc.entry)
+				before, _, _ := h.files.Content(e.Path)
+				daemon, _ := h.accounts.User(l.DaemonUser)
+				tc.tamper(h, l, daemon.UID)
+				cur := h.inspect(t, p)
+				cur.Health = okHealth
+				plan := mustBuild(t, l, cur, gmailRequest())
+
+				want := append(dirEnsures(l), tc.action, "activate-service", "test-account alice")
+				wantActions(t, plan.Actions, want)
+				if !plan.ServiceChanged {
+					t.Error("ServiceChanged = false after a metadata repair")
+				}
+				if tc.entry != "binary" {
+					a, _ := findAction(plan, ActionKind(strings.Fields(tc.action)[0]))
+					if !bytes.Equal(a.Data, before) {
+						t.Errorf("%s rewrites %d bytes, want the %d bytes already there", tc.action, len(a.Data), len(before))
+					}
+				}
+				if err := Validate(l, plan); err != nil {
+					t.Errorf("Validate: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestBuildRefusesGroupWritableService(t *testing.T) {
+	t.Parallel()
+	// A group-writable file fails the trust check before any planning, as
+	// it always has: the repair covers only metadata the trust check
+	// accepts.
+	l := LayoutFor(Linux)
+	h := installedHost(Linux, aliceGmail, nil)
+	data, _, _ := h.files.Content(l.Service)
+	h.files.File(l.Service, 0, 0, 0o664, data)
+	r := buildRefusal(t, Linux, h, gmailRequest())
+	wantMentions(t, "refusal", r.Msg, l.Service, "writable by group or others")
+}
+
+func TestBuildConfigRepairValidateWouldRefuse(t *testing.T) {
+	t.Parallel()
+	// The account has a hand-written endpoint override, which a plan may
+	// not carry, so the config cannot be rewritten through a plan. Build
+	// says how to fix the metadata by hand instead of planning a rewrite
+	// bootstrap apply would refuse.
+	l := LayoutFor(Linux)
+	h := installedHost(Linux, aliceGmail, nil)
+	cfg := append(NewConfig(l, aliceGmail, nil), "\n[accounts.alice.imap]\nhost = \"imap.example.org\"\nport = 993\n"...)
+	h.files.File(l.Config, 0, 0, 0o644, cfg)
+	cur := h.inspect(t, Linux)
+	cur.Health = okHealth
+	if _, err := Build(l, cur, gmailRequest()); err != nil {
+		t.Fatalf("Build with root-owned metadata: %v", err)
+	}
+
+	h.files.File(l.Config, fakeLinuxDaemon, 0, 0o644, cfg)
+	r := buildRefusal(t, Linux, h, gmailRequest())
+	wantMentions(t, "refusal", r.Msg, l.Config, "owner")
+	wantMentions(t, "hint", r.Hint, "chown root:root "+l.Config, "chmod 0644 "+l.Config)
+}

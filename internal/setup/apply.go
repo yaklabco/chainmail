@@ -31,9 +31,18 @@ const (
 // connection and never answers cannot hold the install lock forever.
 // The account test logs in to the mail servers, so it gets longer.
 // auth login is interactive and has no bound.
+//
+// secret set gets the longest bound because it does more than store the
+// secret. For an account password the command then probes the account's
+// IMAP connection limit, opening connections one after another for up
+// to two minutes (internal/cli/secret.go, bounded by probeTimeout in
+// internal/daemon/limits.go). 150 s covers
+// the store and the whole probe, so a valid password is not stored and
+// then reported as a failure because the probe was cut off.
 const (
 	logReadTimeout     = 5 * time.Second
 	daemonCallTimeout  = 15 * time.Second
+	secretSetTimeout   = 150 * time.Second
 	accountTestTimeout = 60 * time.Second
 )
 
@@ -85,10 +94,11 @@ type Applier struct {
 	// means readinessTimeout; tests set it shorter.
 	readyTimeout time.Duration
 	// logTimeout bounds reading the service log after the daemon did not
-	// answer, callTimeout each admin status, accounts list and secret set
-	// outside the readiness wait, and testTimeout the account test. Zero
-	// means logReadTimeout, daemonCallTimeout and accountTestTimeout.
-	logTimeout, callTimeout, testTimeout time.Duration
+	// answer, callTimeout each admin status and accounts list outside the
+	// readiness wait, secretTimeout the secret set with its probe, and
+	// testTimeout the account test. Zero means logReadTimeout,
+	// daemonCallTimeout, secretSetTimeout and accountTestTimeout.
+	logTimeout, callTimeout, secretTimeout, testTimeout time.Duration
 }
 
 // Input is what bootstrap apply reads from bootstrap.
@@ -632,8 +642,11 @@ func (a *Applier) readinessWait() time.Duration { return orDefault(a.readyTimeou
 // logWait bounds reading the service log.
 func (a *Applier) logWait() time.Duration { return orDefault(a.logTimeout, logReadTimeout) }
 
-// callWait bounds one admin status, accounts list or secret set.
+// callWait bounds one admin status or accounts list.
 func (a *Applier) callWait() time.Duration { return orDefault(a.callTimeout, daemonCallTimeout) }
+
+// secretWait bounds secret set, which probes the account after storing.
+func (a *Applier) secretWait() time.Duration { return orDefault(a.secretTimeout, secretSetTimeout) }
 
 // testWait bounds the account test.
 func (a *Applier) testWait() time.Duration { return orDefault(a.testTimeout, accountTestTimeout) }
@@ -795,7 +808,7 @@ func (r *applyRun) storeSecret(ctx context.Context) error {
 		return err
 	}
 	stdin := bytes.NewReader(r.in.Secret)
-	err := bounded(ctx, r.a.callWait(), "secret set", func(c context.Context) error {
+	err := bounded(ctx, r.a.secretWait(), "secret set", func(c context.Context) error {
 		return r.asDaemon(c, stdin, io.Discard, "secret", "set", r.plan.SecretName, "--output", "json")
 	})
 	if err != nil {

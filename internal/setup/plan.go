@@ -99,7 +99,10 @@ type Plan struct {
 // the existing vault key first, because the trust check trusts the daemon
 // user's uid. Then it checks the trust chain and every other refusal,
 // and plans actions only for what is missing or different. Directories
-// are always ensured, which fixes their owners and modes. It never plans
+// are always ensured, which fixes their owners and modes. The binary, the
+// config and the service definition are rewritten when their bytes differ
+// or when their owner, group or mode is not the layout's, so a rewrite
+// with unchanged bytes repairs their metadata. It never plans
 // a repair to an existing user or group: an account of the wrong shape is
 // refused.
 func Build(l Layout, cur Current, req Request) (Plan, error) {
@@ -155,32 +158,44 @@ func Build(l Layout, cur Current, req Request) (Plan, error) {
 			p.add(Action{Kind: ActEnsureDir, Entry: e.Name, Note: entryNote(l, e, "ensure directory")})
 		}
 	}
-	if cur.BinarySHA256 != req.ExecSHA256 {
-		verb := "install"
-		if cur.BinarySHA256 != "" {
-			verb = "update"
-		}
-		p.add(Action{Kind: ActInstallBin, Entry: "binary", Note: verb + " the service binary " + l.Binary})
-		p.ServiceChanged = true
+	binary, _ := l.Entry("binary")
+	switch {
+	case cur.BinarySHA256 == "":
+		p.add(Action{Kind: ActInstallBin, Entry: binary.Name, Note: "install the service binary " + l.Binary})
+	case cur.BinarySHA256 != req.ExecSHA256:
+		p.add(Action{Kind: ActInstallBin, Entry: binary.Name, Note: "update the service binary " + l.Binary})
+	case !cur.metadataOK(binary):
+		p.add(Action{Kind: ActInstallBin, Entry: binary.Name, Note: repairNote(l, binary)})
 	}
 	if !cur.KeyExists {
 		e, _ := l.Entry("vault-key")
 		p.add(Action{Kind: ActCreateKey, Entry: e.Name, Note: entryNote(l, e, "create the vault key")})
 		p.Backup = backup
-		p.ServiceChanged = true
 	}
-	if acct.config != nil {
-		note := "write " + l.Config + " with account " + acct.spec.Name
-		if cur.Config != nil {
-			note = "add account " + acct.spec.Name + " to " + l.Config
+	config, _ := l.Entry("config")
+	switch {
+	case acct.config != nil && cur.Config == nil:
+		p.add(Action{Kind: ActWriteConfig, Entry: config.Name, Data: acct.config, Note: "write " + l.Config + " with account " + acct.spec.Name})
+	case acct.config != nil:
+		p.add(Action{Kind: ActWriteConfig, Entry: config.Name, Data: acct.config, Note: "add account " + acct.spec.Name + " to " + l.Config})
+	case cur.Config != nil && !cur.metadataOK(config):
+		if err := checkConfigRepair(l, cur, p, config); err != nil {
+			return Plan{}, err
 		}
-		p.add(Action{Kind: ActWriteConfig, Entry: "config", Data: acct.config, Note: note})
-		p.ServiceChanged = true
+		p.add(Action{Kind: ActWriteConfig, Entry: config.Name, Data: cur.Config, Note: repairNote(l, config)})
 	}
-	if service := RenderService(l); !bytes.Equal(cur.Service, service) {
-		p.add(Action{Kind: ActWriteService, Entry: "service", Data: service, Note: "write the service definition " + l.Service})
-		p.ServiceChanged = true
+	service, _ := l.Entry("service")
+	switch rendered := RenderService(l); {
+	case !bytes.Equal(cur.Service, rendered):
+		p.add(Action{Kind: ActWriteService, Entry: service.Name, Data: rendered, Note: "write the service definition " + l.Service})
+	case !cur.metadataOK(service):
+		p.add(Action{Kind: ActWriteService, Entry: service.Name, Data: rendered, Note: repairNote(l, service)})
 	}
+	// Every file change restarts the daemon: a new binary, key, config or
+	// service definition, and a rewrite that only repairs metadata.
+	p.ServiceChanged = slices.ContainsFunc(p.Actions, func(a Action) bool {
+		return slices.Contains([]ActionKind{ActInstallBin, ActCreateKey, ActWriteConfig, ActWriteService}, a.Kind)
+	})
 	if p.ServiceChanged {
 		p.add(Action{Kind: ActActivate, Note: "start or restart " + l.ServiceLabel})
 	}
@@ -260,6 +275,64 @@ func isMember(u system.User, g *system.GroupInfo, name string) bool {
 // entryNote describes e with its owner and mode.
 func entryNote(l Layout, e Entry, what string) string {
 	return fmt.Sprintf("%s %s (%s:%s, %04o)", what, e.Path, ownerName(l, e.Owner), groupName(l, e.Group), e.Mode.Perm())
+}
+
+// repairNote describes rewriting e, whose bytes are unchanged, to give it
+// the layout's owner and mode.
+func repairNote(l Layout, e Entry) string {
+	return entryNote(l, e, "set the owner and mode of")
+}
+
+// metadataOK reports whether the file entry e, as Inspect found it, has
+// the layout's owner, group and mode exactly, special bits included. A
+// file that is missing or not a regular file counts as fine here: Build
+// writes it anyway, because it has no bytes to compare.
+func (cur Current) metadataOK(e Entry) bool {
+	info := cur.files[e.Name]
+	if !info.Exists || !info.Mode.IsRegular() {
+		return true
+	}
+	uid, gid, ok := cur.entryIDs(e)
+	return ok && info.UID == uid && info.GID == gid && info.Mode == e.Mode
+}
+
+// entryIDs resolves e's owner and group to the ids Inspect found, and
+// false when the user or group does not exist yet.
+func (cur Current) entryIDs(e Entry) (uid, gid uint32, ok bool) {
+	if e.Owner == OwnerDaemon {
+		if cur.DaemonUser == nil {
+			return 0, 0, false
+		}
+		uid = cur.DaemonUser.UID
+	}
+	var g *system.GroupInfo
+	switch e.Group {
+	case GroupDaemon:
+		g = cur.daemonGroup
+	case GroupClients:
+		g = cur.ClientGroup
+	default:
+		return uid, 0, true
+	}
+	if g == nil {
+		return 0, 0, false
+	}
+	return uid, g.GID, true
+}
+
+// checkConfigRepair refuses a metadata-only rewrite of the existing config
+// that Validate would refuse, such as one whose account has endpoint
+// overrides a plan may not carry. The user fixes the owner and mode by
+// hand instead, and the config is left as it is.
+func checkConfigRepair(l Layout, cur Current, p Plan, e Entry) error {
+	info := cur.files[e.Name]
+	owner := ownerName(l, e.Owner) + ":" + groupName(l, e.Group)
+	mode := fmt.Sprintf("%04o", e.Mode.Perm())
+	return validateConfig(l, p, cur.Config, func(why string) error {
+		return refuse(fmt.Sprintf("fix it with: sudo chown %s %s && sudo chmod %s %s, then run bootstrap again", owner, l.Config, mode, l.Config),
+			"the config %s has owner uid %d gid %d and mode %s, not %s %s, and bootstrap cannot rewrite it through a plan: %s",
+			l.Config, info.UID, info.GID, octalMode(info.Mode), owner, mode, why)
+	})
 }
 
 // ownerName is the user name o resolves to on l's platform.
@@ -549,6 +622,9 @@ func planAccount(l Layout, cur Current, req Request) (plannedAccount, error) {
 		if err := checkDaemonTable(l, cfg.Daemon); err != nil {
 			return plannedAccount{}, err
 		}
+		if err := checkCacheDir(l, cfg.CacheDir()); err != nil {
+			return plannedAccount{}, err
+		}
 	}
 
 	prov, auth := req.Detection.Provider, req.Detection.Auth
@@ -609,6 +685,19 @@ func checkDaemonTable(l Layout, d config.Daemon) error {
 			"the existing config %s sets daemon.client_group to %q; bootstrap's daemon serves the group %s", l.Config, d.ClientGroup, l.ClientGroup)
 	}
 	return nil
+}
+
+// checkCacheDir refuses an existing config whose [cache] dir is set to
+// anything but the layout's state directory. The daemon keeps cache.db,
+// whose contents it trusts, in that directory, and bootstrap checks the
+// trust chain of the state directory only. The comparison is exact, so
+// another spelling of the same directory is refused too.
+func checkCacheDir(l Layout, dir string) error {
+	if dir == "" || dir == l.StateDir {
+		return nil
+	}
+	return refuse("remove dir from the [cache] table of "+l.Config+", or set it to "+l.StateDir,
+		"the existing config %s sets cache.dir to %q; bootstrap's daemon keeps its cache in %s", l.Config, dir, l.StateDir)
 }
 
 // matchExisting refuses a request that conflicts with the account of the

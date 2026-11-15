@@ -41,6 +41,11 @@ type Current struct {
 	// key is the vault key's metadata, read without following a final
 	// symlink. Build refuses a key that is not daemon:daemon 0400.
 	key system.FileInfo
+	// files holds the metadata of the binary, the config and the service
+	// definition, keyed by layout entry name and read without following a
+	// final symlink. Build rewrites a file whose owner, group or mode is
+	// not the layout's even when its bytes are unchanged.
+	files map[string]system.FileInfo
 }
 
 // AccountHealth is what the daemon reported about the requested account.
@@ -84,11 +89,12 @@ func Inspect(ctx context.Context, l Layout, f system.Files, a system.Accounts, i
 	}
 	cur.InvokingUser = *user
 
-	if cur.Config, err = readRegular(f, l.Config); err != nil {
+	cur.files = map[string]system.FileInfo{}
+	if cur.Config, err = cur.readEntry(f, "config", l.Config); err != nil {
 		return Current{}, err
 	}
 	cur.ConfigMarked = cur.Config != nil && HasMarker(cur.Config)
-	if cur.Service, err = readRegular(f, l.Service); err != nil {
+	if cur.Service, err = cur.readEntry(f, "service", l.Service); err != nil {
 		return Current{}, err
 	}
 	cur.ServiceMarked = cur.Service != nil && HasMarker(cur.Service)
@@ -105,7 +111,7 @@ func Inspect(ctx context.Context, l Layout, f system.Files, a system.Accounts, i
 	}
 	cur.VaultExists = vault.Exists
 
-	bin, err := readRegular(f, l.Binary)
+	bin, err := cur.readEntry(f, "binary", l.Binary)
 	if err != nil {
 		return Current{}, err
 	}
@@ -157,22 +163,31 @@ func peek(f system.Files, path string) (system.FileInfo, error) {
 	return info, nil
 }
 
+// readEntry reads the file entry called name at path with readRegular and
+// records its metadata in cur.files.
+func (cur *Current) readEntry(f system.Files, name, path string) ([]byte, error) {
+	data, info, err := readRegular(f, path)
+	cur.files[name] = info
+	return data, err
+}
+
 // readRegular reads path when it is a regular file, and returns nil when
 // it is missing or anything else, such as a symlink. The trust check
-// refuses a symlink; Build refuses whatever else it is.
-func readRegular(f system.Files, path string) ([]byte, error) {
+// refuses a symlink; Build refuses whatever else it is. It returns the
+// metadata Lstat found either way.
+func readRegular(f system.Files, path string) ([]byte, system.FileInfo, error) {
 	info, err := peek(f, path)
 	if err != nil || !info.Exists || !info.Mode.IsRegular() {
-		return nil, err
+		return nil, info, err
 	}
 	data, err := f.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("inspect %s: %w", path, err)
+		return nil, info, fmt.Errorf("inspect %s: %w", path, err)
 	}
 	if data == nil {
 		data = []byte{}
 	}
-	return data, nil
+	return data, info, nil
 }
 
 // trustPaths lists every path whose trust chain bootstrap checks: each
