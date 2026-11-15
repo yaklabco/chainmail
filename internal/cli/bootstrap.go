@@ -515,7 +515,9 @@ func reportBootstrap(env Env, g *globals, l setup.Layout, res setup.Result) erro
 		}
 	}
 	res.Warnings = append(res.Warnings, warnings...)
-	if !g.table() {
+	// The summary is for a person at a terminal. Redirected stdout always
+	// gets the JSON result, whatever output setting is saved.
+	if !g.table() || !env.StdoutTerminal {
 		if err := writeJSON(env.Stdout, res); err != nil {
 			return err
 		}
