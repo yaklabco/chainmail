@@ -448,24 +448,47 @@ func selectedSockets(env Env, g *globals, l setup.Layout) []socketSelection {
 
 // sameSocket reports whether a and b name the same socket, such as
 // /var/run/chainmail/chainmail.sock and /run/chainmail/chainmail.sock
-// where /var/run links to /run. When both exist it compares the files.
+// where /var/run links to /run. The paths are read as written, never
+// cleaned first: the kernel follows a symlink before the ".." after it,
+// so /run/redirect/../chainmail is not /run/chainmail when
+// /run/redirect is a symlink. When both files exist it compares them.
 // Otherwise it compares their directories with every symlink resolved,
-// and the names in them. When a directory cannot be resolved either, it
-// compares the cleaned paths.
+// and the names in them. Only when neither directory resolves does it
+// compare the cleaned paths. When just one resolves they are different
+// sockets, so the other is still asked about.
 func sameSocket(env Env, a, b string) bool {
-	a, b = filepath.Clean(a), filepath.Clean(b)
-	stat, eval := env.stat(), env.evalSymlinks()
+	stat := env.stat()
 	if ai, err := stat(a); err == nil {
 		if bi, err := stat(b); err == nil {
 			return os.SameFile(ai, bi)
 		}
 	}
-	if da, err := eval(filepath.Dir(a)); err == nil {
-		if db, err := eval(filepath.Dir(b)); err == nil {
-			return filepath.Join(da, filepath.Base(a)) == filepath.Join(db, filepath.Base(b))
-		}
+	ra, aErr := resolveSocketDir(env, a)
+	rb, bErr := resolveSocketDir(env, b)
+	switch {
+	case aErr == nil && bErr == nil:
+		return ra == rb
+	case aErr != nil && bErr != nil:
+		return filepath.Clean(a) == filepath.Clean(b)
 	}
-	return a == b
+	return false
+}
+
+// resolveSocketDir is socket with every symlink in its directory
+// resolved. filepath.Split keeps the directory as written, where
+// filepath.Dir would clean it.
+func resolveSocketDir(env Env, socket string) (string, error) {
+	dir, file := filepath.Split(socket)
+	if dir == "" {
+		dir = "."
+	}
+	resolved, err := env.evalSymlinks()(dir)
+	if err != nil {
+		return "", err
+	}
+	// resolved holds no symlink, so a final "." or ".." in file cleans
+	// away as the kernel would resolve it.
+	return filepath.Join(resolved, file), nil
 }
 
 // refuseOtherProduction asks the daemon at each socket the user selects in
