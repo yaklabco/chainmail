@@ -342,9 +342,8 @@ func TestBootstrapFreshPassword(t *testing.T) {
 			t.Errorf("stderr lacks %q:\n%s", want, got.stderr)
 		}
 	}
-	if v, ok := r.daemon.Secret("accounts/alice"); !ok || string(v) != bootSecret {
-		t.Errorf("stored secret = %q, %v", v, ok)
-	}
+	v, ok := r.daemon.Secret("accounts/alice")
+	checkSecret(t, "accounts/alice", v, ok, bootSecret)
 	for _, want := range []string{
 		"alice", "gmail", "running", "ok",
 		"newgrp chainmail-clients", "chainmail accounts list",
@@ -397,9 +396,8 @@ func TestBootstrapNoTerminalNeedsYes(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("with --yes: exit %d: %s", got.code, got.stderr)
 	}
-	if v, ok := r.daemon.Secret("accounts/alice"); !ok || string(v) != bootSecret {
-		t.Errorf("stored secret = %q, %v", v, ok)
-	}
+	v, ok := r.daemon.Secret("accounts/alice")
+	checkSecret(t, "accounts/alice", v, ok, bootSecret)
 	var res setup.Result
 	if err := json.Unmarshal([]byte(got.stdout), &res); err != nil || res.Test != "ok" {
 		t.Errorf("stdout = %s (%v)", got.stdout, err)
@@ -458,7 +456,7 @@ func TestBootstrapKeyShownOnTTY(t *testing.T) {
 		}
 	}
 	if secretLine == "" {
-		t.Fatalf("no key written: %q", key)
+		t.Fatalf("no key written: the key file holds %d bytes and no AGE-SECRET-KEY- line", len(key))
 	}
 	if !strings.Contains(r.tty.Output(), secretLine) {
 		t.Error("the key was not shown on the terminal")
@@ -891,22 +889,13 @@ func TestBootstrapSecretNotInArgv(t *testing.T) {
 	if len(r.sudoArgs) != 1 {
 		t.Fatalf("sudo calls = %d", len(r.sudoArgs))
 	}
-	for _, arg := range r.sudoArgs[0] {
-		if strings.Contains(arg, bootSecret) {
-			t.Errorf("the secret is in sudo's argv: %q", r.sudoArgs[0])
-		}
-	}
+	checkArgv(t, "sudo", r.sudoArgs[0], bootSecret)
 	for _, c := range r.daemon.Calls() {
-		for _, arg := range c.Args {
-			if strings.Contains(arg, bootSecret) {
-				t.Errorf("the secret is in a daemon-user command's argv: %q", c.Args)
-			}
-		}
+		checkArgv(t, "a daemon-user command", c.Args, bootSecret)
 	}
 	// It travels on stdin only, and reached the vault.
-	if v, ok := r.daemon.Secret("accounts/alice"); !ok || string(v) != bootSecret {
-		t.Errorf("stored secret = %q, %v", v, ok)
-	}
+	v, ok := r.daemon.Secret("accounts/alice")
+	checkSecret(t, "accounts/alice", v, ok, bootSecret)
 	if strings.Contains(r.stderr.String(), bootSecret) {
 		t.Error("the secret is on stderr")
 	}
@@ -994,9 +983,8 @@ func TestBootstrapOAuthNoTerminal(t *testing.T) {
 	if res.Test != "skipped" || !slices.Contains(res.NextSteps, "chainmail auth login alice") {
 		t.Errorf("result = %+v", res)
 	}
-	if v, ok := r.daemon.Secret("oauth_clients/google"); !ok || string(v) != "client-secret-5678" {
-		t.Errorf("client secret = %q, %v", v, ok)
-	}
+	v, ok := r.daemon.Secret("oauth_clients/google")
+	checkSecret(t, "oauth_clients/google", v, ok, "client-secret-5678")
 	for _, c := range r.daemon.Calls() {
 		if slices.Contains(c.Args, "login") {
 			t.Errorf("auth login ran without a terminal: %q", c.Args)
@@ -1149,4 +1137,28 @@ func TestBootstrapKeyBackupShowNeedsTerminalStdin(t *testing.T) {
 		t.Error("sudo was called")
 	}
 	r.noChanges()
+}
+
+// checkSecret checks a secret the fake daemon stored (got, and ok for
+// whether it is there) against want. A failure gives presence and
+// lengths, never either value.
+func checkSecret(tb testing.TB, name string, got []byte, ok bool, want string) {
+	tb.Helper()
+	switch {
+	case !ok:
+		tb.Errorf("no secret stored as %s", name)
+	case string(got) != want:
+		tb.Errorf("secret %s holds %d bytes that differ from the %d bytes given", name, len(got), len(want))
+	}
+}
+
+// checkArgv fails for each argument of what's argv that holds secret,
+// giving its position, never the argument.
+func checkArgv(tb testing.TB, what string, args []string, secret string) {
+	tb.Helper()
+	for i, a := range args {
+		if strings.Contains(a, secret) {
+			tb.Errorf("the secret is in %s's argv at position %d of %d", what, i, len(args))
+		}
+	}
 }

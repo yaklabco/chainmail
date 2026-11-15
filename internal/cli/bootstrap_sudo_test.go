@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -78,4 +79,49 @@ func TestRunSudoNoTrustedSudo(t *testing.T) {
 		t.Fatalf("runSudo with no trusted sudo = %v, want the finder's error", err)
 	}
 	wantSudoNotPlanted(t, marker)
+}
+
+// recordTB records the failures a check reports instead of failing.
+type recordTB struct {
+	testing.TB
+	msgs []string
+}
+
+func (r *recordTB) Helper() {}
+
+func (r *recordTB) Errorf(format string, args ...any) {
+	r.msgs = append(r.msgs, fmt.Sprintf(format, args...))
+}
+
+// The checks the bootstrap tests use on secrets report a failure without
+// the secret in it.
+func TestSecretChecksHideValues(t *testing.T) {
+	t.Parallel()
+	const want, stored = "typed-secret-1", "other-secret-22"
+
+	rec := &recordTB{TB: t}
+	checkSecret(rec, "accounts/alice", []byte(stored), true, want)
+	checkSecret(rec, "accounts/bob", nil, false, want)
+	checkArgv(rec, "sudo", []string{"/bin/chainmail", "x" + want, "apply"}, want)
+	if len(rec.msgs) != 3 {
+		t.Fatalf("checks reported %d failures, want 3: %q", len(rec.msgs), rec.msgs)
+	}
+	for _, m := range rec.msgs {
+		if strings.Contains(m, want) || strings.Contains(m, stored) {
+			t.Errorf("failure message holds a secret: %q", m)
+		}
+	}
+	for i, wantPart := range []string{"15 bytes", "no secret", "position 1 of 3"} {
+		if !strings.Contains(rec.msgs[i], wantPart) {
+			t.Errorf("failure %d = %q, want it to say %q", i, rec.msgs[i], wantPart)
+		}
+	}
+
+	// Matching values report nothing.
+	rec = &recordTB{TB: t}
+	checkSecret(rec, "accounts/alice", []byte(want), true, want)
+	checkArgv(rec, "sudo", []string{"/bin/chainmail", "apply"}, want)
+	if len(rec.msgs) != 0 {
+		t.Fatalf("checks of good values reported %q", rec.msgs)
+	}
 }
