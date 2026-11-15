@@ -495,8 +495,8 @@ func resolveSocketDir(env Env, socket string) (string, error) {
 // place of the layout's for its status. One that answers and is not in
 // dev mode is another production installation, and bootstrap refuses to
 // set up a second. A dev daemon, or a socket nothing answers on, is no
-// reason to stop; one CHAINMAIL_SOCKET or cli.toml selects gets the
-// warning clientSocketWarnings gives.
+// reason to stop; one --socket, CHAINMAIL_SOCKET or cli.toml selects
+// gets the warning clientSocketWarnings gives.
 func refuseOtherProduction(ctx context.Context, env Env, g *globals, l setup.Layout) error {
 	ask := env.DaemonStatus
 	if ask == nil {
@@ -644,7 +644,7 @@ func sudoApply(ctx context.Context, env Env, exe string, in applyPayload) (setup
 // reportBootstrap sets up how this user's commands find the daemon, then
 // prints the summary or the result JSON.
 func reportBootstrap(env Env, g *globals, l setup.Layout, res setup.Result) error {
-	warnings := clientSocketWarnings(env, l, true)
+	warnings := clientSocketWarnings(env, g, l, true)
 	for _, w := range warnings {
 		if err := writeString(env.Stderr, "warning: "+w+"\n"); err != nil {
 			return err
@@ -721,7 +721,7 @@ type dryRunAction struct {
 
 // printDryRun prints the plan on stdout and changes nothing.
 func printDryRun(env Env, g *globals, l setup.Layout, plan setup.Plan) error {
-	warnings := clientSocketWarnings(env, l, false)
+	warnings := clientSocketWarnings(env, g, l, false)
 	for _, w := range warnings {
 		if err := writeString(env.Stderr, "warning: "+w+"\n"); err != nil {
 			return err
@@ -747,10 +747,11 @@ func printDryRun(env Env, g *globals, l setup.Layout, plan setup.Plan) error {
 
 // clientSocketWarnings checks how this user's chainmail commands find the
 // daemon, and returns a warning, with the exact line to change, for each
-// setting that points somewhere else. When write is set and the layout's
-// socket is not the default (macOS), it first writes a cli.toml naming
-// the socket if there is none.
-func clientSocketWarnings(env Env, l setup.Layout, write bool) []string {
+// setting that points somewhere else: cli.toml, CHAINMAIL_SOCKET and
+// this run's --socket. When write is set and the layout's socket is not
+// the default (macOS), it first writes a cli.toml naming the socket if
+// there is none.
+func clientSocketWarnings(env Env, g *globals, l setup.Layout, write bool) []string {
 	var warnings []string
 	line := "socket = " + strconv.Quote(l.Socket)
 	path := cliConfigPath(env)
@@ -788,6 +789,12 @@ func clientSocketWarnings(env Env, l setup.Layout, write bool) []string {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s is %s, so chainmail commands still reach that daemon, not the one bootstrap set up at %s; change the line that sets it to: %s=%s",
 			socketBinding.envVar, s, l.Socket, socketBinding.envVar, l.Socket))
+	}
+	if s := g.socketFlag; s != "" && !sameSocket(env, s, l.Socket) {
+		flag := "--" + socketBinding.flag
+		warnings = append(warnings, fmt.Sprintf(
+			"%s is %s, so chainmail commands given it still reach that daemon, not the one bootstrap set up at %s; leave %s out, or give it: %s %s",
+			flag, s, l.Socket, flag, flag, l.Socket))
 	}
 	return warnings
 }

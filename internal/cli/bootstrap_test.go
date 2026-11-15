@@ -762,8 +762,38 @@ func TestBootstrapSocketFlagSelectsDaemon(t *testing.T) {
 			if len(r.sudoArgs) != 1 {
 				t.Errorf("sudo called %d times, want once", len(r.sudoArgs))
 			}
+			for _, want := range []string{"warning: --socket is " + otherSocket, "still reach that daemon", r.l.Socket} {
+				if !strings.Contains(got.stderr, want) {
+					t.Errorf("stderr lacks %q:\n%s", want, got.stderr)
+				}
+			}
 		})
 	}
+}
+
+// A dry run with --socket selecting another socket gives the same
+// warning, on stderr and in the JSON.
+func TestBootstrapDryRunWarnsSocketFlag(t *testing.T) {
+	t.Parallel()
+	r := newBootRig(t, "linux")
+	got := r.run("--socket", otherSocket, "alice@gmail.com", "--dry-run", "--output", "json")
+	if got.code != 0 {
+		t.Fatalf("exit %d: %s", got.code, got.stderr)
+	}
+	const want = "--socket is " + otherSocket
+	if !strings.Contains(got.stderr, "warning: "+want) {
+		t.Errorf("stderr lacks %q:\n%s", want, got.stderr)
+	}
+	var plan struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(got.stdout), &plan); err != nil {
+		t.Fatalf("dry run JSON = %s (%v)", got.stdout, err)
+	}
+	if !slices.ContainsFunc(plan.Warnings, func(w string) bool { return strings.HasPrefix(w, want) }) {
+		t.Errorf("JSON warnings %q lack %q", plan.Warnings, want)
+	}
+	r.noChanges()
 }
 
 // On macOS the built-in default socket is not the layout's, so with
@@ -915,7 +945,7 @@ func TestBootstrapAliasedLayoutSocket(t *testing.T) {
 				if len(r.statusAsked) > 0 {
 					t.Errorf("status asked of %q, want none", r.statusAsked)
 				}
-				if how == "env" && strings.Contains(got.stderr, "still reach that daemon") {
+				if strings.Contains(got.stderr, "still reach that daemon") {
 					t.Errorf("an alias of the layout socket was warned about as another daemon:\n%s", got.stderr)
 				}
 			})
