@@ -54,43 +54,56 @@ func TestUnitsShow(t *testing.T) {
 				"LoadState=loaded\n" +
 				"ActiveState=active\n",
 			want: UnitInfo{
-				Loaded:   true,
-				Fragment: storeUnit,
-				ExecPath: "/nix/store/afs-chainmail-3ebad8d/bin/chainmail",
-				Active:   true,
+				Loaded:    true,
+				LoadState: "loaded",
+				Fragment:  storeUnit,
+				ExecPath:  "/nix/store/afs-chainmail-3ebad8d/bin/chainmail",
+				Active:    true,
 			},
 		},
 		{
 			name: "no unit",
 			out:  "LoadState=not-found\nFragmentPath=\nExecStart=\nActiveState=inactive\n",
-			want: UnitInfo{},
+			want: UnitInfo{LoadState: "not-found"},
 		},
 		{
 			name: "fragment missing",
 			out:  "LoadState=loaded\nFragmentPath=" + filepath.Join(root, "etc/missing.service") + "\nExecStart=\nActiveState=inactive\n",
-			want: UnitInfo{Loaded: true},
+			want: UnitInfo{Loaded: true, LoadState: "loaded"},
 		},
 		{
 			name: "exec start without path",
 			out:  "LoadState=loaded\nFragmentPath=\nExecStart={ argv[]=/bin/true ; ignore_errors=no }\nActiveState=active\n",
-			want: UnitInfo{Loaded: true, Active: true},
+			want: UnitInfo{Loaded: true, LoadState: "loaded", Active: true},
 		},
 		{
 			name: "exec start path without terminator",
 			out:  "LoadState=loaded\nExecStart={ path=/bin/true\nActiveState=active\n",
-			want: UnitInfo{Loaded: true, Active: true},
+			want: UnitInfo{Loaded: true, LoadState: "loaded", Active: true},
 		},
 		{
 			name: "first exec start entry",
 			out: "LoadState=loaded\n" +
 				"ExecStart={ path=/bin/first ; argv[]=/bin/first ; ignore_errors=no }\n" +
 				"ExecStart={ path=/bin/second ; argv[]=/bin/second ; ignore_errors=no }\n",
-			want: UnitInfo{Loaded: true, ExecPath: "/bin/first"},
+			want: UnitInfo{Loaded: true, LoadState: "loaded", ExecPath: "/bin/first"},
 		},
 		{
 			name: "failed unit",
 			out:  "LoadState=loaded\nActiveState=failed\n",
-			want: UnitInfo{Loaded: true},
+			want: UnitInfo{Loaded: true, LoadState: "loaded"},
+		},
+		{
+			// A unit file systemd rejects keeps its fragment but is not
+			// loaded.
+			name: "module unit with a bad setting",
+			out:  "LoadState=bad-setting\nFragmentPath=" + etcUnit + "\nExecStart=\nActiveState=inactive\n",
+			want: UnitInfo{LoadState: "bad-setting", Fragment: storeUnit},
+		},
+		{
+			name: "module unit that failed to load",
+			out:  "LoadState=error\nFragmentPath=" + etcUnit + "\nExecStart=\nActiveState=inactive\n",
+			want: UnitInfo{LoadState: "error", Fragment: storeUnit},
 		},
 	}
 	for _, tt := range tests {

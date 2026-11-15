@@ -242,7 +242,7 @@ func TestUnitsReturnsWhatItIsGiven(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	j := &Journal{}
-	info := system.UnitInfo{Loaded: true, Fragment: "/nix/store/x-unit/chainmail.service", ExecPath: "/nix/store/x/bin/chainmail", Active: true}
+	info := system.UnitInfo{Loaded: true, LoadState: "loaded", Fragment: "/nix/store/x-unit/chainmail.service", ExecPath: "/nix/store/x/bin/chainmail", Active: true}
 	u := &Units{Info: info, Journal: j}
 	got, err := u.Show(ctx, "chainmail.service")
 	if err != nil || got != info {
