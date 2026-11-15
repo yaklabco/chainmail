@@ -32,6 +32,24 @@ func TestFilesFollowAncestorLinks(t *testing.T) {
 	}
 }
 
+// The kernel resolves ".." from the directory a link leads to, not by
+// cleaning the path as text first.
+func TestFilesDotDotAfterAncestorLink(t *testing.T) {
+	t.Parallel()
+	f := NewFiles()
+	f.Dir("/", 0, 0, 0o755).
+		Dir("/a", 0, 0, 0o755).
+		Dir("/a/real", 0, 0, 0o755).
+		Dir("/a/real/sub", 0, 0, 0o755).
+		File("/a/target", 0, 0, 0o644, []byte("kernel")).
+		File("/target", 0, 0, 0o644, []byte("lexical")).
+		Symlink("/link", 0, "/a/real/sub")
+	data, err := f.ReadFile("/link/../../target")
+	if err != nil || string(data) != "kernel" {
+		t.Errorf("ReadFile(/link/../../target) = %q, %v; want the file the kernel finds", data, err)
+	}
+}
+
 func TestFilesLockAndFailures(t *testing.T) {
 	t.Parallel()
 	j := &Journal{}

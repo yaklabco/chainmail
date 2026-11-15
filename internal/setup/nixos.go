@@ -19,6 +19,13 @@ import (
 // nixStorePrefix starts every path in the Nix store.
 const nixStorePrefix = NixStore + "/"
 
+// daemonBinaryName is the base name of the binary the module's unit runs:
+// ${package}/bin/chainmail.
+const daemonBinaryName = "chainmail"
+
+// finishActions are the only actions a Finish plan may hold.
+var finishActions = []ActionKind{ActStoreSecret, ActAuthLogin, ActTestAccount}
+
 // The lines of the printed steps that name the chainmail flake.
 const (
 	flakeInputLine = `inputs.chainmail.url = "github:yaklabco/chainmail";`
@@ -98,7 +105,9 @@ func InspectNixOS(ctx context.Context, l Layout, f system.Files, a system.Accoun
 
 // readFollowing reads path like readRegular, but follows symlinks, a
 // final one included. It returns nil when the path, or a link's target,
-// is missing or is not a regular file.
+// is missing or is not a regular file. A relative link target is appended
+// to the link's directory as written, never cleaned, so Files resolves
+// its ".." from the real directory, as the kernel does.
 func readFollowing(f system.Files, path string) ([]byte, error) {
 	at := path
 	for range maxSymlinkHops {
@@ -112,7 +121,7 @@ func readFollowing(f system.Files, path string) ([]byte, error) {
 		}
 		dest := info.LinkDest
 		if !filepath.IsAbs(dest) {
-			dest = filepath.Join(filepath.Dir(at), dest)
+			dest = at[:strings.LastIndexByte(at, '/')+1] + dest
 		}
 		at = dest
 	}
@@ -139,8 +148,8 @@ func BuildNixOS(l Layout, cur NixCurrent, req Request) (Plan, error) {
 	if err := checkInvoking(l, cur.InvokingUser); err != nil {
 		return Plan{}, err
 	}
-	if !cleanAbs(req.NixDir) {
-		return Plan{}, fmt.Errorf("plan: --nix-dir %q is not a clean absolute path", req.NixDir)
+	if !nixDirOK(req.NixDir) {
+		return Plan{}, fmt.Errorf("plan: --nix-dir %q is not a clean absolute path below /", req.NixDir)
 	}
 	backup, err := checkRequest(req)
 	if err != nil {
@@ -280,6 +289,10 @@ func planNixFinish(l Layout, cur NixCurrent, terminal bool, p *Plan) error {
 		return refuse("load chainmail through the NixOS module: "+deployPage+"#nixos",
 			"the daemon binary %q of %s is not in the Nix store", bin, l.ServiceLabel)
 	}
+	if filepath.Base(bin) != daemonBinaryName {
+		return refuse("load chainmail through the NixOS module, whose unit runs chainmail itself: "+deployPage+"#nixos",
+			"the daemon binary %s of %s is not chainmail; bootstrap runs only chainmail as the daemon user", bin, l.ServiceLabel)
+	}
 	// The trust check passes a missing path, which a build user could
 	// create in the store, so the binary must exist first.
 	if !cur.binary.Exists || !cur.binary.Mode.IsRegular() {
@@ -365,10 +378,16 @@ func cleanAbs(path string) bool {
 	return filepath.IsAbs(path) && filepath.Clean(path) == path && !strings.ContainsFunc(path, unicode.IsControl)
 }
 
+// nixDirOK reports whether dir can be the Nix directory: clean, absolute
+// and not the root directory, whose base name is no directory name.
+func nixDirOK(dir string) bool {
+	return cleanAbs(dir) && dir != "/"
+}
+
 // inNixStore reports whether path is a clean absolute path below the
 // store directory.
 func inNixStore(path string) bool {
-	return cleanAbs(path) && strings.HasPrefix(path, nixStorePrefix) && len(path) > len(nixStorePrefix)
+	return cleanAbs(path) && strings.HasPrefix(path, nixStorePrefix)
 }
 
 // validateNixOS is Validate for a NixOS plan, after the checks every plan
@@ -378,7 +397,7 @@ func inNixStore(path string) bool {
 // daemon binary in the store. Every write-nix's bytes are rendered again
 // and compared, and the next steps are recomputed.
 func validateNixOS(l Layout, p Plan) error {
-	if !cleanAbs(p.NixDir) {
+	if !nixDirOK(p.NixDir) {
 		return refuse(validateHint, "plan names the Nix directory %q", p.NixDir)
 	}
 	if p.ServiceChanged {
@@ -501,11 +520,11 @@ func nixStep(kind ActionKind, entry string) string {
 // and the secret, login and test steps under the rules Build's plans
 // follow.
 func validateNixFinish(l Layout, p Plan) error {
-	if !inNixStore(p.DaemonBinary) {
-		return refuse(validateHint, "plan runs the daemon binary %q, which is not in the Nix store", p.DaemonBinary)
+	if !inNixStore(p.DaemonBinary) || filepath.Base(p.DaemonBinary) != daemonBinaryName {
+		return refuse(validateHint, "plan runs the daemon binary %q, which is not chainmail in the Nix store", p.DaemonBinary)
 	}
 	for _, a := range p.Actions {
-		if !slices.Contains([]ActionKind{ActStoreSecret, ActAuthLogin, ActTestAccount}, a.Kind) {
+		if !slices.Contains(finishActions, a.Kind) {
 			return refuse(validateHint, "plan step %s does not belong in a finish plan", a.Kind)
 		}
 	}

@@ -191,6 +191,35 @@ func TestInspectNixOS(t *testing.T) {
 		}
 	})
 
+	t.Run("relative link resolved from the real directory", func(t *testing.T) {
+		t.Parallel()
+		h := moduleNixHost(nil)
+		data := moduleConfig(aliceGmail, nil)
+		// The kernel resolves ../../real.toml from the store directory the
+		// link is in, not from /etc/static/chainmail, which is a link.
+		h.files.Dir("/nix/store/x-etc", 0, 0, 0o555).
+			Dir("/nix/store/x-etc/etc", 0, 0, 0o555).
+			Dir("/nix/store/x-etc/etc/chainmail", 0, 0, 0o555).
+			File("/nix/store/x-etc/real.toml", 0, 0, 0o444, data).
+			Symlink("/nix/store/x-etc/etc/chainmail/config.toml", 0, "../../real.toml").
+			Symlink("/etc/static", 0, "/nix/store/x-etc/etc").
+			File("/etc/real.toml", 0, 0, 0o444, []byte("decoy")).
+			Symlink(l.Config, 0, "/etc/static/chainmail/config.toml")
+		cur := h.inspect(t)
+		if !bytes.Equal(cur.Config, data) {
+			t.Errorf("Config = %q, want the store file's bytes", cur.Config)
+		}
+	})
+
+	t.Run("symlink loop", func(t *testing.T) {
+		t.Parallel()
+		h := moduleNixHost(nil)
+		h.files.Symlink(l.Config, 0, "config.toml")
+		if _, err := InspectNixOS(context.Background(), l, h.files, h.accounts, h.units, "alice"); err == nil {
+			t.Error("InspectNixOS succeeded with a config that links to itself")
+		}
+	})
+
 	t.Run("unit not from the store", func(t *testing.T) {
 		t.Parallel()
 		h := moduleNixHost(moduleConfig(aliceGmail, nil))
@@ -596,6 +625,16 @@ func TestBuildNixOSRefusals(t *testing.T) {
 			want: "is not in the Nix store",
 		},
 		{
+			name: "finish with another program in the store",
+			host: func() nixHost {
+				h := moduleNixHost(moduleConfig(aliceGmail, nil))
+				h.files.File("/nix/store/x-chainmail/bin/env", 0, 0, 0o555, []byte("env"))
+				h.units.Info.ExecPath = "/nix/store/x-chainmail/bin/env"
+				return h
+			},
+			want: "is not chainmail",
+		},
+		{
 			name: "finish with the binary missing from the store",
 			host: func() nixHost {
 				h := moduleNixHost(moduleConfig(aliceGmail, nil))
@@ -821,7 +860,7 @@ func TestBuildNixOSRefusals(t *testing.T) {
 		mustBuildNixOS(t, freshNixHost().inspect(t), req)
 	})
 
-	for _, dir := range []string{"", "chainmail-nixos", "./chainmail-nixos", "/home/alice/../alice/chainmail-nixos", "/home/alice/x\x1b]0;y"} {
+	for _, dir := range []string{"", "/", "chainmail-nixos", "./chainmail-nixos", "/home/alice/../alice/chainmail-nixos", "/home/alice/x\x1b]0;y"} {
 		t.Run("nix dir "+strings.ToValidUTF8(dir, "?"), func(t *testing.T) {
 			t.Parallel()
 			req := nixRequest()
@@ -1007,6 +1046,8 @@ func TestValidateNixOS(t *testing.T) {
 		{"finish with a relative daemon binary", finish, func(p *Plan) { p.DaemonBinary = "nix/store/x/bin/chainmail" }},
 		{"finish with a daemon binary climbing out of the store", finish, func(p *Plan) { p.DaemonBinary = "/nix/store/../../home/alice/chainmail" }},
 		{"finish with a daemon binary that is the store", finish, func(p *Plan) { p.DaemonBinary = "/nix/store/" }},
+		{"finish with another program as the daemon binary", finish, func(p *Plan) { p.DaemonBinary = "/nix/store/x-coreutils/bin/env" }},
+		{"root as the nix dir", fresh, func(p *Plan) { p.NixDir = "/" }},
 		{"fresh with a daemon binary", fresh, func(p *Plan) { p.DaemonBinary = storeBinary }},
 		{"add with a daemon binary", add, func(p *Plan) { p.DaemonBinary = storeBinary }},
 		{"fresh with backup show and check-cred", freshReuse, func(p *Plan) { p.Backup = BackupShow }},
