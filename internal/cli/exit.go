@@ -2,12 +2,14 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"io"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
 	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/setup"
 )
 
 // usageError marks a mistake in how chainmail was invoked.
@@ -28,6 +30,13 @@ type exitError struct {
 }
 
 func (e *exitError) Error() string { return e.msg }
+
+// reportedExit ends a command whose failure another process already
+// reported on the same stderr, such as bootstrap apply run through sudo.
+// It carries only the exit code, and nothing more is written for it.
+type reportedExit struct{ code int }
+
+func (e reportedExit) Error() string { return fmt.Sprintf("exit status %d", e.code) }
 
 // helpHint points at the help for cmd.
 func helpHint(cmd *cobra.Command) string {
@@ -74,9 +83,21 @@ type classification struct {
 
 // classify maps err to its exit code and reason. New reasons are added here only.
 func classify(err error) classification {
+	var re reportedExit
+	if errors.As(err, &re) {
+		return classification{code: re.code}
+	}
 	var ue usageError
 	if errors.As(err, &ue) {
 		return classification{code: api.ExitUsage, reason: api.ReasonUsage, message: err.Error(), hint: ue.hint}
+	}
+	var ref *setup.Refusal
+	if errors.As(err, &ref) {
+		return classification{code: api.ExitUsage, reason: api.ReasonUsage, message: err.Error(), hint: ref.Hint}
+	}
+	var ae *setup.AuthError
+	if errors.As(err, &ae) {
+		return classification{code: api.ExitCode(api.ReasonAuthRejected), reason: api.ReasonAuthRejected, message: err.Error(), hint: ae.Hint}
 	}
 	var ee *exitError
 	if errors.As(err, &ee) {
@@ -103,6 +124,9 @@ type errorOutput struct {
 // reportError writes err to w as one line of JSON and returns its exit code.
 func reportError(w io.Writer, err error) int {
 	c := classify(err)
+	if errors.As(err, new(reportedExit)) {
+		return c.code
+	}
 	body := errorBody{Reason: c.reason, Message: c.message, Hint: c.hint}
 	_ = writeJSON(w, errorOutput{Error: body}) // stderr is the last resort; nothing else can report a failure here
 	return c.code

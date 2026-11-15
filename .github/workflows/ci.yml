@@ -54,6 +54,32 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-tools
       - run: go tool stave test:integration
+  e2e-linux:
+    # Runs chainmail bootstrap for real against in-process IMAP and SMTP
+    # servers: it creates the chainmail user and the chainmail-clients
+    # group, installs the systemd unit and adds a test CA to the trust
+    # store, checks what it built, then removes it all. The test skips
+    # unless CI is true and CHAINMAIL_E2E_MUTATE_HOST is 1, so it only
+    # changes throwaway runners like this one.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CHAINMAIL_E2E_MUTATE_HOST: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup-tools
+      - run: go tool stave test:e2e
+  e2e-macos:
+    # The same test with launchd, the _chainmail user and the System
+    # keychain, with the tools from the Brewfile as in the macos job.
+    runs-on: macos-latest
+    timeout-minutes: 25
+    env:
+      CHAINMAIL_E2E_MUTATE_HOST: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: brew bundle check --file=Brewfile || brew bundle install --file=Brewfile
+      - run: go tool stave test:e2e
   nix:
     # Builds the flake's package, so a vendorHash that go.mod or go.sum has
     # made stale fails here and not for someone installing from the flake.

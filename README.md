@@ -42,44 +42,69 @@ brew install yaklabco/tap/chainmail
 chainmail version
 ```
 
-Homebrew installs the binary, its shell completions and its man page. It does not start the daemon. Release archives, Nix and building from source are on the [install page](https://chainmail.sh/docs/getting-started/install).
+Homebrew installs the binary, its shell completions and its man page. It does not start the daemon; `chainmail bootstrap` does. Release archives, Nix and building from source are on the [install page](https://chainmail.sh/docs/getting-started/install).
 
-## A first look
+## Set up
 
-This runs a development daemon as your own user, with one Hostinger account. The vault key comes from `age-keygen`, part of [age](https://age-encryption.org). Make the directories and the key:
-
-```sh
-mkdir -p ~/.config/chainmail-dev ~/.local/state/chainmail-dev
-age-keygen -o ~/.config/chainmail-dev/vault-key
-```
-
-Save the config as `~/.config/chainmail-dev/config.toml`:
-
-```toml
-[accounts.site]
-provider = "hostinger"
-address = "me@example.com"
-```
-
-Start the daemon in a terminal of its own:
+`chainmail bootstrap` sets up a production daemon that runs as its own user, with one account. Run it as yourself, not as root. It asks for sudo once.
 
 ```sh
-chainmail daemon --dev --config ~/.config/chainmail-dev/config.toml \
-    --state-dir ~/.local/state/chainmail-dev \
-    --vault-key-file ~/.config/chainmail-dev/vault-key \
-    --socket ~/.local/state/chainmail-dev/chainmail.sock
+chainmail bootstrap you@example.com
 ```
 
-In a second terminal, store the mailbox password, check the login, then list folders and search. Each client command names the same socket:
+Bootstrap finds the provider from the address. It supports Gmail, Google Workspace, iCloud and Hostinger. `--provider` names one when the address does not show it. Bootstrap prints its plan, asks for the account's app password, and asks you to confirm. A Google Workspace account needs `--oauth-client-id`, and bootstrap asks for the OAuth client secret instead. Bootstrap then creates the `chainmail` user (`_chainmail` on macOS) and the `chainmail-clients` group. It installs the binary, the config, the vault key and the service. It starts the daemon, stores the password and tests the login. `--dry-run` prints the plan and changes nothing. A rerun adds another account or repairs the install.
+
+When bootstrap makes a new vault key, it asks whether to back it up. The default is no backup. The key then stays on this machine, and only the daemon's user can read it. If the key is lost, nothing can read the stored passwords, but no mail is lost. [If the vault key is lost](#if-the-vault-key-is-lost) says how to recover. The other choice shows the key once on the terminal, for you to save in a password manager. Anything that can see the terminal at that moment sees the key too, including an agent watching the session. `--key-backup none` or `--key-backup show` answers the question in advance.
+
+Bootstrap adds you to `chainmail-clients`. Log out and back in, or run `newgrp chainmail-clients`, before you use chainmail. The account is named after the address's local part, `you` here, unless `--name` picks another:
 
 ```sh
-chainmail secret set accounts/site --socket ~/.local/state/chainmail-dev/chainmail.sock
-chainmail accounts test site --socket ~/.local/state/chainmail-dev/chainmail.sock
-chainmail folders --account site --socket ~/.local/state/chainmail-dev/chainmail.sock
-chainmail search is:unread in:inbox --socket ~/.local/state/chainmail-dev/chainmail.sock
+chainmail accounts list
+chainmail folders --account you
+chainmail search is:unread in:inbox
 ```
 
-The [quick start](https://chainmail.sh/docs/getting-started/quick-start) goes on to a settings file for the socket, Google accounts, sends and the policy, watching and items.
+On macOS, bootstrap also writes your `cli.toml` so commands find the daemon's socket. Bootstrap supports Linux with systemd and macOS. On NixOS, use the [NixOS module](https://chainmail.sh/docs/operations/deploy#nixos) instead.
+
+An agent that can run sudo without a password can get around all of this. Run agents from an account that cannot.
+
+The [quick start](https://chainmail.sh/docs/getting-started/quick-start) goes on to Google accounts, sends and the policy, watching and items.
+
+### If the vault key is lost
+
+Bootstrap does not make a new key while the old vault is still there, because a new key could never open it. The error says `the vault /var/lib/chainmail/vault.age exists but the vault key /etc/chainmail/vault-key does not`.
+
+If you saved the key, put it back. Paste it into a file called `vault-key`, install that file as the daemon's key with mode 0400, and delete the copy. Then run bootstrap again to check the install and start the daemon:
+
+```sh
+sudo install -o chainmail -g chainmail -m 0400 vault-key /etc/chainmail/vault-key
+rm vault-key
+chainmail bootstrap you@example.com
+```
+
+On macOS, use `-o _chainmail -g chainmail-clients` instead.
+
+Without a saved key, the stored passwords and logins cannot be recovered. Move the old vault aside, then run bootstrap again:
+
+```sh
+sudo mv /var/lib/chainmail/vault.age /var/lib/chainmail/vault.age.lost
+chainmail bootstrap you@example.com
+```
+
+Bootstrap makes a new key and asks for that account's password again. Run it once more for each other account, with the same address and options as before, to enter its password again. For an OAuth account, bootstrap asks for the OAuth client secret again and logs in through the browser. Without a terminal it cannot log in, and it tells you to run `chainmail auth login <name>`.
+
+### Developing chainmail
+
+`chainmail daemon --dev` runs a daemon as your own user, for work on chainmail itself:
+
+> dev mode: this daemon runs as you, so any program running as you, including agents, can read the vault key and every stored password. Use it only to develop chainmail, never with real accounts.
+
+```sh
+chainmail daemon --dev --config ./config.toml --state-dir ./state \
+    --vault-key-file ./vault-key --socket ./state/chainmail.sock
+```
+
+The [developer guide](https://chainmail.sh/docs/developers/architecture) covers building and testing.
 
 ## Features
 

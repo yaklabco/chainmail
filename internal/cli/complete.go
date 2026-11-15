@@ -19,6 +19,7 @@ import (
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 	"github.com/yaklabco/chainmail/internal/client"
 	"github.com/yaklabco/chainmail/internal/provider"
+	"github.com/yaklabco/chainmail/internal/setup"
 )
 
 // completionTimeout bounds each daemon lookup a completion makes, so a
@@ -407,23 +408,30 @@ func (cp *completer) specs() map[string]compSpec {
 		"chainmail admin status":   {args: noComplete},
 		"chainmail auth":           {args: noComplete},
 		"chainmail auth login":     {args: cp.accounts(oauthAccount, 1)},
-		"chainmail cache":          {args: noComplete},
-		"chainmail cache status":   {args: noComplete, flags: map[string]cobra.CompletionFunc{"account": allAccounts}},
-		"chainmail cache rebuild":  {args: noComplete, flags: map[string]cobra.CompletionFunc{"account": allAccounts, "folder": cp.folders(folderSpec{accounts: flagAccount})}},
-		"chainmail cache evict":    {args: noComplete},
-		"chainmail completion":     {args: fixed("bash", "zsh", "fish", "powershell")},
-		"chainmail man":            {args: noComplete},
-		"chainmail version":        {args: noComplete},
-		"chainmail mcp":            {args: noComplete},
-		"chainmail daemon":         {args: noComplete, flags: map[string]cobra.CompletionFunc{"config": files, "state-dir": dirs, "vault-key-file": files}},
-		"chainmail draft":          {args: noComplete},
-		"chainmail draft create":   {args: noComplete, flags: mergeFlagCompletions(compose, map[string]cobra.CompletionFunc{"account": allAccounts})},
-		"chainmail send":           {args: noComplete, flags: mergeFlagCompletions(compose, map[string]cobra.CompletionFunc{"account": allAccounts, "idempotency-key": noComplete})},
-		"chainmail send-raw":       {args: fixed(cobra.CompletionWithDesc("-", "read the message from stdin")), flags: map[string]cobra.CompletionFunc{"account": allAccounts, "file": files, "idempotency-key": noComplete}},
-		"chainmail folders":        {args: noComplete, flags: map[string]cobra.CompletionFunc{"account": allAccounts}},
-		"chainmail secret":         {args: noComplete},
-		"chainmail watch groups":   {args: noComplete},
-		"chainmail watch status":   {args: noComplete},
+		"chainmail bootstrap": {args: noComplete, flags: map[string]cobra.CompletionFunc{
+			"name": noComplete, "oauth-client-id": noComplete, "oauth-client": noComplete,
+			"provider":   fixed(setup.BootstrapProviders()...),
+			"from-pass":  cp.passEntries,
+			"key-backup": fixed(cobra.CompletionWithDesc("none", "keep the key only on this machine"), cobra.CompletionWithDesc("show", "print the key once on the terminal")),
+		}},
+		"chainmail bootstrap apply": {args: noComplete},
+		"chainmail cache":           {args: noComplete},
+		"chainmail cache status":    {args: noComplete, flags: map[string]cobra.CompletionFunc{"account": allAccounts}},
+		"chainmail cache rebuild":   {args: noComplete, flags: map[string]cobra.CompletionFunc{"account": allAccounts, "folder": cp.folders(folderSpec{accounts: flagAccount})}},
+		"chainmail cache evict":     {args: noComplete},
+		"chainmail completion":      {args: fixed("bash", "zsh", "fish", "powershell")},
+		"chainmail man":             {args: noComplete},
+		"chainmail version":         {args: noComplete},
+		"chainmail mcp":             {args: noComplete},
+		"chainmail daemon":          {args: noComplete, flags: map[string]cobra.CompletionFunc{"config": files, "state-dir": dirs, "vault-key-file": files}},
+		"chainmail draft":           {args: noComplete},
+		"chainmail draft create":    {args: noComplete, flags: mergeFlagCompletions(compose, map[string]cobra.CompletionFunc{"account": allAccounts})},
+		"chainmail send":            {args: noComplete, flags: mergeFlagCompletions(compose, map[string]cobra.CompletionFunc{"account": allAccounts, "idempotency-key": noComplete})},
+		"chainmail send-raw":        {args: fixed(cobra.CompletionWithDesc("-", "read the message from stdin")), flags: map[string]cobra.CompletionFunc{"account": allAccounts, "file": files, "idempotency-key": noComplete}},
+		"chainmail folders":         {args: noComplete, flags: map[string]cobra.CompletionFunc{"account": allAccounts}},
+		"chainmail secret":          {args: noComplete},
+		"chainmail watch groups":    {args: noComplete},
+		"chainmail watch status":    {args: noComplete},
 		"chainmail watch": {args: noComplete, flags: map[string]cobra.CompletionFunc{
 			"account": allAccounts, "kind": commaList(watchKinds...), "since": noComplete,
 			"in":    cp.folders(folderSpec{accounts: anyAccount}),

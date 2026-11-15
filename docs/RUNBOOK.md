@@ -48,7 +48,7 @@ chainmail sends the name in SNI and verifies the certificate against it. A certi
 
 ### `calendar.db`
 
-`calendar.db` lives in the cache directory, `[cache] dir` or the state directory by default, next to `cache.db`. It needs no backup. The daemon replaces a file of another schema version, or one SQLite reports as corrupt, and refills it with a full sync.
+`calendar.db` lives in the cache directory, `[cache] dir` or the state directory by default, next to `cache.db`. On an install bootstrap made, the cache stays in the state directory: bootstrap refuses a config whose `[cache] dir` names any other directory, because it checks who can change the state directory and no other. It needs no backup. The daemon replaces a file of another schema version, or one SQLite reports as corrupt, and refills it with a full sync.
 
 To rebuild it by hand, stop the daemon, delete `calendar.db` with its `-wal` and `-shm` files, and start the daemon. One loss comes with that. `calendar.db` also keeps the invites the cache found in mail, and the cache reads invites only from new mail, so invites from mail that arrived before the rebuild are not listed again.
 

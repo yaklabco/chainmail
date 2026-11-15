@@ -142,6 +142,7 @@ func newRoot(ctx context.Context, env Env) *cobra.Command {
 		// The daemon reads --socket only as a flag and has no output.
 		skipSettings(newDaemonCmd(ctx, env, g)),
 		newAccountsCmd(ctx, env, g),
+		newBootstrapCmd(ctx, env, g),
 		newSecretCmd(ctx, env, g),
 		newAuthCmd(ctx, env, g),
 		newAdminCmd(ctx, env, g),
@@ -214,7 +215,7 @@ var groupOf = map[string]string{
 	"rule":      "rules",
 	"calendars": "calendar", "agenda": "calendar", "event": "calendar", "invites": "calendar", "invite": "calendar",
 	"rsvp": "calendar", "freebusy": "calendar",
-	"accounts": "accounts", "auth": "accounts", "secret": "accounts",
+	"accounts": "accounts", "auth": "accounts", "secret": "accounts", "bootstrap": "accounts",
 	"admin": "admin", "audit": "admin", "cache": "admin", "daemon": "admin", "mcp": "admin", "version": "admin", "completion": "admin",
 }
 

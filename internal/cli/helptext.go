@@ -56,8 +56,17 @@ var examples = map[string]string{
   chainmail rsvp ce_01jcb7m2k9r8q3v4w5x6y7z8a9@20261110T140000Z decline --comment "Away that week"`,
 	"chainmail freebusy": `  chainmail freebusy --days 3
   chainmail freebusy --account work --from 2026-11-10 --to 2026-11-10 alice@example.com bob@example.com`,
+	"chainmail bootstrap": `  chainmail bootstrap you@gmail.com
+  # Google Workspace signs in through the browser with your OAuth client
+  chainmail bootstrap you@example.com --oauth-client-id 1234.apps.googleusercontent.com
+  # see what it would change, without changing anything
+  chainmail bootstrap you@example.com --provider hostinger --dry-run
+  # no terminal: the password comes from stdin
+  pass show mail/work | head -n1 | chainmail bootstrap you@example.com --yes --output json`,
 	"chainmail copy": `  chainmail copy cm1:work:INBOX:7:42 --to Receipts`,
-	"chainmail daemon": `  # production runs under systemd; a development daemon runs as you
+	"chainmail daemon": `  # set up a production daemon and an account
+  chainmail bootstrap you@example.com
+  # contributors only: a dev daemon runs as you and is unsafe with real accounts
   chainmail daemon --dev --config ./config.toml --state-dir ./state --vault-key-file ./vault-key`,
 	"chainmail draft create": `  chainmail draft create --account work --to alice@example.com --subject "Notes" --body-file notes.md
   # save a draft, then send it by the ref it prints
