@@ -54,7 +54,6 @@ const (
 
 	// nixosMarker exists on every NixOS system.
 	nixosMarker = "/etc/NIXOS"
-	nixosHint   = "use the NixOS module instead: https://chainmail.sh/docs/operations/deploy#nixos"
 
 	// sudoDisclosure ends every summary.
 	sudoDisclosure = "An agent that can run sudo without a password can get around all of this. " +
@@ -72,6 +71,7 @@ type bootstrapFlags struct {
 	keyBackup                  string
 	keyBackupGiven             bool
 	dryRun, yes                bool
+	nixDir                     string
 }
 
 // applyPayload is the one JSON object bootstrap sends bootstrap apply on
@@ -93,7 +93,10 @@ func newBootstrapCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 			"and service, and one account whose credentials are stored and tested.\n\n" +
 			"Run it as the user who will use chainmail, never as root. It prints its plan, asks for the " +
 			"account's app password or OAuth client secret and for confirmation, then asks for sudo once. " +
-			"A rerun adds another account or repairs the install, and changes only what differs.",
+			"A rerun adds another account or repairs the install, and changes only what differs.\n\n" +
+			"On NixOS it writes Nix files for your configuration to import instead, with the vault key sealed " +
+			"by systemd-creds, and never edits the configuration or rebuilds. Run it again after the rebuild " +
+			"to store the credentials and test the account.",
 		Args: exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			f.keyBackupGiven = cmd.Flags().Changed("key-backup")
@@ -111,6 +114,7 @@ func newBootstrapCmd(ctx context.Context, env Env, g *globals) *cobra.Command {
 		"vault key backup when a new key is made: none, or show to print it once on the terminal")
 	fl.BoolVar(&f.dryRun, "dry-run", false, "print the plan and change nothing")
 	fl.BoolVar(&f.yes, "yes", false, "skip the confirmation and the questions that have defaults")
+	fl.StringVar(&f.nixDir, "nix-dir", "", "directory for the Nix files bootstrap writes on NixOS (default ./chainmail-nixos)")
 	cmd.AddCommand(skipSettings(newBootstrapApplyCmd(ctx, env)))
 	return cmd
 }
@@ -129,36 +133,11 @@ func runBootstrap(ctx context.Context, env Env, g *globals, f bootstrapFlags, ad
 	if err != nil {
 		return err
 	}
+	if l.Platform == setup.NixOS {
+		return runBootstrapNixOS(ctx, env, g, f, l, address)
+	}
 	files := env.setupFiles()
-	if err := refuseNixOS(files); err != nil {
-		return err
-	}
-	backup, err := setup.ParseBackup(f.keyBackup)
-	if err != nil {
-		return err
-	}
-	if backup == setup.BackupShow && !env.canShowKey() {
-		return &setup.Refusal{Msg: showNeedsTerminal, Hint: "run bootstrap in a terminal, or pass --key-backup none"}
-	}
-	if err := checkPassPath(f.fromPass); err != nil {
-		return err
-	}
-
-	det, err := setup.Detect(ctx, env.resolver(), address, f.provider)
-	if err != nil {
-		return err
-	}
-	if det.ViaMX && env.ReadLine != nil && !f.yes {
-		if err := confirmMX(env, address, det.Provider); err != nil {
-			return err
-		}
-	}
-
-	exe, err := env.executable()
-	if err != nil {
-		return err
-	}
-	req, err := bootstrapRequest(env, files, exe, address, f, det, backup)
+	exe, req, err := startBootstrap(ctx, env, files, f, address)
 	if err != nil {
 		return err
 	}
@@ -170,8 +149,8 @@ func runBootstrap(ctx context.Context, env Env, g *globals, f bootstrapFlags, ad
 	if err != nil {
 		return err
 	}
-	if int64(cur.InvokingUser.UID) != int64(uid) {
-		return fmt.Errorf("bootstrap runs as uid %d, but user %s has uid %d", uid, invoking, cur.InvokingUser.UID)
+	if err := checkInvokingUID(uid, invoking, cur.InvokingUser); err != nil {
+		return err
 	}
 	if err := refuseOtherProduction(ctx, env, g, l); err != nil {
 		return err
@@ -185,30 +164,12 @@ func runBootstrap(ctx context.Context, env Env, g *globals, f bootstrapFlags, ad
 	if f.dryRun {
 		return printDryRun(env, g, l, plan)
 	}
-	if err := writeString(env.Stderr, "chainmail bootstrap will:\n"); err != nil {
-		return err
-	}
-	if err := plan.Render(env.Stderr); err != nil {
-		return err
-	}
-	if err := writeString(env.Stderr, "\n"); err != nil {
-		return err
-	}
-	if env.ReadLine == nil && !f.yes {
-		return &setup.Refusal{
-			Msg:  "bootstrap needs a terminal to confirm the plan",
-			Hint: "run it in a terminal, or pass --yes to go ahead without confirming",
-		}
-	}
-
-	secret, err := bootstrapSecret(ctx, env, plan, address, f.fromPass)
+	replan := func(req setup.Request) (setup.Plan, error) { return setup.Build(l, cur, req) }
+	plan, secret, err := askPlan(ctx, env, f, address, setup.ActCreateKey, replan, &req, plan)
 	if err != nil {
 		return err
 	}
 	defer clear(secret)
-	if plan, err = confirmPlan(env, f, l, cur, &req, plan); err != nil {
-		return err
-	}
 	res, err := sudoApply(ctx, env, exe, applyPayload{Plan: plan, Request: req, Secret: secret, Health: cur.Health})
 	if err != nil {
 		return err
@@ -216,17 +177,98 @@ func runBootstrap(ctx context.Context, env Env, g *globals, f bootstrapFlags, ad
 	return reportBootstrap(env, g, l, res)
 }
 
-// confirmPlan asks the key backup choice when the plan makes a key and no
-// flag answered it, planning again with the answer, then asks the user to
-// confirm. --yes skips both.
-func confirmPlan(env Env, f bootstrapFlags, l setup.Layout, cur setup.Current, req *setup.Request, plan setup.Plan) (setup.Plan, error) {
+// startBootstrap checks the flags, detects the provider and returns the
+// running binary and the request every platform plans from.
+func startBootstrap(ctx context.Context, env Env, files system.Files, f bootstrapFlags, address string) (string, setup.Request, error) {
+	backup, err := setup.ParseBackup(f.keyBackup)
+	if err != nil {
+		return "", setup.Request{}, err
+	}
+	if backup == setup.BackupShow && !env.canShowKey() {
+		return "", setup.Request{}, &setup.Refusal{Msg: showNeedsTerminal, Hint: "run bootstrap in a terminal, or pass --key-backup none"}
+	}
+	if err := checkPassPath(f.fromPass); err != nil {
+		return "", setup.Request{}, err
+	}
+
+	det, err := setup.Detect(ctx, env.resolver(), address, f.provider)
+	if err != nil {
+		return "", setup.Request{}, err
+	}
+	if det.ViaMX && env.ReadLine != nil && !f.yes {
+		if err := confirmMX(env, address, det.Provider); err != nil {
+			return "", setup.Request{}, err
+		}
+	}
+
+	exe, err := env.executable()
+	if err != nil {
+		return "", setup.Request{}, err
+	}
+	req, err := bootstrapRequest(env, files, exe, address, f, det, backup)
+	if err != nil {
+		return "", setup.Request{}, err
+	}
+	return exe, req, nil
+}
+
+// checkInvokingUID refuses to go on when the user the host reports for
+// invoking has another uid than the process.
+func checkInvokingUID(uid int, invoking string, u system.User) error {
+	if int64(u.UID) != int64(uid) {
+		return fmt.Errorf("bootstrap runs as uid %d, but user %s has uid %d", uid, invoking, u.UID)
+	}
+	return nil
+}
+
+// askPlan prints the plan, then asks for what it needs: the secret, the
+// key backup choice when the plan has an action of kind makeKey, and the
+// confirmation. It returns the plan to apply, planned again through
+// replan when the backup choice changed it, and the secret, which the
+// caller clears.
+func askPlan(ctx context.Context, env Env, f bootstrapFlags, address string, makeKey setup.ActionKind,
+	replan func(setup.Request) (setup.Plan, error), req *setup.Request, plan setup.Plan,
+) (setup.Plan, []byte, error) {
+	if err := writeString(env.Stderr, "chainmail bootstrap will:\n"); err != nil {
+		return setup.Plan{}, nil, err
+	}
+	if err := plan.Render(env.Stderr); err != nil {
+		return setup.Plan{}, nil, err
+	}
+	if err := writeString(env.Stderr, "\n"); err != nil {
+		return setup.Plan{}, nil, err
+	}
+	if env.ReadLine == nil && !f.yes {
+		return setup.Plan{}, nil, &setup.Refusal{
+			Msg:  "bootstrap needs a terminal to confirm the plan",
+			Hint: "run it in a terminal, or pass --yes to go ahead without confirming",
+		}
+	}
+
+	secret, err := bootstrapSecret(ctx, env, plan, address, f.fromPass)
+	if err != nil {
+		return setup.Plan{}, nil, err
+	}
+	if plan, err = confirmPlan(env, f, makeKey, replan, req, plan); err != nil {
+		clear(secret)
+		return setup.Plan{}, nil, err
+	}
+	return plan, secret, nil
+}
+
+// confirmPlan asks the key backup choice when the plan makes a key (an
+// action of kind makeKey) and no flag answered it, planning again with the
+// answer through replan, then asks the user to confirm. --yes skips both.
+func confirmPlan(env Env, f bootstrapFlags, makeKey setup.ActionKind, replan func(setup.Request) (setup.Plan, error),
+	req *setup.Request, plan setup.Plan,
+) (setup.Plan, error) {
 	if f.yes {
 		return plan, nil
 	}
-	makesKey := slices.ContainsFunc(plan.Actions, func(a setup.Action) bool { return a.Kind == setup.ActCreateKey })
+	makesKey := slices.ContainsFunc(plan.Actions, func(a setup.Action) bool { return a.Kind == makeKey })
 	if makesKey && !f.keyBackupGiven && env.ReadLine != nil {
 		var err error
-		if plan, err = askBackup(env, l, cur, req, plan); err != nil {
+		if plan, err = askBackup(env, replan, req, plan); err != nil {
 			return setup.Plan{}, err
 		}
 	}
@@ -278,30 +320,37 @@ func fileSHA256(files system.Files, path string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// bootstrapLayout is the layout for the platform bootstrap runs on.
+// bootstrapLayout is the layout for the platform bootstrap runs on: NixOS
+// when a Linux host has /etc/NIXOS.
 func bootstrapLayout(env Env) (setup.Layout, error) {
 	switch p := setup.Platform(env.goos()); p {
-	case setup.Linux, setup.Darwin:
+	case setup.Linux:
+		nixos, err := isNixOS(env.setupFiles())
+		if err != nil {
+			return setup.Layout{}, err
+		}
+		if nixos {
+			return setup.LayoutFor(setup.NixOS), nil
+		}
+		return setup.LayoutFor(p), nil
+	case setup.Darwin:
 		return setup.LayoutFor(p), nil
 	default:
 		return setup.Layout{}, &setup.Refusal{
 			Msg:  fmt.Sprintf("bootstrap does not support %s", p),
-			Hint: "bootstrap supports Linux with systemd and macOS",
+			Hint: "bootstrap supports Linux with systemd, NixOS and macOS",
 		}
 	}
 }
 
-// refuseNixOS refuses a NixOS host, whose system configuration owns
-// users, files and services.
-func refuseNixOS(files system.Files) error {
+// isNixOS reports whether the NixOS marker exists. A marker it may not
+// look at counts as missing.
+func isNixOS(files system.Files) (bool, error) {
 	info, err := files.Lstat(nixosMarker)
 	if err != nil && !errors.Is(err, fs.ErrPermission) {
-		return fmt.Errorf("inspect %s: %w", nixosMarker, err)
+		return false, fmt.Errorf("inspect %s: %w", nixosMarker, err)
 	}
-	if info.Exists {
-		return &setup.Refusal{Msg: "bootstrap does not set up chainmail on NixOS", Hint: nixosHint}
-	}
-	return nil
+	return info.Exists, nil
 }
 
 // checkPassPath refuses a pass entry that pass would read as an option
@@ -575,8 +624,9 @@ func bootstrapSecret(ctx context.Context, env Env, plan setup.Plan, address, fro
 	return secret, nil
 }
 
-// askBackup asks the key backup choice and plans again with it.
-func askBackup(env Env, l setup.Layout, cur setup.Current, req *setup.Request, plan setup.Plan) (setup.Plan, error) {
+// askBackup asks the key backup choice and plans again with it through
+// replan.
+func askBackup(env Env, replan func(setup.Request) (setup.Plan, error), req *setup.Request, plan setup.Plan) (setup.Plan, error) {
 	choice, err := setup.AskBackup(&lineReader{read: env.ReadLine}, env.Stderr)
 	if err != nil {
 		return setup.Plan{}, err
@@ -588,7 +638,7 @@ func askBackup(env Env, l setup.Layout, cur setup.Current, req *setup.Request, p
 		return plan, nil
 	}
 	req.Backup = choice
-	return setup.Build(l, cur, *req)
+	return replan(*req)
 }
 
 // lineReader turns ReadLine into an io.Reader that yields one line, with
@@ -644,22 +694,37 @@ func sudoApply(ctx context.Context, env Env, exe string, in applyPayload) (setup
 // reportBootstrap sets up how this user's commands find the daemon, then
 // prints the summary or the result JSON.
 func reportBootstrap(env Env, g *globals, l setup.Layout, res setup.Result) error {
+	warnings, err := socketWarnings(env, g, l)
+	if err != nil {
+		return err
+	}
+	res.Warnings = append(res.Warnings, warnings...)
+	return writeBootstrapResult(env, g, res, bootstrapSummary(l, res))
+}
+
+// socketWarnings sets up how this user's commands find the daemon and
+// prints a warning for each setting that points elsewhere, returning them.
+func socketWarnings(env Env, g *globals, l setup.Layout) ([]string, error) {
 	warnings := clientSocketWarnings(env, g, l, true)
 	for _, w := range warnings {
 		if err := writeString(env.Stderr, "warning: "+w+"\n"); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	res.Warnings = append(res.Warnings, warnings...)
-	// The summary is for a person at a terminal. Redirected stdout always
-	// gets the JSON result, whatever output setting is saved.
+	return warnings, nil
+}
+
+// writeBootstrapResult prints summary, or res as JSON. The summary is for
+// a person at a terminal. Redirected stdout always gets the JSON result,
+// whatever output setting is saved.
+func writeBootstrapResult(env Env, g *globals, res any, summary string) error {
 	if !g.table() || !env.StdoutTerminal {
 		if err := writeJSON(env.Stdout, res); err != nil {
 			return err
 		}
 		return writeString(env.Stderr, sudoDisclosure+"\n")
 	}
-	return writeString(env.Stdout, bootstrapSummary(l, res))
+	return writeString(env.Stdout, summary)
 }
 
 // bootstrapSummary is the summary a person reads at the end.
@@ -879,6 +944,14 @@ func runBootstrapApply(ctx context.Context, env Env) error {
 	if asDaemon == nil {
 		asDaemon = daemonRunner(l, accounts)
 	}
+	var units system.Units
+	var creds system.Creds
+	if l.Platform == setup.NixOS {
+		// The plan is not validated yet, but Apply validates it, and
+		// rebuilds it under the lock, before anything runs as the daemon.
+		asDaemon = nixDaemonRunner(env, l, accounts, in.Plan.DaemonBinary)
+		units, creds = env.setupUnits(), env.setupCreds()
+	}
 	openTerminal := env.OpenTTY
 	if openTerminal == nil {
 		openTerminal = openTTY
@@ -894,6 +967,8 @@ func runBootstrapApply(ctx context.Context, env Env) error {
 		Now:        env.now,
 		Sleep:      func(d time.Duration) { <-env.after(d) },
 		Stderr:     env.Stderr,
+		Units:      units,
+		Creds:      creds,
 	}
 	res, err := a.Apply(ctx, setup.Input{
 		Plan:     in.Plan,
@@ -935,12 +1010,18 @@ func readApplyPayload(r io.Reader) (applyPayload, error) {
 	return p, nil
 }
 
-// daemonRunner runs the installed binary as the daemon user, with the
-// client group as its only group. It looks the user up at each call:
-// a fresh install creates it part way through Apply. The command's stderr
-// goes into the error, except when stdout is the terminal, as for auth
-// login, which prints the consent URL on stderr.
+// daemonRunner runs the installed binary as the daemon user, as
+// daemonRunnerFor does.
 func daemonRunner(l setup.Layout, accounts system.Accounts) func(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error {
+	return daemonRunnerFor(l, accounts, l.Binary)
+}
+
+// daemonRunnerFor runs binary as the daemon user, with the client group as
+// its only group. It looks the user up at each call: a fresh install
+// creates it part way through Apply. The command's stderr goes into the
+// error, except when stdout is the terminal, as for auth login, which
+// prints the consent URL on stderr.
+func daemonRunnerFor(l setup.Layout, accounts system.Accounts, binary string) func(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error {
 	return func(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error {
 		u, ok, err := accounts.LookupUser(ctx, l.DaemonUser)
 		if err != nil {
@@ -961,7 +1042,7 @@ func daemonRunner(l setup.Layout, accounts system.Accounts) func(ctx context.Con
 		if f, ok := stdout.(*os.File); ok {
 			stderr = f
 		}
-		if err := system.RunAs(ctx, u.UID, grp.GID, stdin, stdout, stderr, l.Binary, args...); err != nil {
+		if err := system.RunAs(ctx, u.UID, grp.GID, stdin, stdout, stderr, binary, args...); err != nil {
 			if msg := strings.Join(strings.Fields(errBuf.String()), " "); msg != "" {
 				return fmt.Errorf("%w: %s", err, clip(msg, maxDaemonStderr))
 			}
@@ -1033,6 +1114,22 @@ func (e Env) setupAccounts() system.Accounts {
 		return system.NewAccounts(e.goos(), system.ExecRunner)
 	}
 	return e.SetupAccounts
+}
+
+// setupUnits reads systemd's unit facts on NixOS.
+func (e Env) setupUnits() system.Units {
+	if e.SetupUnits == nil {
+		return system.NewUnits(system.ExecRunner)
+	}
+	return e.SetupUnits
+}
+
+// setupCreds runs systemd-creds on NixOS.
+func (e Env) setupCreds() system.Creds {
+	if e.SetupCreds == nil {
+		return system.NewCreds(system.ExecPipeRunner)
+	}
+	return e.SetupCreds
 }
 
 // canShowKey reports whether stdin and stdout are terminals, so the key

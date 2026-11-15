@@ -33,6 +33,9 @@ type Files interface {
 	// CreateExclusive creates path with O_CREAT|O_EXCL and the given owner
 	// and mode, then writes data. An existing path is fs.ErrExist.
 	CreateExclusive(path string, data []byte, uid, gid uint32, mode fs.FileMode) error
+	// RemoveFile removes path. A final symlink is removed, never followed.
+	// A missing path is an error wrapping fs.ErrNotExist.
+	RemoveFile(path string) error
 	// Lock takes an exclusive flock on path, creating it with mode 0600.
 	Lock(path string) (unlock func() error, err error)
 }
