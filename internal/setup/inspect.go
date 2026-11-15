@@ -253,9 +253,15 @@ func (r trustRecorder) Lstat(path string) (FileInfo, error) {
 // recordTrust records the metadata the trust check of every trust path
 // reads.
 func recordTrust(f system.Files, l Layout) (*trustSnapshot, error) {
+	return recordTrustPaths(f, trustPaths(l))
+}
+
+// recordTrustPaths records the metadata the trust check of each of paths
+// reads.
+func recordTrustPaths(f system.Files, paths []string) (*trustSnapshot, error) {
 	snap := &trustSnapshot{infos: map[string]FileInfo{}, errs: map[string]error{}}
 	rec := trustRecorder{files: f, snap: snap}
-	for _, p := range trustPaths(l) {
+	for _, p := range paths {
 		// The permissive view only stops at a final symlink or a file
 		// where a directory should be, and the real check stops there
 		// too. A refusal here means nothing; Build reports it.

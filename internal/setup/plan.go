@@ -44,6 +44,8 @@ type Request struct {
 	Backup        Backup
 	Terminal      bool                     // bootstrap has a terminal, so OAuth login can run
 	IMAP, SMTP    *config.EndpointOverride // e2e only
+	NixDir        string                   // absolute --nix-dir; NixOS only
+	NixCred       []byte                   // the credential already in NixDir, nil when none
 }
 
 // ActionKind is one kind of step in a plan.
@@ -63,14 +65,32 @@ const (
 	ActStoreSecret  ActionKind = "store-secret"
 	ActAuthLogin    ActionKind = "auth-login"
 	ActTestAccount  ActionKind = "test-account"
+
+	// NixOS only. seal-key and check-cred come first, then write-nix.
+	ActSealKey   ActionKind = "seal-key"   // root: make the key and seal it
+	ActCheckCred ActionKind = "check-cred" // root: the existing credential decrypts here
+	ActWriteNix  ActionKind = "write-nix"  // invoking user: write a Nix file
+)
+
+// rootActions are the actions bootstrap apply runs as root.
+var rootActions = []ActionKind{ActSealKey, ActCheckCred, ActStoreSecret, ActAuthLogin, ActTestAccount}
+
+// NixState is where a NixOS host stands.
+type NixState string
+
+// The states of a NixOS host.
+const (
+	NixFresh  NixState = "fresh"  // no module: seal a key, write the modules
+	NixAdd    NixState = "add"    // module, no such account: write its module
+	NixFinish NixState = "finish" // account configured: store, log in, test
 )
 
 // Action is one step of a plan.
 type Action struct {
 	Kind  ActionKind
-	Entry string // layout entry name for dir and file actions, else ""
+	Entry string // layout entry name for dir and file actions, the file's base name for write-nix, else ""
 	Name  string // group, user or account name, else ""
-	Data  []byte // file contents for write-config and write-service
+	Data  []byte // file contents for write-config, write-service and write-nix
 	Note  string // one line for the printed plan
 }
 
@@ -90,6 +110,16 @@ type Plan struct {
 	// NextSteps are commands the user runs after bootstrap because the
 	// plan could not do them, such as an OAuth login without a terminal.
 	NextSteps []string
+
+	// NixOS only; zero on other platforms.
+	NixState     NixState
+	NixDir       string // absolute --nix-dir
+	DaemonBinary string // Finish: the store binary from the unit's ExecStart
+}
+
+// NeedsRoot reports whether p holds an action bootstrap apply runs.
+func (p Plan) NeedsRoot() bool {
+	return slices.ContainsFunc(p.Actions, func(a Action) bool { return slices.Contains(rootActions, a.Kind) })
 }
 
 // Build plans everything from cur and req, or returns a *Refusal. cur
@@ -105,15 +135,18 @@ type Plan struct {
 // with unchanged bytes repairs their metadata. It never plans
 // a repair to an existing user or group: an account of the wrong shape is
 // refused.
+//
+// A NixOS host is planned by BuildNixOS. Build returns a plain error for
+// one, whichever layout it is given, so a caller that forgets to dispatch
+// never plans an Ubuntu install there.
 func Build(l Layout, cur Current, req Request) (Plan, error) {
+	if l.Platform == NixOS || cur.NixOS {
+		return Plan{}, errors.New("plan: a NixOS host is planned by BuildNixOS, not Build")
+	}
 	if cur.Platform != l.Platform {
 		return Plan{}, fmt.Errorf("plan: installation inspected for %s, layout is for %s", cur.Platform, l.Platform)
 	}
-	if cur.NixOS {
-		return Plan{}, refuse("use the NixOS module instead: "+deployPage+"#nixos",
-			"bootstrap does not set up chainmail on NixOS; the system configuration owns users, files and services there")
-	}
-	if err := checkInvoking(l, cur); err != nil {
+	if err := checkInvoking(l, cur.InvokingUser); err != nil {
 		return Plan{}, err
 	}
 	if err := checkDaemonUser(l, cur); err != nil {
@@ -133,8 +166,7 @@ func Build(l Layout, cur Current, req Request) (Plan, error) {
 		return Plan{}, err
 	}
 	if backup == BackupShow && !cur.KeyExists && !req.Terminal {
-		return Plan{}, refuse("run bootstrap from a terminal, or pass --key-backup none",
-			"--key-backup show needs a terminal; captured output would hold the key")
+		return Plan{}, errBackupNeedsTerminal()
 	}
 	acct, err := planAccount(l, cur, req)
 	if err != nil {
@@ -201,6 +233,12 @@ func Build(l Layout, cur Current, req Request) (Plan, error) {
 	}
 	planSecret(&p, req.Terminal)
 	return p, nil
+}
+
+// errBackupNeedsTerminal refuses --key-backup show without a terminal.
+func errBackupNeedsTerminal() error {
+	return refuse("run bootstrap from a terminal, or pass --key-backup none",
+		"--key-backup show needs a terminal; captured output would hold the key")
 }
 
 // add appends a to the plan's actions.
@@ -363,7 +401,7 @@ func checkTrust(l Layout, cur Current) error {
 	if cur.trust == nil {
 		return errors.New("plan: the installation was not inspected")
 	}
-	if err := checkDaemonIdentity(cur); err != nil {
+	if err := checkDaemonIdentity(cur.DaemonUser, cur.InvokingUser); err != nil {
 		return err
 	}
 	if info, err := cur.trust.Lstat(l.Config); err == nil && info.Mode&fs.ModeSymlink != 0 {
@@ -383,8 +421,7 @@ func checkTrust(l Layout, cur Current) error {
 }
 
 // checkInvoking refuses an invoking user bootstrap must not run as.
-func checkInvoking(l Layout, cur Current) error {
-	inv := cur.InvokingUser
+func checkInvoking(l Layout, inv system.User) error {
 	switch {
 	case inv.Name == "":
 		return errors.New("plan: no invoking user")
@@ -404,18 +441,18 @@ const accountHint = "remove or fix the existing account by hand, then run bootst
 // darwinDaemonHome is the macOS daemon user's home directory.
 const darwinDaemonHome = "/var/empty"
 
-// checkDaemonIdentity refuses an existing daemon user whose uid is root's
-// or a login user's. Only the invoking user is visible as a login user.
-// The trust check trusts the daemon user's uid, so this runs before it.
-func checkDaemonIdentity(cur Current) error {
-	u := cur.DaemonUser
+// checkDaemonIdentity refuses an existing daemon user u (nil when
+// missing) whose uid is root's or a login user's. Only the invoking user
+// inv is visible as a login user. The trust check trusts the daemon
+// user's uid, so this runs before it.
+func checkDaemonIdentity(u *system.User, inv system.User) error {
 	if u == nil {
 		return nil
 	}
 	if u.UID < 1 {
 		return refuse(accountHint, "the existing user %s has uid %d; the daemon user must not be root", u.Name, u.UID)
 	}
-	if inv := cur.InvokingUser; u.UID == inv.UID {
+	if u.UID == inv.UID {
 		return refuse(accountHint, "the existing user %s has uid %d, the same as %s; the daemon user needs a uid of its own",
 			u.Name, u.UID, inv.Name)
 	}
@@ -428,7 +465,7 @@ func checkDaemonIdentity(cur Current) error {
 // with. macOS: primary group chainmail-clients, home /var/empty, shell
 // /usr/bin/false. A group with gid 0 is refused on either.
 func checkDaemonUser(l Layout, cur Current) error {
-	if err := checkDaemonIdentity(cur); err != nil {
+	if err := checkDaemonIdentity(cur.DaemonUser, cur.InvokingUser); err != nil {
 		return err
 	}
 	for _, g := range []*system.GroupInfo{cur.ClientGroup, cur.daemonGroup} {
@@ -600,21 +637,13 @@ type plannedAccount struct {
 // planAccount works out the account from the request and the existing
 // config, refusing conflicts, and renders the config to write.
 func planAccount(l Layout, cur Current, req Request) (plannedAccount, error) {
-	name := req.Name
-	if name == "" {
-		var err error
-		if name, err = AccountName(req.Address); err != nil {
-			return plannedAccount{}, err
-		}
-	}
-	if !config.ValidName(name) {
-		return plannedAccount{}, refuse("pass --name <account> with lowercase letters, digits and dashes",
-			"invalid account name %q", name)
+	name, err := requestName(req)
+	if err != nil {
+		return plannedAccount{}, err
 	}
 
 	var cfg *config.Config
 	if cur.Config != nil {
-		var err error
 		if cfg, err = config.Parse(cur.Config); err != nil {
 			return plannedAccount{}, refuse("fix the config by hand so it parses, then run bootstrap again",
 				"the existing config %s does not parse: %v", l.Config, err)
@@ -627,35 +656,11 @@ func planAccount(l Layout, cur Current, req Request) (plannedAccount, error) {
 		}
 	}
 
-	prov, auth := req.Detection.Provider, req.Detection.Auth
-	pa := plannedAccount{spec: AccountSpec{
-		Name: name, Provider: prov, Address: req.Address, Auth: auth,
-		IMAP: req.IMAP, SMTP: req.SMTP,
-	}}
-	existing, found := config.Account{}, false
-	if cfg != nil {
-		existing, found = cfg.Accounts[name]
+	spec, client, found, err := resolveAccount(cfg, name, req)
+	if err != nil {
+		return plannedAccount{}, err
 	}
-	pa.isNew = !found
-	if found {
-		if err := matchExisting(name, existing, req); err != nil {
-			return plannedAccount{}, err
-		}
-		pa.spec.Address = existing.Address
-		if auth == provider.AuthOAuth2 {
-			pa.spec.OAuthClient = existing.OAuthClient
-		}
-	} else if auth == provider.AuthOAuth2 {
-		pa.spec.OAuthClient = cmp.Or(req.OAuthClient, defaultOAuthClient)
-	}
-
-	if auth == provider.AuthOAuth2 {
-		client, err := planClient(cfg, pa.spec.OAuthClient, req.OAuthClientID, prov)
-		if err != nil {
-			return plannedAccount{}, err
-		}
-		pa.client = client
-	}
+	pa := plannedAccount{spec: spec, client: client, isNew: !found}
 
 	switch {
 	case cur.Config == nil:
@@ -668,6 +673,57 @@ func planAccount(l Layout, cur Current, req Request) (plannedAccount, error) {
 		pa.config = data
 	}
 	return pa, nil
+}
+
+// requestName is the account name req asks for: --name, or the name
+// derived from the address.
+func requestName(req Request) (string, error) {
+	name := req.Name
+	if name == "" {
+		var err error
+		if name, err = AccountName(req.Address); err != nil {
+			return "", err
+		}
+	}
+	if !config.ValidName(name) {
+		return "", refuse("pass --name <account> with lowercase letters, digits and dashes",
+			"invalid account name %q", name)
+	}
+	return name, nil
+}
+
+// resolveAccount works out the account called name that req sets up, and
+// its OAuth client, from the existing config cfg (nil when there is none).
+// It refuses a request that conflicts with the account or client already
+// in cfg. found reports whether cfg has the account.
+func resolveAccount(cfg *config.Config, name string, req Request) (spec AccountSpec, client *OAuthClientSpec, found bool, err error) {
+	prov, auth := req.Detection.Provider, req.Detection.Auth
+	spec = AccountSpec{
+		Name: name, Provider: prov, Address: req.Address, Auth: auth,
+		IMAP: req.IMAP, SMTP: req.SMTP,
+	}
+	var existing config.Account
+	if cfg != nil {
+		existing, found = cfg.Accounts[name]
+	}
+	if found {
+		if err := matchExisting(name, existing, req); err != nil {
+			return AccountSpec{}, nil, false, err
+		}
+		spec.Address = existing.Address
+		if auth == provider.AuthOAuth2 {
+			spec.OAuthClient = existing.OAuthClient
+		}
+	} else if auth == provider.AuthOAuth2 {
+		spec.OAuthClient = cmp.Or(req.OAuthClient, defaultOAuthClient)
+	}
+
+	if auth == provider.AuthOAuth2 {
+		if client, err = planClient(cfg, spec.OAuthClient, req.OAuthClientID, prov); err != nil {
+			return AccountSpec{}, nil, false, err
+		}
+	}
+	return spec, client, found, nil
 }
 
 // checkDaemonTable refuses a parsed [daemon] table that moves the socket
@@ -757,7 +813,10 @@ func Same(a, b Plan) bool {
 		a.Backup == b.Backup &&
 		a.ServiceChanged == b.ServiceChanged &&
 		slices.EqualFunc(a.Actions, b.Actions, sameAction) &&
-		slices.Equal(a.NextSteps, b.NextSteps)
+		slices.Equal(a.NextSteps, b.NextSteps) &&
+		a.NixState == b.NixState &&
+		a.NixDir == b.NixDir &&
+		a.DaemonBinary == b.DaemonBinary
 }
 
 func sameAction(a, b Action) bool {

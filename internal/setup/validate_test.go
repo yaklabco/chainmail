@@ -116,6 +116,15 @@ func TestValidate(t *testing.T) {
 		}},
 		{name: "data on another action", mutate: func(p *Plan) { at(p, ActCreateKey).Data = []byte("AGE-SECRET-KEY-1") }},
 		{name: "unknown action", mutate: func(p *Plan) { p.Actions = append(p.Actions, Action{Kind: "run-shell", Note: "x"}) }},
+		{name: "NixOS state on a Linux plan", mutate: func(p *Plan) { p.NixState = NixFinish }},
+		{name: "nix dir on a Linux plan", mutate: func(p *Plan) { p.NixDir = "/home/alice/chainmail-nixos" }},
+		{name: "daemon binary on a Linux plan", mutate: func(p *Plan) { p.DaemonBinary = "/nix/store/x-chainmail/bin/chainmail" }},
+		{name: "seal-key on a Linux plan", mutate: func(p *Plan) {
+			p.Actions = slices.Insert(p.Actions, indexOf(*p, ActCreateKey), Action{Kind: ActSealKey, Note: "x"})
+		}},
+		{name: "write-nix on a Linux plan", mutate: func(p *Plan) {
+			p.Actions = append(p.Actions, Action{Kind: ActWriteNix, Entry: ServiceNixFile, Data: RenderServiceNix("alice"), Note: "x"})
+		}},
 		{name: "store-secret without NeedSecret", mutate: func(p *Plan) { p.NeedSecret = false }},
 		{name: "NeedSecret without store-secret", mutate: func(p *Plan) {
 			i := indexOf(*p, ActStoreSecret)
