@@ -173,7 +173,7 @@ func runBootstrap(ctx context.Context, env Env, g *globals, f bootstrapFlags, ad
 	if int64(cur.InvokingUser.UID) != int64(uid) {
 		return fmt.Errorf("bootstrap runs as uid %d, but user %s has uid %d", uid, invoking, cur.InvokingUser.UID)
 	}
-	if err := refuseOtherProduction(ctx, env, l); err != nil {
+	if err := refuseOtherProduction(ctx, env, g, l); err != nil {
 		return err
 	}
 	cur.Health = askHealth(ctx, env, l, address, f.name)
@@ -408,9 +408,13 @@ type socketSelection struct {
 }
 
 // selectedSockets lists the sockets this user's chainmail commands are
-// pointed at in place of the layout's, each with what selects it:
-// CHAINMAIL_SOCKET, then cli.toml.
-func selectedSockets(env Env, l setup.Layout) []socketSelection {
+// pointed at in place of the layout's, each with what selects it. The
+// first is the socket a client dials, resolved as every other command
+// resolves it: --socket, then CHAINMAIL_SOCKET, then cli.toml, then the
+// built-in default, which on macOS is not the layout's. CHAINMAIL_SOCKET
+// and cli.toml follow when a setting before them hides them, since the
+// user's next command without that setting would dial them.
+func selectedSockets(env Env, g *globals, l setup.Layout) []socketSelection {
 	var out []socketSelection
 	add := func(socket, source string) {
 		if socket == "" || socket == l.Socket || slices.ContainsFunc(out, func(s socketSelection) bool { return s.socket == socket }) {
@@ -418,29 +422,42 @@ func selectedSockets(env Env, l setup.Layout) []socketSelection {
 		}
 		out = append(out, socketSelection{socket: socket, source: source})
 	}
-	add(env.Getenv(socketBinding.envVar), socketBinding.envVar)
-	if path := cliConfigPath(env); path != "" {
+	envSocket := env.Getenv(socketBinding.envVar)
+	var fileSocket, path string
+	if path = cliConfigPath(env); path != "" {
 		// resolve already read it; a file that broke since is reported by
 		// the next command.
 		if file, err := readCLIConfig(path); err == nil {
-			socket, _ := file[socketBinding.key].(string)
-			add(socket, path)
+			fileSocket, _ = file[socketBinding.key].(string)
 		}
 	}
+	source := "the built-in default"
+	switch {
+	case g.socketFlag != "":
+		source = "--" + socketBinding.flag
+	case envSocket != "":
+		source = socketBinding.envVar
+	case fileSocket != "":
+		source = path
+	}
+	add(g.socketPath(), source)
+	add(envSocket, socketBinding.envVar)
+	add(fileSocket, path)
 	return out
 }
 
 // refuseOtherProduction asks the daemon at each socket the user selects in
 // place of the layout's for its status. One that answers and is not in
 // dev mode is another production installation, and bootstrap refuses to
-// set up a second. A dev daemon, or a socket nothing answers on, only gets
-// the warning clientSocketWarnings gives.
-func refuseOtherProduction(ctx context.Context, env Env, l setup.Layout) error {
+// set up a second. A dev daemon, or a socket nothing answers on, is no
+// reason to stop; one CHAINMAIL_SOCKET or cli.toml selects gets the
+// warning clientSocketWarnings gives.
+func refuseOtherProduction(ctx context.Context, env Env, g *globals, l setup.Layout) error {
 	ask := env.DaemonStatus
 	if ask == nil {
 		ask = daemonStatus
 	}
-	for _, sel := range selectedSockets(env, l) {
+	for _, sel := range selectedSockets(env, g, l) {
 		st, err := ask(ctx, sel.socket)
 		if err != nil || st.Dev {
 			continue

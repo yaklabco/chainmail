@@ -18,6 +18,7 @@ import (
 
 	chainmailv1 "github.com/yaklabco/chainmail/gen/chainmail/v1"
 	"github.com/yaklabco/chainmail/internal/api"
+	"github.com/yaklabco/chainmail/internal/config"
 	"github.com/yaklabco/chainmail/internal/setup"
 	"github.com/yaklabco/chainmail/internal/setup/setuptest"
 	"github.com/yaklabco/chainmail/internal/setup/system"
@@ -688,6 +689,92 @@ func TestBootstrapOtherSocketUnreachableWarns(t *testing.T) {
 				t.Errorf("no warning about %s:\n%s", otherSocket, got.stderr)
 			}
 		})
+	}
+}
+
+// The --socket flag selects the socket this run's client would dial, as
+// it does for every other command, so a daemon answering there is checked
+// the same way: production refuses, dev and silence go ahead.
+func TestBootstrapSocketFlagSelectsDaemon(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		status func(context.Context, string) (DaemonInfo, error)
+		refuse bool
+	}{
+		{
+			name:   "production",
+			status: func(context.Context, string) (DaemonInfo, error) { return DaemonInfo{Version: "0.9.0"}, nil },
+			refuse: true,
+		},
+		{
+			name:   "dev",
+			status: func(context.Context, string) (DaemonInfo, error) { return DaemonInfo{Dev: true, Version: "0.9.0"}, nil },
+		},
+		{
+			name: "unreachable",
+			status: func(context.Context, string) (DaemonInfo, error) {
+				return DaemonInfo{}, errors.New("dial unix: no such file or directory")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newBootRig(t, "linux")
+			r.stdin = bootSecret
+			r.status = tt.status
+			got := r.run("--socket", otherSocket, "alice@gmail.com", "--yes")
+			if !slices.Equal(r.statusAsked, []string{otherSocket}) {
+				t.Errorf("status asked of %q, want only %s", r.statusAsked, otherSocket)
+			}
+			if tt.refuse {
+				wantError(t, got, api.ExitUsage, otherSocket, "--socket", "production")
+				if len(r.sudoArgs) > 0 {
+					t.Error("sudo was called")
+				}
+				r.noChanges()
+				return
+			}
+			if got.code != 0 {
+				t.Fatalf("exit %d: %s", got.code, got.stderr)
+			}
+			if len(r.sudoArgs) != 1 {
+				t.Errorf("sudo called %d times, want once", len(r.sudoArgs))
+			}
+		})
+	}
+}
+
+// On macOS the built-in default socket is not the layout's, so with
+// nothing selected the client dials the default: a production daemon
+// answering there is another installation.
+func TestBootstrapMacDefaultSocketDaemon(t *testing.T) {
+	t.Parallel()
+	r := newBootRig(t, "darwin")
+	r.stdin = bootSecret
+	if r.l.Socket == config.DefaultSocket {
+		t.Fatalf("the macOS layout socket is the default %s", config.DefaultSocket)
+	}
+	r.status = func(context.Context, string) (DaemonInfo, error) { return DaemonInfo{Version: "0.9.0"}, nil }
+	got := r.run("alice@icloud.com", "--yes")
+	wantError(t, got, api.ExitUsage, config.DefaultSocket, "production")
+	if !slices.Equal(r.statusAsked, []string{config.DefaultSocket}) {
+		t.Errorf("status asked of %q, want only %s", r.statusAsked, config.DefaultSocket)
+	}
+	if len(r.sudoArgs) > 0 {
+		t.Error("sudo was called")
+	}
+	r.noChanges()
+
+	// Nothing answering at the default is no reason to stop.
+	r2 := newBootRig(t, "darwin")
+	r2.stdin = bootSecret
+	if got := r2.run("alice@icloud.com", "--yes"); got.code != 0 {
+		t.Fatalf("nothing at the default: exit %d: %s", got.code, got.stderr)
+	}
+	if !slices.Equal(r2.statusAsked, []string{config.DefaultSocket}) {
+		t.Errorf("status asked of %q, want only %s", r2.statusAsked, config.DefaultSocket)
 	}
 }
 
