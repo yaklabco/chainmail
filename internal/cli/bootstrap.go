@@ -729,7 +729,7 @@ func runBootstrapApply(ctx context.Context, env Env) error {
 	files, accounts := env.setupFiles(), env.setupAccounts()
 	service := env.SetupService
 	if service == nil {
-		service = system.NewService(env.goos(), l.ServiceLabel, l.Service, l.LogFile, system.ExecRunner, files)
+		service = system.NewService(env.goos(), l.ServiceLabel, l.Service, l.LogFile, system.ExecRunner)
 	}
 	asDaemon := env.AsDaemon
 	if asDaemon == nil {

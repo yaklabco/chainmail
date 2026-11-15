@@ -9,8 +9,8 @@ import (
 
 // NewService returns the Service for goos. label is the unit name or
 // launchd label, path the definition file, logFile the launchd log ("" on
-// Linux). files reads the log on macOS.
-func NewService(goos, label, path, logFile string, run Runner, files Files) Service {
+// Linux). The launchd log is read straight from the file, from its end.
+func NewService(goos, label, path, logFile string, run Runner) Service {
 	switch goos {
 	case "linux":
 		return &systemdService{unit: label, run: run}
@@ -20,7 +20,6 @@ func NewService(goos, label, path, logFile string, run Runner, files Files) Serv
 			path:    path,
 			logFile: logFile,
 			run:     run,
-			files:   files,
 			sleep:   time.Sleep,
 		}
 	default:
