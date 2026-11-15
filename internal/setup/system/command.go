@@ -240,26 +240,37 @@ func ExecRunner(ctx context.Context, name string, args ...string) ([]byte, error
 // run.
 func execRunner(find func(string) (string, error)) Runner {
 	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		path, err := find(name)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", commandLine(name, args), err)
-		}
-		cmd := exec.CommandContext(ctx, path, args...)
-		// A multi-call binary such as busybox picks its applet from argv[0].
-		cmd.Args[0] = name
-		cmd.Env = append([]string(nil), commandEnv...)
-		// Never the caller's working directory: a relative argument, such
-		// as a file a shell would read, must not resolve against a
-		// directory the invoking user controls.
-		cmd.Dir = "/"
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
-		if err != nil {
-			return out, commandError(name, args, err, stderr.Bytes())
-		}
-		return out, nil
+		return runTrusted(ctx, find, nil, name, args...)
 	}
+}
+
+// runTrusted runs the command find resolves name to, with only commandEnv
+// as its environment, "/" as its working directory and stdin, when not
+// nil, on a pipe. It is the one place the execution policy for host
+// commands lives. stdin may be secret, so it never goes into an error.
+func runTrusted(ctx context.Context, find func(string) (string, error), stdin []byte, name string, args ...string) ([]byte, error) {
+	path, err := find(name)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", commandLine(name, args), err)
+	}
+	cmd := exec.CommandContext(ctx, path, args...)
+	// A multi-call binary such as busybox picks its applet from argv[0].
+	cmd.Args[0] = name
+	cmd.Env = append([]string(nil), commandEnv...)
+	// Never the caller's working directory: a relative argument, such
+	// as a file a shell would read, must not resolve against a
+	// directory the invoking user controls.
+	cmd.Dir = "/"
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return out, commandError(name, args, err, stderr.Bytes())
+	}
+	return out, nil
 }
 
 // PipeRunner runs a trusted host command with stdin, returning stdout.
@@ -273,25 +284,12 @@ var ExecPipeRunner PipeRunner = func(ctx context.Context, stdin []byte, name str
 }
 
 // execPipeRunner is a PipeRunner that resolves each command with find when
-// it is run. It runs the command as execRunner does, with stdin on a pipe.
-// stdin may be secret, so it never goes into an error.
+// it is run, and runs it as execRunner does, with stdin on a pipe.
 func execPipeRunner(find func(string) (string, error)) PipeRunner {
 	return func(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, error) {
-		path, err := find(name)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", commandLine(name, args), err)
+		if stdin == nil {
+			stdin = []byte{}
 		}
-		cmd := exec.CommandContext(ctx, path, args...)
-		cmd.Args[0] = name
-		cmd.Env = append([]string(nil), commandEnv...)
-		cmd.Dir = "/"
-		cmd.Stdin = bytes.NewReader(stdin)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
-		if err != nil {
-			return out, commandError(name, args, err, stderr.Bytes())
-		}
-		return out, nil
+		return runTrusted(ctx, find, stdin, name, args...)
 	}
 }
