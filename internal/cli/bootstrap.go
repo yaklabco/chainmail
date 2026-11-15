@@ -665,7 +665,8 @@ func printDryRun(env Env, g *globals, l setup.Layout, plan setup.Plan) error {
 			return err
 		}
 	}
-	if g.table() {
+	// As with the summary, redirected stdout always gets JSON.
+	if g.table() && env.StdoutTerminal {
 		if err := writeString(env.Stdout, "Dry run: bootstrap would make these changes, and made none.\n"); err != nil {
 			return err
 		}

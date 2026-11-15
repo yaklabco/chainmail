@@ -1117,6 +1117,19 @@ func TestBootstrapJSONWhenStdoutRedirectedDespiteTablePreference(t *testing.T) {
 	if res.Account != "alice" {
 		t.Errorf("result account = %q, want alice", res.Account)
 	}
+
+	// The dry run follows the same rule.
+	r2 := newBootRig(t, "linux")
+	r2.getenv["CHAINMAIL_OUTPUT"] = "table"
+	got = r2.run("alice@gmail.com", "--dry-run")
+	if got.code != 0 {
+		t.Fatalf("dry run: exit %d: %s", got.code, got.stderr)
+	}
+	var plan dryRunOutput
+	if err := json.Unmarshal([]byte(got.stdout), &plan); err != nil || !plan.DryRun || len(plan.Actions) == 0 {
+		t.Fatalf("dry run stdout is not the JSON plan (%v): %s", err, got.stdout)
+	}
+	r2.noChanges()
 }
 
 // Showing the key needs both halves: a terminal stdout with stdin that is
