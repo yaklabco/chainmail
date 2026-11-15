@@ -135,3 +135,43 @@ func TestDaemonFollowsService(t *testing.T) {
 		t.Errorf("State = %+v", st)
 	}
 }
+
+func TestServiceStarts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	running := system.ServiceState{Loaded: true, Running: true}
+
+	t.Run("systemd never restarts on activate", func(t *testing.T) {
+		t.Parallel()
+		svc := (&Service{}).SetState(running)
+		if err := svc.Activate(ctx, true); err != nil {
+			t.Fatal(err)
+		}
+		if n := svc.Starts(); n != 0 {
+			t.Errorf("Starts after Activate(true) on a running unit = %d, want 0", n)
+		}
+		if err := svc.Restart(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if n := svc.Starts(); n != 1 {
+			t.Errorf("Starts after Restart = %d, want 1", n)
+		}
+	})
+
+	t.Run("launchd reloads a loaded job on a changed plist", func(t *testing.T) {
+		t.Parallel()
+		svc := (&Service{Launchd: true}).SetState(running)
+		if err := svc.Activate(ctx, false); err != nil {
+			t.Fatal(err)
+		}
+		if n := svc.Starts(); n != 0 {
+			t.Errorf("Starts after Activate(false) on a running job = %d, want 0", n)
+		}
+		if err := svc.Activate(ctx, true); err != nil {
+			t.Fatal(err)
+		}
+		if n := svc.Starts(); n != 1 {
+			t.Errorf("Starts after Activate(true) on a loaded job = %d, want 1", n)
+		}
+	})
+}

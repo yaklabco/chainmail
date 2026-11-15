@@ -25,6 +25,9 @@ type Service struct {
 	// Stuck leaves StartedAt where it was on a start or restart, as a
 	// daemon that never comes up would.
 	Stuck bool
+	// Launchd models launchd instead of systemd: Activate(true) on a
+	// loaded job unloads and loads it again, which restarts it.
+	Launchd bool
 	// Log is what Logs returns, cut to the last n lines.
 	Log []string
 	// StateErr, ActivateErr and RestartErr make those methods fail.
@@ -34,6 +37,7 @@ type Service struct {
 	loaded    bool
 	running   bool
 	startedAt time.Time
+	starts    int
 	calls     []string
 }
 
@@ -66,6 +70,15 @@ func (s *Service) Calls() []string {
 	return slices.Clone(s.calls)
 }
 
+// Starts counts the starts and restarts so far, however they came about:
+// Restart, Activate on a stopped service, or Activate(true) on a loaded
+// launchd job.
+func (s *Service) Starts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.starts
+}
+
 // State implements system.Service.
 func (s *Service) State(context.Context) (system.ServiceState, error) {
 	s.mu.Lock()
@@ -79,7 +92,8 @@ func (s *Service) State(context.Context) (system.ServiceState, error) {
 
 // Activate implements system.Service: it loads the service and starts it
 // when it is not running. Like systemd's enable --now, it never restarts
-// a running service.
+// a running service, unless Launchd is set: then a changed definition on
+// a loaded job is booted out and bootstrapped again, which restarts it.
 func (s *Service) Activate(_ context.Context, changed bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -87,8 +101,9 @@ func (s *Service) Activate(_ context.Context, changed bool) error {
 	if s.ActivateErr != nil {
 		return s.ActivateErr
 	}
+	reload := s.Launchd && changed && s.loaded
 	s.loaded = true
-	if !s.running {
+	if !s.running || reload {
 		s.start()
 	}
 	return nil
@@ -126,6 +141,7 @@ func (s *Service) Logs(_ context.Context, n int) ([]byte, error) {
 // start marks the service running. The caller holds mu.
 func (s *Service) start() {
 	s.running = true
+	s.starts++
 	if s.Stuck {
 		return
 	}
