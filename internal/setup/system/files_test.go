@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -276,18 +278,61 @@ func TestOSFiles(t *testing.T) {
 	})
 }
 
+func TestRunAsCmd(t *testing.T) {
+	t.Parallel()
+	var out, errOut bytes.Buffer
+	in := strings.NewReader("input")
+	cmd := runAsCmd(t.Context(), 995, 994, in, &out, &errOut, "chainmail", "admin", "status")
+
+	wantEnv := []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/var/empty", "LANG=C"}
+	if !reflect.DeepEqual(cmd.Env, wantEnv) {
+		t.Fatalf("Env = %q, want %q", cmd.Env, wantEnv)
+	}
+	if want := []string{"chainmail", "admin", "status"}; !reflect.DeepEqual(cmd.Args, want) {
+		t.Fatalf("Args = %q, want %q", cmd.Args, want)
+	}
+	if cmd.Stdin != in || cmd.Stdout != &out || cmd.Stderr != &errOut {
+		t.Fatal("stdio not passed through")
+	}
+	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Credential == nil {
+		t.Fatal("no credential set")
+	}
+	c := cmd.SysProcAttr.Credential
+	if c.Uid != 995 || c.Gid != 994 || !reflect.DeepEqual(c.Groups, []uint32{994}) || c.NoSetGroups {
+		t.Fatalf("credential = %+v, want uid 995, gid 994, groups [994], NoSetGroups false", *c)
+	}
+}
+
 func TestRunAs(t *testing.T) {
 	t.Parallel()
 	if os.Getuid() != 0 {
 		t.Skip("RunAs changes credentials, which needs root")
 	}
-	// Root running as root keeps the test from depending on other accounts.
-	var out, errOut bytes.Buffer
-	if err := RunAs(t.Context(), 0, 0, nil, &out, &errOut, "id", "-u"); err != nil {
-		t.Fatalf("RunAs: %v (%s)", err, errOut.String())
+	const nobody = 65534
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-u"}, "65534\n"},
+		{[]string{"-g"}, "65534\n"},
+		{[]string{"-G"}, "65534\n"},
 	}
-	if out.String() != "0\n" {
-		t.Fatalf("id -u = %q", out.String())
+	for _, tt := range tests {
+		var out, errOut bytes.Buffer
+		if err := RunAs(t.Context(), nobody, nobody, nil, &out, &errOut, "id", tt.args...); err != nil {
+			t.Fatalf("RunAs id %v: %v (%s)", tt.args, err, errOut.String())
+		}
+		if out.String() != tt.want {
+			t.Fatalf("id %v = %q, want %q", tt.args, out.String(), tt.want)
+		}
+	}
+
+	var out, errOut bytes.Buffer
+	if err := RunAs(t.Context(), nobody, nobody, nil, &out, &errOut, "env"); err != nil {
+		t.Fatalf("RunAs env: %v (%s)", err, errOut.String())
+	}
+	if want := "PATH=/usr/sbin:/usr/bin:/sbin:/bin\nHOME=/var/empty\nLANG=C\n"; out.String() != want {
+		t.Fatalf("env = %q, want %q", out.String(), want)
 	}
 }
 
