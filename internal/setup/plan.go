@@ -549,6 +549,9 @@ func planAccount(l Layout, cur Current, req Request) (plannedAccount, error) {
 		if err := checkDaemonTable(l, cfg.Daemon); err != nil {
 			return plannedAccount{}, err
 		}
+		if err := checkCacheDir(l, cfg.CacheDir()); err != nil {
+			return plannedAccount{}, err
+		}
 	}
 
 	prov, auth := req.Detection.Provider, req.Detection.Auth
@@ -609,6 +612,19 @@ func checkDaemonTable(l Layout, d config.Daemon) error {
 			"the existing config %s sets daemon.client_group to %q; bootstrap's daemon serves the group %s", l.Config, d.ClientGroup, l.ClientGroup)
 	}
 	return nil
+}
+
+// checkCacheDir refuses an existing config whose [cache] dir is set to
+// anything but the layout's state directory. The daemon keeps cache.db,
+// whose contents it trusts, in that directory, and bootstrap checks the
+// trust chain of the state directory only. The comparison is exact, so
+// another spelling of the same directory is refused too.
+func checkCacheDir(l Layout, dir string) error {
+	if dir == "" || dir == l.StateDir {
+		return nil
+	}
+	return refuse("remove dir from the [cache] table of "+l.Config+", or set it to "+l.StateDir,
+		"the existing config %s sets cache.dir to %q; bootstrap's daemon keeps its cache in %s", l.Config, dir, l.StateDir)
 }
 
 // matchExisting refuses a request that conflicts with the account of the

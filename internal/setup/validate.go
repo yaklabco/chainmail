@@ -24,7 +24,7 @@ var userNameRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$`)
 // Everything is checked against l and this binary's own rendering, never
 // against the plan: the service text must equal RenderService(l), and
 // the config text must parse, hold exactly the plan's account and keep
-// the layout's socket and client group. The actions must come in the
+// the layout's socket, client group and cache directory. The actions must come in the
 // order Build writes them, each at most once (ensure-dir at most once per
 // directory, in layout order), with test-account present unless the plan
 // leaves an OAuth login to the user, and ServiceChanged true exactly when
@@ -238,8 +238,8 @@ func wantTarget(a Action, entry, name string, bad func(string) error) error {
 	return nil
 }
 
-// validateConfig checks that data parses, keeps the layout's socket and
-// client group, and holds the plan's account, and its OAuth client,
+// validateConfig checks that data parses, keeps the layout's socket,
+// client group and cache directory, and holds the plan's account, and its OAuth client,
 // exactly.
 func validateConfig(l Layout, p Plan, data []byte, bad func(string) error) error {
 	cfg, err := config.Parse(data)
@@ -248,6 +248,9 @@ func validateConfig(l Layout, p Plan, data []byte, bad func(string) error) error
 	}
 	if cfg.Daemon.Socket != l.Socket || cfg.Daemon.ClientGroup != l.ClientGroup {
 		return bad("config moves the daemon socket or its client group")
+	}
+	if dir := cfg.CacheDir(); dir != "" && dir != l.StateDir {
+		return bad("config moves the cache out of the state directory")
 	}
 	want := p.Account
 	got, ok := cfg.Accounts[want.Name]

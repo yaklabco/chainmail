@@ -2,6 +2,7 @@ package setup
 
 import (
 	"io/fs"
+	"slices"
 	"strings"
 	"testing"
 
@@ -281,4 +282,65 @@ func TestBuildBackupShowNeedsTerminal(t *testing.T) {
 		cur.Health = okHealth
 		mustBuild(t, LayoutFor(Linux), cur, req)
 	})
+}
+
+func TestBuildConfigCacheDir(t *testing.T) {
+	t.Parallel()
+	withCache := func(base []byte, dir string) []byte {
+		return append(slices.Clone(base), "\n[cache]\ndir = \""+dir+"\"\n"...)
+	}
+	cases := []struct {
+		name string
+		p    Platform
+		// config builds the existing config from the layout.
+		config func(l Layout) []byte
+		dir    string // the value the refusal names; "" means Build plans
+	}{
+		{"linux account present, cache in /tmp", Linux, func(l Layout) []byte {
+			return withCache(NewConfig(l, aliceGmail, nil), "/tmp/chainmail-cache")
+		}, "/tmp/chainmail-cache"},
+		{"macos account present, cache in a home", Darwin, func(l Layout) []byte {
+			return withCache(NewConfig(l, aliceGmail, nil), "/Users/alice/cache")
+		}, "/Users/alice/cache"},
+		{"linux new account, cache elsewhere", Linux, func(Layout) []byte {
+			return withCache([]byte(handWritten), "/home/alice/.cache/chainmail")
+		}, "/home/alice/.cache/chainmail"},
+		{"linux cache below the state directory", Linux, func(l Layout) []byte {
+			return withCache(NewConfig(l, aliceGmail, nil), l.StateDir+"/cache")
+		}, "/var/lib/chainmail/cache"},
+		{"linux cache spelled with a trailing slash", Linux, func(l Layout) []byte {
+			return withCache(NewConfig(l, aliceGmail, nil), l.StateDir+"/")
+		}, "/var/lib/chainmail/"},
+		{"linux cache at the state directory", Linux, func(l Layout) []byte {
+			return withCache(NewConfig(l, aliceGmail, nil), l.StateDir)
+		}, ""},
+		{"macos cache at the state directory", Darwin, func(l Layout) []byte {
+			return withCache(NewConfig(l, aliceGmail, nil), l.StateDir)
+		}, ""},
+		{"linux cache table without dir", Linux, func(l Layout) []byte {
+			return append(NewConfig(l, aliceGmail, nil), "\n[cache]\nmax_size = \"2GiB\"\n"...)
+		}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			l := LayoutFor(tc.p)
+			h := installedHost(tc.p, aliceGmail, nil)
+			h.files.File(l.Config, 0, 0, 0o644, tc.config(l))
+			cur := h.inspect(t, tc.p)
+			cur.Health = okHealth
+			_, err := Build(l, cur, gmailRequest())
+			if tc.dir == "" {
+				if err != nil {
+					t.Errorf("Build: %v", err)
+				}
+				return
+			}
+			r := asRefusal(t, err)
+			wantMentions(t, "refusal", r.Msg, "cache.dir", tc.dir, l.Config, l.StateDir)
+			if r.Hint == "" {
+				t.Error("refusal has no hint")
+			}
+		})
+	}
 }
