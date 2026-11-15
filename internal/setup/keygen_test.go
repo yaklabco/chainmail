@@ -3,6 +3,7 @@ package setup
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -238,13 +239,21 @@ func TestShowKey(t *testing.T) {
 	}
 }
 
+// The end of input is not Enter: ShowKey must not return as if the user had
+// acknowledged the key, and its error must not carry the key.
 func TestShowKeyEOF(t *testing.T) {
 	key, err := GenerateKey(time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tty := &fakeTTY{in: strings.NewReader("")}
-	if err := ShowKey(tty, key); err != nil {
-		t.Fatalf("ShowKey at end of input: %v", err)
+	for _, in := range []string{"", "partial"} {
+		tty := &fakeTTY{in: strings.NewReader(in)}
+		err := ShowKey(tty, key)
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("ShowKey with input %q returned %v, want an error wrapping io.EOF", in, err)
+		}
+		if strings.Contains(err.Error(), string(key)) || strings.Contains(err.Error(), "AGE-SECRET-KEY") {
+			t.Fatal("the error carries the key")
+		}
 	}
 }

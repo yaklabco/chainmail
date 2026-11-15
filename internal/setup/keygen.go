@@ -117,8 +117,8 @@ const (
 )
 
 // ShowKey writes the short warning, the key and a closing line to tty,
-// then waits for a line from tty before returning. The end of input ends
-// the wait.
+// then waits for Enter on tty before returning. Input that ends before a
+// newline is an error wrapping io.EOF: the user did not confirm saving it.
 func ShowKey(tty io.ReadWriter, key []byte) error {
 	var b strings.Builder
 	b.WriteString(showKeyHeader)
@@ -131,7 +131,7 @@ func ShowKey(tty io.ReadWriter, key []byte) error {
 	if _, err := io.WriteString(tty, b.String()); err != nil {
 		return fmt.Errorf("show vault key: %w", err)
 	}
-	if _, err := readAnswer(tty); err != nil && !errors.Is(err, io.EOF) {
+	if _, err := readAnswer(tty); err != nil {
 		return fmt.Errorf("show vault key: wait for Enter: %w", err)
 	}
 	return nil
