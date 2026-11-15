@@ -76,7 +76,7 @@ func newNixBootRig(t *testing.T, config []byte) *bootRig {
 	})
 	r.host.Accounts.AddGroup(system.GroupInfo{Name: r.l.DaemonUser, GID: nixDaemonGID})
 	r.host.Accounts.AddGroup(system.GroupInfo{Name: r.l.ClientGroup, GID: nixClientsGID, Members: []string{"alice"}})
-	r.units.Info = system.UnitInfo{Loaded: true, Fragment: nixStoreFragment, ExecPath: nixStoreBinary, Active: true}
+	r.units.Info = system.UnitInfo{Loaded: true, LoadState: "loaded", Fragment: nixStoreFragment, ExecPath: nixStoreBinary, Active: true}
 	r.svc.SetState(system.ServiceState{Loaded: true, Running: true})
 	return r
 }
@@ -663,6 +663,24 @@ func TestBootstrapNixOSJSON(t *testing.T) {
 			t.Errorf("paths = %q, want %q", res.Paths, want)
 		}
 	})
+}
+
+// TestBootstrapNixOSRootNixDir checks that a --nix-dir that resolves to
+// the root directory is a usage error, not an internal failure.
+func TestBootstrapNixOSRootNixDir(t *testing.T) {
+	t.Parallel()
+	for _, dir := range []string{"/", "/.."} {
+		t.Run(dir, func(t *testing.T) {
+			t.Parallel()
+			r := newNixBootRig(t, nil)
+			r.terminal = true
+			got := r.run("alice@gmail.com", "--nix-dir", dir, "--dry-run")
+			wantError(t, got, api.ExitUsage, "--nix-dir", "choose a --nix-dir such as ./chainmail-nixos")
+			if len(r.sudoArgs) > 0 {
+				t.Errorf("sudo was called %d times", len(r.sudoArgs))
+			}
+		})
+	}
 }
 
 func TestBootstrapNixOSUnwritableNixDir(t *testing.T) {
