@@ -77,6 +77,7 @@ type bootRig struct {
 
 	// Recorded by run.
 	runnerBinaries []string // the binaries DaemonRunnerFor built runners for
+	ttyOpens       int      // the times OpenTTY was called
 	linesLeft      []string
 	sudoArgs       [][]string
 	sudoStdin      [][]byte
@@ -141,7 +142,10 @@ func (r *bootRig) env() Env {
 			r.runnerBinaries = append(r.runnerBinaries, binary)
 			return r.daemon.Run
 		},
-		OpenTTY: func() (io.ReadWriteCloser, error) { return r.tty, nil },
+		OpenTTY: func() (io.ReadWriteCloser, error) {
+			r.ttyOpens++
+			return r.tty, nil
+		},
 		AccountHealth: func(ctx context.Context, socket, account string) (*setup.AccountHealth, error) {
 			r.healthAsked = append(r.healthAsked, socket+" "+account)
 			return r.health(ctx, socket, account)

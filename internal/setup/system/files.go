@@ -130,6 +130,15 @@ func (OSFiles) CreateExclusive(path string, data []byte, uid, gid uint32, mode f
 	return syncDir(filepath.Dir(path))
 }
 
+// RemoveFile removes path with unlink, so a final symlink is removed and
+// never followed. A missing path is an error wrapping fs.ErrNotExist.
+func (OSFiles) RemoveFile(path string) error {
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("removing %s: %w", path, err)
+	}
+	return nil
+}
+
 // Lock takes an exclusive flock on path, creating it with mode 0600, and
 // waits until it gets it. unlock releases the lock and closes the file.
 func (OSFiles) Lock(path string) (func() error, error) {

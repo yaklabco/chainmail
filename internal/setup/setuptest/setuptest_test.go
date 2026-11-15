@@ -77,6 +77,50 @@ func TestFilesLockAndFailures(t *testing.T) {
 	}
 }
 
+func TestFilesRemoveAndFailWriteIn(t *testing.T) {
+	t.Parallel()
+	j := &Journal{}
+	f := FreshHost("linux").Files
+	f.Journal = j
+	f.Dir("/home", 0, 0, 0o755).Dir("/home/alice", 1000, 1000, 0o755)
+	if err := f.CreateExclusive("/home/alice/.probe", nil, 1000, 1000, 0o600); err != nil {
+		t.Fatalf("CreateExclusive: %v", err)
+	}
+	if err := f.RemoveFile("/home/alice/.probe"); err != nil {
+		t.Fatalf("RemoveFile: %v", err)
+	}
+	if _, _, ok := f.Content("/home/alice/.probe"); ok {
+		t.Error("the file is still there after RemoveFile")
+	}
+	if err := f.RemoveFile("/home/alice/.probe"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("RemoveFile of a missing file = %v, want fs.ErrNotExist", err)
+	}
+	want := []string{"create /home/alice/.probe", "remove /home/alice/.probe"}
+	if got := j.Entries(); !slices.Equal(got, want) {
+		t.Errorf("journal = %q, want %q", got, want)
+	}
+	if got := f.Writes(); !slices.Equal(got, []string{"/home/alice/.probe", "/home/alice/.probe"}) {
+		t.Errorf("writes = %q", got)
+	}
+
+	// FailWriteIn fails every write of an entry in the directory, not of
+	// the directory itself.
+	f.FailWriteIn("/home/alice", fs.ErrPermission)
+	for name, err := range map[string]error{
+		"CreateExclusive": f.CreateExclusive("/home/alice/x", nil, 0, 0, 0o600),
+		"WriteFile":       f.WriteFile("/home/alice/y", nil, 0, 0, 0o600),
+		"EnsureDir":       f.EnsureDir("/home/alice/z", 0, 0, 0o755),
+		"RemoveFile":      f.RemoveFile("/home/alice/.probe"),
+	} {
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("%s in the directory = %v, want fs.ErrPermission", name, err)
+		}
+	}
+	if err := f.EnsureDir("/home/alice", 1000, 1000, 0o755); err != nil {
+		t.Errorf("EnsureDir of the directory itself = %v", err)
+	}
+}
+
 func TestAccountsCreateDaemonUser(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

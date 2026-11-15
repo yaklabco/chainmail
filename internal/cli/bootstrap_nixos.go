@@ -3,6 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -33,6 +36,10 @@ const (
 	nixWritten   = "written"
 	nixUnchanged = "unchanged"
 )
+
+// nixProbePrefix starts the name of the file bootstrap makes and removes
+// to prove it can write in the Nix directory.
+const nixProbePrefix = ".chainmail-probe-"
 
 // daemonRun runs a chainmail command as the daemon user, as
 // setup.Applier.AsDaemon does.
@@ -106,13 +113,16 @@ func runBootstrapNixOS(ctx context.Context, env Env, g *globals, f bootstrapFlag
 		return err
 	}
 	defer clear(secret)
+	if err := prepareNixDir(files, cur.InvokingUser, plan); err != nil {
+		return err
+	}
 	res := localNixResult(l, plan)
 	if plan.NeedsRoot() {
 		if res, err = sudoApply(ctx, env, exe, applyPayload{Plan: plan, Request: req, Secret: secret, Health: cur.Health}); err != nil {
 			return err
 		}
 	}
-	written, err := writeNixFiles(files, cur.InvokingUser, plan, res.Cred)
+	written, err := writeNixFiles(env.Stderr, files, cur.InvokingUser, plan, res.Cred)
 	if err != nil {
 		return err
 	}
@@ -266,37 +276,35 @@ func localNixResult(l setup.Layout, p setup.Plan) setup.Result {
 // credential cred comes first, created exclusively so an existing one is
 // never replaced; then each module, replaced whole, and only when its
 // bytes differ. It never writes through a symlink.
-func writeNixFiles(files system.Files, owner system.User, p setup.Plan, cred []byte) ([]nixFile, error) {
+//
+// When the credential cannot be written, it is never lost: it goes to
+// stderr, base64 encoded, with the command that saves it, and nothing
+// else is written.
+func writeNixFiles(stderr io.Writer, files system.Files, owner system.User, p setup.Plan, cred []byte) ([]nixFile, error) {
 	writes := nixWrites(p)
 	if len(writes) == 0 {
 		return nil, nil
 	}
-	info, err := files.Lstat(p.NixDir)
-	if err != nil {
-		return nil, err
+	seals := hasAction(p, setup.ActSealKey)
+	if seals && len(cred) == 0 {
+		return nil, errors.New("bootstrap apply sealed a vault key but returned no credential")
 	}
-	switch {
-	case !info.Exists:
-		if err := files.EnsureDir(p.NixDir, owner.UID, owner.GID, nixDirMode); err != nil {
-			return nil, fmt.Errorf("make the Nix directory: %w", err)
+	credPath := filepath.Join(p.NixDir, setup.CredFile)
+	err := ensureNixDir(files, owner, p.NixDir)
+	if err == nil && seals {
+		err = files.CreateExclusive(credPath, cred, owner.UID, owner.GID, nixFileMode)
+	}
+	if err != nil {
+		if seals {
+			err = fmt.Errorf("write the sealed vault key: %w", err)
+			return nil, errors.Join(err, printCredRecovery(stderr, credPath, cred, err))
 		}
-	case !info.Mode.IsDir():
-		return nil, &setup.Refusal{
-			Msg:  fmt.Sprintf("--nix-dir %s is no longer a directory", p.NixDir),
-			Hint: "run bootstrap again",
-		}
+		return nil, err
 	}
 
 	var out []nixFile
-	credPath := filepath.Join(p.NixDir, setup.CredFile)
 	switch {
-	case hasAction(p, setup.ActSealKey):
-		if len(cred) == 0 {
-			return nil, errors.New("bootstrap apply sealed a vault key but returned no credential")
-		}
-		if err := files.CreateExclusive(credPath, cred, owner.UID, owner.GID, nixFileMode); err != nil {
-			return nil, fmt.Errorf("write the sealed vault key: %w", err)
-		}
+	case seals:
 		out = append(out, nixFile{Path: credPath, Status: nixWritten})
 	case hasAction(p, setup.ActCheckCred):
 		out = append(out, nixFile{Path: credPath, Status: nixUnchanged})
@@ -432,4 +440,91 @@ func writeSteps(b *strings.Builder, steps []string) {
 			b.WriteString(lead + strings.Repeat(" ", indent) + termText(line) + "\n")
 		}
 	}
+}
+
+// ensureNixDir makes the Nix directory dir as owner when it is missing,
+// and refuses anything at dir that is not a directory.
+func ensureNixDir(files system.Files, owner system.User, dir string) error {
+	info, err := files.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	switch {
+	case !info.Exists:
+		if err := files.EnsureDir(dir, owner.UID, owner.GID, nixDirMode); err != nil {
+			return fmt.Errorf("make the Nix directory: %w", err)
+		}
+	case !info.Mode.IsDir():
+		return &setup.Refusal{
+			Msg:  fmt.Sprintf("--nix-dir %s is not a directory", dir),
+			Hint: "pass a --nix-dir that is a directory, or one that does not exist yet",
+		}
+	}
+	return nil
+}
+
+// prepareNixDir makes the plan's Nix directory when it is missing and
+// proves owner can write in it, by creating and removing a probe file,
+// before bootstrap apply seals a key that must then be written there. A
+// plan that writes no Nix file needs neither.
+func prepareNixDir(files system.Files, owner system.User, p setup.Plan) error {
+	if len(nixWrites(p)) == 0 {
+		return nil
+	}
+	cannot := func(err error) error {
+		var ref *setup.Refusal
+		if errors.As(err, &ref) {
+			return err
+		}
+		return &setup.Refusal{
+			Msg:  fmt.Sprintf("bootstrap cannot write in --nix-dir %s: %v", p.NixDir, err),
+			Hint: "choose a --nix-dir you can write to",
+		}
+	}
+	if err := ensureNixDir(files, owner, p.NixDir); err != nil {
+		return cannot(err)
+	}
+	var suffix [8]byte
+	_, _ = rand.Read(suffix[:]) // crypto/rand.Read never fails
+	probe := filepath.Join(p.NixDir, nixProbePrefix+hex.EncodeToString(suffix[:]))
+	if err := files.CreateExclusive(probe, nil, owner.UID, owner.GID, 0o600); err != nil {
+		return cannot(err)
+	}
+	if err := files.RemoveFile(probe); err != nil {
+		return cannot(err)
+	}
+	return nil
+}
+
+// credLineWidth is the width of the base64 lines a credential bootstrap
+// could not write is printed in.
+const credLineWidth = 76
+
+// printCredRecovery prints the sealed credential bootstrap could not write
+// at path, base64 encoded, with the command that saves it there. It is
+// encrypted for this host only, so printing it gives nothing away; it
+// goes to stderr only, never to stdout or the result.
+func printCredRecovery(w io.Writer, path string, cred []byte, cause error) error {
+	var b strings.Builder
+	b.WriteString("bootstrap could not write " + path + ": " + termText(cause.Error()) + "\n")
+	b.WriteString("The sealed vault key credential is below. It is encrypted for this host only, so it is safe to save. Save it with:\n")
+	b.WriteString("  base64 -d > " + shellQuote(path) + " <<'EOF'\n")
+	// The closing EOF starts its line: a here-document ends only at a line
+	// that is exactly its delimiter.
+	enc := base64.StdEncoding.EncodeToString(cred)
+	for len(enc) > credLineWidth {
+		b.WriteString(enc[:credLineWidth] + "\n")
+		enc = enc[credLineWidth:]
+	}
+	b.WriteString(enc + "\nEOF\n")
+	return writeString(w, b.String())
+}
+
+// shellQuote is s as one shell word: as it is when it holds only
+// characters no shell treats specially, else in single quotes.
+func shellQuote(s string) string {
+	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./+-=:,@%") == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

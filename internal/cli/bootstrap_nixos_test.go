@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -123,6 +125,31 @@ func wantFileStatus(t *testing.T, summary, name, status string) {
 	}
 }
 
+// probeRE matches the writability probe bootstrap makes in the Nix
+// directory before bootstrap apply.
+var probeRE = regexp.MustCompile(`/\.chainmail-probe-[0-9a-f]+`)
+
+// nixFileWrites is the paths written through Files, without the
+// writability probe. It fails unless every probe made was removed again.
+func nixFileWrites(t *testing.T, r *bootRig) []string {
+	t.Helper()
+	var out []string
+	probes := map[string]int{}
+	for _, w := range r.host.Files.Writes() {
+		if probeRE.MatchString(w) {
+			probes[w]++
+			continue
+		}
+		out = append(out, w)
+	}
+	for p, n := range probes {
+		if _, _, ok := r.host.Files.Content(p); ok || n != 2 {
+			t.Errorf("probe %s changed %d times and is still there: %v; want made and removed", p, n, ok)
+		}
+	}
+	return out
+}
+
 // unsealedKey is the vault key the fake Creds sealed into cred.
 func unsealedKey(t *testing.T, cred []byte) string {
 	t.Helper()
@@ -173,14 +200,20 @@ func TestBootstrapNixOSFresh(t *testing.T) {
 	wantNixFile(t, r, setup.CredFile, cred)
 	wantNixFile(t, r, setup.ServiceNixFile, setup.RenderServiceNix("alice"))
 	wantNixFile(t, r, setup.AccountNixFile("alice"), setup.RenderAccountNix(nixAlice, nil))
+	// The directory is made and proved writable before bootstrap apply
+	// takes its lock; the credential is written first after it.
 	var changes []string
 	for _, e := range r.host.Files.Journal.Entries() {
-		if strings.Contains(e, nixTestDir) {
-			changes = append(changes, e)
+		if strings.Contains(e, nixTestDir) || strings.Contains(e, "lock ") {
+			changes = append(changes, probeRE.ReplaceAllString(e, "/.chainmail-probe-*"))
 		}
 	}
 	want := []string{
 		"mkdir " + nixTestDir,
+		"create " + nixPath(".chainmail-probe-*"),
+		"remove " + nixPath(".chainmail-probe-*"),
+		"lock /run/chainmail-bootstrap.lock",
+		"unlock /run/chainmail-bootstrap.lock",
 		"create " + nixPath(setup.CredFile),
 		"write " + nixPath(setup.ServiceNixFile),
 		"write " + nixPath(setup.AccountNixFile("alice")),
@@ -254,7 +287,7 @@ func TestBootstrapNixOSFreshRerun(t *testing.T) {
 	if strings.Contains(got.stderr, "Vault key backup") {
 		t.Error("a rerun with a credential asked about the key backup")
 	}
-	if w := r.host.Files.Writes(); len(w) > 0 {
+	if w := nixFileWrites(t, r); len(w) > 0 {
 		t.Errorf("files written: %q", w)
 	}
 	for _, name := range []string{setup.CredFile, setup.ServiceNixFile, setup.AccountNixFile("alice")} {
@@ -268,7 +301,7 @@ func TestBootstrapNixOSFreshRerun(t *testing.T) {
 	if got.code != 0 {
 		t.Fatalf("rerun with an edited module: exit %d: %s", got.code, got.stderr)
 	}
-	if w := r.host.Files.Writes(); !slices.Equal(w, []string{nixPath(setup.AccountNixFile("alice"))}) {
+	if w := nixFileWrites(t, r); !slices.Equal(w, []string{nixPath(setup.AccountNixFile("alice"))}) {
 		t.Errorf("files written = %q, want only the account module", w)
 	}
 	wantNixFile(t, r, setup.AccountNixFile("alice"), setup.RenderAccountNix(nixAlice, nil))
@@ -285,7 +318,7 @@ func TestBootstrapNixOSSealFails(t *testing.T) {
 	r.lines = []string{"y"}
 	got := r.run("alice@gmail.com", "--nix-dir", nixTestDir, "--key-backup", "none")
 	wantError(t, got, api.ExitUsage, "could not seal the vault key", "no usable key")
-	if w := r.host.Files.Writes(); len(w) > 0 {
+	if w := nixFileWrites(t, r); len(w) > 0 {
 		t.Errorf("files written: %q", w)
 	}
 	wantNoNixFiles(t, r)
@@ -301,7 +334,7 @@ func TestBootstrapNixOSFreshBadCred(t *testing.T) {
 	r.lines = []string{"y"}
 	got := r.run("alice@gmail.com", "--nix-dir", nixTestDir)
 	wantError(t, got, api.ExitUsage, "does not decrypt on this host", "move it aside")
-	if w := r.host.Files.Writes(); len(w) > 0 {
+	if w := nixFileWrites(t, r); len(w) > 0 {
 		t.Errorf("files written: %q", w)
 	}
 	after, info, _ := r.host.Files.Content(nixPath(setup.CredFile))
@@ -319,7 +352,7 @@ func TestBootstrapNixOSFreshBadCred(t *testing.T) {
 		r.lines = []string{"y"}
 		got := r.run("alice@gmail.com", "--nix-dir", nixTestDir)
 		wantError(t, got, api.ExitUsage, "systemd-creds could not check the credential", "systemd-creds: not found")
-		if w := r.host.Files.Writes(); len(w) > 0 {
+		if w := nixFileWrites(t, r); len(w) > 0 {
 			t.Errorf("files written: %q", w)
 		}
 	})
@@ -341,7 +374,7 @@ func TestBootstrapNixOSAdd(t *testing.T) {
 	if r.passwordReads != 0 {
 		t.Errorf("password reads = %d, want none", r.passwordReads)
 	}
-	if w := r.host.Files.Writes(); !slices.Equal(w, []string{nixPath(setup.AccountNixFile("alice"))}) {
+	if w := nixFileWrites(t, r); !slices.Equal(w, []string{nixPath(setup.AccountNixFile("alice"))}) {
 		t.Errorf("files written = %q, want only the account module", w)
 	}
 	wantNixFile(t, r, setup.AccountNixFile("alice"), setup.RenderAccountNix(nixAlice, nil))
@@ -630,4 +663,162 @@ func TestBootstrapNixOSJSON(t *testing.T) {
 			t.Errorf("paths = %q, want %q", res.Paths, want)
 		}
 	})
+}
+
+func TestBootstrapNixOSUnwritableNixDir(t *testing.T) {
+	t.Parallel()
+	alice := uint32(setuptest.AliceLinuxUID)
+	sealed := []byte("sealed on this host before")
+	for _, tc := range []struct {
+		name   string
+		config []byte
+		setup  func(r *bootRig)
+	}{
+		{"cannot make the directory", nil, func(r *bootRig) {
+			r.host.Files.FailWrite(nixTestDir, fs.ErrPermission)
+		}},
+		{"cannot write in the directory", nil, func(r *bootRig) {
+			r.host.Files.Dir(nixTestDir, 0, 0, 0o755).FailWriteIn(nixTestDir, fs.ErrPermission)
+		}},
+		{"check-cred", nil, func(r *bootRig) {
+			r.creds.Accept(sealed)
+			r.host.Files.Dir(nixTestDir, 0, 0, 0o755).
+				File(nixPath(setup.CredFile), alice, alice, 0o644, sealed).
+				FailWriteIn(nixTestDir, fs.ErrPermission)
+		}},
+		{"add", nixModuleConfig(nixBob), func(r *bootRig) {
+			r.host.Files.Dir(nixTestDir, 0, 0, 0o755).FailWriteIn(nixTestDir, fs.ErrPermission)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newNixBootRig(t, tc.config)
+			tc.setup(r)
+			r.terminal = true
+			r.lines = []string{"y"}
+			got := r.run("alice@gmail.com", "--nix-dir", nixTestDir, "--key-backup", "show")
+			wantError(t, got, api.ExitUsage, nixTestDir, "choose a --nix-dir you can write to")
+			if len(r.sudoArgs) > 0 {
+				t.Errorf("sudo was called %d times", len(r.sudoArgs))
+			}
+			if r.ttyOpens > 0 {
+				t.Errorf("the terminal was opened %d times", r.ttyOpens)
+			}
+			if calls := r.creds.Calls(); len(calls) > 0 {
+				t.Errorf("Creds calls = %q, want none", calls)
+			}
+			for _, name := range []string{setup.ServiceNixFile, setup.AccountNixFile("alice")} {
+				if _, _, ok := r.host.Files.Content(nixPath(name)); ok {
+					t.Errorf("%s was written", name)
+				}
+			}
+		})
+	}
+}
+
+// recoveryBlock is the credential bootstrap printed on stderr after it
+// could not write it: the save command line, and the base64 lines
+// between it and the closing EOF.
+func recoveryBlock(t *testing.T, stderr string) (cmd string, lines []string) {
+	t.Helper()
+	all := strings.Split(stderr, "\n")
+	start := slices.IndexFunc(all, func(l string) bool { return strings.HasPrefix(l, "  base64 -d > ") })
+	if start < 0 {
+		t.Fatalf("stderr has no recovery block:\n%s", stderr)
+	}
+	end := slices.Index(all[start:], "EOF")
+	if end < 0 {
+		t.Fatalf("the recovery block has no EOF line:\n%s", stderr)
+	}
+	return all[start], all[start+1 : start+end]
+}
+
+func TestBootstrapNixOSCredWriteFails(t *testing.T) {
+	t.Parallel()
+	r := newNixBootRig(t, nil)
+	r.host.Files.Dir(nixTestDir, setuptest.AliceLinuxUID, setuptest.AliceLinuxUID, 0o755).
+		FailWrite(nixPath(setup.CredFile), errors.New("disk full"))
+	r.terminal = true
+	r.lines = []string{"y"}
+	got := r.run("alice@gmail.com", "--nix-dir", nixTestDir, "--key-backup", "none")
+	if got.code == 0 {
+		t.Fatalf("exit 0 although the credential could not be written")
+	}
+	if got.stdout != "" {
+		t.Errorf("stdout = %q, want nothing", got.stdout)
+	}
+	if len(r.sudoArgs) != 1 {
+		t.Errorf("sudo calls = %d, want 1", len(r.sudoArgs))
+	}
+	for _, want := range []string{
+		"bootstrap could not write " + nixPath(setup.CredFile) + ": ",
+		"disk full",
+		"The sealed vault key credential is below. It is encrypted for this host only, so it is safe to save. Save it with:\n",
+	} {
+		if !strings.Contains(got.stderr, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, got.stderr)
+		}
+	}
+	cmd, lines := recoveryBlock(t, got.stderr)
+	if want := "  base64 -d > " + nixPath(setup.CredFile) + " <<'EOF'"; cmd != want {
+		t.Errorf("save command = %q, want %q", cmd, want)
+	}
+	for i, l := range lines {
+		if len(l) > 76 || (i < len(lines)-1 && len(l) != 76) {
+			t.Errorf("base64 line %d is %d columns, want 76 (shorter only on the last)", i+1, len(l))
+		}
+	}
+	cred, err := base64.StdEncoding.DecodeString(strings.Join(lines, ""))
+	if err != nil {
+		t.Fatalf("the recovery block is not base64: %v", err)
+	}
+	if !bytes.HasPrefix(cred, []byte("sealed:")) || r.creds.CheckDecrypt(t.Context(), setup.CredName, cred) != nil {
+		t.Errorf("the recovery block (%d bytes) is not the credential bootstrap apply sealed", len(cred))
+	}
+	if w := nixFileWrites(t, r); len(w) > 0 {
+		t.Errorf("files written after the credential failed: %q", w)
+	}
+
+	// The printed command saves the credential as it is.
+	if bash, err := exec.LookPath("bash"); err == nil {
+		out := filepath.Join(t.TempDir(), "saved.cred")
+		script := strings.Replace(cmd, nixPath(setup.CredFile), out, 1) + "\n" + strings.Join(lines, "\n") + "\nEOF\n"
+		if res, err := exec.CommandContext(t.Context(), bash, "-c", script).CombinedOutput(); err != nil {
+			t.Fatalf("running the save command: %v: %s", err, res)
+		}
+		if saved, err := os.ReadFile(out); err != nil || !bytes.Equal(saved, cred) {
+			t.Errorf("the save command wrote %d bytes (%v), want the %d credential bytes", len(saved), err, len(cred))
+		}
+	}
+
+	t.Run("never in the JSON result", func(t *testing.T) {
+		t.Parallel()
+		r := newNixBootRig(t, nil)
+		r.host.Files.Dir(nixTestDir, setuptest.AliceLinuxUID, setuptest.AliceLinuxUID, 0o755).
+			FailWrite(nixPath(setup.CredFile), errors.New("disk full"))
+		r.terminal = true
+		r.lines = []string{"y"}
+		got := r.run("alice@gmail.com", "--nix-dir", nixTestDir, "--key-backup", "none", "--output", "json")
+		if got.code == 0 || got.stdout != "" {
+			t.Errorf("exit %d, stdout %q; want a failure and nothing on stdout", got.code, got.stdout)
+		}
+		if _, lines := recoveryBlock(t, got.stderr); len(lines) == 0 {
+			t.Error("the recovery block is empty")
+		}
+	})
+}
+
+func TestShellQuote(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		"/home/alice/chainmail-nixos/chainmail-vault-key.cred": "/home/alice/chainmail-nixos/chainmail-vault-key.cred",
+		"/home/alice/my config/x.cred":                         "'/home/alice/my config/x.cred'",
+		"/home/alice/it's/x.cred":                              `'/home/alice/it'\''s/x.cred'`,
+		"/tmp/$(rm -rf ~)/x":                                   "'/tmp/$(rm -rf ~)/x'",
+		"":                                                     "''",
+	} {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
