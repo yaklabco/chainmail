@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -29,5 +30,34 @@ func TestRunBoundedOutput(t *testing.T) {
 	}
 	if string(out) != "in" || string(errOut) != "err\n" {
 		t.Fatalf("stdout %q, stderr %q", out, errOut)
+	}
+}
+
+// dscl reports a missing record with eDSRecordNotFound (DS Error -14136)
+// and a non-zero exit; any other failure is an error, not an absence.
+func TestDSCLRecordExists(t *testing.T) {
+	t.Parallel()
+	failed := errors.New("exit status 56")
+	cases := []struct {
+		name    string
+		stderr  string
+		err     error
+		want    bool
+		wantErr bool
+	}{
+		{name: "found", want: true},
+		{name: "not found by name", stderr: "<dscl_cmd> DS Error: -14136 (eDSRecordNotFound)\n", err: failed},
+		{name: "not found by code only", stderr: "DS Error: -14136\n", err: failed},
+		{name: "other failure", stderr: "DS Error: -14009 (eDSUnknownNodeName)\n", err: failed, wantErr: true},
+		{name: "no output", err: failed, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := dsclRecordExists([]byte(tc.stderr), tc.err)
+			if (err != nil) != tc.wantErr || got != tc.want {
+				t.Fatalf("got %v, %v; want %v, error %v", got, err, tc.want, tc.wantErr)
+			}
+		})
 	}
 }

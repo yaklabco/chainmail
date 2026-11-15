@@ -347,3 +347,16 @@ func runBounded(timeout time.Duration, stdin []byte, name string, args ...string
 	}
 	return out.Bytes(), errOut.Bytes(), nil
 }
+
+// dsclRecordExists reads the result of `dscl . -read <record>`: success is
+// a record that exists, eDSRecordNotFound (DS Error -14136) is one that
+// does not, and any other failure is an error.
+func dsclRecordExists(stderr []byte, err error) (bool, error) {
+	if err == nil {
+		return true, nil
+	}
+	if bytes.Contains(stderr, []byte("eDSRecordNotFound")) || bytes.Contains(stderr, []byte("-14136")) {
+		return false, nil
+	}
+	return false, err
+}

@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -259,6 +260,9 @@ func (h *host) removeUser(name string) {
 
 // userExists reports whether the user database has name.
 func userExists(name string) (bool, error) {
+	if runtime.GOOS == "darwin" {
+		return dsclExists("/Users/" + name)
+	}
 	_, err := user.Lookup(name)
 	var unknown user.UnknownUserError
 	switch {
@@ -273,6 +277,9 @@ func userExists(name string) (bool, error) {
 
 // groupExists reports whether the group database has name.
 func groupExists(name string) (bool, error) {
+	if runtime.GOOS == "darwin" {
+		return dsclExists("/Groups/" + name)
+	}
 	_, err := user.LookupGroup(name)
 	var unknown user.UnknownGroupError
 	switch {
@@ -283,6 +290,19 @@ func groupExists(name string) (bool, error) {
 	default:
 		return false, fmt.Errorf("look up group %s: %w", name, err)
 	}
+}
+
+// dsclExists asks a fresh dscl process whether record exists. On macOS the
+// test process's own user and group lookups go through libc's directory
+// services cache, which can keep answering for a record that was just
+// deleted, so they cannot prove a cleanup worked.
+func dsclExists(record string) (bool, error) {
+	_, stderr, err := runBounded(cmdTimeout, nil, "dscl", ".", "-read", record, "RecordName")
+	there, err := dsclRecordExists(stderr, err)
+	if err != nil {
+		return false, fmt.Errorf("look up %s: %w", record, err)
+	}
+	return there, nil
 }
 
 // removePaths deletes the layout directories, then the parents that did
