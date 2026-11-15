@@ -78,7 +78,7 @@ On NixOS, the [NixOS module](https://chainmail.sh/docs/operations/deploy#nixos) 
 chainmail bootstrap you@example.com --nix-dir ./chainmail-nixos
 ```
 
-Bootstrap writes three files into `--nix-dir`, which is `./chainmail-nixos` by default. `chainmail.nix` turns on the module and adds you to `chainmail-clients`. `chainmail-you.nix` holds the account. `chainmail-vault-key.cred` is the vault key, sealed with `systemd-creds` so that only this machine can open it. None of the files holds a secret in the clear, so you can commit them.
+Bootstrap writes three files into `--nix-dir`, which is `./chainmail-nixos` by default. `chainmail.nix` turns on the module and adds you to `chainmail-clients`. `chainmail-you.nix` holds the account. `chainmail-vault-key.cred` is the vault key, sealed with `systemd-creds`. On a machine with a TPM2 it opens only on that machine. Without one, it opens wherever the host key in `/var/lib/systemd/credential.secret` is, a file only root can read. None of the files holds a secret in the clear, so you can commit them.
 
 Import the files from your NixOS configuration and add the chainmail flake input. Bootstrap prints the lines to add. Rebuild the way you normally do. Then run bootstrap again with the same address. It stores the password through the daemon and tests the login.
 
@@ -107,7 +107,7 @@ chainmail bootstrap you@example.com
 
 Bootstrap makes a new key and asks for that account's password again. Run it once more for each other account, with the same address and options as before, to enter its password again. For an OAuth account, bootstrap asks for the OAuth client secret again and logs in through the browser. Without a terminal it cannot log in, and it tells you to run `chainmail auth login <name>`.
 
-On NixOS, the key is the sealed credential `chainmail-vault-key.cred` in your NixOS configuration, and bootstrap does not make a new one while the module is installed. A reinstall loses the host key that sealed it, so the credential no longer opens. If you saved the key, put it in a file called `vault-key` in the directory that holds the old credential, and seal it again on this machine. The new credential replaces the old one only after it decrypts to a valid age identity, and the saved copy is deleted only after that. Then commit the new file and rebuild:
+On NixOS, the key is the sealed credential `chainmail-vault-key.cred` in your NixOS configuration, and bootstrap does not make a new one while the module is installed. A reinstall that loses `/var/lib/systemd/credential.secret`, or a new TPM2, means the credential no longer opens. If you saved the key, put it in a file called `vault-key` in the directory that holds the old credential, and seal it again on this machine. The new credential replaces the old one only after it decrypts to a valid age identity, and the saved copy is deleted only after that. Then commit the new file and rebuild:
 
 ```sh
 sudo nix shell nixpkgs#age -c bash -euo pipefail -c '
