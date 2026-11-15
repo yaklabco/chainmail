@@ -413,6 +413,7 @@ func (cp *completer) specs() map[string]compSpec {
 			"provider":   fixed(setup.BootstrapProviders()...),
 			"from-pass":  cp.passEntries,
 			"key-backup": fixed(cobra.CompletionWithDesc("none", "keep the key only on this machine"), cobra.CompletionWithDesc("show", "print the key once on the terminal")),
+			"nix-dir":    dirs,
 		}},
 		"chainmail bootstrap apply": {args: noComplete},
 		"chainmail cache":           {args: noComplete},

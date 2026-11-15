@@ -19,7 +19,9 @@ var userNameRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$`)
 
 // Validate is the apply-side check: platform, version, every Entry known
 // to l, user and group names equal to l's, account fields valid, overrides
-// only when e2eEnabled. It returns a *Refusal.
+// only when e2eEnabled. It returns a *Refusal. A NixOS plan gets the same
+// version, platform, user and account checks, then validateNixOS's; any
+// other plan must leave the NixOS fields empty.
 //
 // Everything is checked against l and this binary's own rendering, never
 // against the plan: the service text must equal RenderService(l), and
@@ -54,6 +56,12 @@ func Validate(l Layout, p Plan) error {
 	}
 	if _, err := ParseBackup(string(p.Backup)); err != nil {
 		return err
+	}
+	if p.Platform == NixOS {
+		return validateNixOS(l, p)
+	}
+	if p.NixState != "" || p.NixDir != "" || p.DaemonBinary != "" {
+		return refuse(validateHint, "plan for %s carries NixOS fields", p.Platform)
 	}
 	for _, a := range p.Actions {
 		if err := validateAction(l, p, a); err != nil {
@@ -179,7 +187,7 @@ func validateAction(l Layout, p Plan, a Action) error {
 	bad := func(why string) error {
 		return refuse(validateHint, "plan step %s %s%s: %s", a.Kind, a.Entry, a.Name, why)
 	}
-	if a.Note == "" || strings.ContainsFunc(a.Note, unicode.IsControl) {
+	if badNote(a.Note) {
 		return bad("has an empty note or one with control characters")
 	}
 	if a.Data != nil && a.Kind != ActWriteConfig && a.Kind != ActWriteService {
@@ -228,6 +236,12 @@ func validateAction(l Layout, p Plan, a Action) error {
 		return bad("unknown step")
 	}
 	return nil
+}
+
+// badNote reports whether note is empty or holds control characters,
+// which could rewrite the terminal the plan is printed on.
+func badNote(note string) bool {
+	return note == "" || strings.ContainsFunc(note, unicode.IsControl)
 }
 
 // wantTarget refuses an action whose Entry or Name is not the one given.

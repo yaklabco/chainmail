@@ -357,3 +357,117 @@ func TestCheckTrustLstatError(t *testing.T) {
 		t.Errorf("error %q does not name the path", err)
 	}
 }
+
+// nixStoreTree is a NixOS store path to the chainmail binary: /nix/store
+// is root:nixbld 1775, the entries below it root-owned and read-only.
+func nixStoreTree(edits map[string]FileInfo) map[string]FileInfo {
+	store := dir(0, fs.ModeSticky|0o775)
+	store.GID = 30000
+	return with(map[string]FileInfo{
+		"/":                                      dir(0, 0o755),
+		"/nix":                                   dir(0, 0o755),
+		"/nix/store":                             store,
+		"/nix/store/abc-chainmail":               dir(0, 0o555),
+		"/nix/store/abc-chainmail/bin":           dir(0, 0o555),
+		"/nix/store/abc-chainmail/bin/chainmail": file(0, 0o555),
+		"/opt":                                   dir(0, 0o755),
+		"/opt/store":                             dir(0, fs.ModeSticky|0o775),
+		"/opt/store/chainmail":                   file(0, 0o555),
+	}, edits)
+}
+
+func TestCheckTrustNixStore(t *testing.T) {
+	t.Parallel()
+	const binary = "/nix/store/abc-chainmail/bin/chainmail"
+	storeWith := func(uid uint32, mode fs.FileMode) FileInfo {
+		fi := dir(uid, mode)
+		fi.GID = 30000
+		return fi
+	}
+	cases := []struct {
+		name   string
+		files  map[string]FileInfo
+		path   string
+		unsafe string // the path the refusal names, "" when the check passes
+		reason string
+	}{
+		{
+			name:  "root-owned sticky store",
+			files: nixStoreTree(nil),
+			path:  binary,
+		},
+		{
+			name:   "store without the sticky bit",
+			files:  nixStoreTree(map[string]FileInfo{"/nix/store": storeWith(0, 0o775)}),
+			path:   binary,
+			unsafe: "/nix/store",
+			reason: "writable by group or others",
+		},
+		{
+			name:   "store writable by others",
+			files:  nixStoreTree(map[string]FileInfo{"/nix/store": storeWith(0, fs.ModeSticky|0o777)}),
+			path:   binary,
+			unsafe: "/nix/store",
+			reason: "writable by group or others",
+		},
+		{
+			name:   "store owned by a user",
+			files:  nixStoreTree(map[string]FileInfo{"/nix/store": storeWith(1000, fs.ModeSticky|0o775)}),
+			path:   binary,
+			unsafe: "/nix/store",
+			reason: "owned by uid 1000",
+		},
+		{
+			name:   "group-writable store entry",
+			files:  nixStoreTree(map[string]FileInfo{"/nix/store/abc-chainmail": dir(0, 0o775)}),
+			path:   binary,
+			unsafe: "/nix/store/abc-chainmail",
+			reason: "writable by group or others",
+		},
+		{
+			name:   "missing store entry",
+			files:  nixStoreTree(nil),
+			path:   "/nix/store/missing/bin/chainmail",
+			unsafe: "/nix/store/missing",
+			reason: "is missing from the Nix store, where a build user could create it",
+		},
+		{
+			name:  "missing below a root-owned store entry",
+			files: nixStoreTree(nil),
+			path:  "/nix/store/abc-chainmail/bin/absent",
+		},
+		{
+			name:   "store is a regular file",
+			files:  nixStoreTree(map[string]FileInfo{"/nix/store": file(0, fs.ModeSticky|0o775)}),
+			path:   "/nix/store",
+			unsafe: "/nix/store",
+			reason: "writable by group or others",
+		},
+		{
+			name:   "sticky directory elsewhere",
+			files:  nixStoreTree(nil),
+			path:   "/opt/store/chainmail",
+			unsafe: "/opt/store",
+			reason: "writable by group or others",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := CheckTrust(&fakeFS{files: tc.files}, tc.path, []uint32{0})
+			if tc.unsafe == "" {
+				if err != nil {
+					t.Fatalf("CheckTrust(%q) = %v, want nil", tc.path, err)
+				}
+				return
+			}
+			var r *Refusal
+			if !errors.As(err, &r) {
+				t.Fatalf("CheckTrust(%q) = %v (%T), want *Refusal", tc.path, err, err)
+			}
+			if want := "unsafe path " + tc.unsafe + ": " + tc.reason; r.Msg != want {
+				t.Errorf("message = %q, want %q", r.Msg, want)
+			}
+		})
+	}
+}

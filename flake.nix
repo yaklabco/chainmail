@@ -44,6 +44,11 @@
         inherit self;
         pkgs = nixpkgs.legacyPackages.x86_64-linux;
       };
+      checks.x86_64-linux.nixos-bootstrap = import ./nix/bootstrap-test.nix {
+        inherit self;
+        pkgs = nixpkgs.legacyPackages.x86_64-linux;
+      };
       checks.x86_64-linux.nixos-module-assertions = import ./nix/assertions.nix { inherit self nixpkgs; };
+      checks.x86_64-linux.nixos-bootstrap-render = import ./nix/bootstrap-render.nix { inherit self nixpkgs; };
     };
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -67,7 +68,8 @@ const newPasswordHint = "run bootstrap again and enter the new password"
 const exitAuthRejected = 5
 
 // Applier applies a plan as root. Every field but Resolver is required,
-// except that Stderr may be nil.
+// except that Stderr may be nil, Executable is not copied on NixOS, and
+// Units and Creds are needed only on NixOS.
 type Applier struct {
 	Layout   Layout
 	Files    system.Files
@@ -89,6 +91,12 @@ type Applier struct {
 	// Resolver is not consulted: the request carries the detection the
 	// user confirmed, and Build checks it against the presets.
 	Resolver Resolver
+	// Units reads systemd's view of chainmail.service on NixOS. Other
+	// platforms leave it nil.
+	Units system.Units
+	// Creds seals and checks the vault key credential on NixOS. Other
+	// platforms leave it nil.
+	Creds system.Creds
 
 	// readyTimeout bounds the wait for a started daemon to answer. Zero
 	// means readinessTimeout; tests set it shorter.
@@ -125,6 +133,11 @@ type Result struct {
 	KeyShown       bool              `json:"key_shown"`
 	Warnings       []string          `json:"warnings,omitempty"`
 	NextSteps      []string          `json:"next_steps"`
+	// NixState is the plan's state on NixOS, empty elsewhere.
+	NixState NixState `json:"nix_state,omitempty"`
+	// Cred is the sealed vault key credential after seal-key. It is
+	// encrypted; the CLI writes it into the Nix directory.
+	Cred []byte `json:"cred,omitempty"`
 }
 
 // AuthError is a credential problem. The CLI reports it as
@@ -151,6 +164,9 @@ var ErrNotReady = errors.New("daemon did not become ready")
 // binary would plan itself.
 //
 // A failed account test still returns the Result, with Test "failed".
+//
+// A NixOS plan goes to applyNixOS after the checks above, before anything
+// is written: it takes its lock in /run and owns no files.
 func (a *Applier) Apply(ctx context.Context, in Input) (Result, error) {
 	l := a.Layout
 	if err := Validate(l, in.Plan); err != nil {
@@ -165,6 +181,9 @@ func (a *Applier) Apply(ctx context.Context, in Input) (Result, error) {
 	binary, err := a.readExecutable(in.Request.ExecSHA256)
 	if err != nil {
 		return Result{}, err
+	}
+	if l.Platform == NixOS {
+		return a.applyNixOS(ctx, in)
 	}
 
 	if err := a.prepareLockDir(); err != nil {
@@ -317,7 +336,9 @@ func (v filesView) Lstat(path string) (FileInfo, error) {
 	return FileInfo(info), nil
 }
 
-// newResult is the Result before anything ran.
+// newResult is the Result before anything ran. Paths holds only the
+// paths the layout has: NixOS has no binary, vault key or log file of its
+// own.
 func newResult(l Layout, p Plan) Result {
 	paths := map[string]string{
 		"binary":    l.Binary,
@@ -327,17 +348,22 @@ func newResult(l Layout, p Plan) Result {
 		"vault":     l.Vault,
 		"socket":    l.Socket,
 		"service":   l.Service,
+		"log":       l.LogFile,
 	}
-	if l.LogFile != "" {
-		paths["log"] = l.LogFile
-	}
+	maps.DeleteFunc(paths, func(_, path string) bool { return path == "" })
 	steps := []string{"log out and back in, or run: newgrp " + l.ClientGroup, "chainmail accounts list"}
+	if l.Platform == NixOS && p.NixState != NixFinish {
+		// Until the module is imported and the system rebuilt there is no
+		// group to join and no daemon to ask.
+		steps = nil
+	}
 	return Result{
 		Account:   p.Account.Name,
 		Provider:  p.Account.Provider,
 		Paths:     paths,
 		Test:      testSkipped,
 		NextSteps: append(steps, p.NextSteps...),
+		NixState:  p.NixState,
 	}
 }
 
@@ -358,10 +384,12 @@ type applyRun struct {
 }
 
 // run applies the plan's actions in order, then the steps every run
-// ends with.
+// that uses the daemon ends with. The write-nix steps are the CLI's, so
+// they are neither run nor counted here.
 func (r *applyRun) run(ctx context.Context) (Result, error) {
-	for i, act := range r.plan.Actions {
-		r.progress(i, act.Note)
+	acts := slices.DeleteFunc(slices.Clone(r.plan.Actions), func(act Action) bool { return act.Kind == ActWriteNix })
+	for i, act := range acts {
+		r.progress(i, len(acts), act.Note)
 		if err := r.step(ctx, act); err != nil {
 			var ae *AuthError
 			if errors.As(err, &ae) {
@@ -375,6 +403,9 @@ func (r *applyRun) run(ctx context.Context) (Result, error) {
 			return Result{}, fmt.Errorf("step %d, %s: %w", i+1, act.Note, err)
 		}
 	}
+	if !r.usesDaemon() {
+		return r.res, nil
+	}
 	if err := r.ensureRunning(ctx); err != nil {
 		return Result{}, err
 	}
@@ -385,10 +416,10 @@ func (r *applyRun) run(ctx context.Context) (Result, error) {
 	return r.res, nil
 }
 
-// progress prints the step being run.
-func (r *applyRun) progress(i int, note string) {
+// progress prints the step being run, step i of n.
+func (r *applyRun) progress(i, n int, note string) {
 	if r.a.Stderr != nil {
-		_, _ = fmt.Fprintf(r.a.Stderr, "[%d/%d] %s\n", i+1, len(r.plan.Actions), note) // progress only; a lost line changes nothing
+		_, _ = fmt.Fprintf(r.a.Stderr, "[%d/%d] %s\n", i+1, n, note) // progress only; a lost line changes nothing
 	}
 }
 
@@ -441,6 +472,10 @@ func (r *applyRun) step(ctx context.Context, act Action) error {
 			return err
 		}
 		return r.test(ctx, act.Name)
+	case ActSealKey:
+		return r.sealKey(ctx)
+	case ActCheckCred:
+		return r.checkCred(ctx)
 	default:
 		return fmt.Errorf("unknown step %q", act.Kind)
 	}
@@ -576,10 +611,14 @@ func (r *applyRun) activate(ctx context.Context) error {
 }
 
 // ensureRunning starts a service that was stopped before Apply and that
-// no step of this run started.
+// no step of this run started. On NixOS, where the system configuration
+// owns the service, it refuses instead.
 func (r *applyRun) ensureRunning(ctx context.Context) error {
 	if r.ready || r.pre.Running {
 		return nil
+	}
+	if r.l.Platform == NixOS {
+		return errNotActive(r.l)
 	}
 	start := r.a.Now()
 	if err := r.a.Service.Activate(ctx, false); err != nil {
@@ -867,8 +906,12 @@ func (r *applyRun) test(ctx context.Context, account string) error {
 	return nil
 }
 
-// finish records the service state at the end.
+// finish records the service state at the end of a run that used the
+// daemon.
 func (r *applyRun) finish(ctx context.Context) {
+	if !r.usesDaemon() {
+		return
+	}
 	st, err := r.a.Service.State(ctx)
 	if err != nil {
 		r.warn("could not read the state of " + r.l.ServiceLabel + ": " + err.Error())

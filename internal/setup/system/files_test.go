@@ -241,6 +241,39 @@ func TestOSFiles(t *testing.T) {
 		}
 	})
 
+	t.Run("RemoveFile", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".probe")
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.RemoveFile(path); err != nil {
+			t.Fatalf("RemoveFile: %v", err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("after RemoveFile, Lstat = %v, want fs.ErrNotExist", err)
+		}
+		// A symlink is removed, never its target.
+		target := filepath.Join(dir, "target")
+		if err := os.WriteFile(target, []byte("kept"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(dir, "link")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.RemoveFile(link); err != nil {
+			t.Fatalf("RemoveFile of a link: %v", err)
+		}
+		if got, err := os.ReadFile(target); err != nil || string(got) != "kept" {
+			t.Fatalf("the link's target = %q, %v, want it kept", got, err)
+		}
+		if err := f.RemoveFile(path); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("RemoveFile of a missing file = %v, want fs.ErrNotExist", err)
+		}
+	})
+
 	t.Run("Lock", func(t *testing.T) {
 		t.Parallel()
 		path := filepath.Join(t.TempDir(), ".bootstrap.lock")

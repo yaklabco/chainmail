@@ -89,6 +89,32 @@ func TestLayoutDarwin(t *testing.T) {
 	assertEntries(t, got.Entries(), wantEntries)
 }
 
+func TestLayoutNixOS(t *testing.T) {
+	t.Parallel()
+	got := LayoutFor(NixOS)
+	want := Layout{
+		Platform:     NixOS,
+		DaemonUser:   "chainmail",
+		ClientGroup:  "chainmail-clients",
+		RootGroup:    "root",
+		ConfigDir:    "/etc/chainmail",
+		Config:       "/etc/chainmail/config.toml",
+		Lock:         "/run/chainmail-bootstrap.lock",
+		StateDir:     "/var/lib/chainmail",
+		Vault:        "/var/lib/chainmail/vault.age",
+		SocketDir:    "/run/chainmail",
+		Socket:       "/run/chainmail/chainmail.sock",
+		Service:      "/etc/systemd/system/chainmail.service",
+		ServiceLabel: "chainmail.service",
+	}
+	if got != want {
+		t.Errorf("LayoutFor(NixOS) =\n%+v\nwant\n%+v", got, want)
+	}
+	if e := got.Entries(); len(e) != 0 {
+		t.Errorf("Entries() = %+v, want none: bootstrap owns no files on NixOS", e)
+	}
+}
+
 func assertEntries(t *testing.T, got, want []Entry) {
 	t.Helper()
 	if len(got) != len(want) {

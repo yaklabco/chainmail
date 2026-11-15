@@ -34,13 +34,15 @@ type node struct {
 // parents, so a test can build any tree.
 type Files struct {
 	// Journal, when set, gets one entry per change: "mkdir <path>",
-	// "write <path>", "create <path>", "lock <path>" and "unlock <path>".
+	// "write <path>", "create <path>", "remove <path>", "lock <path>" and
+	// "unlock <path>".
 	Journal *Journal
 
 	mu        sync.Mutex
 	nodes     map[string]node
 	errs      map[string]error
 	writeErrs map[string]error
+	dirErrs   map[string]error // writes of entries in a directory
 	writes    []string
 	locked    map[string]bool
 }
@@ -53,14 +55,16 @@ func NewFiles() *Files {
 		nodes:     map[string]node{},
 		errs:      map[string]error{},
 		writeErrs: map[string]error{},
+		dirErrs:   map[string]error{},
 		locked:    map[string]bool{},
 	}
 }
 
-// resolve follows symlinks in the ancestors of path. The caller holds mu,
-// or owns f.
+// resolve follows symlinks in the ancestors of path. Like the kernel, it
+// takes ".." from the directory reached so far, so it never cleans path
+// as text first. The caller holds mu, or owns f.
 func (f *Files) resolve(path string) string {
-	parts := splitPath(filepath.Clean(path))
+	parts := splitPath(path)
 	cur := "/"
 	for hops := 0; len(parts) > 0 && hops < maxSymlinkHops; {
 		name := parts[0]
@@ -114,7 +118,7 @@ func (f *Files) Symlink(path string, uid uint32, dest string) *Files {
 	return f
 }
 
-// Remove deletes path from the tree.
+// Remove deletes path from the tree, as a setter: it records no change.
 func (f *Files) Remove(path string) *Files {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -130,12 +134,22 @@ func (f *Files) FailRead(path string, err error) *Files {
 	return f
 }
 
-// FailWrite makes EnsureDir, WriteFile and CreateExclusive of path fail
-// with err, wrapped as the real Files wraps it.
+// FailWrite makes EnsureDir, WriteFile, CreateExclusive and RemoveFile of
+// path fail with err, wrapped as the real Files wraps it.
 func (f *Files) FailWrite(path string, err error) *Files {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.writeErrs[f.resolve(path)] = err
+	return f
+}
+
+// FailWriteIn makes EnsureDir, WriteFile, CreateExclusive and RemoveFile
+// of every entry directly in dir fail with err, as a directory the caller
+// may not write would. dir itself is not affected.
+func (f *Files) FailWriteIn(dir string, err error) *Files {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dirErrs[f.resolve(dir)] = err
 	return f
 }
 
@@ -243,6 +257,23 @@ func (f *Files) CreateExclusive(path string, data []byte, uid, gid uint32, mode 
 	return nil
 }
 
+// RemoveFile implements system.Files. A missing path is an error wrapping
+// fs.ErrNotExist.
+func (f *Files) RemoveFile(path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	path = f.resolve(path)
+	if err := f.writable(path, "removing"); err != nil {
+		return err
+	}
+	if _, ok := f.nodes[path]; !ok {
+		return fmt.Errorf("removing %s: %w", path, fs.ErrNotExist)
+	}
+	delete(f.nodes, path)
+	f.record("remove", path)
+	return nil
+}
+
 // Lock implements system.Files. Locking a path that is already locked is
 // an error rather than a wait, so a test that forgets to unlock fails.
 func (f *Files) Lock(path string) (func() error, error) {
@@ -273,6 +304,9 @@ func (f *Files) Lock(path string) (func() error, error) {
 // not a directory. The caller holds mu.
 func (f *Files) writable(path, verb string) error {
 	if err := f.writeErrs[path]; err != nil {
+		return fmt.Errorf("%s %s: %w", verb, path, err)
+	}
+	if err := f.dirErrs[filepath.Dir(path)]; err != nil {
 		return fmt.Errorf("%s %s: %w", verb, path, err)
 	}
 	return f.parentDir(path)

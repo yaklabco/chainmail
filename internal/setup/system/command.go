@@ -16,8 +16,10 @@ import (
 // trustedDirs are the only directories bootstrap runs host commands from,
 // searched in this order. PATH is never consulted: under sudo it can
 // still name a directory the invoking user, or an agent of theirs, can
-// write.
-var trustedDirs = []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin"}
+// write. /run/current-system/sw/bin is the NixOS system profile, a link
+// into the Nix store; elsewhere it does not exist, and only root can
+// create it under /run.
+var trustedDirs = []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin", "/run/current-system/sw/bin"}
 
 // commandEnv is the whole environment of a host command. Nothing is
 // inherited from the caller.
@@ -47,8 +49,10 @@ type finder struct {
 // is trusted when every directory on the way to it, from "/" through the
 // search directory, is owned by root and writable only by root; every
 // symlink on the way is owned by root and sits in such a directory; and
-// it ends at a regular file root owns and only root can write. A missing
-// command is an error wrapping exec.ErrNotFound.
+// it ends at a regular file root owns and only root can write. The Nix
+// store directory alone may also be writable by its group, while it has
+// the sticky bit, as trusted explains. A missing command is an error
+// wrapping exec.ErrNotFound.
 func LookupTrusted(name string, dirs []string) (string, error) {
 	return finder{root: "/", dirs: dirs, owner: 0}.find(name)
 }
@@ -98,7 +102,7 @@ func (f finder) resolve(root, hostPath string) (string, error) {
 	if !fi.IsDir() {
 		return "", fmt.Errorf("%s is not a directory", root)
 	}
-	if err := f.trusted(root, fi); err != nil {
+	if err := f.trusted(root, root, fi); err != nil {
 		return "", err
 	}
 
@@ -158,7 +162,7 @@ func (f finder) resolve(root, hostPath string) (string, error) {
 			continue
 		}
 
-		if err := f.trusted(next, fi); err != nil {
+		if err := f.trusted(root, next, fi); err != nil {
 			return "", err
 		}
 		if len(pending) > 0 && !fi.IsDir() {
@@ -191,16 +195,41 @@ func splitPath(path string) []string {
 	return strings.FieldsFunc(path, func(r rune) bool { return r == '/' })
 }
 
-// trusted refuses path unless the finder's owner owns it and neither its
-// group nor others can write it.
-func (f finder) trusted(path string, fi fs.FileInfo) error {
+// nixStore is the Nix store directory, as a host path. The system package
+// cannot import setup, which names it NixStore.
+const nixStore = "/nix/store"
+
+// trusted refuses path, a directory or file under root, unless the
+// finder's owner owns it and neither its group nor others can write it.
+// The host directory /nix/store is the one exception.
+func (f finder) trusted(root, path string, fi fs.FileInfo) error {
 	if err := f.ownedByOwner(path, fi); err != nil {
 		return err
+	}
+	// The Nix store is group-writable so the nixbld build users can add
+	// to it. Its sticky bit means only an entry's owner can rename or
+	// remove that entry, and the entries a command resolves through are
+	// owned by the owner and read-only, so they still get the normal
+	// check. Only the exact host path qualifies: no other sticky,
+	// group-writable directory does, and neither does a file at that
+	// path, whose contents the sticky bit does not protect.
+	if hostPath(root, path) == nixStore && fi.IsDir() && fi.Mode()&fs.ModeSticky != 0 && fi.Mode().Perm()&0o002 == 0 {
+		return nil
 	}
 	if fi.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("%s is writable by its group or others (mode %v)", path, fi.Mode().Perm())
 	}
 	return nil
+}
+
+// hostPath is path, which is root or below it, as a path on the host the
+// tree under root stands for. It is "" when path is outside root.
+func hostPath(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return ""
+	}
+	return filepath.Join("/", rel)
 }
 
 // ownedByOwner refuses path unless the finder's owner owns it.
@@ -240,24 +269,56 @@ func ExecRunner(ctx context.Context, name string, args ...string) ([]byte, error
 // run.
 func execRunner(find func(string) (string, error)) Runner {
 	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		path, err := find(name)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", commandLine(name, args), err)
+		return runTrusted(ctx, find, nil, name, args...)
+	}
+}
+
+// runTrusted runs the command find resolves name to, with only commandEnv
+// as its environment, "/" as its working directory and stdin, when not
+// nil, on a pipe. It is the one place the execution policy for host
+// commands lives. stdin may be secret, so it never goes into an error.
+func runTrusted(ctx context.Context, find func(string) (string, error), stdin []byte, name string, args ...string) ([]byte, error) {
+	path, err := find(name)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", commandLine(name, args), err)
+	}
+	cmd := exec.CommandContext(ctx, path, args...)
+	// A multi-call binary such as busybox picks its applet from argv[0].
+	cmd.Args[0] = name
+	cmd.Env = append([]string(nil), commandEnv...)
+	// Never the caller's working directory: a relative argument, such
+	// as a file a shell would read, must not resolve against a
+	// directory the invoking user controls.
+	cmd.Dir = "/"
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return out, commandError(name, args, err, stderr.Bytes())
+	}
+	return out, nil
+}
+
+// PipeRunner runs a trusted host command with stdin, returning stdout.
+// stderr goes into the error, as commandError does.
+type PipeRunner func(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, error)
+
+// ExecPipeRunner is the real PipeRunner: it finds name with the host
+// finder, like ExecRunner, and runs it with stdin.
+var ExecPipeRunner PipeRunner = func(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, error) {
+	return execPipeRunner(hostFinder.find)(ctx, stdin, name, args...)
+}
+
+// execPipeRunner is a PipeRunner that resolves each command with find when
+// it is run, and runs it as execRunner does, with stdin on a pipe.
+func execPipeRunner(find func(string) (string, error)) PipeRunner {
+	return func(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, error) {
+		if stdin == nil {
+			stdin = []byte{}
 		}
-		cmd := exec.CommandContext(ctx, path, args...)
-		// A multi-call binary such as busybox picks its applet from argv[0].
-		cmd.Args[0] = name
-		cmd.Env = append([]string(nil), commandEnv...)
-		// Never the caller's working directory: a relative argument, such
-		// as a file a shell would read, must not resolve against a
-		// directory the invoking user controls.
-		cmd.Dir = "/"
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
-		if err != nil {
-			return out, commandError(name, args, err, stderr.Bytes())
-		}
-		return out, nil
+		return runTrusted(ctx, find, stdin, name, args...)
 	}
 }

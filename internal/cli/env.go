@@ -75,8 +75,17 @@ type Env struct {
 	SetupFiles    system.Files
 	SetupAccounts system.Accounts
 	SetupService  system.Service
-	// AsDaemon runs the installed binary as the daemon user.
+	// SetupUnits reads systemd's unit facts and SetupCreds runs
+	// systemd-creds, on NixOS only.
+	SetupUnits system.Units
+	SetupCreds system.Creds
+	// AsDaemon runs the installed binary as the daemon user. NixOS uses
+	// DaemonRunnerFor instead.
 	AsDaemon func(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error
+	// DaemonRunnerFor builds the runner that runs binary as the daemon
+	// user. On NixOS bootstrap apply runs the store binary the plan names
+	// through it, never the layout's binary. Nil means daemonRunner.
+	DaemonRunnerFor func(binary string) func(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error
 	// OpenTTY opens the controlling terminal.
 	OpenTTY func() (io.ReadWriteCloser, error)
 	// AccountHealth asks the daemon at socket about account. An error
@@ -109,6 +118,7 @@ func DefaultEnv() Env {
 		Getuid: os.Getuid, Username: currentUsername, Executable: resolvedExecutable,
 		Sudo: realSudo, Resolver: net.DefaultResolver,
 		SetupFiles: system.OSFiles{}, SetupAccounts: system.NewAccounts(runtime.GOOS, system.ExecRunner),
+		SetupUnits: system.NewUnits(system.ExecRunner), SetupCreds: system.NewCreds(system.ExecPipeRunner),
 		OpenTTY: openTTY, AccountHealth: daemonAccountHealth, DaemonStatus: daemonStatus,
 	}
 	if fd := int(os.Stdin.Fd()); term.IsTerminal(fd) {

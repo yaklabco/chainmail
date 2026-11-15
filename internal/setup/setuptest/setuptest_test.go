@@ -32,6 +32,24 @@ func TestFilesFollowAncestorLinks(t *testing.T) {
 	}
 }
 
+// The kernel resolves ".." from the directory a link leads to, not by
+// cleaning the path as text first.
+func TestFilesDotDotAfterAncestorLink(t *testing.T) {
+	t.Parallel()
+	f := NewFiles()
+	f.Dir("/", 0, 0, 0o755).
+		Dir("/a", 0, 0, 0o755).
+		Dir("/a/real", 0, 0, 0o755).
+		Dir("/a/real/sub", 0, 0, 0o755).
+		File("/a/target", 0, 0, 0o644, []byte("kernel")).
+		File("/target", 0, 0, 0o644, []byte("lexical")).
+		Symlink("/link", 0, "/a/real/sub")
+	data, err := f.ReadFile("/link/../../target")
+	if err != nil || string(data) != "kernel" {
+		t.Errorf("ReadFile(/link/../../target) = %q, %v; want the file the kernel finds", data, err)
+	}
+}
+
 func TestFilesLockAndFailures(t *testing.T) {
 	t.Parallel()
 	j := &Journal{}
@@ -56,6 +74,50 @@ func TestFilesLockAndFailures(t *testing.T) {
 	}
 	if got, want := j.Entries(), []string{"lock /etc/.lock", "unlock /etc/.lock"}; !slices.Equal(got, want) {
 		t.Errorf("journal = %q, want %q", got, want)
+	}
+}
+
+func TestFilesRemoveAndFailWriteIn(t *testing.T) {
+	t.Parallel()
+	j := &Journal{}
+	f := FreshHost("linux").Files
+	f.Journal = j
+	f.Dir("/home", 0, 0, 0o755).Dir("/home/alice", 1000, 1000, 0o755)
+	if err := f.CreateExclusive("/home/alice/.probe", nil, 1000, 1000, 0o600); err != nil {
+		t.Fatalf("CreateExclusive: %v", err)
+	}
+	if err := f.RemoveFile("/home/alice/.probe"); err != nil {
+		t.Fatalf("RemoveFile: %v", err)
+	}
+	if _, _, ok := f.Content("/home/alice/.probe"); ok {
+		t.Error("the file is still there after RemoveFile")
+	}
+	if err := f.RemoveFile("/home/alice/.probe"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("RemoveFile of a missing file = %v, want fs.ErrNotExist", err)
+	}
+	want := []string{"create /home/alice/.probe", "remove /home/alice/.probe"}
+	if got := j.Entries(); !slices.Equal(got, want) {
+		t.Errorf("journal = %q, want %q", got, want)
+	}
+	if got := f.Writes(); !slices.Equal(got, []string{"/home/alice/.probe", "/home/alice/.probe"}) {
+		t.Errorf("writes = %q", got)
+	}
+
+	// FailWriteIn fails every write of an entry in the directory, not of
+	// the directory itself.
+	f.FailWriteIn("/home/alice", fs.ErrPermission)
+	for name, err := range map[string]error{
+		"CreateExclusive": f.CreateExclusive("/home/alice/x", nil, 0, 0, 0o600),
+		"WriteFile":       f.WriteFile("/home/alice/y", nil, 0, 0, 0o600),
+		"EnsureDir":       f.EnsureDir("/home/alice/z", 0, 0, 0o755),
+		"RemoveFile":      f.RemoveFile("/home/alice/.probe"),
+	} {
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("%s in the directory = %v, want fs.ErrPermission", name, err)
+		}
+	}
+	if err := f.EnsureDir("/home/alice", 1000, 1000, 0o755); err != nil {
+		t.Errorf("EnsureDir of the directory itself = %v", err)
 	}
 }
 
@@ -174,4 +236,79 @@ func TestServiceStarts(t *testing.T) {
 			t.Errorf("Starts after Activate(true) on a loaded job = %d, want 1", n)
 		}
 	})
+}
+
+func TestUnitsReturnsWhatItIsGiven(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	j := &Journal{}
+	info := system.UnitInfo{Loaded: true, LoadState: "loaded", Fragment: "/nix/store/x-unit/chainmail.service", ExecPath: "/nix/store/x/bin/chainmail", Active: true}
+	u := &Units{Info: info, Journal: j}
+	got, err := u.Show(ctx, "chainmail.service")
+	if err != nil || got != info {
+		t.Errorf("Show = %+v, %v; want %+v", got, err, info)
+	}
+	boom := errors.New("no bus")
+	u.Err = boom
+	if got, err := u.Show(ctx, "chainmail.service"); !errors.Is(err, boom) || got != (system.UnitInfo{}) {
+		t.Errorf("Show with Err = %+v, %v; want the zero UnitInfo and %v", got, err, boom)
+	}
+	want := []string{"show chainmail.service", "show chainmail.service"}
+	if got := u.Calls(); !slices.Equal(got, want) {
+		t.Errorf("Calls = %q, want %q", got, want)
+	}
+	if got := j.Entries(); !slices.Equal(got, []string{"units show chainmail.service", "units show chainmail.service"}) {
+		t.Errorf("journal = %q", got)
+	}
+}
+
+func TestCredsSealsAndChecks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	j := &Journal{}
+	c := (&Creds{Journal: j}).Accept([]byte("old credential"))
+
+	plain := []byte("AGE-SECRET-KEY-1FAKE")
+	cred, err := c.Encrypt(ctx, "vault-key", plain)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if want := "sealed:QUdFLVNFQ1JFVC1LRVktMUZBS0U="; string(cred) != want {
+		t.Errorf("Encrypt = %q, want %q", cred, want)
+	}
+	// The fake keeps nothing that aliases the caller's plaintext.
+	clear(plain)
+	if err := c.CheckDecrypt(ctx, "vault-key", cred); err != nil {
+		t.Errorf("CheckDecrypt of a credential it sealed: %v", err)
+	}
+	if err := c.CheckDecrypt(ctx, "other-name", cred); err == nil {
+		t.Error("CheckDecrypt accepted a credential under another name")
+	}
+	if err := c.CheckDecrypt(ctx, "vault-key", []byte("old credential")); err != nil {
+		t.Errorf("CheckDecrypt of an accepted credential: %v", err)
+	}
+	err = c.CheckDecrypt(ctx, "vault-key", []byte("foreign credential"))
+	if !errors.Is(err, system.ErrNotDecrypted) || !strings.HasPrefix(err.Error(), "the credential does not decrypt on this host: ") {
+		t.Errorf("CheckDecrypt of a foreign credential = %v, want system.ErrNotDecrypted", err)
+	}
+
+	boom := errors.New("no TPM")
+	c.EncryptErr, c.DecryptErr = boom, boom
+	if got, err := c.Encrypt(ctx, "vault-key", []byte("k")); !errors.Is(err, boom) || got != nil {
+		t.Errorf("Encrypt with EncryptErr = %q, %v", got, err)
+	}
+	if err := c.CheckDecrypt(ctx, "vault-key", cred); !errors.Is(err, boom) || errors.Is(err, system.ErrNotDecrypted) {
+		t.Errorf("CheckDecrypt with DecryptErr = %v, want boom as an operational error", err)
+	}
+
+	want := []string{
+		"encrypt vault-key", "decrypt vault-key", "decrypt other-name", "decrypt vault-key",
+		"decrypt vault-key", "encrypt vault-key", "decrypt vault-key",
+	}
+	if got := c.Calls(); !slices.Equal(got, want) {
+		t.Errorf("Calls = %q, want %q", got, want)
+	}
+	if got := j.Entries(); len(got) != len(want) || got[0] != "creds encrypt vault-key" {
+		t.Errorf("journal = %q", got)
+	}
 }

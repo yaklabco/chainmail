@@ -15,6 +15,9 @@ type Platform string
 const (
 	Linux  Platform = "linux"
 	Darwin Platform = "darwin"
+	// NixOS is Linux whose system configuration owns users, /etc and
+	// units. Bootstrap writes Nix modules there and owns no files.
+	NixOS Platform = "nixos"
 )
 
 // Owner and Group name who owns a path, resolved to ids at apply time.
@@ -66,8 +69,8 @@ type Layout struct {
 	Binary       string
 	ConfigDir    string // /etc/chainmail
 	Config       string // /etc/chainmail/config.toml
-	VaultKey     string // /etc/chainmail/vault-key
-	Lock         string // /etc/chainmail/.bootstrap.lock
+	VaultKey     string // /etc/chainmail/vault-key, "" on NixOS
+	Lock         string // /etc/chainmail/.bootstrap.lock, /run/chainmail-bootstrap.lock on NixOS
 	StateDir     string // /var/lib/chainmail
 	Vault        string // /var/lib/chainmail/vault.age
 	SocketDir    string // /run/chainmail or /var/db/chainmail
@@ -121,6 +124,24 @@ func LayoutFor(p Platform) Layout {
 			LogDir:       "/var/log/chainmail",
 			LogFile:      "/var/log/chainmail/daemon.log",
 		}
+	case NixOS:
+		// The module owns the binary, the key and the unit, so the layout
+		// names no binary, vault key or log.
+		return Layout{
+			Platform:     NixOS,
+			DaemonUser:   "chainmail",
+			ClientGroup:  "chainmail-clients",
+			RootGroup:    "root",
+			ConfigDir:    "/etc/chainmail",
+			Config:       "/etc/chainmail/config.toml",
+			Lock:         "/run/chainmail-bootstrap.lock",
+			StateDir:     "/var/lib/chainmail",
+			Vault:        "/var/lib/chainmail/vault.age",
+			SocketDir:    "/run/chainmail",
+			Socket:       "/run/chainmail/chainmail.sock",
+			Service:      "/etc/systemd/system/chainmail.service",
+			ServiceLabel: "chainmail.service",
+		}
 	default:
 		panic(fmt.Sprintf("setup: no layout for platform %q", p))
 	}
@@ -129,8 +150,12 @@ func LayoutFor(p Platform) Layout {
 // Entries lists every directory and file bootstrap creates, in creation
 // order, with the owner and mode from the spec's Part 2 table. The socket
 // is not listed: the daemon creates it. /run/chainmail is not listed on
-// Linux: systemd creates it.
+// Linux: systemd creates it. NixOS has no entries: the system
+// configuration creates every path.
 func (l Layout) Entries() []Entry {
+	if l.Platform == NixOS {
+		return nil
+	}
 	entries := []Entry{
 		{Name: "binary-dir", Path: l.BinaryDir, Kind: KindDir, Owner: OwnerRoot, Group: GroupRoot, Mode: 0o755},
 		{Name: "binary", Path: l.Binary, Kind: KindFile, Owner: OwnerRoot, Group: GroupRoot, Mode: 0o755},

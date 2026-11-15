@@ -1,0 +1,10 @@
+# Written by chainmail bootstrap. Edits are kept for config.toml only.
+
+[oauth_clients.google]
+client_id = "1234.apps.googleusercontent.com"
+
+[accounts.alice]
+provider = "google-workspace"
+address = "alice@example.com"
+auth = "oauth2"
+oauth_client = "google"
