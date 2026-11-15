@@ -3,7 +3,6 @@ package setup
 import (
 	"cmp"
 	"context"
-	"errors"
 	"net"
 	"net/mail"
 	"slices"
@@ -132,12 +131,8 @@ func Detect(ctx context.Context, r Resolver, address, override string) (Detectio
 
 	records, err := r.LookupMX(ctx, domain)
 	if err != nil {
-		var dnsErr *net.DNSError
-		if !errors.As(err, &dnsErr) || !dnsErr.IsNotFound {
-			return Detection{}, refuse(providerHint(),
-				"DNS lookup of the MX records for %s failed: %v", domain, err)
-		}
-		records = nil
+		return Detection{}, refuse(providerHint(),
+			"DNS lookup of the MX records for %s failed: %v", domain, err)
 	}
 	if p, ok := matchMX(records); ok {
 		return Detection{Provider: p, Auth: bootstrapAuth[p], ViaMX: true}, nil
