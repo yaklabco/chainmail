@@ -2,19 +2,19 @@
 // operating system: files with owners and modes, users and groups, and the
 // systemd or launchd service. Every external command goes through a Runner,
 // so tests replace it with a fake and never run sudo, useradd, dscl,
-// systemctl or launchctl. Linux and macOS logic is chosen at run time by a
+// systemctl or launchctl. The real runner runs only the root-owned copies in
+// the fixed system directories, never a command found through PATH, with a
+// minimal environment. Linux and macOS logic is chosen at run time by a
 // goos string, so both are built and tested on either platform.
 //
 // This package must not import internal/setup: setup imports it.
 package system
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
-	"os/exec"
 	"strings"
 )
 
@@ -101,18 +101,6 @@ type Service interface {
 
 // errUnsupported is returned for a goos other than linux and darwin.
 var errUnsupported = errors.New("unsupported platform")
-
-// ExecRunner is the real Runner, built on exec.CommandContext.
-func ExecRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return out, commandError(name, args, err, stderr.Bytes())
-	}
-	return out, nil
-}
 
 // commandError is the error ExecRunner returns when name fails with err:
 // the command line, err (still reachable through errors.As and errors.Is)

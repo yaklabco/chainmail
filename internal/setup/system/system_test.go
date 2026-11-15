@@ -80,9 +80,15 @@ func (f *fakeRunner) wantCalls(t *testing.T, want ...string) {
 	}
 }
 
+// pathRunner is the runner ExecRunner is built on, finding commands through
+// PATH, so the tests of how it runs a command and reports a failure can use
+// sh on any host. ExecRunner itself only runs commands from the trusted
+// system directories, which on some hosts (NixOS) hold no trusted sh.
+var pathRunner = execRunner(exec.LookPath)
+
 func TestExitCode(t *testing.T) {
 	t.Parallel()
-	_, realErr := ExecRunner(context.Background(), "sh", "-c", "exit 3")
+	_, realErr := pathRunner(context.Background(), "sh", "-c", "exit 3")
 	tests := []struct {
 		name string
 		err  error
@@ -108,7 +114,7 @@ func TestExecRunner(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	out, err := ExecRunner(ctx, "sh", "-c", "echo hello; echo noise >&2")
+	out, err := pathRunner(ctx, "sh", "-c", "echo hello; echo noise >&2")
 	if err != nil {
 		t.Fatalf("ExecRunner: %v", err)
 	}
@@ -116,7 +122,7 @@ func TestExecRunner(t *testing.T) {
 		t.Fatalf("stdout = %q, want %q", out, "hello\n")
 	}
 
-	_, err = ExecRunner(ctx, "sh", "-c", "echo broken >&2; exit 4")
+	_, err = pathRunner(ctx, "sh", "-c", "echo broken >&2; exit 4")
 	if err == nil {
 		t.Fatal("ExecRunner succeeded for a failing command")
 	}
@@ -134,13 +140,13 @@ func TestExecRunnerErrors(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	_, err := ExecRunner(ctx, "sh", "-c", "echo broken >&2; exit 4")
+	_, err := pathRunner(ctx, "sh", "-c", "echo broken >&2; exit 4")
 	want := commandError("sh", []string{"-c", "echo broken >&2; exit 4"}, &fakeExit{code: 4}, []byte("broken\n"))
 	if err == nil || err.Error() != want.Error() {
 		t.Fatalf("ExecRunner error = %v, fake gives %v", err, want)
 	}
 
-	_, err = ExecRunner(ctx, "sh", "-c", "exit 5")
+	_, err = pathRunner(ctx, "sh", "-c", "exit 5")
 	want = commandError("sh", []string{"-c", "exit 5"}, &fakeExit{code: 5}, nil)
 	if err == nil || err.Error() != want.Error() {
 		t.Fatalf("ExecRunner error = %v, fake gives %v", err, want)
@@ -148,7 +154,7 @@ func TestExecRunnerErrors(t *testing.T) {
 
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	_, err = ExecRunner(cancelled, "sh", "-c", "true")
+	_, err = pathRunner(cancelled, "sh", "-c", "true")
 	if !errors.Is(err, context.Canceled) || exitCode(err) != -1 {
 		t.Fatalf("cancelled ExecRunner error = %v (exit %d), want context.Canceled with no exit status", err, exitCode(err))
 	}

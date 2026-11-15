@@ -918,10 +918,28 @@ func resolvedExecutable() (string, error) {
 	return resolved, nil
 }
 
-// realSudo runs sudo with the given stdin and stdout. Its stderr, and so
-// bootstrap apply's progress and errors, is chainmail's own.
+// sudoDirs are where bootstrap looks for sudo, in order. PATH is never
+// searched: a directory in it that the user or an agent can write would
+// get the plan, and the secret in it, from a fake sudo. A copy in
+// /usr/local/bin counts only when root owns it and its directories and
+// only root can write them, which rules out a Homebrew prefix.
+var sudoDirs = []string{"/usr/bin", "/bin", "/usr/local/bin"}
+
+// realSudo runs the trusted sudo with the given stdin and stdout. Its
+// stderr, and so bootstrap apply's progress and errors, is chainmail's own.
 func realSudo(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error {
-	cmd := exec.CommandContext(ctx, "sudo", args...)
+	find := func() (string, error) { return system.LookupTrusted("sudo", sudoDirs) }
+	return runSudo(ctx, find, stdin, stdout, args...)
+}
+
+// runSudo runs the sudo find returns with args.
+func runSudo(ctx context.Context, find func() (string, error), stdin io.Reader, stdout io.Writer, args ...string) error {
+	path, err := find()
+	if err != nil {
+		return fmt.Errorf("find sudo: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Args[0] = "sudo"
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, os.Stderr
 	return cmd.Run()
 }
