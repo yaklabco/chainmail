@@ -107,6 +107,21 @@ chainmail bootstrap you@example.com
 
 Bootstrap makes a new key and asks for that account's password again. Run it once more for each other account, with the same address and options as before, to enter its password again. For an OAuth account, bootstrap asks for the OAuth client secret again and logs in through the browser. Without a terminal it cannot log in, and it tells you to run `chainmail auth login <name>`.
 
+On NixOS, the key is the sealed credential `chainmail-vault-key.cred` in your NixOS configuration, and bootstrap does not make a new one while the module is installed. A reinstall loses the host key that sealed it, so the credential no longer opens. If you saved the key, seal it again on this machine, in the directory that holds the old credential, then commit the new file and rebuild:
+
+```sh
+sudo systemd-creds encrypt --name=vault-key vault-key chainmail-vault-key.cred
+rm vault-key
+```
+
+Without a saved key, stop the daemon, move the old vault aside, and seal a new key in place of the old credential. The new key goes straight from `age-keygen` into `systemd-creds` and is never shown. Commit the new file and rebuild, which starts the daemon again. Then run bootstrap once for each account to enter its password again:
+
+```sh
+sudo systemctl stop chainmail
+sudo mv /var/lib/chainmail/vault.age /var/lib/chainmail/vault.age.lost
+nix shell nixpkgs#age -c age-keygen 2>/dev/null | sudo systemd-creds encrypt --name=vault-key - chainmail-vault-key.cred
+```
+
 ### Developing chainmail
 
 `chainmail daemon --dev` runs a daemon as your own user, for work on chainmail itself:
