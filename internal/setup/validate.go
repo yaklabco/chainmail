@@ -23,10 +23,22 @@ var userNameRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$`)
 //
 // Everything is checked against l and this binary's own rendering, never
 // against the plan: the service text must equal RenderService(l), and
-// the config text must parse and hold exactly the plan's account. The
-// apply step also rebuilds the plan from the installation it inspects
-// under the lock and compares the two with Same, which ties the config
-// text to what is on disk.
+// the config text must parse, hold exactly the plan's account and keep
+// the layout's socket and client group. The actions must come in the
+// order Build writes them, each at most once (ensure-dir at most once per
+// directory, in layout order), with test-account present unless the plan
+// leaves an OAuth login to the user, and ServiceChanged true exactly when
+// the plan changes the binary, key, config or service definition and
+// activates the service.
+//
+// Validate is a structural gate only. It sees the plan and nothing else,
+// so it cannot see the trusted current bytes on disk: it cannot tell a
+// config change bootstrap planned from one someone wrote into the plan by
+// hand, as long as both parse and hold the account, and it cannot verify
+// that InvokingUser is the user who really ran sudo. Apply binds the
+// plan's content: under the lock it inspects the installation again,
+// resolves the invoking user from SUDO_UID, rebuilds the plan with Build
+// and refuses unless Same reports the two plans equal.
 func Validate(l Layout, p Plan) error {
 	if p.Version != planVersion {
 		return refuse(validateHint, "plan version %d is not %d", p.Version, planVersion)
@@ -43,18 +55,69 @@ func Validate(l Layout, p Plan) error {
 	if _, err := ParseBackup(string(p.Backup)); err != nil {
 		return err
 	}
-
-	stores, logins := 0, 0
 	for _, a := range p.Actions {
 		if err := validateAction(l, p, a); err != nil {
 			return err
 		}
-		switch a.Kind {
-		case ActStoreSecret:
-			stores++
-		case ActAuthLogin:
-			logins++
+	}
+	counts, err := validateOrder(l, p.Actions)
+	if err != nil {
+		return err
+	}
+	return validateSteps(p, counts)
+}
+
+// actionOrder is the order Build writes action kinds in.
+var actionOrder = []ActionKind{
+	ActCreateGroup, ActCreateUser, ActAddMember, ActEnsureDir,
+	ActInstallBin, ActCreateKey, ActWriteConfig, ActWriteService,
+	ActActivate, ActStoreSecret, ActAuthLogin, ActTestAccount,
+}
+
+// validateOrder refuses actions out of Build's order, a kind other than
+// ensure-dir more than once, and an ensure-dir repeated or out of layout
+// order. It returns how many actions of each kind the plan has. Every
+// action already passed validateAction, so its kind and entry are known.
+func validateOrder(l Layout, actions []Action) (map[ActionKind]int, error) {
+	var dirs []string
+	for _, e := range l.Entries() {
+		if e.Kind == KindDir {
+			dirs = append(dirs, e.Name)
 		}
+	}
+	counts := map[ActionKind]int{}
+	lastKind, lastDir := -1, -1
+	for _, a := range actions {
+		kind := slices.Index(actionOrder, a.Kind)
+		if kind < lastKind {
+			return nil, refuse(validateHint, "plan step %s comes after %s", a.Kind, actionOrder[lastKind])
+		}
+		lastKind = kind
+		counts[a.Kind]++
+		if a.Kind == ActEnsureDir {
+			dir := slices.Index(dirs, a.Entry)
+			if dir <= lastDir {
+				return nil, refuse(validateHint, "plan step ensure-dir %s is repeated or out of layout order", a.Entry)
+			}
+			lastDir = dir
+			continue
+		}
+		if counts[a.Kind] > 1 {
+			return nil, refuse(validateHint, "plan has more than one %s step", a.Kind)
+		}
+	}
+	return counts, nil
+}
+
+// validateSteps checks the plan's fields against the actions it has:
+// secret, login and test steps, next steps, ServiceChanged and Backup.
+func validateSteps(p Plan, counts map[ActionKind]int) error {
+	stores, logins, tests := counts[ActStoreSecret], counts[ActAuthLogin], counts[ActTestAccount]
+	if p.NeedSecret != (stores == 1) {
+		return refuse(validateHint, "plan has %d store-secret steps with NeedSecret %v", stores, p.NeedSecret)
+	}
+	if logins == 1 && !p.NeedSecret {
+		return refuse(validateHint, "plan logs in to account %q without storing its secret", p.Account.Name)
 	}
 	var wantSteps []string
 	if p.Account.Auth == provider.AuthOAuth2 && p.NeedSecret && logins == 0 {
@@ -63,8 +126,17 @@ func Validate(l Layout, p Plan) error {
 	if !slices.Equal(p.NextSteps, wantSteps) {
 		return refuse(validateHint, "plan has next steps %q", p.NextSteps)
 	}
-	if p.NeedSecret != (stores == 1) || stores > 1 {
-		return refuse(validateHint, "plan has %d store-secret steps with NeedSecret %v", stores, p.NeedSecret)
+	// The account is tested unless the user still has to log in.
+	if wantTests := 1 - len(wantSteps); tests != wantTests {
+		return refuse(validateHint, "plan has %d test-account steps, want %d", tests, wantTests)
+	}
+	changes := counts[ActInstallBin] + counts[ActCreateKey] + counts[ActWriteConfig] + counts[ActWriteService]
+	if p.ServiceChanged != (changes > 0) || p.ServiceChanged != (counts[ActActivate] == 1) {
+		return refuse(validateHint, "plan has ServiceChanged %v with %d changes and %d activate-service steps",
+			p.ServiceChanged, changes, counts[ActActivate])
+	}
+	if p.Backup == BackupShow && counts[ActCreateKey] == 0 {
+		return refuse(validateHint, "plan shows a vault key it does not create")
 	}
 	return nil
 }
@@ -119,10 +191,9 @@ func validateAction(l Layout, p Plan, a Action) error {
 	case ActCreateUser:
 		return wantTarget(a, "", l.DaemonUser, bad)
 	case ActAddMember:
-		if a.Name != p.InvokingUser && a.Name != l.DaemonUser {
-			return bad("adds a user other than the invoking user or the daemon user")
-		}
-		return wantTarget(a, "", a.Name, bad)
+		// An existing daemon user is never repaired, and a new one is
+		// created in the group, so only the invoking user is added.
+		return wantTarget(a, "", p.InvokingUser, bad)
 	case ActEnsureDir:
 		e, ok := l.Entry(a.Entry)
 		if !ok || e.Kind != KindDir || a.Name != "" {
@@ -136,7 +207,7 @@ func validateAction(l Layout, p Plan, a Action) error {
 		if err := wantTarget(a, "config", "", bad); err != nil {
 			return err
 		}
-		return validateConfig(p, a.Data, bad)
+		return validateConfig(l, p, a.Data, bad)
 	case ActWriteService:
 		if err := wantTarget(a, "service", "", bad); err != nil {
 			return err
@@ -167,12 +238,16 @@ func wantTarget(a Action, entry, name string, bad func(string) error) error {
 	return nil
 }
 
-// validateConfig checks that data parses and holds the plan's account,
-// and its OAuth client, exactly.
-func validateConfig(p Plan, data []byte, bad func(string) error) error {
+// validateConfig checks that data parses, keeps the layout's socket and
+// client group, and holds the plan's account, and its OAuth client,
+// exactly.
+func validateConfig(l Layout, p Plan, data []byte, bad func(string) error) error {
 	cfg, err := config.Parse(data)
 	if err != nil {
 		return bad("config does not parse")
+	}
+	if cfg.Daemon.Socket != l.Socket || cfg.Daemon.ClientGroup != l.ClientGroup {
+		return bad("config moves the daemon socket or its client group")
 	}
 	want := p.Account
 	got, ok := cfg.Accounts[want.Name]

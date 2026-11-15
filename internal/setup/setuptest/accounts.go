@@ -53,6 +53,14 @@ func (a *Accounts) AddGroup(g system.GroupInfo) *Accounts {
 	return a
 }
 
+// RemoveGroup removes the group called name, if there is one.
+func (a *Accounts) RemoveGroup(name string) *Accounts {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.groups, name)
+	return a
+}
+
 // User returns the user called name, and false when there is none.
 func (a *Accounts) User(name string) (system.User, bool) {
 	u, ok, _ := a.LookupUser(context.Background(), name)

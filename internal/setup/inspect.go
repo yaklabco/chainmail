@@ -34,6 +34,13 @@ type Current struct {
 	// Inspect found it. Build checks the chain against it. A Current not
 	// made by Inspect has none, and Build refuses it.
 	trust *trustSnapshot
+
+	// daemonGroup is the daemon user's expected primary group as found:
+	// chainmail on Linux, chainmail-clients on macOS. nil when missing.
+	daemonGroup *system.GroupInfo
+	// key is the vault key's metadata, read without following a final
+	// symlink. Build refuses a key that is not daemon:daemon 0400.
+	key system.FileInfo
 }
 
 // AccountHealth is what the daemon reported about the requested account.
@@ -62,12 +69,11 @@ func Inspect(ctx context.Context, l Layout, f system.Files, a system.Accounts, i
 	if cur.DaemonUser, err = lookupUser(ctx, a, l.DaemonUser); err != nil {
 		return Current{}, err
 	}
-	group, ok, err := a.LookupGroup(ctx, l.ClientGroup)
-	if err != nil {
-		return Current{}, fmt.Errorf("inspect group %s: %w", l.ClientGroup, err)
+	if cur.ClientGroup, err = lookupGroup(ctx, a, l.ClientGroup); err != nil {
+		return Current{}, err
 	}
-	if ok {
-		cur.ClientGroup = &group
+	if cur.daemonGroup, err = lookupGroup(ctx, a, daemonGroup(l)); err != nil {
+		return Current{}, err
 	}
 	user, err := lookupUser(ctx, a, invoking)
 	if err != nil {
@@ -92,6 +98,7 @@ func Inspect(ctx context.Context, l Layout, f system.Files, a system.Accounts, i
 		return Current{}, err
 	}
 	cur.KeyExists = key.Exists
+	cur.key = key
 	vault, err := peek(f, l.Vault)
 	if err != nil {
 		return Current{}, err
@@ -111,6 +118,18 @@ func Inspect(ctx context.Context, l Layout, f system.Files, a system.Accounts, i
 		return Current{}, err
 	}
 	return cur, nil
+}
+
+// lookupGroup returns the group called name, or nil when there is none.
+func lookupGroup(ctx context.Context, a system.Accounts, name string) (*system.GroupInfo, error) {
+	g, ok, err := a.LookupGroup(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("inspect group %s: %w", name, err)
+	}
+	if !ok {
+		return nil, nil
+	}
+	return &g, nil
 }
 
 // lookupUser returns the user called name, or nil when there is none.

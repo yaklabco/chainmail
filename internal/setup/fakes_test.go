@@ -46,12 +46,22 @@ func freshHost(p Platform) host {
 // installedHost is a machine bootstrap already set up for spec, with
 // alice in the client group and the binary from fakeBinary.
 func installedHost(p Platform, spec AccountSpec, client *OAuthClientSpec) host {
+	uid := uint32(fakeLinuxDaemon)
+	if p == Darwin {
+		uid = fakeDarwinUID
+	}
+	return installedHostUID(p, spec, client, uid)
+}
+
+// installedHostUID is installedHost with the daemon user, and every path
+// it owns, at uid daemonUID.
+func installedHostUID(p Platform, spec AccountSpec, client *OAuthClientSpec, daemonUID uint32) host {
 	h := freshHost(p)
 	l := LayoutFor(p)
-	daemonUID, daemonGID, clientsGID := uint32(fakeLinuxDaemon), uint32(fakeLinuxGroup), uint32(fakeClientsGID)
+	daemonGID, clientsGID := uint32(fakeLinuxGroup), uint32(fakeClientsGID)
 	daemonUser := system.User{Name: l.DaemonUser, UID: daemonUID, GID: daemonGID, Home: l.StateDir, Shell: "/usr/sbin/nologin", Groups: []string{l.ClientGroup}}
 	if p == Darwin {
-		daemonUID, daemonGID, clientsGID = fakeDarwinUID, fakeDarwinGID, fakeDarwinGID
+		daemonGID, clientsGID = fakeDarwinGID, fakeDarwinGID
 		daemonUser = system.User{Name: l.DaemonUser, UID: daemonUID, GID: clientsGID, Home: "/var/empty", Shell: "/usr/bin/false"}
 	}
 	h.accounts.AddUser(daemonUser)
