@@ -125,7 +125,7 @@ func TestDaemonFollowsService(t *testing.T) {
 		t.Fatalf("secret set: %v", err)
 	}
 	if v, ok := d.Secret("accounts/alice"); !ok || string(v) != "pw" {
-		t.Errorf("stored secret = %q, %v", v, ok)
+		t.Errorf("stored secret (%d bytes, found %v) differs from the 2 bytes set", len(v), ok)
 	}
 	d.TestExit = exitAuth
 	if err := d.Run(ctx, nil, nil, "accounts", "test", "alice", "--socket", d.Socket); !errors.As(err, &exit) || exit.ExitCode() != exitAuth {
