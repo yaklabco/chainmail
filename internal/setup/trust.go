@@ -86,6 +86,14 @@ func CheckTrust(fsv FSView, path string, trusted []uint32) error {
 			return err
 		}
 		if !info.Exists {
+			// Root creates a missing component, so nobody else can, except
+			// directly in the Nix store: checkOwnerMode lets it be
+			// group-writable, and a build user can create a new entry
+			// there. Every other directory a walk passes through is
+			// writable by trusted uids only.
+			if cur == NixStore {
+				return unsafePath(next, "is missing from the Nix store, where a build user could create it")
+			}
 			return nil
 		}
 		leaf := len(pending) == 0
