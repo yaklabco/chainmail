@@ -39,7 +39,7 @@ func TestValidate(t *testing.T) {
 		{"second account on a hand-written config", func(t *testing.T) (Layout, Plan) {
 			l := LayoutFor(Linux)
 			h := installedHost(Linux, aliceGmail, nil)
-			h.files.file(l.Config, 0, 0, 0o644, []byte(handWritten))
+			h.files.File(l.Config, 0, 0, 0o644, []byte(handWritten))
 			return l, mustBuild(t, l, h.inspect(t, Linux), gmailRequest())
 		}},
 	}

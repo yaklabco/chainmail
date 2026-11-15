@@ -64,8 +64,8 @@ func TestInspect(t *testing.T) {
 		t.Parallel()
 		l := LayoutFor(Linux)
 		h := installedHost(Linux, aliceGmail, nil)
-		h.files.file(l.Config, 0, 0, 0o644, []byte(handWritten))
-		h.files.file(l.Service, 0, 0, 0o644, []byte(deployPageUnit))
+		h.files.File(l.Config, 0, 0, 0o644, []byte(handWritten))
+		h.files.File(l.Service, 0, 0, 0o644, []byte(deployPageUnit))
 		cur := h.inspect(t, Linux)
 		if cur.ConfigMarked || cur.ServiceMarked {
 			t.Errorf("ConfigMarked %v ServiceMarked %v, want false for hand-written files", cur.ConfigMarked, cur.ServiceMarked)
@@ -78,7 +78,7 @@ func TestInspect(t *testing.T) {
 	t.Run("nixos", func(t *testing.T) {
 		t.Parallel()
 		h := freshHost(Linux)
-		h.files.file("/etc/NIXOS", 0, 0, 0o644, nil)
+		h.files.File("/etc/NIXOS", 0, 0, 0o644, nil)
 		if cur := h.inspect(t, Linux); !cur.NixOS {
 			t.Error("NixOS = false with /etc/NIXOS present")
 		}
@@ -88,7 +88,7 @@ func TestInspect(t *testing.T) {
 		t.Parallel()
 		l := LayoutFor(Linux)
 		h := installedHost(Linux, aliceGmail, nil)
-		h.files.symlink(l.Config, 0, "/nix/store/config.toml")
+		h.files.Symlink(l.Config, 0, "/nix/store/config.toml")
 		cur := h.inspect(t, Linux)
 		if cur.Config != nil {
 			t.Errorf("Config = %q, want nil for a symlink", cur.Config)
@@ -101,7 +101,7 @@ func TestInspect(t *testing.T) {
 		// the daemon, so the vault cannot even be looked at.
 		l := LayoutFor(Linux)
 		h := installedHost(Linux, aliceGmail, nil)
-		h.files.errs[l.Vault] = fs.ErrPermission
+		h.files.FailRead(l.Vault, fs.ErrPermission)
 		cur := h.inspect(t, Linux)
 		if cur.VaultExists {
 			t.Error("VaultExists = true for a vault that cannot be looked at")
@@ -116,7 +116,7 @@ func TestInspect(t *testing.T) {
 		l := LayoutFor(Linux)
 		h := installedHost(Linux, aliceGmail, nil)
 		boom := errors.New("disk on fire")
-		h.files.errs[l.VaultKey] = boom
+		h.files.FailRead(l.VaultKey, boom)
 		_, err := Inspect(context.Background(), l, h.files, h.accounts, "alice")
 		if !errors.Is(err, boom) {
 			t.Errorf("Inspect error = %v, want it to wrap %v", err, boom)

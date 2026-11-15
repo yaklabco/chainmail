@@ -218,7 +218,7 @@ func TestBuildRerunNoop(t *testing.T) {
 		t.Parallel()
 		l := LayoutFor(Linux)
 		h := installedHost(Linux, aliceGmail, nil)
-		h.files.file(l.Service, 0, 0, 0o644, append(RenderService(l), "# local tweak\n"...))
+		h.files.File(l.Service, 0, 0, 0o644, append(RenderService(l), "# local tweak\n"...))
 		cur := h.inspect(t, Linux)
 		cur.Health = okHealth
 		plan := mustBuild(t, l, cur, gmailRequest())
@@ -233,10 +233,10 @@ func TestBuildRerunNoop(t *testing.T) {
 		t.Parallel()
 		l := LayoutFor(Linux)
 		h := installedHost(Linux, aliceGmail, nil)
-		h.accounts.groups[l.ClientGroup] = system.GroupInfo{Name: l.ClientGroup, GID: fakeClientsGID}
-		alice := h.accounts.users["alice"]
+		h.accounts.AddGroup(system.GroupInfo{Name: l.ClientGroup, GID: fakeClientsGID})
+		alice, _ := h.accounts.User("alice")
 		alice.Groups = nil
-		h.accounts.users["alice"] = alice
+		h.accounts.AddUser(alice)
 		cur := h.inspect(t, Linux)
 		cur.Health = okHealth
 		plan := mustBuild(t, l, cur, gmailRequest())
@@ -262,9 +262,9 @@ func TestBuildRerunNoop(t *testing.T) {
 		t.Parallel()
 		l := LayoutFor(Linux)
 		h := installedHost(Linux, aliceGmail, nil)
-		u := h.accounts.users[l.DaemonUser]
+		u, _ := h.accounts.User(l.DaemonUser)
 		u.Groups = nil
-		h.accounts.users[l.DaemonUser] = u
+		h.accounts.AddUser(u)
 		cur := h.inspect(t, Linux)
 		cur.Health = okHealth
 		plan := mustBuild(t, l, cur, gmailRequest())
@@ -310,7 +310,7 @@ func TestBuildSecondAccount(t *testing.T) {
 		t.Parallel()
 		l := LayoutFor(Linux)
 		h := installedHost(Linux, aliceGmail, nil)
-		h.files.file(l.Config, 0, 0, 0o644, []byte(handWritten))
+		h.files.File(l.Config, 0, 0, 0o644, []byte(handWritten))
 		cur := h.inspect(t, Linux)
 		plan := mustBuild(t, l, cur, gmailRequest())
 		cfg, ok := findAction(plan, ActWriteConfig)
@@ -346,7 +346,7 @@ func TestBuildRefusals(t *testing.T) {
 			name: "nixos",
 			host: func() host {
 				h := freshHost(Linux)
-				h.files.file("/etc/NIXOS", 0, 0, 0o644, nil)
+				h.files.File("/etc/NIXOS", 0, 0, 0o644, nil)
 				return h
 			},
 			want: "NixOS",
@@ -411,7 +411,7 @@ func TestBuildRefusals(t *testing.T) {
 			name: "vault without a key",
 			host: func() host {
 				h := installedHost(Linux, aliceGmail, nil)
-				h.files.remove(linux.VaultKey)
+				h.files.Remove(linux.VaultKey)
 				return h
 			},
 			want: "vault",
@@ -420,7 +420,7 @@ func TestBuildRefusals(t *testing.T) {
 			name: "service file without the marker",
 			host: func() host {
 				h := installedHost(Linux, aliceGmail, nil)
-				h.files.file(linux.Service, 0, 0, 0o644, []byte(deployPageUnit))
+				h.files.File(linux.Service, 0, 0, 0o644, []byte(deployPageUnit))
 				return h
 			},
 			want: "marker",
@@ -429,9 +429,9 @@ func TestBuildRefusals(t *testing.T) {
 			name: "daemon user with a login shell",
 			host: func() host {
 				h := installedHost(Linux, aliceGmail, nil)
-				u := h.accounts.users[linux.DaemonUser]
+				u, _ := h.accounts.User(linux.DaemonUser)
 				u.Shell = "/bin/bash"
-				h.accounts.users[linux.DaemonUser] = u
+				h.accounts.AddUser(u)
 				return h
 			},
 			want: "shell",
@@ -442,7 +442,7 @@ func TestBuildRefusals(t *testing.T) {
 				// On a fresh tree, so the trust check passes and the shape is
 				// what is refused.
 				h := freshHost(Linux)
-				h.accounts.addUser(system.User{Name: linux.DaemonUser, Shell: "/usr/sbin/nologin"})
+				h.accounts.AddUser(system.User{Name: linux.DaemonUser, Shell: "/usr/sbin/nologin"})
 				return h
 			},
 			want: "uid 0",
@@ -451,7 +451,7 @@ func TestBuildRefusals(t *testing.T) {
 			name: "client group with gid 0",
 			host: func() host {
 				h := freshHost(Linux)
-				h.accounts.addGroup(system.GroupInfo{Name: linux.ClientGroup, GID: 0})
+				h.accounts.AddGroup(system.GroupInfo{Name: linux.ClientGroup, GID: 0})
 				return h
 			},
 			want: "gid 0",
@@ -460,7 +460,7 @@ func TestBuildRefusals(t *testing.T) {
 			name: "trust chain: user-owned ancestor",
 			host: func() host {
 				h := freshHost(Linux)
-				h.files.dir("/usr/local", fakeUserUID, fakeUserUID, 0o755)
+				h.files.Dir("/usr/local", fakeUserUID, fakeUserUID, 0o755)
 				return h
 			},
 			want: "unsafe path /usr/local",
@@ -469,7 +469,7 @@ func TestBuildRefusals(t *testing.T) {
 			name: "trust chain: group-writable config directory",
 			host: func() host {
 				h := installedHost(Linux, aliceGmail, nil)
-				h.files.dir(linux.ConfigDir, 0, 0, 0o775)
+				h.files.Dir(linux.ConfigDir, 0, 0, 0o775)
 				return h
 			},
 			want: "unsafe path /etc/chainmail",
@@ -478,7 +478,7 @@ func TestBuildRefusals(t *testing.T) {
 			name: "trust chain: state directory owned by the user",
 			host: func() host {
 				h := installedHost(Linux, aliceGmail, nil)
-				h.files.dir(linux.StateDir, fakeUserUID, fakeUserUID, 0o700)
+				h.files.Dir(linux.StateDir, fakeUserUID, fakeUserUID, 0o700)
 				return h
 			},
 			want: "unsafe path /var/lib/chainmail",
@@ -487,7 +487,7 @@ func TestBuildRefusals(t *testing.T) {
 			name: "trust chain: socket directory writable by others",
 			host: func() host {
 				h := installedHost(Linux, aliceGmail, nil)
-				h.files.dir(linux.SocketDir, fakeLinuxDaemon, fakeLinuxGroup, 0o777)
+				h.files.Dir(linux.SocketDir, fakeLinuxDaemon, fakeLinuxGroup, 0o777)
 				return h
 			},
 			want: "unsafe path /run/chainmail",
@@ -496,7 +496,7 @@ func TestBuildRefusals(t *testing.T) {
 			name: "unparseable config",
 			host: func() host {
 				h := installedHost(Linux, aliceGmail, nil)
-				h.files.file(linux.Config, 0, 0, 0o644, []byte("[accounts.alice\nprovider = "))
+				h.files.File(linux.Config, 0, 0, 0o644, []byte("[accounts.alice\nprovider = "))
 				return h
 			},
 			want: "does not parse",
@@ -505,7 +505,7 @@ func TestBuildRefusals(t *testing.T) {
 			name: "config that is a symlink",
 			host: func() host {
 				h := installedHost(Linux, aliceGmail, nil)
-				h.files.symlink(linux.Config, 0, "/nix/store/abc-config.toml")
+				h.files.Symlink(linux.Config, 0, "/nix/store/abc-config.toml")
 				return h
 			},
 			want: "symlink",
@@ -617,7 +617,7 @@ func TestBuildRefusals(t *testing.T) {
 	t.Run("darwin trust chain through a user-owned symlink target", func(t *testing.T) {
 		t.Parallel()
 		h := freshHost(Darwin)
-		h.files.dir("/private/etc", fakeUserUID, 0, 0o755)
+		h.files.Dir("/private/etc", fakeUserUID, 0, 0o755)
 		cur := h.inspect(t, Darwin)
 		r := asRefusal(t, mustFail(Build(LayoutFor(Darwin), cur, gmailRequest())))
 		if !strings.Contains(r.Msg, "/private/etc") {
