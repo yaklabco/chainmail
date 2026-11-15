@@ -1067,7 +1067,7 @@ func resolvedExecutable() (string, error) {
 // get the plan, and the secret in it, from a fake sudo. A copy in
 // /usr/local/bin counts only when root owns it and its directories and
 // only root can write them, which rules out a Homebrew prefix.
-var sudoDirs = []string{"/usr/bin", "/bin", "/usr/local/bin"}
+var sudoDirs = []string{"/usr/bin", "/bin", "/usr/local/bin", "/run/wrappers/bin"}
 
 // realSudo runs the trusted sudo with the given stdin and stdout. Its
 // stderr, and so bootstrap apply's progress and errors, is chainmail's own.
