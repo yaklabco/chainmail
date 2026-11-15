@@ -211,8 +211,9 @@ func (f finder) trusted(root, path string, fi fs.FileInfo) error {
 	// remove that entry, and the entries a command resolves through are
 	// owned by the owner and read-only, so they still get the normal
 	// check. Only the exact host path qualifies: no other sticky,
-	// group-writable directory does.
-	if hostPath(root, path) == nixStore && fi.Mode()&fs.ModeSticky != 0 && fi.Mode().Perm()&0o002 == 0 {
+	// group-writable directory does, and neither does a file at that
+	// path, whose contents the sticky bit does not protect.
+	if hostPath(root, path) == nixStore && fi.IsDir() && fi.Mode()&fs.ModeSticky != 0 && fi.Mode().Perm()&0o002 == 0 {
 		return nil
 	}
 	if fi.Mode().Perm()&0o022 != 0 {

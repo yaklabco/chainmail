@@ -41,7 +41,8 @@ type FSView interface {
 // An ancestor that is a symlink is accepted only when root owns the link
 // and its directory passed the check, and then the check continues at the
 // link's target. A missing component passes, with everything below it,
-// because root will create it.
+// because root will create it, except a missing entry directly in
+// NixStore, which a build user could create first.
 func CheckTrust(fsv FSView, path string, trusted []uint32) error {
 	if !filepath.IsAbs(path) {
 		return unsafePath(path, "is not absolute")
@@ -86,6 +87,14 @@ func CheckTrust(fsv FSView, path string, trusted []uint32) error {
 			return err
 		}
 		if !info.Exists {
+			// Root creates a missing component, so nobody else can, except
+			// directly in the Nix store: checkOwnerMode lets it be
+			// group-writable, and a build user can create a new entry
+			// there. Every other directory a walk passes through is
+			// writable by trusted uids only.
+			if cur == NixStore {
+				return unsafePath(next, "is missing from the Nix store, where a build user could create it")
+			}
 			return nil
 		}
 		leaf := len(pending) == 0
@@ -126,8 +135,10 @@ func checkOwnerMode(path string, info FileInfo, trusted []uint32) error {
 	// to it. Its sticky bit means only an entry's owner can rename or
 	// remove that entry, and the entries bootstrap resolves are root-owned
 	// and read-only, so they still get the normal check. Only the exact
-	// path qualifies: no other sticky, group-writable directory does.
-	if path == NixStore && info.UID == 0 && info.Mode&fs.ModeSticky != 0 && info.Mode.Perm()&0o002 == 0 {
+	// directory qualifies: no other sticky, group-writable directory does,
+	// and neither does a file at that path, whose contents the sticky bit
+	// does not protect.
+	if path == NixStore && info.Mode.IsDir() && info.UID == 0 && info.Mode&fs.ModeSticky != 0 && info.Mode.Perm()&0o002 == 0 {
 		return nil
 	}
 	if !slices.Contains(trusted, info.UID) {
