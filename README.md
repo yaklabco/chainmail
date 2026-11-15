@@ -64,11 +64,25 @@ chainmail folders --account you
 chainmail search is:unread in:inbox
 ```
 
-On macOS, bootstrap also writes your `cli.toml` so commands find the daemon's socket. Bootstrap supports Linux with systemd and macOS. On NixOS, use the [NixOS module](https://chainmail.sh/docs/operations/deploy#nixos) instead.
+On macOS, bootstrap also writes your `cli.toml` so commands find the daemon's socket. Bootstrap supports Linux with systemd, NixOS and macOS. [On NixOS](#on-nixos) it works differently.
 
 An agent that can run sudo without a password can get around all of this. Run agents from an account that cannot.
 
 The [quick start](https://chainmail.sh/docs/getting-started/quick-start) goes on to Google accounts, sends and the policy, watching and items.
+
+### On NixOS
+
+On NixOS, the [NixOS module](https://chainmail.sh/docs/operations/deploy#nixos) runs chainmail, and bootstrap writes the files that configure it. Bootstrap never edits your NixOS configuration and never rebuilds. It never starts or restarts the daemon either.
+
+```sh
+chainmail bootstrap you@example.com --nix-dir ./chainmail-nixos
+```
+
+Bootstrap writes three files into `--nix-dir`, which is `./chainmail-nixos` by default. `chainmail.nix` turns on the module and adds you to `chainmail-clients`. `chainmail-you.nix` holds the account. `chainmail-vault-key.cred` is the vault key, sealed with `systemd-creds` so that only this machine can open it. None of the files holds a secret in the clear, so you can commit them.
+
+Import the files from your NixOS configuration and add the chainmail flake input. Bootstrap prints the lines to add. Rebuild the way you normally do. Then run bootstrap again with the same address. It stores the password through the daemon and tests the login.
+
+A second account works the same way. Bootstrap writes only that account's file, `chainmail-<name>.nix`, and needs no sudo for it. Import the file, rebuild, and run bootstrap again.
 
 ### If the vault key is lost
 
