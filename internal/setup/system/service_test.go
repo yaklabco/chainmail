@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -62,7 +63,7 @@ func TestServiceSystemd(t *testing.T) {
 
 	t.Run("State failure", func(t *testing.T) {
 		t.Parallel()
-		r := newFakeRunner().on(showState, "", &fakeExit{code: 1, stderr: "no bus"})
+		r := newFakeRunner().onFail(showState, "", 1, "no bus")
 		if _, err := newSvc(r).State(ctx); err == nil {
 			t.Fatal("State succeeded when systemctl failed")
 		}
@@ -88,7 +89,7 @@ func TestServiceSystemd(t *testing.T) {
 
 	t.Run("Activate reload failure", func(t *testing.T) {
 		t.Parallel()
-		r := newFakeRunner().on("systemctl daemon-reload", "", &fakeExit{code: 1})
+		r := newFakeRunner().onFail("systemctl daemon-reload", "", 1, "")
 		if err := newSvc(r).Activate(ctx, true); err == nil {
 			t.Fatal("Activate succeeded when daemon-reload failed")
 		}
@@ -147,7 +148,9 @@ const launchdWaiting = `system/sh.chainmail.daemon = {
 }
 `
 
-var notLoaded = &fakeExit{code: 113, stderr: `Could not find service "sh.chainmail.daemon" in domain for system`}
+// notLoadedStderr is what launchctl print says, exiting 113, about a job
+// launchd does not know.
+const notLoadedStderr = `Could not find service "sh.chainmail.daemon" in domain for system`
 
 func TestServiceLaunchd(t *testing.T) {
 	t.Parallel()
@@ -157,21 +160,23 @@ func TestServiceLaunchd(t *testing.T) {
 		s.(*launchdService).sleep = func(time.Duration) {}
 		return s
 	}
+	notLoaded := func(r *fakeRunner) *fakeRunner { return r.onFail(printLabel, "", 113, notLoadedStderr) }
 
 	stateTests := []struct {
-		name string
-		out  string
-		err  error
-		want ServiceState
+		name  string
+		reply func(*fakeRunner) *fakeRunner
+		want  ServiceState
 	}{
-		{"running", launchdRunning, nil, ServiceState{Loaded: true, Running: true}},
-		{"loaded and waiting", launchdWaiting, nil, ServiceState{Loaded: true}},
-		{"not loaded", "", notLoaded, ServiceState{}},
+		{"running", func(r *fakeRunner) *fakeRunner { return r.on(printLabel, launchdRunning, nil) }, ServiceState{Loaded: true, Running: true}},
+		{"loaded and waiting", func(r *fakeRunner) *fakeRunner { return r.on(printLabel, launchdWaiting, nil) }, ServiceState{Loaded: true}},
+		{"not loaded", notLoaded, ServiceState{}},
+		{"not loaded exit status only", func(r *fakeRunner) *fakeRunner { return r.onFail(printLabel, "", 113, "") }, ServiceState{}},
+		{"not loaded message only", func(r *fakeRunner) *fakeRunner { return r.onFail(printLabel, "", 1, notLoadedStderr) }, ServiceState{}},
 	}
 	for _, tt := range stateTests {
 		t.Run("State "+tt.name, func(t *testing.T) {
 			t.Parallel()
-			r := newFakeRunner().on(printLabel, tt.out, tt.err)
+			r := tt.reply(newFakeRunner())
 			got, err := newSvc(r, nil).State(ctx)
 			if err != nil {
 				t.Fatalf("State: %v", err)
@@ -183,9 +188,50 @@ func TestServiceLaunchd(t *testing.T) {
 		})
 	}
 
+	// Only launchd saying it does not know the job means not loaded.
+	// Anything else is a failure to find out.
+	failures := []struct {
+		name  string
+		reply func(*fakeRunner) *fakeRunner
+	}{
+		{"other failure", func(r *fakeRunner) *fakeRunner {
+			return r.onFail(printLabel, "", 1, "Operation not permitted while System Integrity Protection is engaged")
+		}},
+		{"cancelled before start", func(r *fakeRunner) *fakeRunner { return r.on(printLabel, "", context.Canceled) }},
+		{"killed on cancel", func(r *fakeRunner) *fakeRunner { return r.onFail(printLabel, "", -1, "") }},
+		{"missing launchctl", func(r *fakeRunner) *fakeRunner {
+			return r.on(printLabel, "", &exec.Error{Name: "launchctl", Err: exec.ErrNotFound})
+		}},
+	}
+	for _, tt := range failures {
+		t.Run("State "+tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := tt.reply(newFakeRunner())
+			if got, err := newSvc(r, nil).State(ctx); err == nil {
+				t.Fatalf("State = %+v, want an error", got)
+			}
+		})
+		t.Run("Activate "+tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := tt.reply(newFakeRunner())
+			if err := newSvc(r, nil).Activate(ctx, true); err == nil {
+				t.Fatal("Activate succeeded when launchctl print failed")
+			}
+			r.wantCalls(t, printLabel)
+		})
+		t.Run("Activate waiting for bootout "+tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := tt.reply(newFakeRunner().on(printLabel, launchdRunning, nil))
+			if err := newSvc(r, nil).Activate(ctx, true); err == nil {
+				t.Fatal("Activate succeeded when launchctl print failed after bootout")
+			}
+			r.wantCalls(t, printLabel, "launchctl bootout system/sh.chainmail.daemon", printLabel)
+		})
+	}
+
 	t.Run("Activate not loaded", func(t *testing.T) {
 		t.Parallel()
-		r := newFakeRunner().on(printLabel, "", notLoaded)
+		r := notLoaded(newFakeRunner())
 		if err := newSvc(r, nil).Activate(ctx, true); err != nil {
 			t.Fatalf("Activate: %v", err)
 		}
@@ -197,7 +243,7 @@ func TestServiceLaunchd(t *testing.T) {
 		r := newFakeRunner().
 			on(printLabel, launchdRunning, nil).
 			on(printLabel, launchdRunning, nil). // still unloading
-			on(printLabel, "", notLoaded)
+			onFail(printLabel, "", 113, notLoadedStderr)
 		if err := newSvc(r, nil).Activate(ctx, true); err != nil {
 			t.Fatalf("Activate: %v", err)
 		}

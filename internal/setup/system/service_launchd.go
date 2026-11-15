@@ -29,14 +29,27 @@ type launchdService struct {
 
 func (s *launchdService) target() string { return "system/" + s.label }
 
-// State reads launchctl print. launchctl fails for a job that is not
-// loaded, so any error from it means not loaded.
+// launchctl print's exit status and message for a job launchd does not
+// know.
+const (
+	launchctlNotFound    = 113
+	launchctlNotFoundMsg = "Could not find service"
+)
+
+// State reads launchctl print. Only launchd saying it does not know the
+// job means not loaded; any other failure, including a cancelled context
+// or a missing launchctl, is an error.
 func (s *launchdService) State(ctx context.Context) (ServiceState, error) {
 	out, err := s.run(ctx, "launchctl", "print", s.target())
-	loaded := err == nil
+	if err != nil {
+		if exitCode(err) == launchctlNotFound || strings.Contains(err.Error(), launchctlNotFoundMsg) {
+			return ServiceState{}, nil
+		}
+		return ServiceState{}, fmt.Errorf("reading the state of %s: %w", s.label, err)
+	}
 	return ServiceState{
-		Loaded:  loaded,
-		Running: loaded && strings.Contains(string(out), "state = running"),
+		Loaded:  true,
+		Running: strings.Contains(string(out), "state = running"),
 	}, nil
 }
 

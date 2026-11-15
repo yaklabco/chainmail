@@ -61,28 +61,54 @@ func (a darwinAccounts) LookupGroup(ctx context.Context, name string) (GroupInfo
 	return GroupInfo{Name: name, GID: gid, Members: attrs["GroupMembership"]}, true, nil
 }
 
+// dsMissingAttrMarkers are in dscl's error when a record exists but lacks
+// one of the attributes asked for, such as an empty group's
+// GroupMembership.
+var dsMissingAttrMarkers = []string{"No such key", "eDSAttributeNotFound"}
+
 // read runs dscl -plist . -read on record and returns its attributes,
 // keyed without the dsAttrTypeStandard: prefix. A missing record is false
 // with no error. dscl exits non-zero when one of the attributes is missing
 // (an empty group has no GroupMembership) but still prints the others, so
-// output that parses is used whatever the exit status.
+// that failure is accepted when the output parses. Any other failure is
+// an error, whatever was printed.
 func (a darwinAccounts) read(ctx context.Context, record string, attrs ...string) (map[string][]string, bool, error) {
 	args := append([]string{"-plist", ".", "-read", record}, attrs...)
 	out, err := a.run(ctx, "dscl", args...)
-	if err != nil && strings.Contains(err.Error(), dsNotFoundMarker) {
-		return nil, false, nil
+	if err != nil {
+		if strings.Contains(err.Error(), dsNotFoundMarker) {
+			return nil, false, nil
+		}
+		if !missingAttr(err) {
+			return nil, false, fmt.Errorf("reading %s: %w", record, err)
+		}
 	}
 	parsed, perr := parseDSPlist(out)
-	if perr == nil && len(parsed) > 0 {
-		return parsed, true, nil
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("reading %s: %w", record, err)
-	}
 	if perr != nil {
 		return nil, false, fmt.Errorf("reading %s: %w", record, perr)
 	}
-	return nil, false, fmt.Errorf("reading %s: dscl printed no attributes", record)
+	if len(parsed) == 0 {
+		if err != nil {
+			return nil, false, fmt.Errorf("reading %s: %w", record, err)
+		}
+		return nil, false, fmt.Errorf("reading %s: dscl printed no attributes", record)
+	}
+	return parsed, true, nil
+}
+
+// missingAttr reports whether err is dscl failing only because the record
+// lacks an attribute. A command that did not run to an exit status, such
+// as one killed on cancel, never counts.
+func missingAttr(err error) bool {
+	if exitCode(err) <= 0 {
+		return false
+	}
+	for _, m := range dsMissingAttrMarkers {
+		if strings.Contains(err.Error(), m) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a darwinAccounts) CreateGroup(ctx context.Context, name string) (GroupInfo, error) {

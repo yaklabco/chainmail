@@ -40,9 +40,11 @@ func (OSFiles) Lstat(path string) (FileInfo, error) {
 	return info, nil
 }
 
-// ReadFile reads path, refusing a final symlink.
+// ReadFile reads path, refusing a final symlink and anything that is not
+// a regular file. It opens without blocking, so a FIFO with no writer is
+// refused at once instead of hanging.
 func (OSFiles) ReadFile(path string) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|noFollow, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY|noFollow|nonBlock, 0)
 	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}

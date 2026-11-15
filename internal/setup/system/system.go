@@ -109,13 +109,20 @@ func ExecRunner(ctx context.Context, name string, args ...string) ([]byte, error
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			return out, fmt.Errorf("%s: %w", commandLine(name, args), err)
-		}
-		return out, fmt.Errorf("%s: %w: %s", commandLine(name, args), err, msg)
+		return out, commandError(name, args, err, stderr.Bytes())
 	}
 	return out, nil
+}
+
+// commandError is the error ExecRunner returns when name fails with err:
+// the command line, err (still reachable through errors.As and errors.Is)
+// and the trimmed stderr, if any.
+func commandError(name string, args []string, err error, stderr []byte) error {
+	msg := strings.TrimSpace(string(stderr))
+	if msg == "" {
+		return fmt.Errorf("%s: %w", commandLine(name, args), err)
+	}
+	return fmt.Errorf("%s: %w: %s", commandLine(name, args), err, msg)
 }
 
 // commandLine renders a command for an error message. Bootstrap never puts
