@@ -41,7 +41,8 @@ type FSView interface {
 // An ancestor that is a symlink is accepted only when root owns the link
 // and its directory passed the check, and then the check continues at the
 // link's target. A missing component passes, with everything below it,
-// because root will create it.
+// because root will create it, except a missing entry directly in
+// NixStore, which a build user could create first.
 func CheckTrust(fsv FSView, path string, trusted []uint32) error {
 	if !filepath.IsAbs(path) {
 		return unsafePath(path, "is not absolute")
