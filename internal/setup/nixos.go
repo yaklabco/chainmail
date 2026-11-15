@@ -285,8 +285,7 @@ func planNixAdd(cfg *config.Config, p *Plan) {
 // has, run as the daemon user with the store binary the unit runs.
 func planNixFinish(l Layout, cur NixCurrent, terminal bool, p *Plan) error {
 	if !cur.Unit.Active {
-		return refuse("check it with: journalctl -u chainmail",
-			"%s is not active; bootstrap never starts it on NixOS", l.ServiceLabel)
+		return errNotActive(l)
 	}
 	if cur.DaemonUser == nil {
 		return refuse(notByModuleHint, "the user %s does not exist, although %s is loaded from the Nix store", l.DaemonUser, l.ServiceLabel)
