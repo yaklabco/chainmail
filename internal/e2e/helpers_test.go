@@ -2,12 +2,15 @@ package e2e
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -190,4 +193,56 @@ func cliConfigPath(getenv func(string) string) string {
 		return filepath.Join(h, ".config", "chainmail", "cli.toml")
 	}
 	return ""
+}
+
+// installState is what a rerun of bootstrap on a working install must
+// leave as it was.
+type installState struct {
+	StartedAt string               // the daemon's start time from admin status
+	Paths     map[string]pathState // every layout entry, by path
+	Sums      map[string]string    // the SHA-256 of every layout file, by path
+}
+
+// installChanges lists every difference from before to after, one line
+// each, in path order after any start time change.
+func installChanges(before, after installState) []string {
+	var changes []string
+	if before.StartedAt != after.StartedAt {
+		changes = append(changes, fmt.Sprintf("started_at %s, then %s", before.StartedAt, after.StartedAt))
+	}
+	paths := slices.Concat(slices.Collect(maps.Keys(before.Paths)), slices.Collect(maps.Keys(after.Paths)),
+		slices.Collect(maps.Keys(before.Sums)), slices.Collect(maps.Keys(after.Sums)))
+	slices.Sort(paths)
+	for _, path := range slices.Compact(paths) {
+		changes = append(changes, pathChanges(path, before, after)...)
+	}
+	return changes
+}
+
+// pathChanges lists how path's type, mode, owner, group and contents
+// differ from before to after.
+func pathChanges(path string, before, after installState) []string {
+	var changes []string
+	b, hadB := before.Paths[path]
+	a, hasA := after.Paths[path]
+	switch {
+	case hadB && !hasA:
+		changes = append(changes, path+": gone")
+	case !hadB && hasA:
+		changes = append(changes, path+": new")
+	case hadB:
+		if b.Mode != a.Mode {
+			changes = append(changes, fmt.Sprintf("%s: mode %s, then %s", path, b.Mode, a.Mode))
+		}
+		if b.UID != a.UID {
+			changes = append(changes, fmt.Sprintf("%s: owner %d, then %d", path, b.UID, a.UID))
+		}
+		if b.GID != a.GID {
+			changes = append(changes, fmt.Sprintf("%s: group %d, then %d", path, b.GID, a.GID))
+		}
+	}
+	if bs, as := before.Sums[path], after.Sums[path]; bs != as {
+		changes = append(changes, fmt.Sprintf("%s: SHA-256 %s, then %s", path, cmp.Or(bs, "none"), cmp.Or(as, "none")))
+	}
+	return changes
 }

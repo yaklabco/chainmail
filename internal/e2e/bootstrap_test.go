@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha1" // security delete-certificate -Z names a certificate by its SHA-1 hash
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -102,28 +103,19 @@ func TestBootstrapEndToEnd(t *testing.T) {
 		h.checkCLIConfig()
 	}
 
-	before := h.startedAt(bin)
-	config := h.readFile(h.l.Config)
-	service := h.readFile(h.l.Service)
+	before := h.installState(bin)
 
 	// On Linux the test process's groups predate the membership bootstrap
 	// added, so the rerun cannot ask the daemon about the account and asks
 	// for the password again. macOS may resolve the new membership at once
 	// and skip the password. Either way the rerun tests the account,
-	// changes neither the config nor the service file, and restarts
-	// nothing.
+	// changes no file, owner or mode, and restarts nothing.
 	res = h.bootstrap(bin, env, password)
 	if res.Test != "ok" || !res.ServiceRunning {
 		t.Errorf("second bootstrap result = %+v; want service running, test ok", res)
 	}
-	if after := h.startedAt(bin); after != before {
-		t.Errorf("daemon started_at changed across the second run: %s, then %s; the rerun restarted it", before, after)
-	}
-	if got := h.readFile(h.l.Config); !bytes.Equal(got, config) {
-		t.Errorf("the second run changed %s:\nbefore:\n%s\nafter:\n%s", h.l.Config, config, got)
-	}
-	if got := h.readFile(h.l.Service); !bytes.Equal(got, service) {
-		t.Errorf("the second run changed %s", h.l.Service)
+	for _, change := range installChanges(before, h.installState(bin)) {
+		t.Errorf("the second run changed the install: %s", change)
 	}
 }
 
@@ -449,7 +441,7 @@ func (h *host) checkLayout(ids hostIDs) {
 		h.t.Errorf("the socket: %v", err)
 		return
 	}
-	if st.Mode.Type() != fs.ModeSocket || modeBits(st.Mode) != 0o660 ||st.UID != ids.DaemonUID || st.GID != ids.ClientsGID {
+	if st.Mode.Type() != fs.ModeSocket || modeBits(st.Mode) != 0o660 || st.UID != ids.DaemonUID || st.GID != ids.ClientsGID {
 		h.t.Errorf("socket %s is %s owned by %d:%d, want a socket with mode 0660 owned by %d:%d",
 			h.l.Socket, st.Mode, st.UID, st.GID, ids.DaemonUID, ids.ClientsGID)
 	}
@@ -610,14 +602,36 @@ func (h *host) startedAt(bin string) string {
 	return at
 }
 
-// readFile reads a file the runner may read.
-func (h *host) readFile(path string) []byte {
+// installState records the daemon's start time, the type, mode, owner and
+// group of every layout entry, and the SHA-256 of every layout file, for
+// comparing across the second run.
+func (h *host) installState(bin string) installState {
 	h.t.Helper()
-	data, err := os.ReadFile(path)
+	s := installState{StartedAt: h.startedAt(bin), Paths: map[string]pathState{}, Sums: map[string]string{}}
+	for _, e := range h.l.Entries() {
+		st, err := statPath(e.Path)
+		if err != nil {
+			h.t.Fatalf("%s (%s): %v", e.Path, e.Name, err)
+		}
+		s.Paths[e.Path] = st
+		if e.Kind == setup.KindFile {
+			s.Sums[e.Path] = h.rootSHA256(e.Path)
+		}
+	}
+	return s
+}
+
+// rootSHA256 is the SHA-256 of a file read as root, since the runner may
+// not read the vault key. The contents never leave this function.
+func (h *host) rootSHA256(path string) string {
+	h.t.Helper()
+	data, err := h.sudo("cat", path)
+	defer clear(data)
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	return data
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // dumpLogsOnFailure logs the end of the daemon's log when the test failed.

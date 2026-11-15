@@ -214,3 +214,86 @@ func TestCLIConfigPath(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallChanges(t *testing.T) {
+	t.Parallel()
+	base := func() installState {
+		return installState{
+			StartedAt: "2026-11-15T10:00:00Z",
+			Paths: map[string]pathState{
+				"/etc/chainmail":           {Mode: fs.ModeDir | 0o755},
+				"/etc/chainmail/vault-key": {Mode: 0o400, UID: 301, GID: 302},
+			},
+			Sums: map[string]string{"/etc/chainmail/vault-key": "aaaa"},
+		}
+	}
+	cases := []struct {
+		name   string
+		change func(*installState)
+		want   []string // substrings, one per reported change, in order
+	}{
+		{name: "unchanged", change: func(*installState) {}},
+		{name: "restarted", change: func(s *installState) { s.StartedAt = "2026-11-15T10:05:00Z" }, want: []string{"started_at 2026-11-15T10:00:00Z, then 2026-11-15T10:05:00Z"}},
+		{
+			name: "mode",
+			change: func(s *installState) {
+				s.Paths["/etc/chainmail/vault-key"] = pathState{Mode: 0o440, UID: 301, GID: 302}
+			},
+			want: []string{"/etc/chainmail/vault-key: mode -r--------, then -r--r-----"},
+		},
+		{
+			name:   "setgid bit",
+			change: func(s *installState) { s.Paths["/etc/chainmail"] = pathState{Mode: fs.ModeDir | fs.ModeSetgid | 0o755} },
+			want:   []string{"/etc/chainmail: mode drwxr-xr-x, then dgrwxr-xr-x"},
+		},
+		{
+			name:   "owner",
+			change: func(s *installState) { s.Paths["/etc/chainmail/vault-key"] = pathState{Mode: 0o400, UID: 0, GID: 302} },
+			want:   []string{"/etc/chainmail/vault-key: owner 301, then 0"},
+		},
+		{
+			name:   "group",
+			change: func(s *installState) { s.Paths["/etc/chainmail/vault-key"] = pathState{Mode: 0o400, UID: 301, GID: 0} },
+			want:   []string{"/etc/chainmail/vault-key: group 302, then 0"},
+		},
+		{
+			name:   "contents",
+			change: func(s *installState) { s.Sums["/etc/chainmail/vault-key"] = "bbbb" },
+			want:   []string{"/etc/chainmail/vault-key: SHA-256 aaaa, then bbbb"},
+		},
+		{
+			name:   "gone",
+			change: func(s *installState) { delete(s.Paths, "/etc/chainmail"); delete(s.Sums, "/etc/chainmail/vault-key") },
+			want:   []string{"/etc/chainmail: gone", "/etc/chainmail/vault-key: SHA-256 aaaa, then none"},
+		},
+		{
+			name:   "new",
+			change: func(s *installState) { s.Paths["/etc/chainmail/other"] = pathState{Mode: 0o644} },
+			want:   []string{"/etc/chainmail/other: new"},
+		},
+		{
+			name: "several, in path order",
+			change: func(s *installState) {
+				s.Paths["/etc/chainmail/vault-key"] = pathState{Mode: 0o600, UID: 0, GID: 0}
+				s.Paths["/etc/chainmail"] = pathState{Mode: fs.ModeDir | 0o775}
+			},
+			want: []string{"/etc/chainmail: mode", "/etc/chainmail/vault-key: mode", "/etc/chainmail/vault-key: owner", "/etc/chainmail/vault-key: group"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			after := base()
+			tc.change(&after)
+			got := installChanges(base(), after)
+			if len(got) != len(tc.want) {
+				t.Fatalf("installChanges = %q, want %d changes like %q", got, len(tc.want), tc.want)
+			}
+			for i, w := range tc.want {
+				if !strings.Contains(got[i], w) {
+					t.Errorf("change %d = %q, want it to hold %q", i, got[i], w)
+				}
+			}
+		})
+	}
+}
