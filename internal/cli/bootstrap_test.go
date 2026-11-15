@@ -954,3 +954,42 @@ func TestDaemonRunnerNeedsTheUser(t *testing.T) {
 		t.Errorf("no group: %v", err)
 	}
 }
+
+// A saved table preference does not apply when stdout is redirected: the
+// spec promises one JSON object whenever stdout is not a terminal.
+func TestBootstrapJSONWhenStdoutRedirectedDespiteTablePreference(t *testing.T) {
+	t.Parallel()
+	r := newBootRig(t, "linux")
+	r.stdin = bootSecret + "\n"
+	r.getenv["CHAINMAIL_OUTPUT"] = "table"
+	got := r.run("alice@gmail.com", "--yes")
+	if got.code != 0 {
+		t.Fatalf("exit %d: %s", got.code, got.stderr)
+	}
+	var res setup.Result
+	if err := json.Unmarshal([]byte(got.stdout), &res); err != nil {
+		t.Fatalf("stdout is not one JSON object (%v): %s", err, got.stdout)
+	}
+	if res.Account != "alice" {
+		t.Errorf("result account = %q, want alice", res.Account)
+	}
+}
+
+// Showing the key needs both halves: a terminal stdout with stdin that is
+// not a terminal is refused too.
+func TestBootstrapKeyBackupShowNeedsTerminalStdin(t *testing.T) {
+	t.Parallel()
+	r := newBootRig(t, "linux")
+	r.stdin = bootSecret + "\n"
+	e := r.env()
+	e.StdoutTerminal = true // stdin stays a pipe: no ReadLine, no ReadPassword
+	var out bytes.Buffer
+	e.Stdout = &out
+	code := Execute(t.Context(), []string{"bootstrap", "alice@gmail.com", "--yes", "--key-backup", "show"}, e)
+	got := cliResult{stdout: out.String(), stderr: r.stderr.String(), code: code}
+	wantError(t, got, api.ExitUsage, "--key-backup show needs a terminal; captured output would hold the key")
+	if len(r.sudoArgs) > 0 {
+		t.Error("sudo was called")
+	}
+	r.noChanges()
+}
