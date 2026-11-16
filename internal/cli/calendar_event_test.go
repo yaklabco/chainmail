@@ -227,7 +227,8 @@ func TestEventCreateUsageErrors(t *testing.T) {
 }
 
 // A create, an edit, a cancel or an RSVP the policy holds prints its
-// result on stdout and exits 4 with HELD and the daemon's hint.
+// result on stdout and exits 4 with HELD and the daemon's hint, which
+// only stderr prints, as for a held send.
 func TestCalendarHeldExitsFour(t *testing.T) {
 	t.Parallel()
 	heldCreate := &chainmailv1.CalendarHeld{
@@ -264,28 +265,28 @@ func TestCalendarHeldExitsFour(t *testing.T) {
 			args: []string{"event", "create", "--title", "x", "--start", "2026-11-10 09:00", "--duration", "1h", "--attendee", "stranger@example.net"},
 			hint: heldCreate.GetHint(),
 			stdout: "held by policy: created " + calRef + " as a draft event; no invitations were sent\n" +
-				"blocked: stranger@example.net\n" + "hint: " + heldCreate.GetHint() + "\n",
+				"blocked: stranger@example.net\n",
 		},
 		{
 			name: "edit",
 			args: []string{"event", "edit", calRef, "--etag", `"e1"`, "--title", "y"},
 			hint: heldChange.GetHint(),
 			stdout: "held by policy, not applied: " + calRef + "\n" + "change: " + heldChange.GetSummary() + "\n" +
-				"too many attendees\n" + "hint: " + heldChange.GetHint() + "\n",
+				"too many attendees\n",
 		},
 		{
 			name: "cancel",
 			args: []string{"event", "cancel", calRef, "--etag", `"e1"`},
 			hint: heldChange.GetHint(),
 			stdout: "held by policy, not applied: " + calRef + "\n" + "change: " + heldChange.GetSummary() + "\n" +
-				"too many attendees\n" + "hint: " + heldChange.GetHint() + "\n",
+				"too many attendees\n",
 		},
 		{
 			name: "rsvp",
 			args: []string{"rsvp", calRef, "accept"},
 			hint: heldReply.GetHint(),
 			stdout: "held by policy, not answered: " + calRef + "\n" + "reply saved to Drafts: cm1:work:Drafts:3:9\n" +
-				"blocked: al[2Jice@example.com\n" + "hint: " + heldReply.GetHint() + "\n",
+				"blocked: al[2Jice@example.com\n",
 		},
 	}
 	for _, tt := range tests {
@@ -294,6 +295,9 @@ func TestCalendarHeldExitsFour(t *testing.T) {
 			got := runCal(t, f, append([]string{"--output", "table"}, tt.args...)...)
 			if got.code != api.ExitHeld || errorReason(t, got.stderr) != api.ReasonHeld || !strings.Contains(got.stderr, tt.hint) {
 				t.Errorf("%v: %+v, want exit 4 with HELD and the hint", tt.args, got)
+			}
+			if n := strings.Count(got.stdout+got.stderr, tt.hint); n != 1 {
+				t.Errorf("%v: the hint is printed %d times, want once", tt.args, n)
 			}
 			if got.stdout != tt.stdout {
 				t.Errorf("stdout = %q, want %q", got.stdout, tt.stdout)

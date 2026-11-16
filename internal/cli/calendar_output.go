@@ -344,7 +344,9 @@ func calendarHeldError(kind heldKind, h *chainmailv1.CalendarHeld) error {
 }
 
 // heldDetails are the lines after a held result's first: the Drafts
-// copy, the change, the blocked attendees, too many and the hint.
+// copy, the change, the blocked attendees and too many. The hint is left
+// to the HELD error on stderr, as for a held send, so a terminal shows it
+// once.
 func heldDetails(b *strings.Builder, h *chainmailv1.CalendarHeld) {
 	if d := h.GetDraftRef(); d != "" {
 		fmt.Fprintf(b, "reply saved to Drafts: %s\n", termText(d))
@@ -361,9 +363,6 @@ func heldDetails(b *strings.Builder, h *chainmailv1.CalendarHeld) {
 	}
 	if h.GetTooMany() {
 		b.WriteString("too many attendees\n")
-	}
-	if hint := h.GetHint(); hint != "" {
-		fmt.Fprintf(b, "hint: %s\n", termText(hint))
 	}
 }
 
