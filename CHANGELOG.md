@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The README wordmark leads with a CM ligature in place of the two linked rings: one heavy stroke in which the C runs along the baseline into the M.
 - The README is a short introduction, and the quick start and runbook moved to chainmail.sh.
 - Watch group names that start with `rules.` are refused, as names that start with `cache.` are. The upgrade deletes any such group.
 - A client that names itself `rule` or `daemon` is recorded in the audit log as `(invalid)`, so those client kinds mark only the daemon's own work.

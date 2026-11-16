@@ -8,13 +8,9 @@
 @keyframes blink { 50% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .cursor, .letter { animation: none; } }
 </style>
-<g transform="translate(0 -630.0) scale(25.8333)">
-<mask id="wl-l" maskUnits="userSpaceOnUse" x="-4" y="-4" width="48" height="32"><rect x="-4" y="-4" width="48" height="32" fill="#fff"/><path d="M22 18.93 A8 8 0 0 1 18.75 15.38" fill="none" stroke="#000" stroke-width="5.4"/></mask>
-<mask id="wl-r" maskUnits="userSpaceOnUse" x="-4" y="-4" width="48" height="32"><rect x="-4" y="-4" width="48" height="32" fill="#fff"/><path d="M18 5.07 A8 8 0 0 1 21.25 8.62" fill="none" stroke="#000" stroke-width="5.4"/></mask>
-<g fill="none" stroke="#8a6516" stroke-width="2.6">
-<circle cx="14" cy="12" r="8" mask="url(#wl-l)"/>
-<circle cx="26" cy="12" r="8" mask="url(#wl-r)"/>
-</g>
+<g transform="matrix(2.7907 0 0 2.7907 -135.35 -1034.42)">
+<clipPath id="wl-cap"><rect x="70" y="170" width="372" height="172"/></clipPath>
+<path d="M205 211.8A66 66 0 1 0 156 322H222A34 34 0 0 0 256 288V110L339 362L422 110V342" fill="none" stroke="#8a6516" stroke-width="40" stroke-miterlimit="20" clip-path="url(#wl-cap)"/>
 </g>
 <path class="letter" style="animation-duration: 450ms" fill="#1b1f27" d="M1620.3 12Q1551.3 12 1496.8 -20Q1442.3 -52 1411.3 -110.5Q1380.3 -169 1380.3 -248Q1380.3 -327 1411.8 -385Q1443.3 -443 1497.3 -475.5Q1551.3 -508 1620.3 -508Q1715.3 -508 1773.8 -460.5Q1832.3 -413 1848.3 -330H1737.3Q1727.3 -366 1696.8 -387Q1666.3 -408 1619.3 -408Q1585.3 -408 1554.8 -390Q1524.3 -372 1505.8 -336.5Q1487.3 -301 1487.3 -248Q1487.3 -196 1505.8 -160Q1524.3 -124 1554.8 -105.5Q1585.3 -87 1619.3 -87Q1667.3 -87 1696.3 -108Q1725.3 -129 1737.3 -166H1848.3Q1828.3 -84 1770.3 -36Q1712.3 12 1620.3 12Z"/>
 <path class="letter" style="animation-duration: 545ms" fill="#1b1f27" d="M1946.3 0V-720H2052.3V-422Q2072.3 -459 2116.3 -483.5Q2160.3 -508 2215.3 -508Q2307.3 -508 2355.3 -452.5Q2403.3 -397 2403.3 -293V0H2297.3V-278Q2297.3 -340 2267.3 -374Q2237.3 -408 2184.3 -408Q2129.3 -408 2090.8 -371Q2052.3 -334 2052.3 -264V0Z"/>
