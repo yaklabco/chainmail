@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-16
+
 ### Added
 
 - A documentation site at https://chainmail.sh, with a user guide, an operations guide, a configuration and command reference, and a developer guide.
@@ -82,5 +84,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The Go module moved to `github.com/yaklabco/chainmail`.
 
-[Unreleased]: https://github.com/yaklabco/chainmail/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/yaklabco/chainmail/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/yaklabco/chainmail/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yaklabco/chainmail/releases/tag/v0.1.0
