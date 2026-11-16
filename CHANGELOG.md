@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- An invite from one of your accounts to another is now an invite on the guest account. Calendars judged who you are by every account's address at once, so the guest account counted as the organizer. The invite was left out of `chainmail invites`, and answering it was refused. Each account now knows you by its own address only. The send policy still allows every account's address. The daemon recomputes the stored events when it opens `calendar.db`. A new event that invites another of your accounts now asks that account to answer, like any guest. Invites the old reading hid show up in `chainmail invites` but raise no `invite` event.
+
 ## [0.2.0] - 2026-11-16
 
 ### Added
