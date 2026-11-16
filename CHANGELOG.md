@@ -38,7 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The README wordmark leads with a CM ligature in place of the two linked rings: one heavy stroke in which the C runs along the baseline into the M.
 - The README is a short introduction, and the quick start and runbook moved to chainmail.sh.
 - Watch group names that start with `rules.` are refused, as names that start with `cache.` are. The upgrade deletes any such group.
 - A client that names itself `rule` or `daemon` is recorded in the audit log as `(invalid)`, so those client kinds mark only the daemon's own work.
@@ -48,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The landing page leads with what an agent does with your mail: a morning brief, threads filed under tasks, follow-ups before a due date, rules that file receipts, held replies and search across accounts. The two stories that need unreleased features say so.
 - https://chainmail.sh/search is a new page on search speed, with the benchmark figures for the local index against the mail servers. It replaces the redirect from `/search` to the manual's search page.
 - Messages, help and MCP text no longer name one person. Held sends and calendar writes say they were saved for the user, as in `held by policy: saved to Drafts for the user to review and send`. The MCP instructions and tool descriptions tell agents to tell the user. CLI help says you and your.
-- The logo is now a wordmark: two linked gold rings, the name in DM Mono, typed in on load, and a blinking underscore cursor. The favicons and the link preview image use it too, and the gopher mascot is retired.
+- The logo is now a wordmark: a CM ligature, one heavy stroke in which the C runs along the baseline into the M, then the name in DM Mono, typed in on load, and a blinking underscore cursor. The favicons show the ligature on a black tile, and the gopher mascot is retired.
 - A Google account that logs in with OAuth2 now asks for three calendar scopes, unless its calendar table sets `store = "none"`. A refresh token from before lacks them, so mail keeps working and the account's calendar state is `auth_required` until you run `chainmail auth login <account>`.
 - A `gmail` account with `auth = "password"` has calendar store `none`, and `store = "google"` on it is a config error, since the Calendar API takes no password.
 - `CACHE_NOT_READY` also answers a calendar read before the account's first calendar sync, and `HELD` a calendar answer or change the policy held.
